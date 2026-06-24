@@ -1,0 +1,52 @@
+[package]
+name = "ninjaone-patch-toolkit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "PKCE-authenticated NinjaOne patching-operations toolkit (Tauri 2 + Leptos)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "ninjaone_patch_toolkit_lib"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "ninjaone-patch-toolkit"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+anyhow = "1.0"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "6.0"
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+open = "5.3"
+rand = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "rustls", "rustls-native-certs"] }
+rust_xlsxwriter = "0.92"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+thiserror = "2.0"
+tokio = { version = "1.42", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
+toml = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
+urlencoding = "2.1"
+
+[dev-dependencies]
+calamine = "0.26"
+wiremock = "0.6"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

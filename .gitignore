@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target
+/src-tauri/target
+/web-rs/target
+
+# Trunk / WASM frontend build output
+/web-rs/dist
+
+# Tauri generated sources
+/src-tauri/gen/schemas
+
+# Local secrets / env
+.env
+.env.*
+!.env.example
+
+# OS / editor cruft
+.DS_Store
+*.swp

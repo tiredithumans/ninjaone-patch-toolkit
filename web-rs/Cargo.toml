@@ -1,0 +1,24 @@
+[package]
+name = "ninjaone-patch-toolkit-web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Leptos CSR frontend for the NinjaOne Patch Toolkit"
+license = "MIT"
+publish = false
+
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+gloo-timers = "0.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

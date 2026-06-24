@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NinjaOne Patch Toolkit",
+  "version": "0.1.0",
+  "identifier": "io.github.tiredithumans.ninjaone-patch-toolkit",
+  "build": {
+    "beforeDevCommand": {
+      "cwd": "../web-rs",
+      "script": "trunk serve"
+    },
+    "devUrl": "http://localhost:8080",
+    "beforeBuildCommand": {
+      "cwd": "../web-rs",
+      "script": "trunk build --release"
+    },
+    "frontendDist": "../web-rs/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "NinjaOne Patch Toolkit",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 1024,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {}
+}
