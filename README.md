@@ -42,15 +42,30 @@ devices, patches), `filter.rs` (`df` builder + client‑side facets), `rows.rs` 
 
 ## NinjaOne setup
 
-In NinjaOne: **Administration → Apps → API → Client App IDs → Add**.
+Create an API client in NinjaOne: **Administration → Apps → API → Client App IDs → Add**.
 
-- **Application Platform:** `Native` (public client, no secret) — or `Web` if you prefer a
-  confidential client with a secret (the app supports both).
-- **Scopes:** `Monitoring` and `offline_access`.
-- **Redirect URI:** loopback `http://localhost:11434/` (Native apps use localhost; the
-  port matches the app's configurable callback port).
+- **Application Platform:** **`Native`** — a public client with no secret (recommended for a
+  desktop app). The app also supports a **`Web`** (confidential) client if you'd rather use one
+  with a secret.
+- **Allowed grant types:** enable **Authorization Code** *and* **Refresh Token**. Authorization
+  Code drives the interactive browser sign‑in; Refresh Token keeps you signed in without
+  re‑authenticating every hour. (Don't pick a client‑credentials / machine‑to‑machine app — it has
+  no authorization‑code flow, and the sign‑in page will 404.)
+- **Scopes:** **`Monitoring`** (read‑only). The app additionally requests `offline_access` at
+  sign‑in to obtain the refresh token.
+- **Redirect URI:**
+  - *Native:* not configurable — NinjaOne accepts the loopback redirect automatically. The app
+    listens on `http://localhost:<callback port>/` (default port `11434`).
+  - *Web:* register the redirect URI **exactly** as `http://localhost:11434/`, matching the app's
+    **Callback port**.
 
-Copy the generated **Client ID** (and Secret, if a Web app).
+Copy the generated **Client ID** (and the **Client Secret** only if you chose `Web`).
+
+> **Region/Instance must match your console.** The Client ID is only valid on the NinjaOne instance
+> it was created on. In the app's **Settings**, set **Region/Instance** to the host you sign in to
+> NinjaOne at (the host in your browser's address bar — e.g. `https://us2.ninjarmm.com`). If sign‑in
+> reports a **404**, NinjaOne didn't recognize the Client ID at that host — re‑check the
+> Region/Instance and that the Client ID belongs to a Native, Authorization‑Code app.
 
 ## Prerequisites
 
