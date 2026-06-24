@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 description = "PKCE-authenticated NinjaOne patching-operations toolkit (Tauri 2 + Leptos)"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [lib]
@@ -26,11 +26,11 @@ anyhow = "1.0"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
-keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+keyring = "4"
 open = "5.3"
 rand = "0.10"
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "rustls", "rustls-native-certs"] }
-rust_xlsxwriter = "0.92"
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "rustls"] }
+rust_xlsxwriter = "0.95"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
@@ -43,7 +43,7 @@ url = "2.5"
 urlencoding = "2.1"
 
 [dev-dependencies]
-calamine = "0.26"
+calamine = "0.35"
 wiremock = "0.6"
 
 [profile.release]
