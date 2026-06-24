@@ -248,7 +248,11 @@ impl PatchStatus {
 /// One joined detail row: a single patch on a single device, enriched with the
 /// device's organization/location/role/OS names. This is the export unit and the
 /// table row shown in the UI.
+///
+/// Serialized to the frontend over IPC: field names MUST be camelCase to match
+/// `web-rs/src/types.rs` (which deserializes with `rename_all = "camelCase"`).
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PatchRow {
     pub device_id: i64,
     pub device_name: String,

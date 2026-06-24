@@ -115,6 +115,7 @@ pub fn build_rows(
 
 /// A device-level rollup for the reboot view and compliance computation.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceSummary {
     pub device_id: i64,
     pub device_name: String,
@@ -150,6 +151,7 @@ pub fn build_device_summaries(
 
 /// Per-organization compliance rollup for the summary view and Excel summary sheet.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComplianceBucket {
     pub organization: String,
     pub devices_total: usize,
@@ -249,6 +251,7 @@ pub fn pending_counts(current_patches: &[Patch]) -> HashMap<i64, usize> {
 
 /// The full result of a patch query, returned to the frontend and reused by export.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueryResult {
     pub rows: Vec<PatchRow>,
     pub devices: Vec<DeviceSummary>,
@@ -376,5 +379,52 @@ mod tests {
         assert_eq!(b.pending_critical, 2);
         assert_eq!(b.aged_critical, 1);
         assert!((b.compliance_pct - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn query_result_serializes_camel_case_for_the_frontend() {
+        // web-rs/src/types.rs deserializes the query result with
+        // rename_all = "camelCase"; serializing snake_case here breaks decoding
+        // with `missing field deviceName`. Guard the IPC contract.
+        let d = device(2, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(2, &d)]);
+        let patches = vec![patch(2, "PENDING", "CRITICAL", Some(1))];
+        let maps = maps();
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &patches,
+                type_label: "OS",
+                status_override: None,
+            }],
+            &FilterParams::default(),
+        );
+        let counts = pending_counts(&patches);
+        let devices = build_device_summaries(std::slice::from_ref(&d), &counts, &maps);
+        let compliance = build_compliance(&devices, &patches, &by_id, &maps, 30, Utc::now());
+        let result = QueryResult {
+            rows,
+            devices,
+            compliance,
+            devices_total: 1,
+            generated_at: "2026-01-01 00:00 UTC".into(),
+        };
+
+        let json = serde_json::to_string(&result).expect("serialize QueryResult");
+        for key in [
+            "\"deviceName\"",
+            "\"deviceRole\"",
+            "\"osName\"",
+            "\"patchType\"",
+            "\"needsReboot\"",
+            "\"pendingCount\"",
+            "\"devicesTotal\"",
+            "\"generatedAt\"",
+            "\"compliancePct\"",
+        ] {
+            assert!(json.contains(key), "missing {key} in {json}");
+        }
+        assert!(!json.contains("device_name"), "snake_case leaked: {json}");
     }
 }
