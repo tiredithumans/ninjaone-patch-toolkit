@@ -3,3 +3,4 @@ pub mod export;
 pub mod lookups;
 pub mod patches;
 pub mod settings;
+pub mod update;

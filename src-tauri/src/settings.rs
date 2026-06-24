@@ -18,6 +18,10 @@ pub struct Preset {
     pub filter: FilterParams,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Non-secret app configuration persisted to `settings.json`. The client secret and
 /// refresh token live in the OS keyring, never here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +35,10 @@ pub struct Settings {
     pub sla_days: i64,
     #[serde(default)]
     pub presets: Vec<Preset>,
+    /// Whether to check GitHub for a newer release on launch. Defaults on; older
+    /// settings files without the field are treated as enabled.
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
 }
 
 impl Default for Settings {
@@ -42,6 +50,7 @@ impl Default for Settings {
             install_window_days: DEFAULT_INSTALL_WINDOW_DAYS,
             sla_days: DEFAULT_SLA_DAYS,
             presets: Vec::new(),
+            auto_check_updates: true,
         }
     }
 }

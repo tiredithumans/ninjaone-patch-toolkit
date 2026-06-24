@@ -82,6 +82,10 @@ pub struct AppState {
     f_install_days: RwSignal<i64>,
     f_sla: RwSignal<i64>,
     has_secret: RwSignal<bool>,
+    f_auto_update: RwSignal<bool>,
+
+    update: RwSignal<Option<UpdateInfo>>,
+    update_busy: RwSignal<bool>,
 }
 
 fn non_empty(s: String) -> Option<String> {
@@ -125,6 +129,9 @@ impl AppState {
             f_install_days: RwSignal::new(30),
             f_sla: RwSignal::new(30),
             has_secret: RwSignal::new(false),
+            f_auto_update: RwSignal::new(true),
+            update: RwSignal::new(None),
+            update_busy: RwSignal::new(false),
         }
     }
 
@@ -233,6 +240,7 @@ impl AppState {
         self.f_install_days.set(v.install_window_days);
         self.f_sla.set(v.sla_days);
         self.has_secret.set(v.has_client_secret);
+        self.f_auto_update.set(v.auto_check_updates);
         self.install_days.set(v.install_window_days);
         self.presets.set(v.presets);
     }
@@ -276,7 +284,11 @@ pub fn App() -> impl IntoView {
     });
     spawn_local(async move {
         if let Ok(s) = api::get_settings().await {
+            let auto = s.auto_check_updates;
             state.apply_settings_view(s);
+            if auto && let Ok(Some(info)) = api::check_for_update().await {
+                state.update.set(Some(info));
+            }
         }
     });
 
@@ -302,7 +314,84 @@ pub fn App() -> impl IntoView {
             <QueryControls/>
             <Results/>
             <Toaster/>
+            <UpdateSplash/>
         </main>
+    }
+}
+
+/// Modal shown when an update is available. Renders the new version + the
+/// release notes (changelog) and offers to install + relaunch.
+#[component]
+fn UpdateSplash() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    view! {
+        {move || {
+            let Some(info) = state.update.get() else {
+                return ().into_any();
+            };
+            let notes = info.notes.unwrap_or_default();
+            let changelog = if notes.trim().is_empty() {
+                None
+            } else {
+                Some(
+                    view! {
+                        <div class="changelog">
+                            <h3>"What's new"</h3>
+                            <div class="changelog-body">{notes}</div>
+                        </div>
+                    },
+                )
+            };
+            let install = move |_| {
+                state.update_busy.set(true);
+                spawn_local(async move {
+                    // On success the backend installs and relaunches the app, so
+                    // this never returns Ok; an Err means the install failed.
+                    if let Err(e) = api::install_update().await {
+                        state.update_busy.set(false);
+                        state.notify(Toast::err(format!("Update failed: {e}")));
+                    }
+                });
+            };
+            let dismiss = move |_| state.update.set(None);
+            view! {
+                <div class="modal-overlay">
+                    <div class="modal">
+                        <h2>{format!("Update available — v{}", info.version)}</h2>
+                        <p class="modal-sub">
+                            {format!(
+                                "You're on v{}. Install the new version now?",
+                                info.current_version,
+                            )}
+                        </p>
+                        {changelog}
+                        <div class="row modal-actions">
+                            <button
+                                class="btn btn-primary"
+                                prop:disabled=move || state.update_busy.get()
+                                on:click=install
+                            >
+                                {move || {
+                                    if state.update_busy.get() {
+                                        "Updating…"
+                                    } else {
+                                        "Update & restart"
+                                    }
+                                }}
+                            </button>
+                            <button
+                                class="btn btn-ghost"
+                                prop:disabled=move || state.update_busy.get()
+                                on:click=dismiss
+                            >
+                                "Later"
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            }
+                .into_any()
+        }}
     }
 }
 
@@ -389,6 +478,7 @@ fn SettingsPanel() -> impl IntoView {
             sla_days: state.f_sla.get_untracked(),
             client_secret: non_empty(state.f_client_secret.get_untracked()),
             clear_secret: false,
+            auto_check_updates: state.f_auto_update.get_untracked(),
         };
         spawn_local(async move {
             match api::save_settings(args).await {
@@ -413,6 +503,7 @@ fn SettingsPanel() -> impl IntoView {
                 sla_days: state.f_sla.get_untracked(),
                 client_secret: None,
                 clear_secret: true,
+                auto_check_updates: state.f_auto_update.get_untracked(),
             };
             match api::save_settings(args).await {
                 Ok(v) => {
@@ -421,6 +512,21 @@ fn SettingsPanel() -> impl IntoView {
                 }
                 Err(e) => state.notify(Toast::err(e)),
             }
+        });
+    };
+
+    let check_now = move |_| {
+        if state.update_busy.get_untracked() {
+            return;
+        }
+        state.update_busy.set(true);
+        spawn_local(async move {
+            match api::check_for_update().await {
+                Ok(Some(info)) => state.update.set(Some(info)),
+                Ok(None) => state.notify(Toast::ok("You're on the latest version")),
+                Err(e) => state.notify(Toast::err(e)),
+            }
+            state.update_busy.set(false);
         });
     };
 
@@ -513,6 +619,14 @@ fn SettingsPanel() -> impl IntoView {
                         }
                     />
                 </label>
+                <label class="inline">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || state.f_auto_update.get()
+                        on:change=move |ev| state.f_auto_update.set(event_target_checked(&ev))
+                    />
+                    "Automatically check for updates on launch"
+                </label>
             </div>
             <div class="row">
                 <button class="btn btn-primary" on:click=save>
@@ -523,6 +637,15 @@ fn SettingsPanel() -> impl IntoView {
                         "Clear stored secret"
                     </button>
                 </Show>
+                <button
+                    class="btn btn-ghost"
+                    prop:disabled=move || state.update_busy.get()
+                    on:click=check_now
+                >
+                    {move || {
+                        if state.update_busy.get() { "Checking…" } else { "Check for updates" }
+                    }}
+                </button>
             </div>
         </section>
     }
