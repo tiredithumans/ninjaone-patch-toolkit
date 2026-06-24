@@ -15,6 +15,7 @@ pub struct SettingsView {
     pub sla_days: i64,
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
+    pub auto_check_updates: bool,
 }
 
 fn view(state: &AppState) -> SettingsView {
@@ -27,6 +28,7 @@ fn view(state: &AppState) -> SettingsView {
         sla_days: s.sla_days,
         has_client_secret: state.auth.has_client_secret(),
         presets: s.presets,
+        auto_check_updates: s.auto_check_updates,
     }
 }
 
@@ -48,6 +50,12 @@ pub struct SaveSettingsArgs {
     pub client_secret: Option<String>,
     #[serde(default)]
     pub clear_secret: bool,
+    #[serde(default = "default_auto_check")]
+    pub auto_check_updates: bool,
+}
+
+fn default_auto_check() -> bool {
+    true
 }
 
 #[tauri::command]
@@ -72,6 +80,7 @@ pub fn save_settings(
         guard.callback_port = args.callback_port;
         guard.install_window_days = args.install_window_days.max(1);
         guard.sla_days = args.sla_days.max(1);
+        guard.auto_check_updates = args.auto_check_updates;
         guard.save().map_err(UiError::from)?;
         guard.clone()
     };

@@ -108,12 +108,23 @@ pub struct SettingsView {
     pub sla_days: i64,
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
+    pub auto_check_updates: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Preset {
     pub name: String,
     pub filter: FilterParams,
+}
+
+/// Available-update metadata from the backend updater. `notes` is the published
+/// release body (the changelog) shown in the update splash.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfo {
+    pub version: String,
+    pub current_version: String,
+    pub notes: Option<String>,
 }
 
 // --- Command argument payloads (frontend → backend) --------------------------
@@ -139,4 +150,5 @@ pub struct SaveSettingsArgs {
     pub sla_days: i64,
     pub client_secret: Option<String>,
     pub clear_secret: bool,
+    pub auto_check_updates: bool,
 }

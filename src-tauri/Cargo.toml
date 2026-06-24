@@ -1,6 +1,6 @@
 [package]
 name = "ninjaone-patch-toolkit"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.96"
 description = "PKCE-authenticated NinjaOne patching-operations toolkit (Tauri 2 + Leptos)"
@@ -22,6 +22,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
 anyhow = "1.0"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }

@@ -86,6 +86,14 @@ just test         # backend unit + wiremock integration tests
   written to `settings.json`.
 - The app requests read‑only (`monitoring`) scope only.
 
+## Updates
+
+The app checks GitHub for a newer release on launch and offers to install it, showing the new
+version's release notes first. Toggle the launch check under **Settings → Automatically check for
+updates**, or click **Check for updates** there anytime. Updates are signed (minisign) and verified
+before they install, and only apply once a release is published — so a draft release never ships to
+users.
+
 ## Contributing
 
 Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and

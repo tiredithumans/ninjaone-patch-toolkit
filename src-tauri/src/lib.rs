@@ -30,6 +30,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::auth::sign_in,
@@ -46,6 +47,8 @@ pub fn run() {
             commands::lookups::list_node_classes,
             commands::patches::query_patches,
             commands::export::export_patches_xlsx,
+            commands::update::check_for_update,
+            commands::update::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -59,8 +59,9 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / Needs-Reboot)
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets)
 ├── src/error.rs                 # UiError { message } — the IPC error shape
-├── src/commands/                # #[tauri::command] handlers (auth, lookups, patches, export, settings)
-├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command (Trunk)
+├── src/commands/                # #[tauri::command] handlers (auth, lookups, patches, export, settings, update)
+├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command (Trunk), updater (pubkey/endpoint)
+├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
 ├── build.rs                     # tauri-build
 └── capabilities/default.json    # scoped capability definitions
 
@@ -189,6 +190,17 @@ secrets are **not** stored there — see below).
   `'self' ipc: http://ipc.localhost` — the webview only talks to the backend over IPC. **All**
   NinjaOne HTTP happens in the Rust backend (reqwest), so adding a new NinjaOne region/host needs
   **no** CSP change. Don't add `connect-src` entries for backend calls.
+
+- **Auto-update.** `commands::update::{check_for_update, install_update}` wrap `tauri-plugin-updater`;
+  the frontend's `UpdateSplash` shows the release notes (changelog) and the install relaunches the
+  app. The updater fetches the signed `latest.json` from the GitHub releases endpoint
+  (`tauri.conf.json` → `plugins.updater`) — **backend egress, not subject to the CSP**. The launch
+  check is gated by the `auto_check_updates` setting. `createUpdaterArtifacts` is **off** in the base
+  config (so local `just build` needs no signing key) and enabled only in the release via
+  `--config src-tauri/updater-build.json`. The minisign **public** key is committed in
+  `tauri.conf.json`; the **private** key + password are GitHub secrets
+  (`TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]`). Updates apply only from a build that already contains the
+  updater, and only once a release is **published** (a draft isn't `latest`).
 
 - **Frontend reactivity is closure-based (Leptos CSR).** `{move || sig.get()}` to track, `.get()` /
   `.with()` to read; state is `RwSignal<T>`. CSS is plain global `web-rs/styles.css`.

@@ -97,6 +97,16 @@ pub async fn export_patches() -> Result<Option<String>, String> {
     invoke("export_patches_xlsx", no_args()).await
 }
 
+// --- Updates -----------------------------------------------------------------
+
+pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
+    invoke("check_for_update", no_args()).await
+}
+
+pub async fn install_update() -> Result<(), String> {
+    invoke("install_update", no_args()).await
+}
+
 // --- Settings + presets ------------------------------------------------------
 
 pub async fn get_settings() -> Result<SettingsView, String> {
