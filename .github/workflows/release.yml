@@ -1,0 +1,104 @@
+name: Release (bundles)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Two tags pushed close together must not race on which assets attach to which
+# draft — queue them instead. Never cancel: a half-cancelled release run is
+# worse than a slow one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Guard tag matches manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Fail fast (before the long builds) if a tag was pushed without bumping the
+      # version. The bundle takes its version from tauri.conf.json; the release
+      # name comes from the tag — a mismatch ships a confusingly-versioned build.
+      # All three manifests (release skill bumps them in lockstep) must agree.
+      - name: Check versions
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          conf=$(jq -r '.version' src-tauri/tauri.conf.json)
+          cargo_v=$(grep -m1 -E '^version = ' src-tauri/Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')
+          web_v=$(grep -m1 -E '^version = ' web-rs/Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')
+          echo "tag=$tag conf=$conf src-tauri=$cargo_v web-rs=$web_v"
+          fail=0
+          for v in "$conf" "$cargo_v" "$web_v"; do
+            if [ "$v" != "$tag" ]; then fail=1; fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::tag v$tag does not match all manifests — bump src-tauri/tauri.conf.json, src-tauri/Cargo.toml, and web-rs/Cargo.toml before tagging"
+            exit 1
+          fi
+          echo "all manifests match v$tag — ok"
+
+  build:
+    name: Build bundles (${{ matrix.os }})
+    needs: guard
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: |
+            src-tauri
+            web-rs
+
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: just,trunk
+
+      - name: Install system deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked --version "^2"
+
+      # cargo tauri build runs beforeBuildCommand (trunk build --release) then
+      # produces the platform bundle into src-tauri/target/release/bundle/.
+      - name: Build bundles
+        run: just build
+
+      # Each OS only produces its own bundle subset, so unmatched globs are
+      # expected — don't fail on them. Three matrix jobs append to the one draft
+      # release for this tag.
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          files: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+          # Draft first, human publishes: a review checkpoint for the generated
+          # notes (paste the changelog), and a bad build is caught before anyone
+          # downloads it.
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: false

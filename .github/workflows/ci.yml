@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly RustSec database refresh so we catch advisories filed after merge.
+    - cron: "0 6 * * 1"
+
+# A new push to the same branch/PR supersedes the in-flight run — without this
+# every PR update queues a duplicate full 3-OS matrix.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege token for every job. Declared explicitly so a future change
+# to the repo-level default can't silently re-broaden these workflows.
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Backend (src-tauri) (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Match the pinned MSRV in rust-toolchain.toml (which rustup honors for the
+      # actual build regardless of this line) so the installed toolchain is not
+      # misleadingly older than what compiles.
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: just
+      - name: Install system deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+      # `tauri::generate_context!` (src-tauri/src/lib.rs) reads frontendDist
+      # (../web-rs/dist) at COMPILE time, so clippy/test fail without it. The dist
+      # is a Trunk artifact (gitignored); a stub satisfies the macro without the
+      # full WASM build (the `web` job exercises the real frontend build).
+      - name: Stub frontend dist
+        shell: bash
+        run: |
+          mkdir -p web-rs/dist
+          printf '<!doctype html><title>stub</title>' > web-rs/dist/index.html
+      - name: fmt (both crates)
+        run: just fmt-check
+      - name: clippy
+        run: just clippy
+      - name: test
+        run: just test
+
+  web:
+    name: Frontend (Leptos/WASM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: web-rs
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: just,trunk
+      # web-rs is a separate wasm32 crate the backend `rust` job's clippy never
+      # reaches — lint it here (wasm target, -D warnings), then prove it builds
+      # through Trunk (the `before*Command` path Tauri uses).
+      - name: clippy
+        run: just web-clippy
+      - name: build
+        run: just web-build
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Workflow-file syntax gate. Pinned by version + checksum (no install-action
+      # manifest exists).
+      - name: actionlint
+        run: |
+          curl -sSfL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # RustSec advisory scan via the same `just` recipe run locally. The recipe
+      # covers BOTH lockfiles: src-tauri/Cargo.lock and the frontend's own
+      # web-rs/Cargo.lock (the two crates carry independent lockfiles).
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: just,cargo-audit
+      - name: audit (both lockfiles)
+        run: just audit

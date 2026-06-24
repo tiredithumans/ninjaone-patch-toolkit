@@ -1,5 +1,9 @@
 # NinjaOne Patch Toolkit
 
+[![CI](https://github.com/tiredithumans/ninjaone-patch-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/tiredithumans/ninjaone-patch-toolkit/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/tiredithumans/ninjaone-patch-toolkit/actions/workflows/codeql.yml/badge.svg)](https://github.com/tiredithumans/ninjaone-patch-toolkit/actions/workflows/codeql.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 A native desktop toolkit (Rust / Leptos / Tauri 2) for patching‑operations teams. It
 authenticates to the NinjaOne Public API with **OAuth 2.0 + PKCE**, filters the fleet,
 lists individual patches per server, and exports to Excel.
@@ -81,3 +85,25 @@ just test         # backend unit + wiremock integration tests
   the OS keyring (Keychain / Credential Manager / Secret Service). Nothing sensitive is
   written to `settings.json`.
 - The app requests read‑only (`monitoring`) scope only.
+
+## Contributing
+
+Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and
+[AGENTS.md](AGENTS.md) (the conventions every contributor follows). Run
+`just verify` before opening a PR. Report security issues privately via the
+[security advisory flow](https://github.com/tiredithumans/ninjaone-patch-toolkit/security/advisories/new),
+not a public issue (see [SECURITY.md](.github/SECURITY.md)).
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
