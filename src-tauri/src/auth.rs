@@ -242,6 +242,37 @@ impl AuthState {
         let state = random_url_token(32);
         let redirect_uri = format!("http://localhost:{port}/");
 
+        let auth_url = build_auth_url(
+            &base_url,
+            &client_id,
+            &redirect_uri,
+            &pkce.challenge,
+            &state,
+        );
+
+        // Pre-flight: NinjaOne's /ws/oauth/authorize returns 404 when it doesn't
+        // recognize the client_id at this host (confirmed across every region). A
+        // recognized client — even with no browser session — instead redirects to
+        // the login page, so only a 404 is fatal. Catch it here with an actionable
+        // message rather than opening the browser to a bare 404 and then waiting
+        // out the 3-minute callback timeout. Best-effort: a probe error (offline,
+        // proxy, …) falls through to the normal flow.
+        let probe = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .build();
+        if let Ok(probe) = probe
+            && let Ok(resp) = probe.get(&auth_url).send().await
+            && resp.status() == reqwest::StatusCode::NOT_FOUND
+        {
+            bail!(
+                "NinjaOne did not recognize this Client ID at {base_url} (HTTP 404). \
+                 Check that Region/Instance matches the host you sign in to NinjaOne at, \
+                 that the Client ID is copied correctly, and that the API app is a Native \
+                 app with the Authorization Code grant and the Monitoring scope."
+            );
+        }
+
         let listener = TcpListener::bind(("127.0.0.1", port))
             .await
             .with_context(|| {
@@ -251,13 +282,6 @@ impl AuthState {
                 )
             })?;
 
-        let auth_url = build_auth_url(
-            &base_url,
-            &client_id,
-            &redirect_uri,
-            &pkce.challenge,
-            &state,
-        );
         debug!(%auth_url, "opening browser for PKCE login");
         if let Err(err) = open::that(&auth_url) {
             warn!(?err, "failed to open browser; user must navigate manually");
