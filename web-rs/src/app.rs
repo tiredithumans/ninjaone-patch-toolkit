@@ -466,9 +466,9 @@ fn SettingsPanel() -> impl IntoView {
                 <label>
                     {move || {
                         if state.has_secret.get() {
-                            "Client secret (stored — leave blank to keep)"
+                            "Client secret (leave blank to keep)"
                         } else {
-                            "Client secret (optional — Native apps have none)"
+                            "Client secret (Native apps have none)"
                         }
                     }}
                     <input
