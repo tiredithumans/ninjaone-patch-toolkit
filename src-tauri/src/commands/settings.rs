@@ -90,6 +90,9 @@ pub fn save_settings(
         snapshot.client_id.clone(),
         snapshot.callback_port,
     );
+    // The instance may have changed — drop cached lookups so a different tenant
+    // doesn't inherit stale org/location/role names.
+    state.clear_lookups_cache();
 
     match args.client_secret.map(|s| s.trim().to_string()) {
         Some(secret) if !secret.is_empty() => {
