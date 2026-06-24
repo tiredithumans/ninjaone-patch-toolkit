@@ -22,9 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       # Fail fast (before the long builds) if a tag was pushed without bumping the
-      # version. The bundle takes its version from tauri.conf.json; the release
-      # name comes from the tag — a mismatch ships a confusingly-versioned build.
-      # All three manifests (release skill bumps them in lockstep) must agree.
+      # version. The bundle/updater take their version from tauri.conf.json; the
+      # release name comes from the tag — a mismatch ships a confusingly-versioned
+      # build, and the updater would advertise the wrong version. All three
+      # manifests (the release skill bumps them in lockstep) must agree.
       - name: Check versions
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -50,13 +51,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # Build macOS as a universal binary so one updater entry covers both
+          # Apple Silicon and Intel.
+          - os: macos-latest
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin
+          - os: ubuntu-latest
+            rust-targets: ""
+            args: ""
+          - os: windows-latest
+            rust-targets: ""
+            args: ""
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown${{ matrix.rust-targets && format(',{0}', matrix.rust-targets) || '' }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -66,7 +78,7 @@ jobs:
 
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          tool: just,trunk
+          tool: trunk
 
       - name: Install system deps (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -74,31 +86,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked --version "^2"
-
-      # cargo tauri build runs beforeBuildCommand (trunk build --release) then
-      # produces the platform bundle into src-tauri/target/release/bundle/.
-      - name: Build bundles
-        run: just build
-
-      # Each OS only produces its own bundle subset, so unmatched globs are
-      # expected — don't fail on them. Three matrix jobs append to the one draft
-      # release for this tag.
-      - name: Upload release assets
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+      # tauri-action builds the frontend (beforeBuildCommand = trunk build),
+      # bundles per-OS, signs the updater artifacts with the minisign key, and
+      # attaches the bundles + .sig + an aggregated latest.json to a DRAFT
+      # release. `--config src-tauri/updater-build.json` turns on
+      # createUpdaterArtifacts only here (the base config leaves it off so local
+      # `just build` doesn't need signing keys). Updates go live only when the
+      # release is PUBLISHED — a draft isn't "latest", so the floating
+      # latest.json endpoint stays on the last published version until you ship.
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          files: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/appimage/*.AppImage
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/rpm/*.rpm
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*-setup.exe
-          # Draft first, human publishes: a review checkpoint for the generated
-          # notes (paste the changelog), and a bad build is caught before anyone
-          # downloads it.
-          draft: true
-          generate_release_notes: true
-          fail_on_unmatched_files: false
+          tagName: ${{ github.ref_name }}
+          releaseName: ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          args: --config src-tauri/updater-build.json ${{ matrix.args }}
