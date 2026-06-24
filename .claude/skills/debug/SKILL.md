@@ -42,7 +42,7 @@ If backend logic is responsible:
 
 For sign-in / token / keyring issues (`src-tauri/src/auth.rs`):
 - **PKCE flow:** loopback redirect on the configured callback port (default `11434`); the browser
-  must reach `http://localhost:<port>/`. A hung sign-in is usually the callback never arriving.
+  must reach `http://127.0.0.1:<port>` (NinjaOne Native clients register `http://127.0.0.1`). A hung sign-in is usually the callback never arriving.
 - **Scopes:** read-only `monitoring offline_access`. A 403 on a NinjaOne call ≠ an auth bug.
 - **Keyring:** refresh token + optional client secret live in the OS keyring (Keychain / Credential
   Manager / Secret Service). A "not signed in after restart" symptom → keyring read failing or empty.
