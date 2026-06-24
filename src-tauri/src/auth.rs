@@ -240,7 +240,12 @@ impl AuthState {
 
         let pkce = PkceChallenge::new();
         let state = random_url_token(32);
-        let redirect_uri = format!("http://localhost:{port}/");
+        // NinjaOne Native API clients register the loopback redirect as
+        // `http://127.0.0.1` (host only) and accept any port per RFC 8252, so the
+        // redirect_uri MUST use `127.0.0.1` (not `localhost`, which NinjaOne treats
+        // as a different host) with no trailing path. The callback listener binds
+        // 127.0.0.1 below, so the browser reaches it either way.
+        let redirect_uri = format!("http://127.0.0.1:{port}");
 
         let auth_url = build_auth_url(
             &base_url,
@@ -277,7 +282,7 @@ impl AuthState {
             .await
             .with_context(|| {
                 format!(
-                    "could not bind OAuth callback listener on localhost:{port}. \
+                    "could not bind OAuth callback listener on 127.0.0.1:{port}. \
                      Is another instance of this app running?"
                 )
             })?;
@@ -547,7 +552,7 @@ mod tests {
         let url = build_auth_url(
             "https://us2.ninjarmm.com",
             "client123",
-            "http://localhost:11434/",
+            "http://127.0.0.1:11434",
             "challengeABC",
             "stateXYZ",
         );

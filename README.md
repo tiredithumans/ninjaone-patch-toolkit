@@ -54,10 +54,10 @@ Create an API client in NinjaOne: **Administration → Apps → API → Client A
 - **Scopes:** **`Monitoring`** (read‑only). The app additionally requests `offline_access` at
   sign‑in to obtain the refresh token.
 - **Redirect URI:**
-  - *Native:* not configurable — NinjaOne accepts the loopback redirect automatically. The app
-    listens on `http://localhost:<callback port>/` (default port `11434`).
-  - *Web:* register the redirect URI **exactly** as `http://localhost:11434/`, matching the app's
-    **Callback port**.
+  - *Native:* not configurable — NinjaOne registers it as **`http://127.0.0.1`** and accepts any
+    port (the app listens on `http://127.0.0.1:<callback port>`, default `11434`).
+  - *Web:* register the redirect URI **exactly** as **`http://127.0.0.1:11434`** — `127.0.0.1`
+    (not `localhost`), no trailing slash, matching the app's **Callback port**.
 
 Copy the generated **Client ID** (and the **Client Secret** only if you chose `Web`).
 
