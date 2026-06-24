@@ -38,15 +38,8 @@ pub async fn query_patches(
     let df = filter.device_filter();
     let df_ref = df.as_deref();
 
-    // 1. Inventory + lookups.
-    let devices = api.devices(df_ref).await.map_err(UiError::from)?;
-    let orgs = api.organizations().await.map_err(UiError::from)?;
-    let locations = api.all_locations().await.unwrap_or_default();
-    let roles = api.roles().await.map_err(UiError::from)?;
-    let maps = LookupMaps::build(&orgs, &locations, &roles);
-    let devices_by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
-
-    // 2. Split requested statuses: Installed routes to the history endpoints.
+    // 1. Classify the requested statuses. "Installed" routes to the history
+    // endpoints; the rest narrow the current-patch set for display.
     let want_installed = args.statuses.iter().any(|s| s.is_installed());
     let current_status_set: HashSet<&'static str> = args
         .statuses
@@ -54,48 +47,55 @@ pub async fn query_patches(
         .filter(|s| !s.is_installed())
         .map(|s| s.api_value())
         .collect();
+    let include_os = args.patch_type.includes_os();
+    let include_sw = args.patch_type.includes_software();
+    let days = args
+        .install_after_days
+        .unwrap_or(settings.install_window_days)
+        .max(1);
+    let after = (Utc::now() - Duration::days(days)).timestamp();
 
-    // 3. Current patches — always fetched (drives compliance + pending counts).
-    let os_current = if args.patch_type.includes_os() {
-        api.fleet_os_patches(df_ref, None)
-            .await
-            .map_err(UiError::from)?
-    } else {
-        Vec::new()
-    };
-    let sw_current = if args.patch_type.includes_software() {
-        api.fleet_software_patches(df_ref, None)
-            .await
-            .map_err(UiError::from)?
-    } else {
-        Vec::new()
-    };
+    // 2. Inventory, lookups (cached), and current/installed patches are all
+    // independent — fetch them concurrently so the latency is the slowest call,
+    // not the sum of all of them. Conditional fetches resolve to empty when the
+    // patch type / status doesn't request them.
+    let (devices, (orgs, locations, roles), os_current, sw_current, os_installs, sw_installs) =
+        tokio::try_join!(
+            api.devices(df_ref),
+            state.lookups(),
+            async {
+                if include_os {
+                    api.fleet_os_patches(df_ref, None).await
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+            async {
+                if include_sw {
+                    api.fleet_software_patches(df_ref, None).await
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+            async {
+                if want_installed && include_os {
+                    api.fleet_os_patch_installs(df_ref, after, None).await
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+            async {
+                if want_installed && include_sw {
+                    api.fleet_software_patch_installs(df_ref, after, None).await
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+        )
+        .map_err(UiError::from)?;
 
-    // 4. Install history — only when the operator asked for Installed.
-    let (os_installs, sw_installs) = if want_installed {
-        let days = args
-            .install_after_days
-            .unwrap_or(settings.install_window_days)
-            .max(1);
-        let after = (Utc::now() - Duration::days(days)).timestamp();
-        let osi = if args.patch_type.includes_os() {
-            api.fleet_os_patch_installs(df_ref, after, None)
-                .await
-                .map_err(UiError::from)?
-        } else {
-            Vec::new()
-        };
-        let swi = if args.patch_type.includes_software() {
-            api.fleet_software_patch_installs(df_ref, after, None)
-                .await
-                .map_err(UiError::from)?
-        } else {
-            Vec::new()
-        };
-        (osi, swi)
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    let maps = LookupMaps::build(&orgs, &locations, &roles);
+    let devices_by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
 
     // 5. Narrow current patches to the requested non-installed statuses for display.
     let status_match = |p: &Patch| {

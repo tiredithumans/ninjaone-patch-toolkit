@@ -86,6 +86,9 @@ pub struct AppState {
 
     update: RwSignal<Option<UpdateInfo>>,
     update_busy: RwSignal<bool>,
+
+    refreshing: RwSignal<bool>,
+    toast_gen: RwSignal<u64>,
 }
 
 fn non_empty(s: String) -> Option<String> {
@@ -132,6 +135,8 @@ impl AppState {
             f_auto_update: RwSignal::new(true),
             update: RwSignal::new(None),
             update_busy: RwSignal::new(false),
+            refreshing: RwSignal::new(false),
+            toast_gen: RwSignal::new(0),
         }
     }
 
@@ -140,7 +145,18 @@ impl AppState {
     }
 
     fn notify(self, t: Toast) {
+        // Auto-dismiss after a few seconds (errors linger a little longer); a
+        // newer toast supersedes this one via the generation guard.
+        let ms = if t.error { 7000 } else { 4000 };
+        let generation = self.toast_gen.get_untracked().wrapping_add(1);
+        self.toast_gen.set(generation);
         self.toast.set(Some(t));
+        gloo_timers::callback::Timeout::new(ms, move || {
+            if self.toast_gen.get_untracked() == generation {
+                self.toast.set(None);
+            }
+        })
+        .forget();
     }
 
     fn refresh_auth(self) {
@@ -205,16 +221,31 @@ impl AppState {
     }
 
     fn run_query(self) {
-        if self.busy.get_untracked() {
+        self.run_query_inner(false);
+    }
+
+    /// Auto-refresh variant: flags a subtle `refreshing` state instead of the main
+    /// `busy` one (so the Run-query button doesn't flicker each tick) and stays
+    /// quiet about precondition failures.
+    fn run_query_auto(self) {
+        self.run_query_inner(true);
+    }
+
+    fn run_query_inner(self, silent: bool) {
+        if self.busy.get_untracked() || self.refreshing.get_untracked() {
             return;
         }
         if !self.is_authed() {
-            self.notify(Toast::err("Sign in first"));
+            if !silent {
+                self.notify(Toast::err("Sign in first"));
+            }
             return;
         }
         let statuses = self.statuses.get_untracked();
         if statuses.is_empty() {
-            self.notify(Toast::err("Select at least one status"));
+            if !silent {
+                self.notify(Toast::err("Select at least one status"));
+            }
             return;
         }
         let args = PatchQueryArgs {
@@ -223,13 +254,14 @@ impl AppState {
             statuses,
             install_after_days: Some(self.install_days.get_untracked()),
         };
-        self.busy.set(true);
+        let flag = if silent { self.refreshing } else { self.busy };
+        flag.set(true);
         spawn_local(async move {
             match api::query_patches(args).await {
                 Ok(r) => self.result.set(Some(r)),
                 Err(e) => self.notify(Toast::err(e)),
             }
-            self.busy.set(false);
+            flag.set(false);
         });
     }
 
@@ -299,7 +331,8 @@ pub fn App() -> impl IntoView {
         let authed = state.is_authed();
         interval.set_value(None);
         if secs > 0 && authed {
-            let iv = gloo_timers::callback::Interval::new(secs * 1000, move || state.run_query());
+            let iv =
+                gloo_timers::callback::Interval::new(secs * 1000, move || state.run_query_auto());
             interval.set_value(Some(iv));
         }
     });
@@ -908,16 +941,26 @@ fn QueryControls() -> impl IntoView {
                     </label>
                 </Show>
                 <label class="inline">
-                    "Auto-refresh (s)"
-                    <input
-                        type="number"
-                        class="narrow"
-                        prop:value=move || state.refresh_secs.get().to_string()
-                        on:input=move |ev| {
-                            state.refresh_secs.set(event_target_value(&ev).parse().unwrap_or(0))
-                        }
-                    />
+                    "Auto-refresh"
+                    <select on:change=move |ev| {
+                        state.refresh_secs.set(event_target_value(&ev).parse().unwrap_or(0))
+                    }>
+                        {[("0", "Off"), ("30", "30s"), ("60", "1m"), ("300", "5m"), ("900", "15m")]
+                            .into_iter()
+                            .map(|(val, label)| {
+                                let sel = move || state.refresh_secs.get().to_string() == val;
+                                view! {
+                                    <option value=val selected=sel>
+                                        {label}
+                                    </option>
+                                }
+                            })
+                            .collect_view()}
+                    </select>
                 </label>
+                <Show when=move || state.refreshing.get()>
+                    <span class="chips-label">"↻ refreshing…"</span>
+                </Show>
                 <button
                     class="btn btn-primary"
                     prop:disabled=move || state.busy.get()
