@@ -20,7 +20,7 @@ jobs:
     name: Guard tag matches manifests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Fail fast (before the long builds) if a tag was pushed without bumping the
       # version. The bundle takes its version from tauri.conf.json; the release
       # name comes from the tag — a mismatch ships a confusingly-versioned build.
@@ -52,7 +52,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
@@ -64,7 +64,7 @@ jobs:
             src-tauri
             web-rs
 
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
         with:
           tool: just,trunk
 
@@ -87,7 +87,7 @@ jobs:
       # release for this tag.
       - name: Upload release assets
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: |
             src-tauri/target/release/bundle/dmg/*.dmg
