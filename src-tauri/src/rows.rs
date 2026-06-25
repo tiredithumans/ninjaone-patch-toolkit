@@ -752,4 +752,53 @@ mod tests {
             assert!(json.contains(key), "missing {key} in {json}");
         }
     }
+
+    #[test]
+    fn unmapped_org_and_missing_device_fall_back_to_placeholders() {
+        let maps = maps(); // only org 10 ("Contoso") is mapped
+        // Device 1 belongs to org 999, which is absent from the lookup map.
+        let d1 = device(1, 999, "Windows Server 2022");
+        let devices = [d1];
+        let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+        // One patch on the unmapped-org device, one on a device id not in inventory.
+        let patches = vec![
+            patch(1, "MANUAL", "CRITICAL", Some(1)),
+            patch(404, "MANUAL", "CRITICAL", Some(1)),
+        ];
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &patches,
+                type_label: "OS",
+                status_override: None,
+                status_filter: None,
+            }],
+            &FilterParams::default(),
+        );
+
+        assert_eq!(rows.len(), 2);
+        let mapped = rows.iter().find(|r| r.device_id == 1).unwrap();
+        assert_eq!(
+            mapped.organization, "(unknown)",
+            "an org id absent from the lookup map renders as (unknown)"
+        );
+        assert_eq!(mapped.device_name, "srv1");
+        let orphan = rows.iter().find(|r| r.device_id == 404).unwrap();
+        assert_eq!(
+            orphan.device_name, "(unknown)",
+            "a patch for a device not in inventory has no resolvable name"
+        );
+        assert_eq!(orphan.organization, "(unknown)");
+    }
+
+    #[test]
+    fn empty_inputs_yield_no_rows_or_compliance() {
+        let maps = maps();
+        let by_id: HashMap<i64, &Device> = HashMap::new();
+        let rows = build_rows(&by_id, &maps, &[], &FilterParams::default());
+        assert!(rows.is_empty());
+        let compliance = build_compliance(&[], &[], &by_id, &maps, 30, Utc::now());
+        assert!(compliance.is_empty());
+    }
 }
