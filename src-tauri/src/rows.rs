@@ -4,7 +4,7 @@
 //!
 //! Adapted from `ninjaone-patch-dashboard`'s `snapshot.rs` device↔patch join.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
@@ -49,6 +49,11 @@ pub struct PatchSource<'a> {
     pub patches: &'a [Patch],
     pub type_label: &'static str,
     pub status_override: Option<&'static str>,
+    /// When set, only patches whose raw status is in this set become rows — lets
+    /// the caller narrow the current-patch families to the requested statuses
+    /// without cloning the matched subset out first. Install sources leave it
+    /// `None` (they're already the requested set and carry a `status_override`).
+    pub status_filter: Option<&'a HashSet<&'static str>>,
 }
 
 fn fmt_dt(ts: Option<DateTime<Utc>>) -> Option<String> {
@@ -66,6 +71,16 @@ pub fn build_rows(
     let mut rows = Vec::new();
     for source in sources {
         for patch in source.patches {
+            if let Some(allowed) = source.status_filter {
+                let keep = patch
+                    .status
+                    .as_deref()
+                    .map(|s| allowed.contains(s))
+                    .unwrap_or(false);
+                if !keep {
+                    continue;
+                }
+            }
             let device = patch
                 .device_id
                 .and_then(|id| devices_by_id.get(&id))
@@ -338,6 +353,7 @@ mod tests {
                 patches: &patches,
                 type_label: "OS",
                 status_override: None,
+                status_filter: None,
             }],
             &filter,
         );
@@ -363,6 +379,7 @@ mod tests {
                 patches: &patches,
                 type_label: "OS",
                 status_override: Some("INSTALLED"),
+                status_filter: None,
             }],
             &FilterParams::default(),
         );
@@ -430,6 +447,7 @@ mod tests {
                 patches: &patches,
                 type_label: "OS",
                 status_override: None,
+                status_filter: None,
             }],
             &FilterParams::default(),
         );

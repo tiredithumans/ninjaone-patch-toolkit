@@ -97,50 +97,41 @@ pub async fn query_patches(
     let maps = LookupMaps::build(&orgs, &locations, &roles);
     let devices_by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
 
-    // 5. Narrow current patches to the requested non-installed statuses for display.
-    let status_match = |p: &Patch| {
-        p.status
-            .as_deref()
-            .map(|s| current_status_set.contains(s))
-            .unwrap_or(false)
+    // 5/6. Build detail rows directly from the fetched families. The current-patch
+    // sources carry the requested-status filter so build_rows narrows them in
+    // place — no need to clone the matched subset out before joining. The borrow
+    // ends with the block so the families can then move into `all_current`.
+    let mut rows = {
+        let mut sources = vec![
+            PatchSource {
+                patches: &os_current,
+                type_label: "OS",
+                status_override: None,
+                status_filter: Some(&current_status_set),
+            },
+            PatchSource {
+                patches: &sw_current,
+                type_label: "SOFTWARE",
+                status_override: None,
+                status_filter: Some(&current_status_set),
+            },
+        ];
+        if want_installed {
+            sources.push(PatchSource {
+                patches: &os_installs,
+                type_label: "OS",
+                status_override: Some("INSTALLED"),
+                status_filter: None,
+            });
+            sources.push(PatchSource {
+                patches: &sw_installs,
+                type_label: "SOFTWARE",
+                status_override: Some("INSTALLED"),
+                status_filter: None,
+            });
+        }
+        build_rows(&devices_by_id, &maps, &sources, &filter)
     };
-    let os_display: Vec<Patch> = os_current
-        .iter()
-        .filter(|p| status_match(p))
-        .cloned()
-        .collect();
-    let sw_display: Vec<Patch> = sw_current
-        .iter()
-        .filter(|p| status_match(p))
-        .cloned()
-        .collect();
-
-    // 6. Build detail rows from every source.
-    let mut sources = vec![
-        PatchSource {
-            patches: &os_display,
-            type_label: "OS",
-            status_override: None,
-        },
-        PatchSource {
-            patches: &sw_display,
-            type_label: "SOFTWARE",
-            status_override: None,
-        },
-    ];
-    if want_installed {
-        sources.push(PatchSource {
-            patches: &os_installs,
-            type_label: "OS",
-            status_override: Some("INSTALLED"),
-        });
-        sources.push(PatchSource {
-            patches: &sw_installs,
-            type_label: "SOFTWARE",
-            status_override: Some("INSTALLED"),
-        });
-    }
-    let mut rows = build_rows(&devices_by_id, &maps, &sources, &filter);
     rows.sort_by(|a, b| {
         b.severity_rank
             .cmp(&a.severity_rank)
