@@ -111,6 +111,9 @@ pub struct AppState {
     /// The detail rows for the currently displayed page, fetched from the backend
     /// cache via `get_patch_rows` (the full row set is never shipped over IPC).
     page_rows: RwSignal<Vec<PatchRow>>,
+    /// Collapses the Filters panel body to give the results more room. Expanded
+    /// (false) by default.
+    filters_collapsed: RwSignal<bool>,
     presets: RwSignal<Vec<Preset>>,
     preset_name: RwSignal<String>,
 
@@ -180,6 +183,7 @@ impl AppState {
             result: RwSignal::new(None),
             patches_page: RwSignal::new(0),
             page_rows: RwSignal::new(Vec::new()),
+            filters_collapsed: RwSignal::new(false),
             presets: RwSignal::new(Vec::new()),
             preset_name: RwSignal::new(String::new()),
             f_instance: RwSignal::new("https://us2.ninjarmm.com".to_string()),
@@ -960,7 +964,17 @@ fn Filters() -> impl IntoView {
                 <Show when=move || state.loading_lookups()>
                     <span class="chips-label">"Loading…"</span>
                 </Show>
+                <button
+                    class="btn btn-ghost filters-toggle"
+                    aria-expanded=move || (!state.filters_collapsed.get()).to_string()
+                    on:click=move |_| state.filters_collapsed.update(|c| *c = !*c)
+                >
+                    {move || {
+                        if state.filters_collapsed.get() { "Show ▸" } else { "Hide ▾" }
+                    }}
+                </button>
             </div>
+            <Show when=move || !state.filters_collapsed.get()>
             <div class="subhead">"Device"</div>
             <div class="grid">
                 <label>
@@ -1202,6 +1216,7 @@ fn Filters() -> impl IntoView {
                         }
                     />
                 </label>
+            </Show>
             </Show>
         </section>
     }

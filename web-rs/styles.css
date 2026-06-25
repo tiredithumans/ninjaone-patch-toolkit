@@ -261,6 +261,13 @@ select:disabled {
   background: transparent;
 }
 
+/* Collapse toggle in the Filters header — pushed to the right, compact. */
+.filters-toggle {
+  margin-left: auto;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .link {
   background: none;
   border: none;
