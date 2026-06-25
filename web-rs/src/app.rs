@@ -380,6 +380,16 @@ pub fn App() -> impl IntoView {
 #[component]
 fn UpdateSplash() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // Escape dismisses the update splash (same as "Later"), unless an install is
+    // already running.
+    window_event_listener(leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape"
+            && state.update.get_untracked().is_some()
+            && !state.update_busy.get_untracked()
+        {
+            state.update.set(None);
+        }
+    });
     view! {
         {move || {
             let Some(info) = state.update.get() else {
@@ -412,8 +422,15 @@ fn UpdateSplash() -> impl IntoView {
             let dismiss = move |_| state.update.set(None);
             view! {
                 <div class="modal-overlay">
-                    <div class="modal">
-                        <h2>{format!("Update available — v{}", info.version)}</h2>
+                    <div
+                        class="modal"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="update-title"
+                    >
+                        <h2 id="update-title">
+                            {format!("Update available — v{}", info.version)}
+                        </h2>
                         <p class="modal-sub">
                             {format!(
                                 "You're on v{}. Install the new version now?",
@@ -899,6 +916,7 @@ fn PresetRow() -> impl IntoView {
                     .into_iter()
                     .map(|p| {
                         let name = p.name.clone();
+                        let label_name = p.name.clone();
                         let p2 = p.clone();
                         let del_name = p.name.clone();
                         view! {
@@ -911,6 +929,7 @@ fn PresetRow() -> impl IntoView {
                                 </button>
                                 <button
                                     class="x"
+                                    aria-label=format!("Delete preset {label_name}")
                                     on:click=move |_| {
                                         let n = del_name.clone();
                                         spawn_local(async move {
@@ -1152,18 +1171,18 @@ fn PatchesTable() -> impl IntoView {
                 <table>
                     <thead>
                         <tr>
-                            <th>"Organization"</th>
-                            <th>"Location"</th>
-                            <th>"Role"</th>
-                            <th>"Device"</th>
-                            <th>"OS"</th>
-                            <th>"Type"</th>
-                            <th>"KB"</th>
-                            <th>"Patch"</th>
-                            <th>"Severity"</th>
-                            <th>"Status"</th>
-                            <th>"Release"</th>
-                            <th>"Installed"</th>
+                            <th scope="col">"Organization"</th>
+                            <th scope="col">"Location"</th>
+                            <th scope="col">"Role"</th>
+                            <th scope="col">"Device"</th>
+                            <th scope="col">"OS"</th>
+                            <th scope="col">"Type"</th>
+                            <th scope="col">"KB"</th>
+                            <th scope="col">"Patch"</th>
+                            <th scope="col">"Severity"</th>
+                            <th scope="col">"Status"</th>
+                            <th scope="col">"Release"</th>
+                            <th scope="col">"Installed"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1226,12 +1245,12 @@ fn ComplianceTable() -> impl IntoView {
                 <table>
                     <thead>
                         <tr>
-                            <th>"Organization"</th>
-                            <th>"Devices"</th>
-                            <th>"Compliant"</th>
-                            <th>"Compliance"</th>
-                            <th>"Pending Crit/Imp"</th>
-                            <th>"Aged (past SLA)"</th>
+                            <th scope="col">"Organization"</th>
+                            <th scope="col">"Devices"</th>
+                            <th scope="col">"Compliant"</th>
+                            <th scope="col">"Compliance"</th>
+                            <th scope="col">"Pending Crit/Imp"</th>
+                            <th scope="col">"Aged (past SLA)"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1240,11 +1259,16 @@ fn ComplianceTable() -> impl IntoView {
                                 .into_iter()
                                 .map(|b| {
                                     let pct = format!("{:.0}%", b.compliance_pct);
-                                    let aged_class = if b.aged_critical > 0 {
-                                        "sev-critical"
+                                    let aged = b.aged_critical;
+                                    let aged_class = if aged > 0 { "sev-critical" } else { "" };
+                                    // Prefix a warning glyph so the aged backlog is
+                                    // distinguishable without relying on color.
+                                    let aged_label = if aged > 0 {
+                                        format!("⚠ {aged}")
                                     } else {
-                                        ""
+                                        aged.to_string()
                                     };
+                                    let aged_title = if aged > 0 { "Past SLA — needs attention" } else { "" };
                                     view! {
                                         <tr>
                                             <td>{b.organization}</td>
@@ -1253,7 +1277,9 @@ fn ComplianceTable() -> impl IntoView {
                                             <td>{pct}</td>
                                             <td>{b.pending_critical}</td>
                                             <td>
-                                                <span class=aged_class>{b.aged_critical}</span>
+                                                <span class=aged_class title=aged_title>
+                                                    {aged_label}
+                                                </span>
                                             </td>
                                         </tr>
                                     }
@@ -1301,12 +1327,12 @@ fn RebootTable() -> impl IntoView {
                 <table>
                     <thead>
                         <tr>
-                            <th>"Organization"</th>
-                            <th>"Location"</th>
-                            <th>"Role"</th>
-                            <th>"Device"</th>
-                            <th>"OS"</th>
-                            <th>"Pending patches"</th>
+                            <th scope="col">"Organization"</th>
+                            <th scope="col">"Location"</th>
+                            <th scope="col">"Role"</th>
+                            <th scope="col">"Device"</th>
+                            <th scope="col">"OS"</th>
+                            <th scope="col">"Pending patches"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1338,7 +1364,10 @@ fn RebootTable() -> impl IntoView {
 fn Toaster() -> impl IntoView {
     let state = expect_context::<AppState>();
     view! {
-        <Show when=move || state.toast.get().is_some()>
+        // Always-present live region: a screen reader announces the toast as it
+        // appears. An aria-live region created at the same moment as its content
+        // is not reliably announced, so the wrapper stays mounted.
+        <div class="toaster" role="status" aria-live="assertive" aria-atomic="true">
             {move || {
                 state
                     .toast
@@ -1348,14 +1377,18 @@ fn Toaster() -> impl IntoView {
                         view! {
                             <div class=cls>
                                 <span>{t.msg}</span>
-                                <button class="x" on:click=move |_| state.toast.set(None)>
+                                <button
+                                    class="x"
+                                    aria-label="Dismiss notification"
+                                    on:click=move |_| state.toast.set(None)
+                                >
                                     "×"
                                 </button>
                             </div>
                         }
                     })
             }}
-        </Show>
+        </div>
     }
 }
 
