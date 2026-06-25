@@ -105,6 +105,10 @@ pub fn build_rows(
             if !filter.severity_allowed(severity) {
                 continue;
             }
+            let released = patch.released_at();
+            if !filter.release_date_allowed(released.map(|r| r.timestamp())) {
+                continue;
+            }
             let status = patch
                 .status
                 .clone()
@@ -128,7 +132,7 @@ pub fn build_rows(
                 severity: severity.label().to_string(),
                 severity_rank: severity.rank(),
                 status,
-                release_date: fmt_dt(patch.released_at()),
+                release_date: fmt_dt(released),
                 installed_date: fmt_dt(patch.installed_at()),
                 release_ts: patch.release_timestamp.map(|s| s as i64),
                 installed_ts: patch.installed_timestamp.map(|s| s as i64),
@@ -371,6 +375,34 @@ mod tests {
         assert_eq!(rows[0].location.as_deref(), Some("HQ"));
         assert_eq!(rows[0].device_role.as_deref(), Some("Domain Controller"));
         assert_eq!(rows[0].patch_type, "OS");
+    }
+
+    #[test]
+    fn release_date_filter_narrows_rows() {
+        let d1 = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d1)]);
+        let maps = maps();
+        let patches = vec![
+            patch(1, "PENDING", "CRITICAL", Some(2)), // released 2 days ago → kept
+            patch(1, "PENDING", "CRITICAL", Some(100)), // released 100 days ago → dropped
+        ];
+        let cutoff = (Utc::now() - Duration::days(10)).timestamp();
+        let filter = FilterParams {
+            release_after: Some(cutoff),
+            ..Default::default()
+        };
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &patches,
+                type_label: "OS",
+                status_override: None,
+                status_filter: None,
+            }],
+            &filter,
+        );
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]

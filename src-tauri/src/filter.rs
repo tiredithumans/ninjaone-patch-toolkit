@@ -24,6 +24,17 @@ pub struct FilterParams {
     /// client-side. NinjaOne's severity is its CVSS-derived bucket, so this doubles
     /// as the CVSS-band filter. Empty = all severities.
     pub severities: Vec<String>,
+    /// Relative release-date window: keep patches released within the last N days.
+    /// Resolved to `release_after` (absolute) at query time; stored relatively so a
+    /// saved preset stays relative.
+    #[serde(default)]
+    pub release_within_days: Option<i64>,
+    /// Absolute release-date bounds (Unix seconds) for a custom range; applied
+    /// client-side against each patch's release timestamp.
+    #[serde(default)]
+    pub release_after: Option<i64>,
+    #[serde(default)]
+    pub release_before: Option<i64>,
 }
 
 impl FilterParams {
@@ -108,6 +119,21 @@ impl FilterParams {
         self.severities
             .iter()
             .any(|s| Severity::from_raw(s) == severity)
+    }
+
+    /// True when a patch's release timestamp (Unix seconds) falls within the
+    /// `release_after`/`release_before` bounds. With no bounds set, everything
+    /// matches; with a bound set, a patch with no release date is excluded (its age
+    /// can't be confirmed). The relative `release_within_days` is resolved into
+    /// `release_after` before this is called.
+    pub fn release_date_allowed(&self, released_ts: Option<i64>) -> bool {
+        if self.release_after.is_none() && self.release_before.is_none() {
+            return true;
+        }
+        let Some(ts) = released_ts else {
+            return false;
+        };
+        self.release_after.is_none_or(|a| ts >= a) && self.release_before.is_none_or(|b| ts <= b)
     }
 }
 
@@ -212,6 +238,35 @@ mod tests {
     fn empty_search_allows_all() {
         let f = FilterParams::default();
         assert!(f.search_allowed(None, None));
+    }
+
+    #[test]
+    fn release_date_bounds_filter_and_exclude_undated() {
+        // No bounds → everything matches, including undated.
+        let any = FilterParams::default();
+        assert!(any.release_date_allowed(Some(1_700_000_000)));
+        assert!(any.release_date_allowed(None));
+
+        // after + before define an inclusive window; undated is excluded.
+        let f = FilterParams {
+            release_after: Some(1_000),
+            release_before: Some(2_000),
+            ..Default::default()
+        };
+        assert!(f.release_date_allowed(Some(1_500)));
+        assert!(f.release_date_allowed(Some(1_000)));
+        assert!(f.release_date_allowed(Some(2_000)));
+        assert!(!f.release_date_allowed(Some(999)));
+        assert!(!f.release_date_allowed(Some(2_001)));
+        assert!(!f.release_date_allowed(None));
+
+        // after-only bound.
+        let after = FilterParams {
+            release_after: Some(1_000),
+            ..Default::default()
+        };
+        assert!(after.release_date_allowed(Some(5_000)));
+        assert!(!after.release_date_allowed(Some(500)));
     }
 
     #[test]
