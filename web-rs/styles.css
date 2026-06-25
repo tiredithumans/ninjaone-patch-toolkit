@@ -474,6 +474,22 @@ tbody tr:hover {
   font-size: 0.85rem;
 }
 
+/* --- Filter sub-section headings (Device / Patch) --- */
+.subhead {
+  margin: 14px 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.subhead:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
 /* --- Patches table pagination --- */
 .pager {
   display: flex;
