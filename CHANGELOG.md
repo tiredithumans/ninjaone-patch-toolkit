@@ -31,6 +31,11 @@ version and start a fresh `[Unreleased]`.
 
 ### Fixed
 
+- **Pending patches returned no results.** NinjaOne's patch API uses `MANUAL` for
+  patches awaiting approval (its UI labels them "Pending"), but the app filtered for
+  the literal `PENDING`, which the API never returns — so the Status: Pending filter
+  and the Compliance pending counts matched nothing. "Pending" now maps to `MANUAL`,
+  and such patches display as "Pending".
 - **OS Type filtering returned no patches.** NinjaOne's patch query endpoints
   ignore `class` in the device filter, so selecting an OS Type returned matching
   devices but zero patch rows (for any class). The OS Type facet is now applied
