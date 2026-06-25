@@ -1064,13 +1064,15 @@ fn Results() -> impl IntoView {
     let tab = state.active_tab;
 
     let summary = move || {
-        state.result.get().map(|r| {
-            format!(
-                "{} patch rows · {} devices · generated {}",
-                r.rows.len(),
-                r.devices_total,
-                r.generated_at
-            )
+        state.result.with(|r| {
+            r.as_ref().map(|r| {
+                format!(
+                    "{} patch rows · {} devices · generated {}",
+                    r.rows.len(),
+                    r.devices_total,
+                    r.generated_at
+                )
+            })
         })
     };
 
@@ -1109,12 +1111,30 @@ fn Results() -> impl IntoView {
 #[component]
 fn PatchesTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let rows = move || state.result.get().map(|r| r.rows).unwrap_or_default();
-    let total = move || rows().len();
+    // Borrow via `.with` so the table reads lengths and the capped slice without
+    // cloning the entire Vec<PatchRow> on every render.
+    let total = move || {
+        state
+            .result
+            .with(|r| r.as_ref().map_or(0, |r| r.rows.len()))
+    };
+    let rows = move || {
+        state.result.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    r.rows
+                        .iter()
+                        .take(ROW_DISPLAY_CAP)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    };
 
     view! {
         <Show
-            when=move || state.result.get().is_some()
+            when=move || state.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
             <Show when=move || { total() > ROW_DISPLAY_CAP }>
@@ -1150,7 +1170,6 @@ fn PatchesTable() -> impl IntoView {
                         {move || {
                             rows()
                                 .into_iter()
-                                .take(ROW_DISPLAY_CAP)
                                 .map(|r| {
                                     let sev = sev_class(&r.severity);
                                     let stat = status_class(&r.status);
@@ -1187,11 +1206,20 @@ fn PatchesTable() -> impl IntoView {
 #[component]
 fn ComplianceTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let buckets = move || state.result.get().map(|r| r.compliance).unwrap_or_default();
+    let buckets = move || {
+        state
+            .result
+            .with(|r| r.as_ref().map(|r| r.compliance.clone()).unwrap_or_default())
+    };
+    let has_buckets = move || {
+        state
+            .result
+            .with(|r| r.as_ref().is_some_and(|r| !r.compliance.is_empty()))
+    };
 
     view! {
         <Show
-            when=move || !buckets().is_empty()
+            when=has_buckets
             fallback=|| view! { <p class="empty">"No compliance data yet."</p> }
         >
             <div class="table-wrap">
@@ -1242,22 +1270,31 @@ fn ComplianceTable() -> impl IntoView {
 #[component]
 fn RebootTable() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // Filter then clone via `.with` so only the needs-reboot subset is cloned,
+    // not the full device list, and the emptiness check clones nothing.
     let devices = move || {
-        state
-            .result
-            .get()
-            .map(|r| {
-                r.devices
-                    .into_iter()
-                    .filter(|d| d.needs_reboot)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+        state.result.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    r.devices
+                        .iter()
+                        .filter(|d| d.needs_reboot)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    };
+    let has_devices = move || {
+        state.result.with(|r| {
+            r.as_ref()
+                .is_some_and(|r| r.devices.iter().any(|d| d.needs_reboot))
+        })
     };
 
     view! {
         <Show
-            when=move || !devices().is_empty()
+            when=has_devices
             fallback=|| view! { <p class="empty">"No devices flagged for reboot."</p> }
         >
             <div class="table-wrap">
