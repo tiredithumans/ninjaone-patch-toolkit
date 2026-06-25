@@ -59,6 +59,8 @@ pub struct AppState {
     locations: RwSignal<Vec<Location>>,
     roles: RwSignal<Vec<Role>>,
     node_classes: RwSignal<Vec<NodeClass>>,
+    /// Count of in-flight org/role/class lookup requests; > 0 means "loading".
+    lookups_pending: RwSignal<u32>,
 
     org_id: RwSignal<Option<i64>>,
     loc_id: RwSignal<Option<i64>>,
@@ -114,6 +116,7 @@ impl AppState {
             locations: RwSignal::new(Vec::new()),
             roles: RwSignal::new(Vec::new()),
             node_classes: RwSignal::new(Vec::new()),
+            lookups_pending: RwSignal::new(0),
             org_id: RwSignal::new(None),
             loc_id: RwSignal::new(None),
             role_id: RwSignal::new(None),
@@ -169,23 +172,37 @@ impl AppState {
         });
     }
 
+    fn loading_lookups(self) -> bool {
+        self.lookups_pending.get() > 0
+    }
+
     fn load_lookups(self) {
+        self.lookups_pending.set(3);
         spawn_local(async move {
             match api::list_orgs().await {
                 Ok(o) => self.orgs.set(o),
-                Err(e) => self.notify(Toast::err(e)),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load organizations: {e}"))),
             }
+            self.lookup_done();
         });
         spawn_local(async move {
-            if let Ok(r) = api::list_roles().await {
-                self.roles.set(r);
+            match api::list_roles().await {
+                Ok(r) => self.roles.set(r),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load roles: {e}"))),
             }
+            self.lookup_done();
         });
         spawn_local(async move {
-            if let Ok(n) = api::list_node_classes().await {
-                self.node_classes.set(n);
+            match api::list_node_classes().await {
+                Ok(n) => self.node_classes.set(n),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load OS types: {e}"))),
             }
+            self.lookup_done();
         });
+    }
+
+    fn lookup_done(self) {
+        self.lookups_pending.update(|n| *n = n.saturating_sub(1));
     }
 
     fn select_org(self, org: Option<i64>) {
@@ -194,8 +211,9 @@ impl AppState {
         self.locations.set(Vec::new());
         if let Some(id) = org {
             spawn_local(async move {
-                if let Ok(locs) = api::list_locations(id).await {
-                    self.locations.set(locs);
+                match api::list_locations(id).await {
+                    Ok(locs) => self.locations.set(locs),
+                    Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
                 }
             });
         }
@@ -292,9 +310,12 @@ impl AppState {
         if let Some(org) = f.organization_id {
             let want_loc = f.location_id;
             spawn_local(async move {
-                if let Ok(locs) = api::list_locations(org).await {
-                    self.locations.set(locs);
-                    self.loc_id.set(want_loc);
+                match api::list_locations(org).await {
+                    Ok(locs) => {
+                        self.locations.set(locs);
+                        self.loc_id.set(want_loc);
+                    }
+                    Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
                 }
             });
         }
@@ -496,9 +517,13 @@ fn Header() -> impl IntoView {
                         class="btn"
                         on:click=move |_| {
                             spawn_local(async move {
-                                let _ = api::sign_out().await;
-                                state.refresh_auth();
-                                state.notify(Toast::ok("Signed out"));
+                                match api::sign_out().await {
+                                    Ok(()) => {
+                                        state.refresh_auth();
+                                        state.notify(Toast::ok("Signed out"));
+                                    }
+                                    Err(e) => state.notify(Toast::err(e)),
+                                }
                             });
                         }
                     >
@@ -714,7 +739,12 @@ fn FilterBar() -> impl IntoView {
 
     view! {
         <section class="panel">
-            <h2>"Filters"</h2>
+            <div class="row">
+                <h2>"Filters"</h2>
+                <Show when=move || state.loading_lookups()>
+                    <span class="chips-label">"Loading…"</span>
+                </Show>
+            </div>
             <div class="grid">
                 <label>
                     "Organization"
