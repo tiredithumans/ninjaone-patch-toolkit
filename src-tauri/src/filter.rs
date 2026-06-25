@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use crate::model::Severity;
 
 /// Filter facets chosen by the operator in the UI. Identity facets (org/location/
-/// role) and the coarse OS-type facet (`node_classes`) are pushed into the NinjaOne
-/// `df` device-filter DSL; `os_name_contains`, `search`, and `severities` are
-/// applied client-side against patch rows after fetch.
+/// role) go into the `df` for both the device and patch queries; the coarse OS-type
+/// facet (`node_classes`) goes into the device `df` only (the patch `/queries/*`
+/// endpoints ignore `class`) and is reapplied client-side via the device join.
+/// `os_name_contains`, `search`, and `severities` are applied client-side against
+/// patch rows after fetch.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FilterParams {
@@ -25,9 +27,8 @@ pub struct FilterParams {
 }
 
 impl FilterParams {
-    /// Builds the NinjaOne `df` DSL string from the identity + node-class facets.
-    /// Returns `None` when no server-side facet is selected (query the whole fleet).
-    pub fn device_filter(&self) -> Option<String> {
+    /// Identity clauses (org/location/role) shared by the device and patch filters.
+    fn identity_clauses(&self) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
         if let Some(id) = self.organization_id {
             parts.push(format!("org = {id}"));
@@ -38,6 +39,14 @@ impl FilterParams {
         if let Some(id) = self.role_id {
             parts.push(format!("role = {id}"));
         }
+        parts
+    }
+
+    /// Builds the NinjaOne `df` DSL for the **device** query from the identity
+    /// facets plus the coarse OS-type (node-class) facet. Returns `None` when no
+    /// server-side facet is selected (query the whole fleet).
+    pub fn device_filter(&self) -> Option<String> {
+        let mut parts = self.identity_clauses();
         let classes: Vec<String> = self
             .node_classes
             .iter()
@@ -47,11 +56,17 @@ impl FilterParams {
         if !classes.is_empty() {
             parts.push(format!("class in ({})", classes.join(", ")));
         }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(" AND "))
-        }
+        (!parts.is_empty()).then(|| parts.join(" AND "))
+    }
+
+    /// Builds the `df` for the **patch / install** queries. NinjaOne's `/queries/*`
+    /// endpoints don't honor `class` in `df` — passing it returns no rows even when
+    /// matching devices exist — so the node-class facet is omitted here and applied
+    /// client-side via the device join in `rows::build_rows`. Only the identity
+    /// facets (which the query endpoints do honor) are sent server-side.
+    pub fn patch_filter(&self) -> Option<String> {
+        let parts = self.identity_clauses();
+        (!parts.is_empty()).then(|| parts.join(" AND "))
     }
 
     /// Case-insensitive substring match of the OS-name sub-filter against a device's
@@ -129,6 +144,34 @@ mod tests {
                 "org = 1 AND location = 2 AND role = 3 AND class in (WINDOWS_SERVER, LINUX_SERVER)"
             )
         );
+    }
+
+    #[test]
+    fn patch_filter_omits_node_class() {
+        // The patch query keeps identity facets but drops `class` (the /queries/*
+        // endpoints ignore it), so the node-class facet is applied client-side.
+        let f = FilterParams {
+            organization_id: Some(1),
+            node_classes: vec!["LINUX_SERVER".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            f.device_filter().as_deref(),
+            Some("org = 1 AND class in (LINUX_SERVER)")
+        );
+        assert_eq!(f.patch_filter().as_deref(), Some("org = 1"));
+
+        // Class-only selection → patch filter is whole-fleet (None); class is
+        // reconstructed via the device join.
+        let g = FilterParams {
+            node_classes: vec!["LINUX_SERVER".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            g.device_filter().as_deref(),
+            Some("class in (LINUX_SERVER)")
+        );
+        assert!(g.patch_filter().is_none());
     }
 
     #[test]

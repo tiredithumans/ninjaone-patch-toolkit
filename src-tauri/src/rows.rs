@@ -85,6 +85,13 @@ pub fn build_rows(
                 .device_id
                 .and_then(|id| devices_by_id.get(&id))
                 .copied();
+            // NinjaOne's /queries/* patch endpoints ignore `class` in `df`, so the
+            // node-class facet is applied here: `devices_by_id` is already
+            // class-filtered (the device query does honor `class`), so when a class
+            // is selected, drop patches whose device isn't in that set.
+            if !filter.node_classes.is_empty() && device.is_none() {
+                continue;
+            }
             let os_name = device.and_then(Device::os_name);
 
             if !filter.os_name_allowed(os_name.as_deref()) {
@@ -364,6 +371,36 @@ mod tests {
         assert_eq!(rows[0].location.as_deref(), Some("HQ"));
         assert_eq!(rows[0].device_role.as_deref(), Some("Domain Controller"));
         assert_eq!(rows[0].patch_type, "OS");
+    }
+
+    #[test]
+    fn node_class_filter_drops_patches_without_a_matched_device() {
+        // The patch query isn't class-filtered server-side, so build_rows narrows
+        // it to patches whose device is in the (class-filtered) device set.
+        let d1 = device(1, 10, "Linux"); // matched the class → in the device map
+        let by_id = HashMap::from([(1, &d1)]);
+        let patches = vec![
+            patch(1, "PENDING", "CRITICAL", Some(5)), // device 1 matched → kept
+            patch(2, "PENDING", "CRITICAL", Some(5)), // device 2 not in set → dropped
+        ];
+        let maps = maps();
+        let filter = FilterParams {
+            node_classes: vec!["LINUX_SERVER".into()],
+            ..Default::default()
+        };
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &patches,
+                type_label: "OS",
+                status_override: None,
+                status_filter: None,
+            }],
+            &filter,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].device_id, 1);
     }
 
     #[test]
