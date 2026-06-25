@@ -388,6 +388,17 @@ impl AppState {
 
     fn apply_preset(self, p: Preset) {
         let f = p.filter;
+        // Restore the patch-query selectors only when the preset captured them, so a
+        // legacy preset leaves the current Type/Status/install-window untouched.
+        if let Some(pt) = p.patch_type {
+            self.patch_type.set(pt);
+        }
+        if let Some(st) = p.statuses {
+            self.statuses.set(st);
+        }
+        if let Some(d) = p.install_days {
+            self.install_days.set(d);
+        }
         self.role_id.set(f.role_id);
         self.selected_classes.set(f.node_classes);
         self.selected_severities.set(f.severities);
@@ -481,8 +492,8 @@ pub fn App() -> impl IntoView {
             <Show when=move || state.show_settings.get()>
                 <SettingsPanel/>
             </Show>
-            <FilterBar/>
-            <QueryControls/>
+            <Filters/>
+            <RunControls/>
             <Results/>
             <Toaster/>
             <UpdateSplash/>
@@ -866,8 +877,9 @@ fn SettingsPanel() -> impl IntoView {
 }
 
 #[component]
-fn FilterBar() -> impl IntoView {
+fn Filters() -> impl IntoView {
     let state = expect_context::<AppState>();
+    let installed_selected = move || state.statuses.get().iter().any(|s| s == "INSTALLED");
 
     view! {
         <section class="panel">
@@ -877,6 +889,7 @@ fn FilterBar() -> impl IntoView {
                     <span class="chips-label">"Loading…"</span>
                 </Show>
             </div>
+            <div class="subhead">"Device"</div>
             <div class="grid">
                 <label>
                     "Organization"
@@ -954,14 +967,6 @@ fn FilterBar() -> impl IntoView {
                         on:input=move |ev| state.os_name.set(event_target_value(&ev))
                     />
                 </label>
-                <label>
-                    "Search (KB or name)"
-                    <input
-                        placeholder="e.g. KB5040434"
-                        prop:value=move || state.search.get()
-                        on:input=move |ev| state.search.set(event_target_value(&ev))
-                    />
-                </label>
             </div>
             <div class="chips">
                 <span class="chips-label">"OS Type:"</span>
@@ -990,29 +995,106 @@ fn FilterBar() -> impl IntoView {
                         .collect_view()
                 }}
             </div>
-            <div class="chips">
-                <span class="chips-label">"Severity:"</span>
-                {SEVERITY_OPTIONS
-                    .iter()
-                    .map(|&(value, label)| {
-                        let v_checked = value.to_string();
-                        let checked = move || state.selected_severities.get().contains(&v_checked);
-                        let v_toggle = value.to_string();
-                        view! {
-                            <label class="chip">
-                                <input
-                                    type="checkbox"
-                                    prop:checked=checked
-                                    on:change=move |_| {
-                                        state.toggle_in(state.selected_severities, v_toggle.clone())
-                                    }
-                                />
-                                {label}
-                            </label>
-                        }
-                    })
-                    .collect_view()}
+            <div class="subhead">"Patch"</div>
+            <div class="controls">
+                <div class="control-group">
+                    <span class="chips-label">"Type:"</span>
+                    {["ALL", "OS", "SOFTWARE"]
+                        .iter()
+                        .map(|t| {
+                            let t = t.to_string();
+                            let val = t.clone();
+                            let active = move || state.patch_type.get() == val;
+                            let set = t.clone();
+                            view! {
+                                <button
+                                    class=move || if active() { "seg seg-on" } else { "seg" }
+                                    on:click=move |_| state.patch_type.set(set.clone())
+                                >
+                                    {t}
+                                </button>
+                            }
+                        })
+                        .collect_view()}
+                </div>
+                <div class="control-group">
+                    <span class="chips-label">"Status:"</span>
+                    {STATUS_OPTIONS
+                        .iter()
+                        .map(|s| {
+                            let s = s.to_string();
+                            let value = s.clone();
+                            let checked = move || state.statuses.get().contains(&value);
+                            let toggle = s.clone();
+                            view! {
+                                <label class="chip">
+                                    <input
+                                        type="checkbox"
+                                        prop:checked=checked
+                                        on:change=move |_| {
+                                            state.toggle_in(state.statuses, toggle.clone())
+                                        }
+                                    />
+                                    {s}
+                                </label>
+                            }
+                        })
+                        .collect_view()}
+                </div>
+                <div class="control-group">
+                    <span class="chips-label">"Severity:"</span>
+                    {SEVERITY_OPTIONS
+                        .iter()
+                        .map(|&(value, label)| {
+                            let v_checked = value.to_string();
+                            let checked = move || {
+                                state.selected_severities.get().contains(&v_checked)
+                            };
+                            let v_toggle = value.to_string();
+                            view! {
+                                <label class="chip">
+                                    <input
+                                        type="checkbox"
+                                        prop:checked=checked
+                                        on:change=move |_| {
+                                            state.toggle_in(state.selected_severities, v_toggle.clone())
+                                        }
+                                    />
+                                    {label}
+                                </label>
+                            }
+                        })
+                        .collect_view()}
+                </div>
             </div>
+            <div class="grid">
+                <label>
+                    "Search (KB or name)"
+                    <input
+                        placeholder="e.g. KB5040434"
+                        prop:value=move || state.search.get()
+                        on:input=move |ev| state.search.set(event_target_value(&ev))
+                    />
+                </label>
+            </div>
+            <Show when=installed_selected>
+                <label class="inline">
+                    "Installed within (days)"
+                    <input
+                        type="number"
+                        class="narrow"
+                        min="1"
+                        max="3650"
+                        prop:value=move || state.install_days.get().to_string()
+                        on:change=move |ev| {
+                            let v = event_target_value(&ev)
+                                .parse::<i64>()
+                                .unwrap_or_else(|_| state.install_days.get_untracked());
+                            state.install_days.set(v.clamp(1, 3650));
+                        }
+                    />
+                </label>
+            </Show>
             <PresetRow/>
         </section>
     }
@@ -1031,6 +1113,9 @@ fn PresetRow() -> impl IntoView {
         let preset = Preset {
             name: name.trim().to_string(),
             filter: state.current_filter(),
+            patch_type: Some(state.patch_type.get_untracked()),
+            statuses: Some(state.statuses.get_untracked()),
+            install_days: Some(state.install_days.get_untracked()),
         };
         spawn_local(async move {
             match api::save_preset(preset).await {
@@ -1098,75 +1183,12 @@ fn PresetRow() -> impl IntoView {
 }
 
 #[component]
-fn QueryControls() -> impl IntoView {
+fn RunControls() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let installed_selected = move || state.statuses.get().iter().any(|s| s == "INSTALLED");
 
     view! {
         <section class="panel">
             <div class="controls">
-                <div class="control-group">
-                    <span class="chips-label">"Type:"</span>
-                    {["ALL", "OS", "SOFTWARE"]
-                        .iter()
-                        .map(|t| {
-                            let t = t.to_string();
-                            let val = t.clone();
-                            let active = move || state.patch_type.get() == val;
-                            let set = t.clone();
-                            view! {
-                                <button
-                                    class=move || if active() { "seg seg-on" } else { "seg" }
-                                    on:click=move |_| state.patch_type.set(set.clone())
-                                >
-                                    {t}
-                                </button>
-                            }
-                        })
-                        .collect_view()}
-                </div>
-                <div class="control-group">
-                    <span class="chips-label">"Status:"</span>
-                    {STATUS_OPTIONS
-                        .iter()
-                        .map(|s| {
-                            let s = s.to_string();
-                            let value = s.clone();
-                            let checked = move || state.statuses.get().contains(&value);
-                            let toggle = s.clone();
-                            view! {
-                                <label class="chip">
-                                    <input
-                                        type="checkbox"
-                                        prop:checked=checked
-                                        on:change=move |_| {
-                                            state.toggle_in(state.statuses, toggle.clone())
-                                        }
-                                    />
-                                    {s}
-                                </label>
-                            }
-                        })
-                        .collect_view()}
-                </div>
-                <Show when=installed_selected>
-                    <label class="inline">
-                        "Installed within (days)"
-                        <input
-                            type="number"
-                            class="narrow"
-                            min="1"
-                            max="3650"
-                            prop:value=move || state.install_days.get().to_string()
-                            on:change=move |ev| {
-                                let v = event_target_value(&ev)
-                                    .parse::<i64>()
-                                    .unwrap_or_else(|_| state.install_days.get_untracked());
-                                state.install_days.set(v.clamp(1, 3650));
-                            }
-                        />
-                    </label>
-                </Show>
                 <label class="inline">
                     "Auto-refresh"
                     <select on:change=move |ev| {
