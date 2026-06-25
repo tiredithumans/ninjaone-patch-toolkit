@@ -1004,44 +1004,46 @@ fn Filters() -> impl IntoView {
                         }}
                     </select>
                 </label>
-                <label>
-                    "OS name contains"
+            </div>
+            <div class="stacked-filters">
+                <div class="control-group">
+                    <span class="chips-label">"OS Type:"</span>
+                    {move || {
+                        state
+                            .node_classes
+                            .get()
+                            .into_iter()
+                            .map(|nc| {
+                                let value = nc.value.clone();
+                                let checked = move || state.selected_classes.get().contains(&value);
+                                let toggle_value = nc.value.clone();
+                                view! {
+                                    <label class="chip">
+                                        <input
+                                            type="checkbox"
+                                            prop:checked=checked
+                                            on:change=move |_| {
+                                                state.toggle_in(state.selected_classes, toggle_value.clone())
+                                            }
+                                        />
+                                        {nc.label}
+                                    </label>
+                                }
+                            })
+                            .collect_view()
+                    }}
+                </div>
+                <div class="control-group">
+                    <span class="chips-label">"OS name contains:"</span>
                     <input
                         placeholder="e.g. Server 2022"
                         prop:value=move || state.os_name.get()
                         on:input=move |ev| state.os_name.set(event_target_value(&ev))
                     />
-                </label>
-            </div>
-            <div class="chips">
-                <span class="chips-label">"OS Type:"</span>
-                {move || {
-                    state
-                        .node_classes
-                        .get()
-                        .into_iter()
-                        .map(|nc| {
-                            let value = nc.value.clone();
-                            let checked = move || state.selected_classes.get().contains(&value);
-                            let toggle_value = nc.value.clone();
-                            view! {
-                                <label class="chip">
-                                    <input
-                                        type="checkbox"
-                                        prop:checked=checked
-                                        on:change=move |_| {
-                                            state.toggle_in(state.selected_classes, toggle_value.clone())
-                                        }
-                                    />
-                                    {nc.label}
-                                </label>
-                            }
-                        })
-                        .collect_view()
-                }}
+                </div>
             </div>
             <div class="subhead">"Patch"</div>
-            <div class="controls">
+            <div class="stacked-filters">
                 <div class="control-group">
                     <span class="chips-label">"Type:"</span>
                     {["ALL", "OS", "SOFTWARE"]
@@ -1111,18 +1113,16 @@ fn Filters() -> impl IntoView {
                         })
                         .collect_view()}
                 </div>
-            </div>
-            <label class="search-field">
-                "Search (KB or name)"
-                <input
-                    placeholder="e.g. KB5040434"
-                    prop:value=move || state.search.get()
-                    on:input=move |ev| state.search.set(event_target_value(&ev))
-                />
-            </label>
-            <div class="controls">
-                <label class="inline">
-                    "Released"
+                <div class="control-group">
+                    <span class="chips-label">"Search (KB or name):"</span>
+                    <input
+                        placeholder="e.g. KB5040434"
+                        prop:value=move || state.search.get()
+                        on:input=move |ev| state.search.set(event_target_value(&ev))
+                    />
+                </div>
+                <div class="control-group">
+                    <span class="chips-label">"Released:"</span>
                     <select
                         prop:value=move || state.release_window.get()
                         on:change=move |ev| state.release_window.set(event_target_value(&ev))
@@ -1134,29 +1134,29 @@ fn Filters() -> impl IntoView {
                         <option value="90">"Last 90 days"</option>
                         <option value="custom">"Custom range…"</option>
                     </select>
-                </label>
-                <Show when=move || state.release_window.get() == "custom">
-                    <label class="inline">
-                        "After"
-                        <input
-                            type="date"
-                            prop:value=move || state.release_after_date.get()
-                            on:change=move |ev| {
-                                state.release_after_date.set(event_target_value(&ev))
-                            }
-                        />
-                    </label>
-                    <label class="inline">
-                        "Before"
-                        <input
-                            type="date"
-                            prop:value=move || state.release_before_date.get()
-                            on:change=move |ev| {
-                                state.release_before_date.set(event_target_value(&ev))
-                            }
-                        />
-                    </label>
-                </Show>
+                    <Show when=move || state.release_window.get() == "custom">
+                        <label class="inline">
+                            "After"
+                            <input
+                                type="date"
+                                prop:value=move || state.release_after_date.get()
+                                on:change=move |ev| {
+                                    state.release_after_date.set(event_target_value(&ev))
+                                }
+                            />
+                        </label>
+                        <label class="inline">
+                            "Before"
+                            <input
+                                type="date"
+                                prop:value=move || state.release_before_date.get()
+                                on:change=move |ev| {
+                                    state.release_before_date.set(event_target_value(&ev))
+                                }
+                            />
+                        </label>
+                    </Show>
+                </div>
             </div>
             <Show when=installed_selected>
                 <label class="inline">

@@ -11,6 +11,15 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Filters now read as a vertical list with inline titles.** In the Patch
+  section, Type, Status, Severity, Search, and Released each sit on their own row
+  with the title (e.g. "Search (KB or name):") inline to the left, aligned into a
+  single column. In the Device section, OS Type and OS name contains are stacked
+  the same way, while Organization, Location, and Device Role stay in the
+  responsive grid.
+
 ## [0.5.0] - 2026-06-25
 
 ### Added
