@@ -1073,16 +1073,14 @@ fn Filters() -> impl IntoView {
                         .collect_view()}
                 </div>
             </div>
-            <div class="grid">
-                <label>
-                    "Search (KB or name)"
-                    <input
-                        placeholder="e.g. KB5040434"
-                        prop:value=move || state.search.get()
-                        on:input=move |ev| state.search.set(event_target_value(&ev))
-                    />
-                </label>
-            </div>
+            <label class="search-field">
+                "Search (KB or name)"
+                <input
+                    placeholder="e.g. KB5040434"
+                    prop:value=move || state.search.get()
+                    on:input=move |ev| state.search.set(event_target_value(&ev))
+                />
+            </label>
             <Show when=installed_selected>
                 <label class="inline">
                     "Installed within (days)"
@@ -1195,27 +1193,6 @@ fn RunControls() -> impl IntoView {
     view! {
         <section class="panel">
             <div class="controls">
-                <label class="inline">
-                    "Auto-refresh"
-                    <select on:change=move |ev| {
-                        state.refresh_secs.set(event_target_value(&ev).parse().unwrap_or(0))
-                    }>
-                        {[("0", "Off"), ("30", "30s"), ("60", "1m"), ("300", "5m"), ("900", "15m")]
-                            .into_iter()
-                            .map(|(val, label)| {
-                                let sel = move || state.refresh_secs.get().to_string() == val;
-                                view! {
-                                    <option value=val selected=sel>
-                                        {label}
-                                    </option>
-                                }
-                            })
-                            .collect_view()}
-                    </select>
-                </label>
-                <Show when=move || state.refreshing.get()>
-                    <span class="chips-label">"↻ refreshing…"</span>
-                </Show>
                 <button
                     class="btn btn-primary"
                     prop:disabled=move || state.busy.get()
@@ -1238,6 +1215,27 @@ fn RunControls() -> impl IntoView {
                 >
                     "Export to Excel"
                 </button>
+                <Show when=move || state.refreshing.get()>
+                    <span class="chips-label">"↻ refreshing…"</span>
+                </Show>
+                <label class="inline">
+                    "Auto-refresh"
+                    <select on:change=move |ev| {
+                        state.refresh_secs.set(event_target_value(&ev).parse().unwrap_or(0))
+                    }>
+                        {[("0", "Off"), ("30", "30s"), ("60", "1m"), ("300", "5m"), ("900", "15m")]
+                            .into_iter()
+                            .map(|(val, label)| {
+                                let sel = move || state.refresh_secs.get().to_string() == val;
+                                view! {
+                                    <option value=val selected=sel>
+                                        {label}
+                                    </option>
+                                }
+                            })
+                            .collect_view()}
+                    </select>
+                </label>
             </div>
             <Show when=move || state.busy.get()>
                 <div class="query-progress">
