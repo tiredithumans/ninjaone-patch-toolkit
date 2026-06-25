@@ -52,6 +52,7 @@ pub struct AppState {
     auth: RwSignal<Option<AuthStatus>>,
     show_settings: RwSignal<bool>,
     busy: RwSignal<bool>,
+    signing_in: RwSignal<bool>,
     active_tab: RwSignal<Tab>,
 
     orgs: RwSignal<Vec<Organization>>,
@@ -107,6 +108,7 @@ impl AppState {
             auth: RwSignal::new(None),
             show_settings: RwSignal::new(false),
             busy: RwSignal::new(false),
+            signing_in: RwSignal::new(false),
             active_tab: RwSignal::new(Tab::Patches),
             orgs: RwSignal::new(Vec::new()),
             locations: RwSignal::new(Vec::new()),
@@ -462,7 +464,14 @@ fn Header() -> impl IntoView {
                         view! {
                             <button
                                 class="btn btn-primary"
+                                prop:disabled=move || state.signing_in.get()
                                 on:click=move |_| {
+                                    if state.signing_in.get_untracked() {
+                                        return;
+                                    }
+                                    state.signing_in.set(true);
+                                    state
+                                        .notify(Toast::ok("Complete the sign-in in your browser…"));
                                     spawn_local(async move {
                                         match api::sign_in().await {
                                             Ok(()) => {
@@ -472,10 +481,13 @@ fn Header() -> impl IntoView {
                                             }
                                             Err(e) => state.notify(Toast::err(e)),
                                         }
+                                        state.signing_in.set(false);
                                     });
                                 }
                             >
-                                "Sign in"
+                                {move || {
+                                    if state.signing_in.get() { "Signing in…" } else { "Sign in" }
+                                }}
                             </button>
                         }
                     }
