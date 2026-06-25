@@ -1485,7 +1485,7 @@ fn ComplianceTable() -> impl IntoView {
                             <th scope="col">"Devices"</th>
                             <th scope="col">"Compliant"</th>
                             <th scope="col">"Compliance"</th>
-                            <th scope="col">"Pending Crit/Imp"</th>
+                            <th scope="col">"Pending Critical/Important Patches"</th>
                             <th scope="col">"Aged (past SLA)"</th>
                         </tr>
                     </thead>
