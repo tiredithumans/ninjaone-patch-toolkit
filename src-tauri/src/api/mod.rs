@@ -14,6 +14,15 @@ use crate::auth::AuthState;
 use crate::error::truncate_body;
 
 const DEFAULT_PAGE_SIZE: u32 = 500;
+/// Page size for the high-volume `/queries/*` reporting endpoints (patches and
+/// install history). These are cursor-paginated, so a larger page only means
+/// fewer *sequential* round trips on a big fleet — the cursor (not the page size)
+/// decides when paging stops, so an API that silently caps the page still returns
+/// every row. Kept a conservative 2× of `DEFAULT_PAGE_SIZE`; raise once a tenant's
+/// real limit is confirmed. The `after`-paginated list endpoints stay at
+/// `DEFAULT_PAGE_SIZE` (their stop condition compares the page length to the
+/// requested size, so they must not over-request).
+const REPORTING_PAGE_SIZE: u32 = 1000;
 const MAX_RETRIES: u8 = 3;
 
 /// Sink for incremental pagination progress: invoked with the cumulative row
@@ -137,7 +146,8 @@ impl NinjaApiClient {
         path: &str,
         base_query: &[(&str, String)],
     ) -> Result<Vec<T>> {
-        self.get_paginated_reporting(path, base_query, None).await
+        self.get_paginated_reporting(path, base_query, DEFAULT_PAGE_SIZE, None)
+            .await
     }
 
     /// Like [`get_paginated`](Self::get_paginated), reporting the cumulative row
@@ -147,6 +157,7 @@ impl NinjaApiClient {
         &self,
         path: &str,
         base_query: &[(&str, String)],
+        page_size: u32,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<T>> {
         let mut all: Vec<T> = Vec::new();
@@ -156,7 +167,7 @@ impl NinjaApiClient {
 
         loop {
             let mut query: Vec<(&str, String)> = base_query.to_vec();
-            query.push(("pageSize", DEFAULT_PAGE_SIZE.to_string()));
+            query.push(("pageSize", page_size.to_string()));
             if let Some(c) = &cursor {
                 query.push(("cursor", c.clone()));
             }
@@ -191,7 +202,7 @@ impl NinjaApiClient {
                     // A short page is the last page. Otherwise advance the cursor to
                     // the largest id seen; stop if it can't move forward (no id, or
                     // no new rows) so a misbehaving endpoint can't loop forever.
-                    if len < DEFAULT_PAGE_SIZE as usize {
+                    if len < page_size as usize {
                         return Ok(all);
                     }
                     match max_id {
@@ -310,6 +321,56 @@ mod tests {
         let orgs = client.organizations().await.expect("organizations call");
         let names: Vec<_> = orgs.into_iter().map(|o| o.name).collect();
         assert_eq!(names, vec!["Alpha", "Beta"]);
+    }
+
+    #[tokio::test]
+    async fn patch_queries_request_the_reporting_page_size_and_follow_the_cursor() {
+        use crate::auth::AuthState;
+        use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // The /queries/* fetchers must request the larger reporting page size.
+        // Page 1 (no cursor) returns fewer rows than the requested page size but a
+        // live cursor — proving the cursor (not the page length) drives paging, so
+        // an API that caps the page below REPORTING_PAGE_SIZE still returns every
+        // row instead of stopping after the first short page.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .and(query_param("pageSize", REPORTING_PAGE_SIZE.to_string()))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{ "id": 1, "name": "KB1" }],
+                "cursor": "tok-2"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .and(query_param("pageSize", REPORTING_PAGE_SIZE.to_string()))
+            .and(query_param("cursor", "tok-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{ "id": 2, "name": "KB2" }],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        let client = NinjaApiClient::new(http, auth);
+
+        let patches = client
+            .fleet_os_patches(None, None, None)
+            .await
+            .expect("os patches call");
+        assert_eq!(
+            patches.len(),
+            2,
+            "must follow the cursor past the first page"
+        );
     }
 
     #[tokio::test]
