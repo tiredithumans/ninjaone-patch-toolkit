@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-25
+
 ### Changed
 
 - **Filters now read as a vertical list with inline titles.** In the Patch
