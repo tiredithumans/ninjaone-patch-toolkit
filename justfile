@@ -66,8 +66,14 @@ coverage:
 web-check:
     cargo check --manifest-path web-rs/Cargo.toml --target {{wasm}}
 
+# Frontend pure-helper unit tests on the host target. The wasm build excludes the
+# #[cfg(test)] module, and the helpers under test are JS-free so they run natively
+# (no wasm/browser runner). Components and js_sys-backed helpers aren't covered.
+web-test:
+    cargo test --manifest-path web-rs/Cargo.toml
+
 # Run every CI gate in sequence.
-verify: fmt-check clippy test web-check web-clippy
+verify: fmt-check clippy test web-check web-clippy web-test
 
 # --- Dependency policy -------------------------------------------------------
 

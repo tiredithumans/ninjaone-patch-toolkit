@@ -85,6 +85,10 @@ jobs:
         run: just web-clippy
       - name: build
         run: just web-build
+      # Pure-helper unit tests run on the host target (the wasm build excludes the
+      # #[cfg(test)] module); the helpers under test are JS-free.
+      - name: test
+        run: just web-test
 
   coverage:
     name: Coverage (backend)

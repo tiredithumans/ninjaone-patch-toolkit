@@ -1820,3 +1820,49 @@ fn status_class(status: &str) -> &'static str {
         _ => "stat",
     }
 }
+
+// Host-target unit tests for the JS-free pure helpers. The wasm build excludes this
+// module (`cfg(test)` is never set there), and the date helpers are deliberately
+// not covered here — they call `js_sys::Date`, which only runs in the browser.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_thousands_inserts_separators() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(42), "42");
+        assert_eq!(group_thousands(1_000), "1,000");
+        assert_eq!(group_thousands(12_300), "12,300");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn parse_opt_trims_and_rejects_non_numbers() {
+        assert_eq!(parse_opt("  42 "), Some(42));
+        assert_eq!(parse_opt("-7"), Some(-7));
+        assert_eq!(parse_opt(""), None);
+        assert_eq!(parse_opt("abc"), None);
+    }
+
+    #[test]
+    fn non_empty_collapses_blank_to_none() {
+        assert_eq!(non_empty("   ".to_string()), None);
+        assert_eq!(non_empty(" hi ".to_string()), Some("hi".to_string()));
+    }
+
+    #[test]
+    fn severity_and_status_classes_map_known_and_unknown_values() {
+        assert_eq!(sev_class("Critical"), "sev sev-critical");
+        assert_eq!(sev_class("nonsense"), "sev sev-none");
+        assert_eq!(status_class("PENDING"), "stat stat-pending");
+        assert_eq!(status_class("FAILED"), "stat stat-failed");
+        assert_eq!(status_class("???"), "stat");
+    }
+
+    #[test]
+    fn tab_class_marks_only_the_active_tab() {
+        assert_eq!(tab_class(Tab::Patches, Tab::Patches), "tab tab-on");
+        assert_eq!(tab_class(Tab::Patches, Tab::Reboot), "tab");
+    }
+}
