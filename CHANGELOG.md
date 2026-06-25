@@ -11,6 +11,25 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-25
+
+### Added
+
+- **Collapse the Filters panel.** A Hide/Show toggle in the Filters header folds
+  the filter controls away so the results table gets more room. The panel stays
+  expanded by default, and Run query plus the results stay available while it's
+  collapsed.
+
+### Changed
+
+- **Faster, lighter patch queries on large fleets.** The detail table now loads
+  rows a page at a time from the backend instead of transferring the whole result
+  set to the UI at once, so large queries (10k+ rows) feel noticeably snappier.
+  The fleet-wide patch fetches use larger API pages to cut round-trips, and the
+  per-query join, filtering, and Excel export do less redundant work. The rows,
+  compliance figures, and export contents are unchanged — only how quickly they
+  arrive.
+
 ## [0.5.1] - 2026-06-25
 
 ### Changed

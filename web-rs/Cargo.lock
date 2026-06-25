@@ -900,7 +900,7 @@ checksum = "60993920e071b0c9b66f14e2b32740a4e27ffc82854dcd72035887f336a09a28"
 
 [[package]]
 name = "ninjaone-patch-toolkit-web"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "console_error_panic_hook",
  "gloo-timers",
