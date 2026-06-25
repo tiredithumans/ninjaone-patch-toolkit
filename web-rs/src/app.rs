@@ -223,7 +223,7 @@ impl AppState {
     }
 
     fn load_lookups(self) {
-        self.lookups_pending.set(3);
+        self.lookups_pending.set(2);
         spawn_local(async move {
             match api::list_orgs().await {
                 Ok(o) => self.orgs.set(o),
@@ -238,12 +238,16 @@ impl AppState {
             }
             self.lookup_done();
         });
+    }
+
+    /// Loads the static OS-type list. It needs no auth or API call, so it runs at
+    /// startup rather than waiting for sign-in like the org/role/location lookups.
+    fn load_node_classes(self) {
         spawn_local(async move {
             match api::list_node_classes().await {
                 Ok(n) => self.node_classes.set(n),
                 Err(e) => self.notify(Toast::err(format!("Couldn't load OS types: {e}"))),
             }
-            self.lookup_done();
         });
     }
 
@@ -428,7 +432,9 @@ pub fn App() -> impl IntoView {
     let state = AppState::new();
     provide_context(state);
 
-    // Initial load.
+    // Initial load. The OS-type facet is static, so load it immediately rather than
+    // gating it behind sign-in with the org/role/location lookups.
+    state.load_node_classes();
     spawn_local(async move {
         if let Ok(a) = api::auth_status().await {
             let authed = a.authenticated;
@@ -1067,16 +1073,14 @@ fn Filters() -> impl IntoView {
                         .collect_view()}
                 </div>
             </div>
-            <div class="grid">
-                <label>
-                    "Search (KB or name)"
-                    <input
-                        placeholder="e.g. KB5040434"
-                        prop:value=move || state.search.get()
-                        on:input=move |ev| state.search.set(event_target_value(&ev))
-                    />
-                </label>
-            </div>
+            <label class="search-field">
+                "Search (KB or name)"
+                <input
+                    placeholder="e.g. KB5040434"
+                    prop:value=move || state.search.get()
+                    on:input=move |ev| state.search.set(event_target_value(&ev))
+                />
+            </label>
             <Show when=installed_selected>
                 <label class="inline">
                     "Installed within (days)"
@@ -1189,27 +1193,6 @@ fn RunControls() -> impl IntoView {
     view! {
         <section class="panel">
             <div class="controls">
-                <label class="inline">
-                    "Auto-refresh"
-                    <select on:change=move |ev| {
-                        state.refresh_secs.set(event_target_value(&ev).parse().unwrap_or(0))
-                    }>
-                        {[("0", "Off"), ("30", "30s"), ("60", "1m"), ("300", "5m"), ("900", "15m")]
-                            .into_iter()
-                            .map(|(val, label)| {
-                                let sel = move || state.refresh_secs.get().to_string() == val;
-                                view! {
-                                    <option value=val selected=sel>
-                                        {label}
-                                    </option>
-                                }
-                            })
-                            .collect_view()}
-                    </select>
-                </label>
-                <Show when=move || state.refreshing.get()>
-                    <span class="chips-label">"↻ refreshing…"</span>
-                </Show>
                 <button
                     class="btn btn-primary"
                     prop:disabled=move || state.busy.get()
@@ -1232,6 +1215,27 @@ fn RunControls() -> impl IntoView {
                 >
                     "Export to Excel"
                 </button>
+                <Show when=move || state.refreshing.get()>
+                    <span class="chips-label">"↻ refreshing…"</span>
+                </Show>
+                <label class="inline">
+                    "Auto-refresh"
+                    <select on:change=move |ev| {
+                        state.refresh_secs.set(event_target_value(&ev).parse().unwrap_or(0))
+                    }>
+                        {[("0", "Off"), ("30", "30s"), ("60", "1m"), ("300", "5m"), ("900", "15m")]
+                            .into_iter()
+                            .map(|(val, label)| {
+                                let sel = move || state.refresh_secs.get().to_string() == val;
+                                view! {
+                                    <option value=val selected=sel>
+                                        {label}
+                                    </option>
+                                }
+                            })
+                            .collect_view()}
+                    </select>
+                </label>
             </div>
             <Show when=move || state.busy.get()>
                 <div class="query-progress">
