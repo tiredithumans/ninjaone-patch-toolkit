@@ -157,9 +157,24 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
   opacity: 1;
 }
 
-.search-field {
-  max-width: 320px;
-  margin-top: 4px;
+/* Device / Patch filters: one filter per row, each row's title inline with its
+   controls. The min-width on the titles lines the controls up into a single
+   column; the shared width on inputs/selects keeps that column straight. */
+.stacked-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.stacked-filters > .control-group > .chips-label {
+  min-width: 148px;
+}
+
+.stacked-filters > .control-group > input,
+.stacked-filters > .control-group > select {
+  width: 260px;
+  max-width: 100%;
 }
 
 select:disabled {
