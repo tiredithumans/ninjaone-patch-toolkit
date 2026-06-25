@@ -4,7 +4,7 @@ use leptos::task::spawn_local;
 use crate::api;
 use crate::types::*;
 
-const ROW_DISPLAY_CAP: usize = 1000;
+const PATCHES_PAGE_SIZE: usize = 100;
 
 const REGIONS: [(&str, &str); 5] = [
     ("https://app.ninjarmm.com", "North America (app)"),
@@ -15,6 +15,15 @@ const REGIONS: [(&str, &str); 5] = [
 ];
 
 const STATUS_OPTIONS: [&str; 5] = ["PENDING", "APPROVED", "REJECTED", "INSTALLED", "FAILED"];
+
+/// Severity facet options as (raw value sent to the backend, display label).
+const SEVERITY_OPTIONS: [(&str, &str); 5] = [
+    ("CRITICAL", "Critical"),
+    ("IMPORTANT", "Important"),
+    ("MODERATE", "Moderate"),
+    ("LOW", "Low"),
+    ("OPTIONAL", "Optional"),
+];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -83,6 +92,7 @@ pub struct AppState {
     loc_id: RwSignal<Option<i64>>,
     role_id: RwSignal<Option<i64>>,
     selected_classes: RwSignal<Vec<String>>,
+    selected_severities: RwSignal<Vec<String>>,
     os_name: RwSignal<String>,
     search: RwSignal<String>,
 
@@ -92,6 +102,8 @@ pub struct AppState {
     refresh_secs: RwSignal<u32>,
 
     result: RwSignal<Option<QueryResult>>,
+    /// Zero-based page index for the paginated Patches table.
+    patches_page: RwSignal<usize>,
     presets: RwSignal<Vec<Preset>>,
     preset_name: RwSignal<String>,
 
@@ -148,6 +160,7 @@ impl AppState {
             loc_id: RwSignal::new(None),
             role_id: RwSignal::new(None),
             selected_classes: RwSignal::new(Vec::new()),
+            selected_severities: RwSignal::new(Vec::new()),
             os_name: RwSignal::new(String::new()),
             search: RwSignal::new(String::new()),
             patch_type: RwSignal::new("ALL".to_string()),
@@ -155,6 +168,7 @@ impl AppState {
             install_days: RwSignal::new(30),
             refresh_secs: RwSignal::new(0),
             result: RwSignal::new(None),
+            patches_page: RwSignal::new(0),
             presets: RwSignal::new(Vec::new()),
             preset_name: RwSignal::new(String::new()),
             f_instance: RwSignal::new("https://us2.ninjarmm.com".to_string()),
@@ -269,6 +283,7 @@ impl AppState {
             node_classes: self.selected_classes.get_untracked(),
             os_name_contains: non_empty(self.os_name.get_untracked()),
             search: non_empty(self.search.get_untracked()),
+            severities: self.selected_severities.get_untracked(),
         }
     }
 
@@ -317,7 +332,14 @@ impl AppState {
         flag.set(true);
         spawn_local(async move {
             match api::query_patches(args, seq).await {
-                Ok(r) => self.result.set(Some(r)),
+                Ok(r) => {
+                    self.result.set(Some(r));
+                    // Jump back to page 1 on a manual run; an auto-refresh keeps the
+                    // current page (it's clamped if the new result is shorter).
+                    if !silent {
+                        self.patches_page.set(0);
+                    }
+                }
                 Err(e) => self.notify(Toast::err(e)),
             }
             // Record the round-trip so the next run can show "Last run took Ns"
@@ -368,6 +390,7 @@ impl AppState {
         let f = p.filter;
         self.role_id.set(f.role_id);
         self.selected_classes.set(f.node_classes);
+        self.selected_severities.set(f.severities);
         self.os_name.set(f.os_name_contains.unwrap_or_default());
         self.search.set(f.search.unwrap_or_default());
         // Load the org's locations, then restore the saved location.
@@ -967,6 +990,29 @@ fn FilterBar() -> impl IntoView {
                         .collect_view()
                 }}
             </div>
+            <div class="chips">
+                <span class="chips-label">"Severity:"</span>
+                {SEVERITY_OPTIONS
+                    .iter()
+                    .map(|&(value, label)| {
+                        let v_checked = value.to_string();
+                        let checked = move || state.selected_severities.get().contains(&v_checked);
+                        let v_toggle = value.to_string();
+                        view! {
+                            <label class="chip">
+                                <input
+                                    type="checkbox"
+                                    prop:checked=checked
+                                    on:change=move |_| {
+                                        state.toggle_in(state.selected_severities, v_toggle.clone())
+                                    }
+                                />
+                                {label}
+                            </label>
+                        }
+                    })
+                    .collect_view()}
+            </div>
             <PresetRow/>
         </section>
     }
@@ -1274,25 +1320,52 @@ fn Results() -> impl IntoView {
 #[component]
 fn PatchesTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // Borrow via `.with` so the table reads lengths and the capped slice without
-    // cloning the entire Vec<PatchRow> on every render.
+    // Borrow via `.with` so the table reads lengths and the current page slice
+    // without cloning the entire Vec<PatchRow> on every render.
     let total = move || {
         state
             .result
             .with(|r| r.as_ref().map_or(0, |r| r.rows.len()))
     };
+    let page_count = move || total().div_ceil(PATCHES_PAGE_SIZE).max(1);
+    // Clamp the stored page so a shorter result (e.g. after an auto-refresh) can't
+    // leave us past the last page.
+    let page = move || state.patches_page.get().min(page_count() - 1);
     let rows = move || {
+        let start = page() * PATCHES_PAGE_SIZE;
         state.result.with(|r| {
             r.as_ref()
                 .map(|r| {
                     r.rows
                         .iter()
-                        .take(ROW_DISPLAY_CAP)
+                        .skip(start)
+                        .take(PATCHES_PAGE_SIZE)
                         .cloned()
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
         })
+    };
+    let pager_summary = move || {
+        let t = total();
+        let start = page() * PATCHES_PAGE_SIZE;
+        let end = (start + PATCHES_PAGE_SIZE).min(t);
+        format!(
+            "Rows {}\u{2013}{} of {} \u{00b7} Page {} of {}",
+            start + 1,
+            end,
+            group_thousands(t),
+            page() + 1,
+            page_count(),
+        )
+    };
+    let go_prev = move |_| state.patches_page.update(|p| *p = p.saturating_sub(1));
+    let go_next = move |_| {
+        let last = page_count().saturating_sub(1);
+        state.patches_page.update(|p| {
+            let cur = (*p).min(last);
+            *p = (cur + 1).min(last);
+        });
     };
 
     view! {
@@ -1300,18 +1373,36 @@ fn PatchesTable() -> impl IntoView {
             when=move || state.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
-            <Show when=move || { total() > ROW_DISPLAY_CAP }>
-                <p class="note">
-                    {move || {
-                        format!(
-                            "Showing first {} of {} rows. Export to Excel for the full set.",
-                            ROW_DISPLAY_CAP,
-                            total(),
-                        )
-                    }}
-                </p>
-            </Show>
-            <div class="table-wrap">
+            <Show
+                when=move || { total() > 0 }
+                fallback=|| {
+                    view! {
+                        <p class="empty">
+                            "No patches matched your filters. Try widening the organization, severity, or status selection."
+                        </p>
+                    }
+                }
+            >
+                <Show when=move || { page_count() > 1 }>
+                    <div class="pager">
+                        <button
+                            class="btn"
+                            prop:disabled=move || page() == 0
+                            on:click=go_prev
+                        >
+                            "‹ Prev"
+                        </button>
+                        <span class="pager-info">{pager_summary}</span>
+                        <button
+                            class="btn"
+                            prop:disabled=move || { page() + 1 >= page_count() }
+                            on:click=go_next
+                        >
+                            "Next ›"
+                        </button>
+                    </div>
+                </Show>
+                <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
@@ -1361,7 +1452,8 @@ fn PatchesTable() -> impl IntoView {
                         }}
                     </tbody>
                 </table>
-            </div>
+                </div>
+            </Show>
         </Show>
     }
 }
@@ -1393,7 +1485,7 @@ fn ComplianceTable() -> impl IntoView {
                             <th scope="col">"Devices"</th>
                             <th scope="col">"Compliant"</th>
                             <th scope="col">"Compliance"</th>
-                            <th scope="col">"Pending Crit/Imp"</th>
+                            <th scope="col">"Pending Critical/Important Patches"</th>
                             <th scope="col">"Aged (past SLA)"</th>
                         </tr>
                     </thead>

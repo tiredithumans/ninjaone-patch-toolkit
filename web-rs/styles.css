@@ -474,6 +474,20 @@ tbody tr:hover {
   font-size: 0.85rem;
 }
 
+/* --- Patches table pagination --- */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.pager-info {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
 /* --- Update splash modal --- */
 .modal-overlay {
   position: fixed;
