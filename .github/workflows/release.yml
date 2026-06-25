@@ -44,12 +44,76 @@ jobs:
           fi
           echo "all manifests match v$tag — ok"
 
+  # Create the draft release ONCE, up front, so the per-OS build jobs all upload
+  # into the same release instead of each running tauri-action's find-or-create
+  # logic. With the matrix creating the release, parallel jobs raced: one job
+  # recreated the draft and wiped another's already-uploaded bundles (v0.6.1
+  # shipped with the macOS .dmg/.app.tar.gz missing and no `darwin` entry in
+  # latest.json). A single pre-created release with a shared releaseId removes
+  # that race — the build jobs only ever upload, never (re)create.
+  create-release:
+    name: Create draft release
+    needs: guard
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Same CHANGELOG.md extraction the build jobs use — sets the release body
+      # here (the build jobs reuse it for latest.json's `notes`). Kept in sync by
+      # being the identical step; see the build job's copy for the rationale.
+      - name: Extract changelog notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes=""
+          if [ -f CHANGELOG.md ]; then
+            notes=$(awk -v ver="$version" '
+              /^## \[/ { if (c) exit; if (index($0, "## [" ver "]") == 1) c=1; next }
+              c { print }
+            ' CHANGELOG.md | sed '/./,$!d')
+          fi
+          if [ -z "$(printf %s "$notes" | tr -d '[:space:]')" ]; then
+            notes="See the release notes on GitHub for what's new in v$version."
+          fi
+          {
+            echo "RELEASE_NOTES<<__CHANGELOG_EOF__"
+            echo "$notes"
+            echo "__CHANGELOG_EOF__"
+          } >> "$GITHUB_ENV"
+
+      - name: Create draft release
+        id: create
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          result-encoding: string
+          script: |
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: process.env.GITHUB_REF_NAME,
+              name: process.env.GITHUB_REF_NAME,
+              body: process.env.RELEASE_NOTES,
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
   build:
     name: Build bundles (${{ matrix.os }})
-    needs: guard
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Serialize the OS builds. Each job uploads into the shared draft and, for
+      # the updater, reads the release's current latest.json, merges its own
+      # platform in, and re-uploads it. That read-modify-write is not atomic, so
+      # running the jobs in parallel would lose-update latest.json and drop a
+      # platform. One-at-a-time makes the merge safe; releases are infrequent so
+      # the extra wall-clock is acceptable.
+      max-parallel: 1
       matrix:
         # macos-latest builds natively (Apple Silicon / arm64) — the approach that
         # worked for v0.1.0. The *universal-binary* bundling was the failing step
@@ -110,22 +174,24 @@ jobs:
 
       # tauri-action builds the frontend (beforeBuildCommand = trunk build),
       # bundles per-OS, signs the updater artifacts with the minisign key, and
-      # attaches the bundles + .sig + an aggregated latest.json to a DRAFT
-      # release. `--config src-tauri/updater-build.json` turns on
+      # uploads the bundles + .sig + its platform's entry in latest.json to the
+      # DRAFT release created by `create-release` (via `releaseId` — so the build
+      # jobs only upload, never create, which is what stops the asset-clobbering
+      # race). `--config src-tauri/updater-build.json` turns on
       # createUpdaterArtifacts only here (the base config leaves it off so local
       # `just build` doesn't need signing keys). Updates go live only when the
       # release is PUBLISHED — a draft isn't "latest", so the floating
       # latest.json endpoint stays on the last published version until you ship.
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2
         env:
-          # Required for tauri-action to create/upload the GitHub release.
+          # Required for tauri-action to upload to the GitHub release.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: ${{ github.ref_name }}
-          # CHANGELOG.md section extracted above → release body AND latest.json notes.
+          # Upload into the pre-created draft instead of finding/creating one.
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          # CHANGELOG.md section extracted above → latest.json notes.
           releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: true
           prerelease: false
