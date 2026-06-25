@@ -114,3 +114,20 @@ jobs:
           tool: just,cargo-audit
       - name: audit (both lockfiles)
         run: just audit
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # License + supply-chain (sources) + bans policy from deny.toml, over both
+      # crates' trees, via the same `just` recipes used locally. RustSec
+      # advisories are NOT re-checked here — the `audit` job (cargo-audit) owns
+      # those, so the two gates don't overlap.
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
+        with:
+          tool: just,cargo-deny
+      - name: deny (backend)
+        run: just deny
+      - name: deny (frontend)
+        run: just web-deny

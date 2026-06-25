@@ -111,6 +111,8 @@ just web-build       # trunk build → web-rs/dist (debug)
 
 # Dependency policy:
 just audit           # RustSec advisories — scans BOTH lockfiles (src-tauri + web-rs)
+just deny            # license + supply-chain (sources) + bans policy (deny.toml), backend tree
+just web-deny        # same policy for the web-rs tree
 
 # Packaging / housekeeping:
 just build           # cargo tauri build → bundles (.dmg/.app, .msi/.nsis, AppImage)
@@ -234,7 +236,8 @@ each gate is also callable independently. Use the recipe flags from `/justfile`;
 4. **Frontend compile** — `just web-check` (wasm target; `web-rs` is a separate crate the backend
    gates never reach).
 5. **Lint (frontend)** — `just web-clippy` (`-D warnings`, wasm target).
-6. **Dependency audit** *(optional locally)* — `just audit` (scans both lockfiles).
+6. **Dependency audit** *(optional locally)* — `just audit` (RustSec advisories, both lockfiles)
+   + `just deny` / `just web-deny` (licenses + supply-chain sources + bans via `deny.toml`).
 7. **CodeQL** *(GitHub-side)* — Rust security queries, build-mode `none` (`.github/workflows/codeql.yml`).
 
 For behavior changes not provable by a unit test, run `just dev` and exercise the view.
