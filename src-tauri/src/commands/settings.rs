@@ -87,11 +87,13 @@ pub fn save_settings(
         .to_string();
     require_https_instance(&instance_base_url)?;
 
+    let instance_changed;
     let snapshot = {
         let mut guard = state
             .settings
             .lock()
             .map_err(|_| UiError::new("settings state poisoned"))?;
+        instance_changed = guard.instance_base_url != instance_base_url;
         guard.instance_base_url = instance_base_url;
         guard.client_id = args
             .client_id
@@ -111,8 +113,12 @@ pub fn save_settings(
         snapshot.callback_port,
     );
     // The instance may have changed — drop cached lookups so a different tenant
-    // doesn't inherit stale org/location/role names.
+    // doesn't inherit stale org/location/role names, and drop the cached query
+    // result so an export can't write the previous tenant's rows.
     state.clear_lookups_cache();
+    if instance_changed {
+        state.clear_last_result();
+    }
 
     match args.client_secret.map(|s| s.trim().to_string()) {
         Some(secret) if !secret.is_empty() => {

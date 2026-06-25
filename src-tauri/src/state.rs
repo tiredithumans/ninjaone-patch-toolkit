@@ -102,4 +102,12 @@ impl AppState {
             *guard = None;
         }
     }
+
+    /// Drops the cached query result so a later export can't write a previous
+    /// tenant's rows after sign-out or an instance change.
+    pub fn clear_last_result(&self) {
+        if let Ok(mut slot) = self.last_result.lock() {
+            *slot = None;
+        }
+    }
 }
