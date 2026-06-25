@@ -49,10 +49,12 @@ pub struct PatchSource<'a> {
     pub patches: &'a [Patch],
     pub type_label: &'static str,
     pub status_override: Option<&'static str>,
-    /// When set, only patches whose raw status is in this set become rows — lets
-    /// the caller narrow the current-patch families to the requested statuses
-    /// without cloning the matched subset out first. Install sources leave it
-    /// `None` (they're already the requested set and carry a `status_override`).
+    /// When set, only patches whose raw status (or, if absent, `status_override`)
+    /// is in this set become rows — lets the caller narrow a patch family to the
+    /// requested statuses without cloning the matched subset out first. Used for
+    /// both the current-patch families (MANUAL/APPROVED/REJECTED) and the install
+    /// families, which return both INSTALLED and FAILED records and so are narrowed
+    /// to the requested install statuses.
     pub status_filter: Option<&'a HashSet<&'static str>>,
 }
 
@@ -84,9 +86,13 @@ pub fn build_rows(
     for source in sources {
         for patch in source.patches {
             if let Some(allowed) = source.status_filter {
+                // Fall back to the source's status_override when a record omits its
+                // own status, so an install record with no status still matches the
+                // label (e.g. INSTALLED) it would be displayed under.
                 let keep = patch
                     .status
                     .as_deref()
+                    .or(source.status_override)
                     .map(|s| allowed.contains(s))
                     .unwrap_or(false);
                 if !keep {
@@ -537,6 +543,65 @@ mod tests {
         );
         assert_eq!(rows.len(), 1, "a MANUAL patch matches the Pending filter");
         assert_eq!(rows[0].status, "PENDING", "MANUAL renders as PENDING");
+    }
+
+    #[test]
+    fn failed_filter_keeps_failed_installs_and_drops_installed() {
+        use crate::model::PatchStatus;
+        // FAILED is an install *result*: it comes from the install-history source
+        // (which returns both INSTALLED and FAILED records), narrowed to the
+        // requested install statuses. A FAILED-only query must keep the FAILED
+        // record and drop the INSTALLED one — the bug was routing FAILED to the
+        // current feed, where it never appears, so nothing was returned.
+        let d1 = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d1)]);
+        let maps = maps();
+        let mut failed = patch(1, "FAILED", "CRITICAL", Some(1));
+        failed.installed_timestamp = Some((Utc::now() - Duration::days(1)).timestamp() as f64);
+        let installed = patch(1, "INSTALLED", "CRITICAL", Some(1));
+        let patches = vec![failed, installed];
+        let failed_set = HashSet::from([PatchStatus::Failed.api_value()]);
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &patches,
+                type_label: "OS",
+                status_override: Some("INSTALLED"),
+                status_filter: Some(&failed_set),
+            }],
+            &FilterParams::default(),
+        );
+        assert_eq!(rows.len(), 1, "only the FAILED install record is kept");
+        assert_eq!(rows[0].status, "FAILED");
+    }
+
+    #[test]
+    fn install_filter_falls_back_to_override_for_missing_status() {
+        use crate::model::PatchStatus;
+        // An install record that omits its own status falls back to the source's
+        // override (INSTALLED) for both matching and display, so an INSTALLED query
+        // still keeps it.
+        let d1 = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d1)]);
+        let maps = maps();
+        let mut p = patch(1, "INSTALLED", "CRITICAL", Some(1));
+        p.status = None;
+        let patches = vec![p];
+        let installed_set = HashSet::from([PatchStatus::Installed.api_value()]);
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &patches,
+                type_label: "OS",
+                status_override: Some("INSTALLED"),
+                status_filter: Some(&installed_set),
+            }],
+            &FilterParams::default(),
+        );
+        assert_eq!(rows.len(), 1, "missing status falls back to the override");
+        assert_eq!(rows[0].status, "INSTALLED");
     }
 
     #[test]

@@ -33,7 +33,10 @@ Skills live in `.claude/skills/`. Load a skill with `skill: <name>`.
 Key files to read before editing:
 - **Adding a command?** `src-tauri/src/lib.rs` (handler list) + `web-rs/src/api.rs` (IPC wrappers).
 - **NinjaOne API call / pagination?** `src-tauri/src/api/mod.rs` (`NinjaApiClient`, retry + cursor
-  paging) → `api/devices.rs`, `api/patches.rs`, `api/lookups.rs`.
+  paging) → `api/devices.rs`, `api/patches.rs`, `api/lookups.rs`. **Verify endpoint shapes, params,
+  and field/status enums against the official spec — never infer them from endpoint names or memory:**
+  the rendered docs are <https://app.ninjarmm.com/apidocs/?links.active=core> and the raw OpenAPI is
+  <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> (grep it; the SPA can't be scraped).
 - **Auth / PKCE / keyring?** `src-tauri/src/auth.rs` + `src-tauri/src/state.rs` (`AppState`).
 - **Fleet filter (`df` DSL) / OS-name facet?** `src-tauri/src/filter.rs`.
 - **Device↔patch join, compliance, SLA, reboot rollups?** `src-tauri/src/rows.rs`.
@@ -178,10 +181,16 @@ secrets are **not** stored there — see below).
   prefix on either side) are applied **client-side** against rows after fetch. Keep the split: a new
   identity/class facet extends the DSL; a new substring/text facet is a client-side `*_allowed()`.
 
-- **Installed vs current patches.** Current patches are **always** fetched (they drive compliance %
-  and pending/reboot counts). "Installed" status routes to the **install-history** endpoints over a
-  configurable lookback window (`settings.install_window_days`, overridable per query). See
-  `commands/patches.rs`.
+- **Installed/Failed vs current patches (status routing — load-bearing).** Per the official spec,
+  the current `/queries/{os,software}-patches` feed returns only patches "for which there were **no
+  installation attempts**" (statuses `MANUAL`/`APPROVED`/`REJECTED`), while `/queries/*-patch-installs`
+  returns the install **history** — "successful **and** failed" records (status `INSTALLED`/`FAILED`).
+  So **both** `Installed` *and* `Failed` are install *results* and must route to the install-history
+  endpoints over the lookback window (`settings.install_window_days`, overridable per query); only
+  `Pending`/`Approved`/`Rejected` narrow the current feed. `PatchStatus::is_install_history()` encodes
+  this. Routing `Failed` to the current feed (it never appears there) was a real bug — a FAILED query
+  returned nothing. Current patches are **always** fetched regardless of the status filter (they drive
+  compliance % and pending/reboot counts). See `commands/patches.rs`.
 
 - **camelCase ↔ snake_case across IPC.** Backend arg/result structs sent to/from the frontend carry
   `#[serde(rename_all = "camelCase")]`; `web-rs/src/types.rs` mirrors them. NinjaOne API JSON (e.g.

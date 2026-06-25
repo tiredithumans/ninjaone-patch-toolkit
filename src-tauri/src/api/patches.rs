@@ -4,8 +4,10 @@ use super::{NinjaApiClient, ProgressFn, REPORTING_PAGE_SIZE};
 use crate::model::Patch;
 
 impl NinjaApiClient {
-    /// Current OS patches (PENDING/APPROVED/REJECTED/FAILED) across the filtered
-    /// fleet. `status` narrows to a single NinjaOne status when supplied.
+    /// Current OS patches across the filtered fleet — those "for which there were
+    /// no installation attempts" (status MANUAL/APPROVED/REJECTED). FAILED/INSTALLED
+    /// are install *results* and live on `fleet_os_patch_installs`, not here.
+    /// `status` narrows to a single NinjaOne status when supplied.
     pub async fn fleet_os_patches(
         &self,
         df: Option<&str>,

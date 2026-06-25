@@ -224,8 +224,9 @@ impl PatchType {
     }
 }
 
-/// Operator-facing patch status. `Installed` is sourced from the patch-install
-/// history endpoints; the others come from the current/pending patch endpoints.
+/// Operator-facing patch status. `Installed` and `Failed` are install *results*,
+/// sourced from the `*-patch-installs` history endpoints; `Pending`/`Approved`/
+/// `Rejected` come from the current-patches feed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum PatchStatus {
@@ -251,10 +252,16 @@ impl PatchStatus {
         }
     }
 
-    /// Installed patches live on the `*-patch-installs` history endpoints, not the
-    /// current-patches feed, so they are fetched over a date window instead.
-    pub fn is_installed(self) -> bool {
-        matches!(self, Self::Installed)
+    /// Whether this status is sourced from the `*-patch-installs` history
+    /// endpoints rather than the current-patches feed. Both `Installed` and
+    /// `Failed` are install *results*: per the NinjaOne API, the current
+    /// `/queries/{os,software}-patches` feed returns only patches "for which there
+    /// were no installation attempts" (MANUAL/APPROVED/REJECTED), while the
+    /// `*-patch-installs` history endpoints return the "successful and failed"
+    /// records (status `INSTALLED`/`FAILED`). Routing `Failed` to the current feed
+    /// is why a FAILED query returns nothing — it is never present there.
+    pub fn is_install_history(self) -> bool {
+        matches!(self, Self::Installed | Self::Failed)
     }
 }
 
@@ -299,11 +306,17 @@ mod tests {
     }
 
     #[test]
-    fn status_api_value_and_installed_routing() {
+    fn status_api_value_and_install_history_routing() {
         assert_eq!(PatchStatus::Pending.api_value(), "MANUAL");
         assert_eq!(PatchStatus::Installed.api_value(), "INSTALLED");
-        assert!(PatchStatus::Installed.is_installed());
-        assert!(!PatchStatus::Approved.is_installed());
+        assert_eq!(PatchStatus::Failed.api_value(), "FAILED");
+        // Installed AND Failed are install results → history endpoints; the rest
+        // come from the current-patches feed.
+        assert!(PatchStatus::Installed.is_install_history());
+        assert!(PatchStatus::Failed.is_install_history());
+        assert!(!PatchStatus::Approved.is_install_history());
+        assert!(!PatchStatus::Pending.is_install_history());
+        assert!(!PatchStatus::Rejected.is_install_history());
     }
 
     #[test]
