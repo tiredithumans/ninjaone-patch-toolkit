@@ -116,3 +116,31 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rows::QueryResult;
+
+    #[test]
+    fn last_result_cache_starts_empty_and_clears() {
+        let state = AppState::new().expect("build state");
+        // A fresh state has no cached result, so export_patches_xlsx errors with
+        // "Run a query before exporting" rather than writing a stale workbook.
+        assert!(state.last_result.lock().unwrap().is_none());
+
+        *state.last_result.lock().unwrap() = Some(QueryResult {
+            rows: Vec::new(),
+            devices: Vec::new(),
+            compliance: Vec::new(),
+            devices_total: 0,
+            generated_at: "2026-01-01 00:00:00 UTC".into(),
+        });
+        assert!(state.last_result.lock().unwrap().is_some());
+
+        // Sign-out / instance change drops the cache so a later export can't leak a
+        // previous tenant's rows.
+        state.clear_last_result();
+        assert!(state.last_result.lock().unwrap().is_none());
+    }
+}
