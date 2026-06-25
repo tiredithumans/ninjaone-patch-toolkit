@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -115,16 +116,23 @@ impl NinjaApiClient {
     /// `/queries/*` endpoints return a `{ results, cursor }` envelope (cursor is a
     /// bare string or a `{ name, offset, ... }` object, fed back as `cursor`); the
     /// core list endpoints (`/devices-detailed`, `/organizations`, `/locations`, …)
-    /// return a bare array and page via `after=<last id>` and `pageSize`, ending
-    /// when a page is shorter than `pageSize`. Without the `after` paging a fleet
-    /// with more than `pageSize` devices would load only the first page, so the
+    /// return a bare array and page via `after=<id>` and `pageSize`, ending when a
+    /// page is shorter than `pageSize`. Without the `after` paging a fleet with
+    /// more than `pageSize` devices would load only the first page, so the
     /// device-to-patch join would miss every device after the first page.
+    ///
+    /// The `after` cursor advances by the **maximum** id on a page (not the last
+    /// one) so an endpoint that doesn't return ids in ascending order can't stop
+    /// short, and ids are de-duplicated so an inclusive-`after` boundary row isn't
+    /// counted twice. Forward progress is required (the max id must advance), so a
+    /// misbehaving endpoint can't loop forever.
     pub async fn get_paginated<T: DeserializeOwned + Clone>(
         &self,
         path: &str,
         base_query: &[(&str, String)],
     ) -> Result<Vec<T>> {
         let mut all: Vec<T> = Vec::new();
+        let mut seen_ids: HashSet<i64> = HashSet::new();
         let mut cursor: Option<String> = None;
         let mut after: Option<i64> = None;
 
@@ -143,24 +151,30 @@ impl NinjaApiClient {
             match raw {
                 Value::Array(items) => {
                     let len = items.len();
-                    // Capture the last record's id for the next `after` page before
-                    // the items are consumed.
-                    let last_id = items
-                        .last()
-                        .and_then(|v| v.get("id"))
-                        .and_then(Value::as_i64);
+                    let mut max_id = after;
                     for item in items {
+                        let id = item.get("id").and_then(Value::as_i64);
+                        // Skip a row already seen on a prior page (an inclusive
+                        // `after` cursor re-returns the boundary row).
+                        if let Some(id) = id
+                            && !seen_ids.insert(id)
+                        {
+                            continue;
+                        }
+                        if let Some(id) = id {
+                            max_id = Some(max_id.map_or(id, |m| m.max(id)));
+                        }
                         let v: T = serde_json::from_value(item).context("deserialize page item")?;
                         all.push(v);
                     }
-                    // A short page is the last page. Also stop if the server can't
-                    // give a forward-moving `after` (no id / no progress) so a
-                    // misbehaving endpoint can't loop forever.
+                    // A short page is the last page. Otherwise advance the cursor to
+                    // the largest id seen; stop if it can't move forward (no id, or
+                    // no new rows) so a misbehaving endpoint can't loop forever.
                     if len < DEFAULT_PAGE_SIZE as usize {
                         return Ok(all);
                     }
-                    match last_id {
-                        Some(id) if after.is_none_or(|prev| id > prev) => after = Some(id),
+                    match max_id {
+                        Some(id) if Some(id) != after => after = Some(id),
                         _ => return Ok(all),
                     }
                 }
@@ -389,5 +403,52 @@ mod tests {
         );
         assert_eq!(devices.first().unwrap().id, 1);
         assert_eq!(devices.last().unwrap().id, 503);
+    }
+
+    #[tokio::test]
+    async fn after_pagination_uses_max_id_and_dedupes_boundary() {
+        use crate::auth::AuthState;
+        use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Page 1: a full page whose ids descend (last id = 1, max id = 500). The
+        // cursor must advance by the max (500), not the last (1), or an unsorted
+        // endpoint would page from the wrong id and re-fetch / drop rows.
+        let page1: Vec<_> = (1..=DEFAULT_PAGE_SIZE as i64)
+            .rev()
+            .map(|i| json!({ "id": i }))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .and(query_param_is_missing("after"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page1))
+            .mount(&server)
+            .await;
+
+        // Page 2 at after=500 re-includes id 500 (inclusive boundary) plus 501/502;
+        // the duplicate must be dropped and the short page ends paging.
+        let page2 = json!([{ "id": 500 }, { "id": 501 }, { "id": 502 }]);
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .and(query_param("after", "500"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page2))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        let client = NinjaApiClient::new(http, auth);
+
+        let devices = client.devices(None).await.expect("devices call");
+        assert_eq!(
+            devices.len(),
+            DEFAULT_PAGE_SIZE as usize + 2,
+            "boundary row 500 must be de-duplicated"
+        );
+        let n500 = devices.iter().filter(|d| d.id == 500).count();
+        assert_eq!(n500, 1, "id 500 must appear exactly once");
+        assert!(devices.iter().any(|d| d.id == 502));
     }
 }
