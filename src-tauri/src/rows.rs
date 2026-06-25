@@ -79,6 +79,8 @@ pub fn build_rows(
     filter: &FilterParams,
 ) -> Vec<PatchRow> {
     let mut rows = Vec::new();
+    // Lower the query needles and parse the severities once, not per patch.
+    let prepared = filter.prepare();
     for source in sources {
         for patch in source.patches {
             if let Some(allowed) = source.status_filter {
@@ -104,19 +106,19 @@ pub fn build_rows(
             }
             let os_name = device.and_then(Device::os_name);
 
-            if !filter.os_name_allowed(os_name.as_deref()) {
+            if !prepared.os_name_allowed(os_name.as_deref()) {
                 continue;
             }
-            if !filter.search_allowed(patch.kb_number.as_deref(), patch.name.as_deref()) {
+            if !prepared.search_allowed(patch.kb_number.as_deref(), patch.name.as_deref()) {
                 continue;
             }
 
             let severity = patch.severity_enum();
-            if !filter.severity_allowed(severity) {
+            if !prepared.severity_allowed(severity) {
                 continue;
             }
             let released = patch.released_at();
-            if !filter.release_date_allowed(released.map(|r| r.timestamp())) {
+            if !prepared.release_date_allowed(released.map(|r| r.timestamp())) {
                 continue;
             }
             let status = patch
@@ -301,7 +303,9 @@ pub fn pending_counts(current_patches: &[Patch]) -> HashMap<i64, usize> {
     counts
 }
 
-/// The full result of a patch query, returned to the frontend and reused by export.
+/// The full result of a patch query. Cached in `AppState.last_result` and read by
+/// the Excel exporter; **not** sent wholesale over IPC — the frontend gets a
+/// [`QuerySummary`] and pages the detail rows on demand via `get_patch_rows`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResult {
@@ -310,6 +314,46 @@ pub struct QueryResult {
     pub compliance: Vec<ComplianceBucket>,
     pub devices_total: usize,
     pub generated_at: String,
+}
+
+/// The lightweight view of a query returned to the frontend over IPC: the first
+/// page of detail rows plus the rollups (compliance, the reboot subset, totals).
+/// The remaining detail rows stay in the backend cache and are fetched a page at a
+/// time, so a 10k+ row fleet doesn't serialize multiple MB of JSON into the WASM
+/// webview on every query.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuerySummary {
+    /// The first page of detail rows; later pages come from `get_patch_rows`.
+    pub rows: Vec<PatchRow>,
+    /// Total detail-row count (the table pages over this, not `rows.len()`).
+    pub rows_total: usize,
+    /// Only the devices flagged for reboot — all the reboot view renders. The full
+    /// device list stays in the cache for export.
+    pub reboot_devices: Vec<DeviceSummary>,
+    pub compliance: Vec<ComplianceBucket>,
+    pub devices_total: usize,
+    pub generated_at: String,
+}
+
+impl QuerySummary {
+    /// Builds the IPC summary from the full result, cloning only the first
+    /// `first_page` rows and the reboot subset (not the whole row/device sets).
+    pub fn from_result(result: &QueryResult, first_page: usize) -> Self {
+        Self {
+            rows: result.rows.iter().take(first_page).cloned().collect(),
+            rows_total: result.rows.len(),
+            reboot_devices: result
+                .devices
+                .iter()
+                .filter(|d| d.needs_reboot)
+                .cloned()
+                .collect(),
+            compliance: result.compliance.clone(),
+            devices_total: result.devices_total,
+            generated_at: result.generated_at.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -586,5 +630,61 @@ mod tests {
             assert!(json.contains(key), "missing {key} in {json}");
         }
         assert!(!json.contains("device_name"), "snake_case leaked: {json}");
+    }
+
+    #[test]
+    fn query_summary_trims_to_first_page_and_reboot_subset() {
+        // Two rows, two devices (one needing reboot). A first page of 1 keeps a
+        // single row but reports the true total; only the reboot device is carried.
+        let d1 = device(1, 10, "Windows Server 2022"); // id 1 → needs_reboot = false
+        let d2 = device(2, 10, "Windows Server 2019"); // id 2 → needs_reboot = true
+        let by_id = HashMap::from([(1, &d1), (2, &d2)]);
+        let maps = maps();
+        let patches = vec![
+            patch(1, "MANUAL", "CRITICAL", Some(1)),
+            patch(2, "MANUAL", "CRITICAL", Some(1)),
+        ];
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &patches,
+                type_label: "OS",
+                status_override: None,
+                status_filter: None,
+            }],
+            &FilterParams::default(),
+        );
+        let counts = pending_counts(&patches);
+        let devices = build_device_summaries(&[d1.clone(), d2.clone()], &counts, &maps);
+        let compliance = build_compliance(&devices, &patches, &by_id, &maps, 30, Utc::now());
+        let result = QueryResult {
+            rows,
+            devices,
+            compliance,
+            devices_total: 2,
+            generated_at: "2026-01-01 00:00 UTC".into(),
+        };
+
+        let summary = QuerySummary::from_result(&result, 1);
+        assert_eq!(
+            summary.rows.len(),
+            1,
+            "first page is capped at `first_page`"
+        );
+        assert_eq!(summary.rows_total, 2, "total reflects the full row set");
+        assert_eq!(
+            summary.reboot_devices.len(),
+            1,
+            "only the needs-reboot device is carried"
+        );
+        assert!(summary.reboot_devices.iter().all(|d| d.needs_reboot));
+        assert_eq!(summary.devices_total, 2);
+
+        // The IPC contract is camelCase, same as QueryResult.
+        let json = serde_json::to_string(&summary).expect("serialize QuerySummary");
+        for key in ["\"rowsTotal\"", "\"rebootDevices\"", "\"devicesTotal\""] {
+            assert!(json.contains(key), "missing {key} in {json}");
+        }
     }
 }
