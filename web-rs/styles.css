@@ -1,4 +1,8 @@
 :root {
+  /* Tell the browser this is a dark app so native UI — the date-picker calendar
+     popup, scrollbars, form-control internals — renders dark, and the date input's
+     calendar icon is drawn light (visible) instead of dark-on-dark. */
+  color-scheme: dark;
   --bg: #0f1117;
   --panel: #171a23;
   --panel-2: #1d212c;
@@ -140,6 +144,17 @@ select:focus {
 
 input.narrow {
   width: 80px;
+}
+
+/* Date inputs: keep the (now light, via color-scheme) calendar icon clearly
+   visible and clickable. */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.9;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
 }
 
 .search-field {
