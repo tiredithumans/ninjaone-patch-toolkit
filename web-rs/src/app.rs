@@ -694,9 +694,14 @@ fn FilterBar() -> impl IntoView {
             <div class="grid">
                 <label>
                     "Organization"
-                    <select on:change=move |ev| {
-                        state.select_org(parse_opt(&event_target_value(&ev)));
-                    }>
+                    <select
+                        prop:value=move || {
+                            state.org_id.get().map(|id| id.to_string()).unwrap_or_default()
+                        }
+                        on:change=move |ev| {
+                            state.select_org(parse_opt(&event_target_value(&ev)));
+                        }
+                    >
                         <option value="">"All organizations"</option>
                         {move || {
                             state
@@ -714,6 +719,9 @@ fn FilterBar() -> impl IntoView {
                     "Location"
                     <select
                         prop:disabled=move || state.locations.get().is_empty()
+                        prop:value=move || {
+                            state.loc_id.get().map(|id| id.to_string()).unwrap_or_default()
+                        }
                         on:change=move |ev| state.loc_id.set(parse_opt(&event_target_value(&ev)))
                     >
                         <option value="">"All locations"</option>
@@ -731,9 +739,14 @@ fn FilterBar() -> impl IntoView {
                 </label>
                 <label>
                     "Device Role"
-                    <select on:change=move |ev| {
-                        state.role_id.set(parse_opt(&event_target_value(&ev)))
-                    }>
+                    <select
+                        prop:value=move || {
+                            state.role_id.get().map(|id| id.to_string()).unwrap_or_default()
+                        }
+                        on:change=move |ev| {
+                            state.role_id.set(parse_opt(&event_target_value(&ev)))
+                        }
+                    >
                         <option value="">"All roles"</option>
                         {move || {
                             state
