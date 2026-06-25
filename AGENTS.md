@@ -202,7 +202,11 @@ secrets are **not** stored there — see below).
   `--config src-tauri/updater-build.json`. The minisign **public** key is committed in
   `tauri.conf.json`; the **private** key + password are GitHub secrets
   (`TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]`). Updates apply only from a build that already contains the
-  updater, and only once a release is **published** (a draft isn't `latest`).
+  updater, and only once a release is **published** (a draft isn't `latest`). The notes shown in
+  `UpdateSplash` come from `CHANGELOG.md`: `release.yml` extracts the tagged version's section and
+  passes it to tauri-action as `releaseBody`, which becomes both the GitHub release body and
+  `latest.json`'s `notes`. Add user-facing changes under `## [Unreleased]` in `CHANGELOG.md`; the
+  release skill rolls it to the version heading at tag time.
 
 - **Frontend reactivity is closure-based (Leptos CSR).** `{move || sig.get()}` to track, `.get()` /
   `.with()` to read; state is `RwSignal<T>`. CSS is plain global `web-rs/styles.css`.
