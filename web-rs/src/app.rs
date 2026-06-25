@@ -92,6 +92,12 @@ pub struct AppState {
 
     refreshing: RwSignal<bool>,
     toast_gen: RwSignal<u64>,
+
+    /// Wall-clock timing for the running-query progress bar / elapsed display.
+    /// `elapsed_tick` is bumped by a timer to re-evaluate the elapsed label.
+    query_started_ms: RwSignal<f64>,
+    elapsed_tick: RwSignal<u32>,
+    last_duration_ms: RwSignal<Option<f64>>,
 }
 
 fn non_empty(s: String) -> Option<String> {
@@ -142,6 +148,9 @@ impl AppState {
             update_busy: RwSignal::new(false),
             refreshing: RwSignal::new(false),
             toast_gen: RwSignal::new(0),
+            query_started_ms: RwSignal::new(0.0),
+            elapsed_tick: RwSignal::new(0),
+            last_duration_ms: RwSignal::new(None),
         }
     }
 
@@ -275,14 +284,44 @@ impl AppState {
             install_after_days: Some(self.install_days.get_untracked()),
         };
         let flag = if silent { self.refreshing } else { self.busy };
+        let started = js_sys::Date::now();
+        self.query_started_ms.set(started);
         flag.set(true);
         spawn_local(async move {
             match api::query_patches(args).await {
                 Ok(r) => self.result.set(Some(r)),
                 Err(e) => self.notify(Toast::err(e)),
             }
+            // Record the round-trip so the next run can show "Last run took Ns"
+            // and drive the estimated progress bar.
+            self.last_duration_ms
+                .set(Some(js_sys::Date::now() - started));
             flag.set(false);
         });
+    }
+
+    /// Seconds since the running query started (re-evaluated on each timer tick).
+    fn elapsed_secs(self) -> f64 {
+        let _ = self.elapsed_tick.get();
+        let started = self.query_started_ms.get_untracked();
+        if started <= 0.0 {
+            0.0
+        } else {
+            ((js_sys::Date::now() - started) / 1000.0).max(0.0)
+        }
+    }
+
+    /// Estimated completion fraction (0.0–0.95) from the previous run's duration,
+    /// or `None` when there's no prior timing yet (→ indeterminate bar). Capped
+    /// below 1.0 so an over-running query doesn't claim to be finished.
+    fn progress_estimate(self) -> Option<f64> {
+        let _ = self.elapsed_tick.get();
+        let last = self.last_duration_ms.get()?;
+        if last <= 0.0 {
+            return None;
+        }
+        let elapsed = js_sys::Date::now() - self.query_started_ms.get_untracked();
+        Some((elapsed / last).clamp(0.0, 0.95))
     }
 
     fn apply_settings_view(self, v: SettingsView) {
@@ -346,6 +385,14 @@ pub fn App() -> impl IntoView {
             }
         }
     });
+
+    // Tick the elapsed-time display roughly twice a second while a query runs.
+    gloo_timers::callback::Interval::new(500, move || {
+        if state.busy.get_untracked() || state.refreshing.get_untracked() {
+            state.elapsed_tick.update(|t| *t = t.wrapping_add(1));
+        }
+    })
+    .forget();
 
     // Auto-refresh: rebuild the interval whenever the cadence or auth changes.
     let interval = StoredValue::new_local(None::<gloo_timers::callback::Interval>);
@@ -1073,6 +1120,42 @@ fn QueryControls() -> impl IntoView {
                     "Export to Excel"
                 </button>
             </div>
+            <Show when=move || state.busy.get()>
+                <div class="query-progress">
+                    <div class="progress">
+                        {move || match state.progress_estimate() {
+                            Some(p) => {
+                                view! {
+                                    <div
+                                        class="progress-bar"
+                                        style=format!("width:{:.1}%", p * 100.0)
+                                    ></div>
+                                }
+                                    .into_any()
+                            }
+                            None => {
+                                view! { <div class="progress-bar progress-indeterminate"></div> }
+                                    .into_any()
+                            }
+                        }}
+                    </div>
+                    <span class="progress-label">
+                        {move || format!("Running… {:.0}s", state.elapsed_secs())}
+                    </span>
+                </div>
+            </Show>
+            <Show when=move || {
+                !state.busy.get() && state.last_duration_ms.get().is_some()
+            }>
+                <p class="query-hint">
+                    {move || {
+                        format!(
+                            "Last run took {:.0}s",
+                            state.last_duration_ms.get().unwrap_or(0.0) / 1000.0,
+                        )
+                    }}
+                </p>
+            </Show>
         </section>
     }
 }
