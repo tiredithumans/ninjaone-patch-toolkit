@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use super::NinjaApiClient;
+use super::{NinjaApiClient, ProgressFn};
 use crate::model::Patch;
 
 impl NinjaApiClient {
@@ -10,8 +10,9 @@ impl NinjaApiClient {
         &self,
         df: Option<&str>,
         status: Option<&str>,
+        on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
-        self.get_paginated("/queries/os-patches", &patch_query(df, status))
+        self.get_paginated_reporting("/queries/os-patches", &patch_query(df, status), on_progress)
             .await
     }
 
@@ -20,9 +21,14 @@ impl NinjaApiClient {
         &self,
         df: Option<&str>,
         status: Option<&str>,
+        on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
-        self.get_paginated("/queries/software-patches", &patch_query(df, status))
-            .await
+        self.get_paginated_reporting(
+            "/queries/software-patches",
+            &patch_query(df, status),
+            on_progress,
+        )
+        .await
     }
 
     /// Installed-OS-patch history within a time window (Unix seconds).
@@ -31,9 +37,10 @@ impl NinjaApiClient {
         df: Option<&str>,
         installed_after: i64,
         installed_before: Option<i64>,
+        on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
         let query = install_query(df, installed_after, installed_before);
-        self.get_paginated("/queries/os-patch-installs", &query)
+        self.get_paginated_reporting("/queries/os-patch-installs", &query, on_progress)
             .await
     }
 
@@ -43,9 +50,10 @@ impl NinjaApiClient {
         df: Option<&str>,
         installed_after: i64,
         installed_before: Option<i64>,
+        on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
         let query = install_query(df, installed_after, installed_before);
-        self.get_paginated("/queries/software-patch-installs", &query)
+        self.get_paginated_reporting("/queries/software-patch-installs", &query, on_progress)
             .await
     }
 }
