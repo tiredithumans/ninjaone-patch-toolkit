@@ -214,17 +214,21 @@ impl NinjaApiClient {
                     let results = obj
                         .remove("results")
                         .ok_or_else(|| anyhow!("paginated response missing `results`"))?;
-                    let page_len = if let Value::Array(items) = results {
-                        let len = items.len();
-                        for item in items {
-                            let v: T =
-                                serde_json::from_value(item).context("deserialize page item")?;
-                            all.push(v);
-                        }
-                        len
-                    } else {
-                        0
+                    // `results` must be an array. A non-array (string/object/number)
+                    // is a malformed envelope, not an empty page — fail loudly
+                    // rather than silently treating it as zero rows and stopping,
+                    // which would return a truncated fleet as if it were complete.
+                    let Value::Array(items) = results else {
+                        bail!(
+                            "paginated `results` was not an array: {}",
+                            truncate_body(&results.to_string())
+                        );
                     };
+                    let page_len = items.len();
+                    for item in items {
+                        let v: T = serde_json::from_value(item).context("deserialize page item")?;
+                        all.push(v);
+                    }
 
                     if let Some(report) = on_progress {
                         report(all.len());
@@ -321,6 +325,37 @@ mod tests {
         let orgs = client.organizations().await.expect("organizations call");
         let names: Vec<_> = orgs.into_iter().map(|o| o.name).collect();
         assert_eq!(names, vec!["Alpha", "Beta"]);
+    }
+
+    #[tokio::test]
+    async fn non_array_results_envelope_is_an_error_not_a_truncated_fleet() {
+        use crate::auth::AuthState;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A `results` that isn't an array must fail, not be read as an empty page.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": "not-an-array",
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        let client = NinjaApiClient::new(http, auth);
+
+        let err = client
+            .fleet_os_patches(None, None, None)
+            .await
+            .expect_err("a non-array results envelope must error");
+        assert!(
+            err.to_string().contains("was not an array"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

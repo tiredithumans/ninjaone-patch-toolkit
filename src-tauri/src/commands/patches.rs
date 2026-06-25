@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
+use tracing::warn;
 
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::error::UiError;
@@ -97,8 +98,11 @@ pub async fn query_patches(
     // full result in the cache for paging (`get_patch_rows`) and export — moving it
     // in rather than cloning every row.
     let summary = QuerySummary::from_result(&result, FIRST_PAGE_ROWS);
-    if let Ok(mut slot) = state.last_result.lock() {
-        *slot = Some(result);
+    match state.last_result.lock() {
+        Ok(mut slot) => *slot = Some(result),
+        // A poisoned cache means export/paging would read the previous run — warn
+        // rather than silently dropping the write so the staleness is observable.
+        Err(_) => warn!("result cache poisoned; export and paging will use the prior query"),
     }
     Ok(summary)
 }
@@ -163,6 +167,9 @@ where
         .collect();
     let include_os = args.patch_type.includes_os();
     let include_sw = args.patch_type.includes_software();
+    // The configured window is validated >= 1 in save_settings; clamp the optional
+    // per-query override the same way so a 0/negative lookback can't invert into a
+    // future `after` bound that would match no install history.
     let days = args
         .install_after_days
         .unwrap_or(install_window_days)

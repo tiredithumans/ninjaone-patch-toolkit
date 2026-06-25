@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use tracing::warn;
 
 use crate::api::NinjaApiClient;
 use crate::auth::AuthState;
@@ -68,7 +69,13 @@ impl AppState {
 
     /// Snapshot of settings for use across `.await` points without holding the lock.
     pub fn settings_snapshot(&self) -> Settings {
-        self.settings.lock().map(|g| g.clone()).unwrap_or_default()
+        self.settings.lock().map(|g| g.clone()).unwrap_or_else(|p| {
+            // A poisoned lock still holds the real settings — recover them (and warn)
+            // rather than silently defaulting, which would point queries at the
+            // wrong instance/tenant.
+            warn!("settings mutex poisoned; recovering the last-known settings");
+            p.into_inner().clone()
+        })
     }
 
     /// Orgs/locations/roles used to label patch rows, served from a short-TTL
@@ -85,7 +92,18 @@ impl AppState {
         }
         let (orgs, locations, roles) = tokio::try_join!(
             self.api.organizations(),
-            async { Ok::<_, anyhow::Error>(self.api.all_locations().await.unwrap_or_default()) },
+            async {
+                // Locations only supply optional row labels, so a failure here is
+                // non-fatal — fall back to none, but warn so a tenant-wide locations
+                // outage isn't silently rendered as blank location names.
+                Ok::<_, anyhow::Error>(match self.api.all_locations().await {
+                    Ok(locs) => locs,
+                    Err(e) => {
+                        warn!(error = %e, "locations fetch failed; rows will omit location names");
+                        Vec::new()
+                    }
+                })
+            },
             self.api.roles(),
         )?;
         let (orgs, locations, roles) = (Arc::new(orgs), Arc::new(locations), Arc::new(roles));
