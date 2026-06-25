@@ -183,6 +183,17 @@ pub fn build_compliance(
     let mut by_org: HashMap<String, Acc> = HashMap::new();
 
     for s in summaries {
+        // An offline device can't apply patches and reports no current patch
+        // records, so a zero pending count says nothing about its compliance.
+        // Exclude it from the denominator rather than scoring it compliant and
+        // inflating the headline metric.
+        let offline = devices_by_id
+            .get(&s.device_id)
+            .map(|d| d.is_offline())
+            .unwrap_or(false);
+        if offline {
+            continue;
+        }
         let acc = by_org.entry(s.organization.clone()).or_default();
         acc.total += 1;
         if s.pending_count == 0 {
@@ -275,7 +286,6 @@ mod tests {
             node_role_id: Some(2),
             node_class: Some("WINDOWS_SERVER".into()),
             offline: Some(false),
-            last_contact: None,
             os: Some(OsInfo {
                 name: Some(os.into()),
                 needs_reboot: Some(id % 2 == 0),
@@ -379,6 +389,29 @@ mod tests {
         assert_eq!(b.pending_critical, 2);
         assert_eq!(b.aged_critical, 1);
         assert!((b.compliance_pct - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compliance_excludes_offline_devices_from_the_denominator() {
+        let online = device(1, 10, "Windows Server 2022"); // online, has a pending patch
+        let mut offline = device(2, 10, "Windows Server 2019");
+        offline.offline = Some(true); // offline → unknown, must not count
+        let by_id = HashMap::from([(1, &online), (2, &offline)]);
+        let maps = maps();
+        let current = vec![patch(1, "PENDING", "CRITICAL", Some(1))];
+        let counts = pending_counts(&current);
+        let summaries = build_device_summaries(&[online.clone(), offline.clone()], &counts, &maps);
+        let buckets = build_compliance(&summaries, &current, &by_id, &maps, 30, Utc::now());
+        assert_eq!(buckets.len(), 1);
+        let b = &buckets[0];
+        assert_eq!(
+            b.devices_total, 1,
+            "offline device excluded from denominator"
+        );
+        assert_eq!(
+            b.devices_compliant, 0,
+            "the online device has a pending patch"
+        );
     }
 
     #[test]

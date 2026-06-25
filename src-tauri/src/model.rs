@@ -50,8 +50,6 @@ pub struct Device {
     #[serde(default)]
     pub offline: Option<bool>,
     #[serde(default)]
-    pub last_contact: Option<f64>,
-    #[serde(default)]
     pub os: Option<OsInfo>,
 }
 
@@ -72,6 +70,10 @@ impl Device {
             .as_ref()
             .and_then(|o| o.needs_reboot)
             .unwrap_or(false)
+    }
+
+    pub fn is_offline(&self) -> bool {
+        self.offline.unwrap_or(false)
     }
 }
 
