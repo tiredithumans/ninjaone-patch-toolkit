@@ -4,7 +4,7 @@ use leptos::task::spawn_local;
 use crate::api;
 use crate::types::*;
 
-const ROW_DISPLAY_CAP: usize = 1000;
+const PATCHES_PAGE_SIZE: usize = 100;
 
 const REGIONS: [(&str, &str); 5] = [
     ("https://app.ninjarmm.com", "North America (app)"),
@@ -102,6 +102,8 @@ pub struct AppState {
     refresh_secs: RwSignal<u32>,
 
     result: RwSignal<Option<QueryResult>>,
+    /// Zero-based page index for the paginated Patches table.
+    patches_page: RwSignal<usize>,
     presets: RwSignal<Vec<Preset>>,
     preset_name: RwSignal<String>,
 
@@ -166,6 +168,7 @@ impl AppState {
             install_days: RwSignal::new(30),
             refresh_secs: RwSignal::new(0),
             result: RwSignal::new(None),
+            patches_page: RwSignal::new(0),
             presets: RwSignal::new(Vec::new()),
             preset_name: RwSignal::new(String::new()),
             f_instance: RwSignal::new("https://us2.ninjarmm.com".to_string()),
@@ -329,7 +332,14 @@ impl AppState {
         flag.set(true);
         spawn_local(async move {
             match api::query_patches(args, seq).await {
-                Ok(r) => self.result.set(Some(r)),
+                Ok(r) => {
+                    self.result.set(Some(r));
+                    // Jump back to page 1 on a manual run; an auto-refresh keeps the
+                    // current page (it's clamped if the new result is shorter).
+                    if !silent {
+                        self.patches_page.set(0);
+                    }
+                }
                 Err(e) => self.notify(Toast::err(e)),
             }
             // Record the round-trip so the next run can show "Last run took Ns"
@@ -1310,25 +1320,52 @@ fn Results() -> impl IntoView {
 #[component]
 fn PatchesTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // Borrow via `.with` so the table reads lengths and the capped slice without
-    // cloning the entire Vec<PatchRow> on every render.
+    // Borrow via `.with` so the table reads lengths and the current page slice
+    // without cloning the entire Vec<PatchRow> on every render.
     let total = move || {
         state
             .result
             .with(|r| r.as_ref().map_or(0, |r| r.rows.len()))
     };
+    let page_count = move || total().div_ceil(PATCHES_PAGE_SIZE).max(1);
+    // Clamp the stored page so a shorter result (e.g. after an auto-refresh) can't
+    // leave us past the last page.
+    let page = move || state.patches_page.get().min(page_count() - 1);
     let rows = move || {
+        let start = page() * PATCHES_PAGE_SIZE;
         state.result.with(|r| {
             r.as_ref()
                 .map(|r| {
                     r.rows
                         .iter()
-                        .take(ROW_DISPLAY_CAP)
+                        .skip(start)
+                        .take(PATCHES_PAGE_SIZE)
                         .cloned()
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
         })
+    };
+    let pager_summary = move || {
+        let t = total();
+        let start = page() * PATCHES_PAGE_SIZE;
+        let end = (start + PATCHES_PAGE_SIZE).min(t);
+        format!(
+            "Rows {}\u{2013}{} of {} \u{00b7} Page {} of {}",
+            start + 1,
+            end,
+            group_thousands(t),
+            page() + 1,
+            page_count(),
+        )
+    };
+    let go_prev = move |_| state.patches_page.update(|p| *p = p.saturating_sub(1));
+    let go_next = move |_| {
+        let last = page_count().saturating_sub(1);
+        state.patches_page.update(|p| {
+            let cur = (*p).min(last);
+            *p = (cur + 1).min(last);
+        });
     };
 
     view! {
@@ -1336,18 +1373,36 @@ fn PatchesTable() -> impl IntoView {
             when=move || state.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
-            <Show when=move || { total() > ROW_DISPLAY_CAP }>
-                <p class="note">
-                    {move || {
-                        format!(
-                            "Showing first {} of {} rows. Export to Excel for the full set.",
-                            ROW_DISPLAY_CAP,
-                            total(),
-                        )
-                    }}
-                </p>
-            </Show>
-            <div class="table-wrap">
+            <Show
+                when=move || { total() > 0 }
+                fallback=|| {
+                    view! {
+                        <p class="empty">
+                            "No patches matched your filters. Try widening the organization, severity, or status selection."
+                        </p>
+                    }
+                }
+            >
+                <Show when=move || { page_count() > 1 }>
+                    <div class="pager">
+                        <button
+                            class="btn"
+                            prop:disabled=move || page() == 0
+                            on:click=go_prev
+                        >
+                            "‹ Prev"
+                        </button>
+                        <span class="pager-info">{pager_summary}</span>
+                        <button
+                            class="btn"
+                            prop:disabled=move || { page() + 1 >= page_count() }
+                            on:click=go_next
+                        >
+                            "Next ›"
+                        </button>
+                    </div>
+                </Show>
+                <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
@@ -1397,7 +1452,8 @@ fn PatchesTable() -> impl IntoView {
                         }}
                     </tbody>
                 </table>
-            </div>
+                </div>
+            </Show>
         </Show>
     }
 }
