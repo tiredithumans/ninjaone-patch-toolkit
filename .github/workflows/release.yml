@@ -81,6 +81,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf
 
+      # Pull this version's CHANGELOG.md section so the GitHub release body AND the
+      # updater manifest's `notes` carry the changelog. tauri-action passes
+      # `releaseBody` straight through to latest.json's `notes` (which the in-app
+      # "Update available" window shows). Runs on every matrix OS via bash (Git Bash
+      # on Windows); each job sets the same body. Falls back to a generic line when
+      # the tagged version has no section.
+      - name: Extract changelog notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes=""
+          if [ -f CHANGELOG.md ]; then
+            notes=$(awk -v ver="$version" '
+              /^## \[/ { if (c) exit; if (index($0, "## [" ver "]") == 1) c=1; next }
+              c { print }
+            ' CHANGELOG.md | sed '/./,$!d')
+          fi
+          if [ -z "$(printf %s "$notes" | tr -d '[:space:]')" ]; then
+            notes="See the release notes on GitHub for what's new in v$version."
+          fi
+          {
+            echo "RELEASE_NOTES<<__CHANGELOG_EOF__"
+            echo "$notes"
+            echo "__CHANGELOG_EOF__"
+          } >> "$GITHUB_ENV"
+
       # tauri-action builds the frontend (beforeBuildCommand = trunk build),
       # bundles per-OS, signs the updater artifacts with the minisign key, and
       # attaches the bundles + .sig + an aggregated latest.json to a DRAFT
@@ -98,6 +125,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: ${{ github.ref_name }}
+          # CHANGELOG.md section extracted above → release body AND latest.json notes.
+          releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
