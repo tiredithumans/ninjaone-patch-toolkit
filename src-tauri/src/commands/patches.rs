@@ -1,19 +1,24 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::api::ProgressFn;
+use crate::api::{NinjaApiClient, ProgressFn};
 use crate::error::UiError;
 use crate::filter::FilterParams;
-use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
+use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus, PatchType, Role};
 use crate::rows::{
     LookupMaps, PatchSource, QueryResult, QuerySummary, build_compliance, build_device_summaries,
     build_rows, pending_counts,
 };
 use crate::state::AppState;
+
+/// The org/location/role lookups a query joins against, each shared behind `Arc`
+/// so a cache hit hands out a cheap refcount bump instead of a deep clone.
+type Lookups = (Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>);
 
 /// Size of the first page of detail rows returned inline by `query_patches`. Must
 /// match the frontend's `PATCHES_PAGE_SIZE` so the seeded page fills the table's
@@ -67,12 +72,64 @@ pub async fn query_patches(
     query_id: Option<u64>,
 ) -> Result<QuerySummary, UiError> {
     let settings = state.settings_snapshot();
-    let api = state.api.clone();
+    // `qid` (0 when the frontend omits it) lets the frontend drop progress events
+    // tagged with a run it has already superseded.
+    let qid = query_id.unwrap_or(0);
+    let progress =
+        move |stage: &'static str, loaded: usize| emit_progress(&app, qid, stage, loaded);
+
+    // The org/location/role lookups are served from `AppState`'s short-TTL cache;
+    // the fetch→join→rollup itself lives in `run_query`, which takes them as a
+    // future so they still resolve concurrently with the inventory/patch fetches.
+    let result = run_query(
+        &state.api,
+        state.lookups(),
+        settings.install_window_days,
+        settings.sla_days,
+        args,
+        Utc::now(),
+        &progress,
+    )
+    .await
+    .map_err(UiError::from)?;
+
+    // Hand the frontend a lightweight summary (first page + rollups) and keep the
+    // full result in the cache for paging (`get_patch_rows`) and export — moving it
+    // in rather than cloning every row.
+    let summary = QuerySummary::from_result(&result, FIRST_PAGE_ROWS);
+    if let Ok(mut slot) = state.last_result.lock() {
+        *slot = Some(result);
+    }
+    Ok(summary)
+}
+
+/// The fetch→join→rollup core of [`query_patches`], split out so it can be driven
+/// in tests against a mock NinjaOne server without a Tauri `AppHandle`/`State`.
+///
+/// `lookups` is taken as a *future* (not a resolved value) so the org/location/role
+/// fetch runs concurrently with the inventory and patch fetches — `query_patches`
+/// passes `AppState::lookups()` (the cached fetch); a test passes a ready tuple.
+/// `progress` (the UI sink, keyed by stage) and `now` (the clock, for the release/
+/// install windows, SLA aging, and `generated_at`) are injected so the caller owns
+/// both, keeping this function deterministic and side-effect free.
+#[allow(clippy::too_many_arguments)]
+async fn run_query<L>(
+    api: &NinjaApiClient,
+    lookups: L,
+    install_window_days: i64,
+    sla_days: i64,
+    args: PatchQueryArgs,
+    now: DateTime<Utc>,
+    progress: &(dyn Fn(&'static str, usize) + Send + Sync),
+) -> anyhow::Result<QueryResult>
+where
+    L: std::future::Future<Output = anyhow::Result<Lookups>>,
+{
     let mut filter = args.filter;
     // Resolve the relative release-date window into an absolute lower bound; the
     // filter is applied client-side in build_rows, which has no clock.
     if let Some(days) = filter.release_within_days {
-        filter.release_after = Some((Utc::now() - Duration::days(days.max(0))).timestamp());
+        filter.release_after = Some((now - Duration::days(days.max(0))).timestamp());
     }
     // The device query honors the node-class facet (`class in (...)`); the patch/
     // install queries don't (NinjaOne's /queries/* ignore `class`), so they use a
@@ -108,80 +165,71 @@ pub async fn query_patches(
     let include_sw = args.patch_type.includes_software();
     let days = args
         .install_after_days
-        .unwrap_or(settings.install_window_days)
+        .unwrap_or(install_window_days)
         .max(1);
-    let after = (Utc::now() - Duration::days(days)).timestamp();
+    let after = (now - Duration::days(days)).timestamp();
 
     // 2. Inventory, lookups (cached), and current/installed patches are all
     // independent — fetch them concurrently so the latency is the slowest call,
     // not the sum of all of them. Conditional fetches resolve to empty when the
     // patch type / status doesn't request them.
     // Per-stream progress reporters: each emits a cumulative count tagged with its
-    // stage so the UI can show live totals. `qid` (0 when the frontend omits it)
-    // lets the frontend drop events from a run it has already superseded.
-    let qid = query_id.unwrap_or(0);
-    let app_d = app.clone();
-    let p_devices = move |n: usize| emit_progress(&app_d, qid, "devices", n);
-    let app_o = app.clone();
-    let p_os = move |n: usize| emit_progress(&app_o, qid, "osPatches", n);
-    let app_s = app.clone();
-    let p_sw = move |n: usize| emit_progress(&app_s, qid, "swPatches", n);
-    let app_oi = app.clone();
-    let p_os_inst = move |n: usize| emit_progress(&app_oi, qid, "osInstalls", n);
-    let app_si = app.clone();
-    let p_sw_inst = move |n: usize| emit_progress(&app_si, qid, "swInstalls", n);
+    // stage so the UI can show live totals.
+    let p_devices = |n: usize| progress("devices", n);
+    let p_os = |n: usize| progress("osPatches", n);
+    let p_sw = |n: usize| progress("swPatches", n);
+    let p_os_inst = |n: usize| progress("osInstalls", n);
+    let p_sw_inst = |n: usize| progress("swInstalls", n);
 
-    let (devices, (orgs, locations, roles), os_current, sw_current, os_installs, sw_installs) =
-        tokio::try_join!(
-            api.devices(device_df_ref, Some(&p_devices as &ProgressFn)),
-            state.lookups(),
-            async {
-                if include_os {
-                    api.fleet_os_patches(patch_df_ref, None, Some(&p_os as &ProgressFn))
-                        .await
-                } else {
-                    Ok(Vec::new())
-                }
-            },
-            async {
-                if include_sw {
-                    api.fleet_software_patches(patch_df_ref, None, Some(&p_sw as &ProgressFn))
-                        .await
-                } else {
-                    Ok(Vec::new())
-                }
-            },
-            async {
-                if want_installs && include_os {
-                    api.fleet_os_patch_installs(
-                        patch_df_ref,
-                        after,
-                        None,
-                        Some(&p_os_inst as &ProgressFn),
-                    )
+    let (devices, (orgs, locations, roles), os_current, sw_current, os_installs, sw_installs) = tokio::try_join!(
+        api.devices(device_df_ref, Some(&p_devices as &ProgressFn)),
+        lookups,
+        async {
+            if include_os {
+                api.fleet_os_patches(patch_df_ref, None, Some(&p_os as &ProgressFn))
                     .await
-                } else {
-                    Ok(Vec::new())
-                }
-            },
-            async {
-                if want_installs && include_sw {
-                    api.fleet_software_patch_installs(
-                        patch_df_ref,
-                        after,
-                        None,
-                        Some(&p_sw_inst as &ProgressFn),
-                    )
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if include_sw {
+                api.fleet_software_patches(patch_df_ref, None, Some(&p_sw as &ProgressFn))
                     .await
-                } else {
-                    Ok(Vec::new())
-                }
-            },
-        )
-        .map_err(UiError::from)?;
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if want_installs && include_os {
+                api.fleet_os_patch_installs(
+                    patch_df_ref,
+                    after,
+                    None,
+                    Some(&p_os_inst as &ProgressFn),
+                )
+                .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if want_installs && include_sw {
+                api.fleet_software_patch_installs(
+                    patch_df_ref,
+                    after,
+                    None,
+                    Some(&p_sw_inst as &ProgressFn),
+                )
+                .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+    )?;
 
     // Fetches done; the rest is the in-memory join/rollup.
-    emit_progress(&app, qid, "joining", 0);
+    progress("joining", 0);
 
     let maps = LookupMaps::build(&orgs, &locations, &roles);
     let devices_by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
@@ -243,26 +291,17 @@ pub async fn query_patches(
         &all_current,
         &devices_by_id,
         &maps,
-        settings.sla_days,
-        Utc::now(),
+        sla_days,
+        now,
     );
 
-    let result = QueryResult {
+    Ok(QueryResult {
         rows,
         devices: summaries,
         compliance,
         devices_total: devices.len(),
-        generated_at: Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-    };
-
-    // Hand the frontend a lightweight summary (first page + rollups) and keep the
-    // full result in the cache for paging (`get_patch_rows`) and export — moving it
-    // in rather than cloning every row.
-    let summary = QuerySummary::from_result(&result, FIRST_PAGE_ROWS);
-    if let Ok(mut slot) = state.last_result.lock() {
-        *slot = Some(result);
-    }
-    Ok(summary)
+        generated_at: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    })
 }
 
 /// Serves one page of detail rows from the cached query result so the frontend can
@@ -283,4 +322,189 @@ pub async fn get_patch_rows(
         .map(|r| r.rows.iter().skip(offset).take(limit).cloned().collect())
         .unwrap_or_default();
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AuthState;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A fixed clock so the release/install windows, SLA aging, and `generated_at`
+    /// are deterministic regardless of when the test runs.
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).unwrap() // 2023-11-14T22:13:20Z
+    }
+
+    /// Lookups resolved up front — the org/location/role *fetch* is covered by the
+    /// `api::mod` tests; here they only need to label rows so the join is assertable.
+    fn lookups() -> Lookups {
+        (
+            Arc::new(vec![Organization {
+                id: 1,
+                name: "Alpha".into(),
+            }]),
+            Arc::new(vec![]),
+            Arc::new(vec![]),
+        )
+    }
+
+    fn client(server: &MockServer) -> NinjaApiClient {
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        NinjaApiClient::new(http, auth)
+    }
+
+    fn args(patch_type: PatchType, statuses: Vec<PatchStatus>) -> PatchQueryArgs {
+        PatchQueryArgs {
+            filter: FilterParams::default(),
+            patch_type,
+            statuses,
+            install_after_days: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
+        let server = MockServer::start().await;
+
+        // Two online devices in org Alpha; device 10 needs a reboot.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "id": 10, "systemName": "web-01", "organizationId": 1,
+                    "offline": false, "os": { "name": "Windows Server 2022", "needsReboot": true }
+                },
+                {
+                    "id": 20, "systemName": "web-02", "organizationId": 1,
+                    "offline": false, "os": { "name": "Windows Server 2019", "needsReboot": false }
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        // Current OS-patch feed: one MANUAL (pending) Critical aged past SLA, one
+        // APPROVED Low. With statuses=[Pending] only the MANUAL one becomes a row.
+        let aged = fixed_now().timestamp() - 60 * 86_400; // 60 days old
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    { "deviceId": 10, "kbNumber": "KB1", "status": "MANUAL",
+                      "severity": "CRITICAL", "releaseDate": aged },
+                    { "deviceId": 20, "kbNumber": "KB2", "status": "APPROVED",
+                      "severity": "LOW", "releaseDate": aged }
+                ],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let progress = |_: &'static str, _: usize| {};
+        let result = run_query(
+            &client(&server),
+            async { Ok::<_, anyhow::Error>(lookups()) },
+            30,
+            30,
+            args(PatchType::Os, vec![PatchStatus::Pending]),
+            fixed_now(),
+            &progress,
+        )
+        .await
+        .expect("query");
+
+        // Only the MANUAL patch survives the Pending filter, displayed as PENDING.
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+        assert_eq!(row.kb.as_deref(), Some("KB1"));
+        assert_eq!(row.status, "PENDING");
+        assert_eq!(row.organization, "Alpha");
+        assert_eq!(row.severity, "Critical");
+        assert!(row.needs_reboot);
+
+        // Both devices counted; only device 10 lands in the reboot subset.
+        assert_eq!(result.devices_total, 2);
+        let summary = QuerySummary::from_result(&result, FIRST_PAGE_ROWS);
+        assert_eq!(summary.reboot_devices.len(), 1);
+        assert_eq!(summary.reboot_devices[0].device_id, 10);
+
+        // Compliance: both online, both carry a pending/approved patch → 0% compliant.
+        // The MANUAL Critical (aged) lands in pending_critical AND aged_critical; the
+        // APPROVED Low is below the Important rank so neither counts it.
+        assert_eq!(result.compliance.len(), 1);
+        let alpha = &result.compliance[0];
+        assert_eq!(alpha.organization, "Alpha");
+        assert_eq!(alpha.devices_total, 2);
+        assert_eq!(alpha.devices_compliant, 0);
+        assert_eq!(alpha.compliance_pct, 0.0);
+        assert_eq!(alpha.pending_critical, 1);
+        assert_eq!(alpha.aged_critical, 1);
+    }
+
+    #[tokio::test]
+    async fn installed_query_routes_to_history_endpoint_not_current_feed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false }
+            ])))
+            .mount(&server)
+            .await;
+
+        // The current feed is still fetched (include_os) but must contribute no rows
+        // for an install-only status — this MANUAL record has to be ignored.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    { "deviceId": 10, "kbNumber": "KBCURRENT", "status": "MANUAL",
+                      "severity": "CRITICAL" }
+                ],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        // The install-history endpoint returns one INSTALLED and one FAILED record;
+        // statuses=[Installed] keeps only the INSTALLED one.
+        let installed = fixed_now().timestamp() - 5 * 86_400;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patch-installs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    { "deviceId": 10, "kbNumber": "KBOK", "status": "INSTALLED",
+                      "installedAt": installed },
+                    { "deviceId": 10, "kbNumber": "KBBAD", "status": "FAILED" }
+                ],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let progress = |_: &'static str, _: usize| {};
+        let result = run_query(
+            &client(&server),
+            async { Ok::<_, anyhow::Error>(lookups()) },
+            30,
+            30,
+            args(PatchType::Os, vec![PatchStatus::Installed]),
+            fixed_now(),
+            &progress,
+        )
+        .await
+        .expect("query");
+
+        // Exactly the install-history INSTALLED record — the current MANUAL row and
+        // the FAILED install are both excluded.
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+        assert_eq!(row.kb.as_deref(), Some("KBOK"));
+        assert_eq!(row.status, "INSTALLED");
+        assert!(row.installed_date.is_some());
+    }
 }
