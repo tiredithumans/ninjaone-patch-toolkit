@@ -46,6 +46,7 @@ pub fn run() {
             commands::lookups::list_roles,
             commands::lookups::list_node_classes,
             commands::patches::query_patches,
+            commands::patches::get_patch_rows,
             commands::export::export_patches_xlsx,
             commands::update::check_for_update,
             commands::update::install_update,

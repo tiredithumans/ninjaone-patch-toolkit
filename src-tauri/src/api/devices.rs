@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use super::{NinjaApiClient, ProgressFn};
+use super::{DEFAULT_PAGE_SIZE, NinjaApiClient, ProgressFn};
 use crate::model::Device;
 
 impl NinjaApiClient {
@@ -15,7 +15,7 @@ impl NinjaApiClient {
             Some(f) if !f.is_empty() => vec![("df", f.to_string())],
             _ => Vec::new(),
         };
-        self.get_paginated_reporting("/devices-detailed", &query, on_progress)
+        self.get_paginated_reporting("/devices-detailed", &query, DEFAULT_PAGE_SIZE, on_progress)
             .await
     }
 }

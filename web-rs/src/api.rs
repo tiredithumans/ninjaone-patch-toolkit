@@ -98,6 +98,19 @@ pub async fn query_patches(args: PatchQueryArgs, query_id: u64) -> Result<QueryR
     invoke("query_patches", args_of(&Wrap { args, query_id })).await
 }
 
+/// Fetches one page of detail rows from the backend's cached query result. The
+/// full row set lives in the backend cache (not shipped over IPC), so the table
+/// pages a large fleet by requesting just the visible window.
+pub async fn get_patch_rows(offset: usize, limit: usize) -> Result<Vec<PatchRow>, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Wrap {
+        offset: usize,
+        limit: usize,
+    }
+    invoke("get_patch_rows", args_of(&Wrap { offset, limit })).await
+}
+
 /// Subscribes to backend `query:progress` events for the lifetime of the app,
 /// decoding each event's payload and handing it to `handler`. The Tauri unlisten
 /// handle is intentionally dropped — the subscription lives as long as the app.

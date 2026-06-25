@@ -140,10 +140,14 @@ secrets are **not** stored there — see below).
   structs use `#[serde(rename_all = "camelCase")]`. Renaming a parameter is a wire-format change —
   update both sides.
 
-- **`query_patches` → export coupling (load-bearing).** `query_patches` caches its `QueryResult` in
-  `AppState.last_result` (a `Mutex`) on success; `export_patches_xlsx` reads that cache so the
-  frontend never round-trips all rows back over IPC. Export with no prior successful query = nothing
-  to write. Don't add a second source of truth for the exported rows.
+- **`query_patches` → cache → export/paging coupling (load-bearing).** `query_patches` caches the
+  full `QueryResult` in `AppState.last_result` (a `Mutex`) on success and returns only a lightweight
+  `QuerySummary` (first page of rows + `rows_total` + the reboot-device subset + compliance) over IPC
+  — a 10k+ row fleet is never serialized wholesale into the WASM webview. The detail table pages the
+  rest on demand via `get_patch_rows(offset, limit)`, which slices the same cache; `export_patches_xlsx`
+  reads it too. So the cache is the single source of truth for both export **and** row paging: export
+  or paging with no prior successful query = empty. Don't add a second source of truth for the rows,
+  and keep the backend `QuerySummary` ⇄ frontend `QueryResult` (`web-rs/src/types.rs`) shapes in sync.
 
 - **`AppState` locks are brief — never held across `.await`.** `settings`/`last_result` are
   `std::sync::Mutex`. Take a `settings_snapshot()` (clone) before any `.await`; don't hold a guard

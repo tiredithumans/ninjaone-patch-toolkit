@@ -80,52 +80,103 @@ impl FilterParams {
         (!parts.is_empty()).then(|| parts.join(" AND "))
     }
 
-    /// Case-insensitive substring match of the OS-name sub-filter against a device's
-    /// reported OS name. Empty/unset filter matches everything.
-    pub fn os_name_allowed(&self, os_name: Option<&str>) -> bool {
-        match self.os_name_contains.as_deref().map(str::trim) {
-            None | Some("") => true,
-            Some(q) => os_name
-                .map(|n| n.to_ascii_lowercase().contains(&q.to_ascii_lowercase()))
-                .unwrap_or(false),
-        }
-    }
+    /// Lowers the query needles and parses the severity strings **once** into a
+    /// [`PreparedFilter`], which does the actual per-patch matching for
+    /// `rows::build_rows`. Doing the lowering/parsing here rather than in the row
+    /// loop avoids re-allocating the needles and re-parsing the severities on every
+    /// row.
+    pub fn prepare(&self) -> PreparedFilter {
+        let os_name_needle = self
+            .os_name_contains
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .map(str::to_ascii_lowercase);
 
-    /// Case-insensitive substring match against KB number and patch name. Accepts a
-    /// `KB` prefix on either side (`KB5040434` matches a stored `5040434`).
-    pub fn search_allowed(&self, kb: Option<&str>, name: Option<&str>) -> bool {
-        let Some(q) = self
+        let search = self
             .search
             .as_deref()
             .map(str::trim)
             .filter(|q| !q.is_empty())
-        else {
+            .map(|q| {
+                let q_lower = q.to_ascii_lowercase();
+                let q_bare = q_lower.trim_start_matches("kb").trim().to_string();
+                SearchNeedle { q_lower, q_bare }
+            });
+
+        PreparedFilter {
+            os_name_needle,
+            search,
+            severities: self
+                .severities
+                .iter()
+                .map(|s| Severity::from_raw(s))
+                .collect(),
+            release_after: self.release_after,
+            release_before: self.release_before,
+        }
+    }
+}
+
+/// Pre-lowered free-text needle: the full lowercased query plus its `KB`-stripped
+/// form, both computed once in [`FilterParams::prepare`].
+struct SearchNeedle {
+    q_lower: String,
+    q_bare: String,
+}
+
+/// The client-side patch facets with their query needles lowercased and their
+/// severities parsed up front, so matching a row costs no query-side allocation.
+/// Built by [`FilterParams::prepare`]; consumed per row by `rows::build_rows`.
+pub struct PreparedFilter {
+    /// Trimmed, lowercased OS-name needle. `None` = facet inactive (match all).
+    os_name_needle: Option<String>,
+    /// Lowercased free-text needle. `None` = facet inactive (match all).
+    search: Option<SearchNeedle>,
+    /// Parsed severities to keep. Empty = all severities allowed.
+    severities: Vec<Severity>,
+    release_after: Option<i64>,
+    release_before: Option<i64>,
+}
+
+impl PreparedFilter {
+    /// Case-insensitive substring match of the OS-name needle against a device's
+    /// reported OS name. An inactive facet matches everything; an active one
+    /// excludes a device that reports no OS name.
+    pub fn os_name_allowed(&self, os_name: Option<&str>) -> bool {
+        match &self.os_name_needle {
+            None => true,
+            Some(needle) => os_name
+                .map(|n| n.to_ascii_lowercase().contains(needle.as_str()))
+                .unwrap_or(false),
+        }
+    }
+
+    /// Case-insensitive substring match of the free-text needle against the KB
+    /// number and patch name. Accepts a `KB` prefix on either side (`KB5040434`
+    /// matches a stored `5040434`). An inactive facet matches everything.
+    pub fn search_allowed(&self, kb: Option<&str>, name: Option<&str>) -> bool {
+        let Some(needle) = &self.search else {
             return true;
         };
-        let q_lower = q.to_ascii_lowercase();
-        let q_bare = q_lower.trim_start_matches("kb").trim();
         let kb_lower = kb.map(|k| k.to_ascii_lowercase()).unwrap_or_default();
         let kb_bare = kb_lower.trim_start_matches("kb").trim();
         let name_lower = name.map(|n| n.to_ascii_lowercase()).unwrap_or_default();
-        kb_lower.contains(&q_lower) || kb_bare.contains(q_bare) || name_lower.contains(&q_lower)
+        kb_lower.contains(needle.q_lower.as_str())
+            || kb_bare.contains(needle.q_bare.as_str())
+            || name_lower.contains(needle.q_lower.as_str())
     }
 
-    /// True when a patch's severity is among the selected severities. An empty
-    /// selection matches everything.
+    /// True when the patch severity is among the selected set. An empty selection
+    /// matches every severity.
     pub fn severity_allowed(&self, severity: Severity) -> bool {
-        if self.severities.is_empty() {
-            return true;
-        }
-        self.severities
-            .iter()
-            .any(|s| Severity::from_raw(s) == severity)
+        self.severities.is_empty() || self.severities.contains(&severity)
     }
 
-    /// True when a patch's release timestamp (Unix seconds) falls within the
-    /// `release_after`/`release_before` bounds. With no bounds set, everything
-    /// matches; with a bound set, a patch with no release date is excluded (its age
-    /// can't be confirmed). The relative `release_within_days` is resolved into
-    /// `release_after` before this is called.
+    /// True when the patch's release timestamp (Unix seconds) falls within the
+    /// configured `release_after`/`release_before` bounds. With no bounds set,
+    /// everything matches; once a bound is set, an undated patch is excluded (its
+    /// age can't be confirmed).
     pub fn release_date_allowed(&self, released_ts: Option<i64>) -> bool {
         if self.release_after.is_none() && self.release_before.is_none() {
             return true;
@@ -214,36 +265,37 @@ mod tests {
 
     #[test]
     fn os_name_substring_is_case_insensitive() {
-        let f = FilterParams {
+        let p = FilterParams {
             os_name_contains: Some("server 2022".into()),
             ..Default::default()
-        };
-        assert!(f.os_name_allowed(Some("Windows Server 2022")));
-        assert!(!f.os_name_allowed(Some("Windows Server 2019")));
-        assert!(!f.os_name_allowed(None));
+        }
+        .prepare();
+        assert!(p.os_name_allowed(Some("Windows Server 2022")));
+        assert!(!p.os_name_allowed(Some("Windows Server 2019")));
+        assert!(!p.os_name_allowed(None));
     }
 
     #[test]
     fn search_matches_kb_with_or_without_prefix() {
-        let f = FilterParams {
+        let p = FilterParams {
             search: Some("KB5040434".into()),
             ..Default::default()
-        };
-        assert!(f.search_allowed(Some("5040434"), None));
-        assert!(f.search_allowed(Some("KB5040434"), None));
-        assert!(!f.search_allowed(Some("5036893"), None));
+        }
+        .prepare();
+        assert!(p.search_allowed(Some("5040434"), None));
+        assert!(p.search_allowed(Some("KB5040434"), None));
+        assert!(!p.search_allowed(Some("5036893"), None));
     }
 
     #[test]
     fn empty_search_allows_all() {
-        let f = FilterParams::default();
-        assert!(f.search_allowed(None, None));
+        assert!(FilterParams::default().prepare().search_allowed(None, None));
     }
 
     #[test]
     fn release_date_bounds_filter_and_exclude_undated() {
         // No bounds → everything matches, including undated.
-        let any = FilterParams::default();
+        let any = FilterParams::default().prepare();
         assert!(any.release_date_allowed(Some(1_700_000_000)));
         assert!(any.release_date_allowed(None));
 
@@ -252,7 +304,8 @@ mod tests {
             release_after: Some(1_000),
             release_before: Some(2_000),
             ..Default::default()
-        };
+        }
+        .prepare();
         assert!(f.release_date_allowed(Some(1_500)));
         assert!(f.release_date_allowed(Some(1_000)));
         assert!(f.release_date_allowed(Some(2_000)));
@@ -264,7 +317,8 @@ mod tests {
         let after = FilterParams {
             release_after: Some(1_000),
             ..Default::default()
-        };
+        }
+        .prepare();
         assert!(after.release_date_allowed(Some(5_000)));
         assert!(!after.release_date_allowed(Some(500)));
     }
@@ -272,15 +326,46 @@ mod tests {
     #[test]
     fn severity_filter_keeps_only_selected() {
         use crate::model::Severity;
-        let f = FilterParams {
+        let p = FilterParams {
             severities: vec!["CRITICAL".into(), "IMPORTANT".into()],
             ..Default::default()
-        };
-        assert!(f.severity_allowed(Severity::Critical));
-        assert!(f.severity_allowed(Severity::Important));
-        assert!(!f.severity_allowed(Severity::Low));
-        assert!(!f.severity_allowed(Severity::Unknown));
+        }
+        .prepare();
+        assert!(p.severity_allowed(Severity::Critical));
+        assert!(p.severity_allowed(Severity::Important));
+        assert!(!p.severity_allowed(Severity::Low));
+        assert!(!p.severity_allowed(Severity::Unknown));
         // Empty selection matches everything.
-        assert!(FilterParams::default().severity_allowed(Severity::Low));
+        assert!(
+            FilterParams::default()
+                .prepare()
+                .severity_allowed(Severity::Low)
+        );
+    }
+
+    #[test]
+    fn prepare_trims_needles_and_kb_prefix_is_bidirectional() {
+        // Whitespace around a needle is trimmed before matching.
+        let os = FilterParams {
+            os_name_contains: Some("  server 2022 ".into()),
+            ..Default::default()
+        }
+        .prepare();
+        assert!(os.os_name_allowed(Some("Windows Server 2022")));
+
+        // A bare query matches a `KB`-prefixed stored value (and the free-text
+        // needle also matches against the patch name, not just the KB).
+        let bare = FilterParams {
+            search: Some("5040434".into()),
+            ..Default::default()
+        }
+        .prepare();
+        assert!(bare.search_allowed(Some("KB5040434"), None));
+        let by_name = FilterParams {
+            search: Some("cumulative".into()),
+            ..Default::default()
+        }
+        .prepare();
+        assert!(by_name.search_allowed(None, Some("Cumulative Update")));
     }
 }

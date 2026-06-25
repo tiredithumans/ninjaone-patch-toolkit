@@ -82,25 +82,27 @@ fn write_detail_sheet(workbook: &mut Workbook, header: &Format, rows: &[PatchRow
 
     for (i, r) in rows.iter().enumerate() {
         let row = (i + 1) as u32;
-        let cells: [String; 14] = [
-            r.organization.clone(),
-            r.location.clone().unwrap_or_default(),
-            r.device_role.clone().unwrap_or_default(),
-            r.device_name.clone(),
-            r.os_name.clone().unwrap_or_default(),
-            r.node_class.clone().unwrap_or_default(),
-            r.patch_type.clone(),
-            r.kb.clone().unwrap_or_default(),
-            r.name.clone(),
-            r.severity.clone(),
-            r.status.clone(),
-            if r.needs_reboot { "Yes" } else { "No" }.to_string(),
-            r.release_date.clone().unwrap_or_default(),
-            r.installed_date.clone().unwrap_or_default(),
+        // Write each cell from a borrow rather than cloning all 14 fields into a
+        // temporary array first (this runs once per exported row).
+        let cells: [&str; 14] = [
+            &r.organization,
+            r.location.as_deref().unwrap_or_default(),
+            r.device_role.as_deref().unwrap_or_default(),
+            &r.device_name,
+            r.os_name.as_deref().unwrap_or_default(),
+            r.node_class.as_deref().unwrap_or_default(),
+            &r.patch_type,
+            r.kb.as_deref().unwrap_or_default(),
+            &r.name,
+            &r.severity,
+            &r.status,
+            if r.needs_reboot { "Yes" } else { "No" },
+            r.release_date.as_deref().unwrap_or_default(),
+            r.installed_date.as_deref().unwrap_or_default(),
         ];
         for (col, value) in cells.iter().enumerate() {
             sheet
-                .write_string(row, col as u16, value)
+                .write_string(row, col as u16, *value)
                 .context("write cell")?;
         }
     }

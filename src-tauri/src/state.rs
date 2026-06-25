@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -16,9 +16,11 @@ const LOOKUP_TTL: Duration = Duration::from_secs(300);
 
 struct LookupCache {
     at: Instant,
-    orgs: Vec<Organization>,
-    locations: Vec<Location>,
-    roles: Vec<Role>,
+    // Held behind `Arc` so a cache hit (and every auto-refresh tick) hands out a
+    // cheap refcount bump instead of deep-cloning three Vecs.
+    orgs: Arc<Vec<Organization>>,
+    locations: Arc<Vec<Location>>,
+    roles: Arc<Vec<Role>>,
 }
 
 /// Process-wide application state injected into every Tauri command.
@@ -72,7 +74,9 @@ impl AppState {
     /// Orgs/locations/roles used to label patch rows, served from a short-TTL
     /// cache. Fetches the three concurrently on a miss. The lock is never held
     /// across the `.await`.
-    pub async fn lookups(&self) -> Result<(Vec<Organization>, Vec<Location>, Vec<Role>)> {
+    pub async fn lookups(
+        &self,
+    ) -> Result<(Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>)> {
         if let Ok(guard) = self.lookups_cache.lock()
             && let Some(c) = guard.as_ref()
             && c.at.elapsed() < LOOKUP_TTL
@@ -84,6 +88,7 @@ impl AppState {
             async { Ok::<_, anyhow::Error>(self.api.all_locations().await.unwrap_or_default()) },
             self.api.roles(),
         )?;
+        let (orgs, locations, roles) = (Arc::new(orgs), Arc::new(locations), Arc::new(roles));
         if let Ok(mut guard) = self.lookups_cache.lock() {
             *guard = Some(LookupCache {
                 at: Instant::now(),

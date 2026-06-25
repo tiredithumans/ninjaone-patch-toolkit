@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use super::{NinjaApiClient, ProgressFn};
+use super::{NinjaApiClient, ProgressFn, REPORTING_PAGE_SIZE};
 use crate::model::Patch;
 
 impl NinjaApiClient {
@@ -12,8 +12,13 @@ impl NinjaApiClient {
         status: Option<&str>,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
-        self.get_paginated_reporting("/queries/os-patches", &patch_query(df, status), on_progress)
-            .await
+        self.get_paginated_reporting(
+            "/queries/os-patches",
+            &patch_query(df, status),
+            REPORTING_PAGE_SIZE,
+            on_progress,
+        )
+        .await
     }
 
     /// Current third-party software patches across the filtered fleet.
@@ -26,6 +31,7 @@ impl NinjaApiClient {
         self.get_paginated_reporting(
             "/queries/software-patches",
             &patch_query(df, status),
+            REPORTING_PAGE_SIZE,
             on_progress,
         )
         .await
@@ -40,8 +46,13 @@ impl NinjaApiClient {
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
         let query = install_query(df, installed_after, installed_before);
-        self.get_paginated_reporting("/queries/os-patch-installs", &query, on_progress)
-            .await
+        self.get_paginated_reporting(
+            "/queries/os-patch-installs",
+            &query,
+            REPORTING_PAGE_SIZE,
+            on_progress,
+        )
+        .await
     }
 
     /// Installed-software-patch history within a time window (Unix seconds).
@@ -53,8 +64,13 @@ impl NinjaApiClient {
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
         let query = install_query(df, installed_after, installed_before);
-        self.get_paginated_reporting("/queries/software-patch-installs", &query, on_progress)
-            .await
+        self.get_paginated_reporting(
+            "/queries/software-patch-installs",
+            &query,
+            REPORTING_PAGE_SIZE,
+            on_progress,
+        )
+        .await
     }
 }
 
