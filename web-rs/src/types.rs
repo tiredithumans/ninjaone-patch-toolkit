@@ -12,6 +12,9 @@ pub struct FilterParams {
     pub node_classes: Vec<String>,
     pub os_name_contains: Option<String>,
     pub search: Option<String>,
+    /// Patch severities to keep (e.g. `CRITICAL`); empty = all.
+    #[serde(default)]
+    pub severities: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

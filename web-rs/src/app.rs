@@ -16,6 +16,15 @@ const REGIONS: [(&str, &str); 5] = [
 
 const STATUS_OPTIONS: [&str; 5] = ["PENDING", "APPROVED", "REJECTED", "INSTALLED", "FAILED"];
 
+/// Severity facet options as (raw value sent to the backend, display label).
+const SEVERITY_OPTIONS: [(&str, &str); 5] = [
+    ("CRITICAL", "Critical"),
+    ("IMPORTANT", "Important"),
+    ("MODERATE", "Moderate"),
+    ("LOW", "Low"),
+    ("OPTIONAL", "Optional"),
+];
+
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Patches,
@@ -83,6 +92,7 @@ pub struct AppState {
     loc_id: RwSignal<Option<i64>>,
     role_id: RwSignal<Option<i64>>,
     selected_classes: RwSignal<Vec<String>>,
+    selected_severities: RwSignal<Vec<String>>,
     os_name: RwSignal<String>,
     search: RwSignal<String>,
 
@@ -148,6 +158,7 @@ impl AppState {
             loc_id: RwSignal::new(None),
             role_id: RwSignal::new(None),
             selected_classes: RwSignal::new(Vec::new()),
+            selected_severities: RwSignal::new(Vec::new()),
             os_name: RwSignal::new(String::new()),
             search: RwSignal::new(String::new()),
             patch_type: RwSignal::new("ALL".to_string()),
@@ -269,6 +280,7 @@ impl AppState {
             node_classes: self.selected_classes.get_untracked(),
             os_name_contains: non_empty(self.os_name.get_untracked()),
             search: non_empty(self.search.get_untracked()),
+            severities: self.selected_severities.get_untracked(),
         }
     }
 
@@ -368,6 +380,7 @@ impl AppState {
         let f = p.filter;
         self.role_id.set(f.role_id);
         self.selected_classes.set(f.node_classes);
+        self.selected_severities.set(f.severities);
         self.os_name.set(f.os_name_contains.unwrap_or_default());
         self.search.set(f.search.unwrap_or_default());
         // Load the org's locations, then restore the saved location.
@@ -966,6 +979,29 @@ fn FilterBar() -> impl IntoView {
                         })
                         .collect_view()
                 }}
+            </div>
+            <div class="chips">
+                <span class="chips-label">"Severity:"</span>
+                {SEVERITY_OPTIONS
+                    .iter()
+                    .map(|&(value, label)| {
+                        let v_checked = value.to_string();
+                        let checked = move || state.selected_severities.get().contains(&v_checked);
+                        let v_toggle = value.to_string();
+                        view! {
+                            <label class="chip">
+                                <input
+                                    type="checkbox"
+                                    prop:checked=checked
+                                    on:change=move |_| {
+                                        state.toggle_in(state.selected_severities, v_toggle.clone())
+                                    }
+                                />
+                                {label}
+                            </label>
+                        }
+                    })
+                    .collect_view()}
             </div>
             <PresetRow/>
         </section>
