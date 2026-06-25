@@ -632,11 +632,14 @@ fn SettingsPanel() -> impl IntoView {
                     "Callback port"
                     <input
                         type="number"
+                        min="1024"
+                        max="65535"
                         prop:value=move || state.f_port.get().to_string()
-                        on:input=move |ev| {
-                            if let Ok(p) = event_target_value(&ev).parse() {
-                                state.f_port.set(p);
-                            }
+                        on:change=move |ev| {
+                            let v = event_target_value(&ev)
+                                .parse::<u16>()
+                                .unwrap_or_else(|_| state.f_port.get_untracked());
+                            state.f_port.set(v.clamp(1024, 65535));
                         }
                     />
                 </label>
@@ -644,11 +647,14 @@ fn SettingsPanel() -> impl IntoView {
                     "Install history window (days)"
                     <input
                         type="number"
+                        min="1"
+                        max="3650"
                         prop:value=move || state.f_install_days.get().to_string()
-                        on:input=move |ev| {
-                            if let Ok(d) = event_target_value(&ev).parse() {
-                                state.f_install_days.set(d);
-                            }
+                        on:change=move |ev| {
+                            let v = event_target_value(&ev)
+                                .parse::<i64>()
+                                .unwrap_or_else(|_| state.f_install_days.get_untracked());
+                            state.f_install_days.set(v.clamp(1, 3650));
                         }
                     />
                 </label>
@@ -656,11 +662,14 @@ fn SettingsPanel() -> impl IntoView {
                     "SLA window for aged criticals (days)"
                     <input
                         type="number"
+                        min="1"
+                        max="3650"
                         prop:value=move || state.f_sla.get().to_string()
-                        on:input=move |ev| {
-                            if let Ok(d) = event_target_value(&ev).parse() {
-                                state.f_sla.set(d);
-                            }
+                        on:change=move |ev| {
+                            let v = event_target_value(&ev)
+                                .parse::<i64>()
+                                .unwrap_or_else(|_| state.f_sla.get_untracked());
+                            state.f_sla.set(v.clamp(1, 3650));
                         }
                     />
                 </label>
@@ -959,11 +968,14 @@ fn QueryControls() -> impl IntoView {
                         <input
                             type="number"
                             class="narrow"
+                            min="1"
+                            max="3650"
                             prop:value=move || state.install_days.get().to_string()
-                            on:input=move |ev| {
-                                if let Ok(d) = event_target_value(&ev).parse() {
-                                    state.install_days.set(d);
-                                }
+                            on:change=move |ev| {
+                                let v = event_target_value(&ev)
+                                    .parse::<i64>()
+                                    .unwrap_or_else(|_| state.install_days.get_untracked());
+                                state.install_days.set(v.clamp(1, 3650));
                             }
                         />
                     </label>
