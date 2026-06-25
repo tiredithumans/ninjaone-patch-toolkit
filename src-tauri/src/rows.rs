@@ -233,7 +233,10 @@ pub fn build_compliance(
             .unwrap_or_else(|| "(unknown)".to_string());
         let acc = by_org.entry(org).or_default();
         acc.pending_critical += 1;
-        if p.released_at().map(|r| r < sla_cutoff).unwrap_or(false) {
+        // A pending Critical/Important patch with no known release date can't be
+        // proven fresh, so flag it as aged for review rather than assuming it is
+        // within SLA (which would understate the backlog).
+        if p.released_at().map(|r| r < sla_cutoff).unwrap_or(true) {
             acc.aged_critical += 1;
         }
     }
