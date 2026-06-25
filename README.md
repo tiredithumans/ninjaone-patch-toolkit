@@ -92,6 +92,7 @@ flow.
 just build        # distributable bundles (.dmg/.app, .msi/.nsis, AppImage)
 just verify       # fmt-check + clippy + tests + wasm check + wasm clippy
 just test         # backend unit + wiremock integration tests
+just coverage     # backend test coverage (cargo-llvm-cov) → summary + lcov report
 ```
 
 ## Security

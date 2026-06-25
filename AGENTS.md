@@ -109,6 +109,7 @@ just fmt-check       # rustfmt --check BOTH crates (covers web-rs too)
 just clippy          # backend clippy (-D warnings)
 just web-clippy      # frontend clippy (wasm target, -D warnings)
 just test            # backend unit + wiremock integration tests
+just coverage        # backend test coverage (cargo-llvm-cov) → summary + target/lcov.info
 just web-check       # cargo check the frontend (wasm target)
 just web-build       # trunk build → web-rs/dist (debug)
 
@@ -253,9 +254,12 @@ each gate is also callable independently. Use the recipe flags from `/justfile`;
 4. **Frontend compile** — `just web-check` (wasm target; `web-rs` is a separate crate the backend
    gates never reach).
 5. **Lint (frontend)** — `just web-clippy` (`-D warnings`, wasm target).
-6. **Dependency audit** *(optional locally)* — `just audit` (RustSec advisories, both lockfiles)
+6. **Coverage** *(measurement-only; CI `coverage` job)* — `just coverage` (cargo-llvm-cov, backend
+   only). No minimum threshold is enforced yet, so a dip never fails the build; the CI job publishes
+   `lcov.info` as an artifact and a per-file summary on the run page.
+7. **Dependency audit** *(optional locally)* — `just audit` (RustSec advisories, both lockfiles)
    + `just deny` / `just web-deny` (licenses + supply-chain sources + bans via `deny.toml`).
-7. **CodeQL** *(GitHub-side)* — Rust security queries, build-mode `none` (`.github/workflows/codeql.yml`).
+8. **CodeQL** *(GitHub-side)* — Rust security queries, build-mode `none` (`.github/workflows/codeql.yml`).
 
 For behavior changes not provable by a unit test, run `just dev` and exercise the view.
 
