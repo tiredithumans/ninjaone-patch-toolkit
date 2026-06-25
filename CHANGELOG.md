@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-25
+
 ### Fixed
 
 - **Patch Status: Failed now returns results.** A "Failed" patch is an install
