@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+use crate::model::Severity;
+
 /// Filter facets chosen by the operator in the UI. Identity facets (org/location/
 /// role) and the coarse OS-type facet (`node_classes`) are pushed into the NinjaOne
-/// `df` device-filter DSL; `os_name_contains` and `search` are applied client-side
-/// against patch rows after fetch.
+/// `df` device-filter DSL; `os_name_contains`, `search`, and `severities` are
+/// applied client-side against patch rows after fetch.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FilterParams {
@@ -16,6 +18,10 @@ pub struct FilterParams {
     pub os_name_contains: Option<String>,
     /// Free-text query matched client-side against KB number and patch name.
     pub search: Option<String>,
+    /// Patch severities to keep (raw strings like `CRITICAL`/`IMPORTANT`), matched
+    /// client-side. NinjaOne's severity is its CVSS-derived bucket, so this doubles
+    /// as the CVSS-band filter. Empty = all severities.
+    pub severities: Vec<String>,
 }
 
 impl FilterParams {
@@ -76,6 +82,17 @@ impl FilterParams {
         let kb_bare = kb_lower.trim_start_matches("kb").trim();
         let name_lower = name.map(|n| n.to_ascii_lowercase()).unwrap_or_default();
         kb_lower.contains(&q_lower) || kb_bare.contains(q_bare) || name_lower.contains(&q_lower)
+    }
+
+    /// True when a patch's severity is among the selected severities. An empty
+    /// selection matches everything.
+    pub fn severity_allowed(&self, severity: Severity) -> bool {
+        if self.severities.is_empty() {
+            return true;
+        }
+        self.severities
+            .iter()
+            .any(|s| Severity::from_raw(s) == severity)
     }
 }
 
@@ -152,5 +169,20 @@ mod tests {
     fn empty_search_allows_all() {
         let f = FilterParams::default();
         assert!(f.search_allowed(None, None));
+    }
+
+    #[test]
+    fn severity_filter_keeps_only_selected() {
+        use crate::model::Severity;
+        let f = FilterParams {
+            severities: vec!["CRITICAL".into(), "IMPORTANT".into()],
+            ..Default::default()
+        };
+        assert!(f.severity_allowed(Severity::Critical));
+        assert!(f.severity_allowed(Severity::Important));
+        assert!(!f.severity_allowed(Severity::Low));
+        assert!(!f.severity_allowed(Severity::Unknown));
+        // Empty selection matches everything.
+        assert!(FilterParams::default().severity_allowed(Severity::Low));
     }
 }

@@ -95,6 +95,9 @@ pub fn build_rows(
             }
 
             let severity = patch.severity_enum();
+            if !filter.severity_allowed(severity) {
+                continue;
+            }
             let status = patch
                 .status
                 .clone()
