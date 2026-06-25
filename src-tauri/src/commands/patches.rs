@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use chrono::{Duration, Utc};
@@ -132,19 +133,14 @@ pub async fn query_patches(
         }
         build_rows(&devices_by_id, &maps, &sources, &filter)
     };
-    rows.sort_by(|a, b| {
-        b.severity_rank
-            .cmp(&a.severity_rank)
-            .then_with(|| {
-                a.organization
-                    .to_lowercase()
-                    .cmp(&b.organization.to_lowercase())
-            })
-            .then_with(|| {
-                a.device_name
-                    .to_lowercase()
-                    .cmp(&b.device_name.to_lowercase())
-            })
+    // Highest severity first, then organization, then device — case-insensitive.
+    // sort_by_cached_key lowercases each field once instead of on every compare.
+    rows.sort_by_cached_key(|r| {
+        (
+            Reverse(r.severity_rank),
+            r.organization.to_lowercase(),
+            r.device_name.to_lowercase(),
+        )
     });
 
     // 7. Compliance + reboot rollups from the complete current set.

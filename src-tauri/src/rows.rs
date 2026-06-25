@@ -256,11 +256,7 @@ pub fn build_compliance(
             aged_critical: a.aged_critical,
         })
         .collect();
-    buckets.sort_by(|a, b| {
-        a.organization
-            .to_lowercase()
-            .cmp(&b.organization.to_lowercase())
-    });
+    buckets.sort_by_cached_key(|b| b.organization.to_lowercase());
     buckets
 }
 
