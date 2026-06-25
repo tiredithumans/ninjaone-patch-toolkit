@@ -483,3 +483,9 @@ tbody tr:hover {
 .modal-actions {
   margin-top: 0;
 }
+
+.app-version {
+  margin-top: 16px;
+  font-size: 11px;
+  color: var(--muted);
+}

@@ -680,6 +680,9 @@ fn SettingsPanel() -> impl IntoView {
                     }}
                 </button>
             </div>
+            <p class="app-version">
+                {concat!("NinjaOne Patch Toolkit v", env!("CARGO_PKG_VERSION"))}
+            </p>
         </section>
     }
 }
