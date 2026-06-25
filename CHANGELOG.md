@@ -31,6 +31,10 @@ version and start a fresh `[Unreleased]`.
 
 ### Fixed
 
+- **The Released filter's date pickers are now dark-themed and their calendar icon
+  is visible.** The native date inputs now follow the app's dark color scheme, so
+  the calendar popup matches the UI and the (previously dark-on-dark, invisible)
+  calendar icon is light and clickable.
 - **Pending patches returned no results.** NinjaOne's patch API uses `MANUAL` for
   patches awaiting approval (its UI labels them "Pending"), but the app filtered for
   the literal `PENDING`, which the API never returns — so the Status: Pending filter
