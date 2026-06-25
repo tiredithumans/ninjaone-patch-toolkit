@@ -1176,7 +1176,6 @@ fn Filters() -> impl IntoView {
                     />
                 </label>
             </Show>
-            <PresetRow/>
         </section>
     }
 }
@@ -1313,6 +1312,7 @@ fn RunControls() -> impl IntoView {
                             .collect_view()}
                     </select>
                 </label>
+                <PresetRow/>
             </div>
             <Show when=move || state.busy.get()>
                 <div class="query-progress">

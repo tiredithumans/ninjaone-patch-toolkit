@@ -200,6 +200,10 @@ select:disabled {
   gap: 14px;
 }
 
+.controls .presets {
+  margin-top: 0;
+}
+
 .chips-label {
   font-size: 12px;
   color: var(--muted);
