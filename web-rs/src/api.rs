@@ -12,6 +12,9 @@ use crate::types::*;
 extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = invoke, catch)]
     async fn tauri_invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"], js_name = listen)]
+    fn tauri_listen(event: &str, handler: &JsValue) -> JsValue;
 }
 
 #[derive(serde::Deserialize)]
@@ -85,12 +88,29 @@ pub async fn list_node_classes() -> Result<Vec<NodeClass>, String> {
 
 // --- Patches + export --------------------------------------------------------
 
-pub async fn query_patches(args: PatchQueryArgs) -> Result<QueryResult, String> {
+pub async fn query_patches(args: PatchQueryArgs, query_id: u64) -> Result<QueryResult, String> {
     #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct Wrap {
         args: PatchQueryArgs,
+        query_id: u64,
     }
-    invoke("query_patches", args_of(&Wrap { args })).await
+    invoke("query_patches", args_of(&Wrap { args, query_id })).await
+}
+
+/// Subscribes to backend `query:progress` events for the lifetime of the app,
+/// decoding each event's payload and handing it to `handler`. The Tauri unlisten
+/// handle is intentionally dropped — the subscription lives as long as the app.
+pub fn on_query_progress(mut handler: impl FnMut(QueryProgressEvent) + 'static) {
+    let cb = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+        if let Ok(payload) = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
+            && let Ok(ev) = serde_wasm_bindgen::from_value::<QueryProgressEvent>(payload)
+        {
+            handler(ev);
+        }
+    });
+    let _ = tauri_listen("query:progress", cb.as_ref());
+    cb.forget();
 }
 
 pub async fn export_patches() -> Result<Option<String>, String> {

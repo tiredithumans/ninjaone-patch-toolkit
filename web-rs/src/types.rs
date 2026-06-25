@@ -117,6 +117,17 @@ pub struct Preset {
     pub filter: FilterParams,
 }
 
+/// Incremental progress for an in-flight `query_patches`, delivered on the
+/// `query:progress` event. `stage` is one of `devices` / `osPatches` /
+/// `swPatches` / `osInstalls` / `swInstalls` / `joining`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryProgressEvent {
+    pub query_id: u64,
+    pub stage: String,
+    pub loaded: usize,
+}
+
 /// Available-update metadata from the backend updater. `notes` is the published
 /// release body (the changelog) shown in the update splash.
 #[derive(Clone, Debug, Deserialize)]
