@@ -44,6 +44,23 @@ impl Toast {
     }
 }
 
+/// Live record counts streamed from the backend while a query runs.
+#[derive(Clone, Copy, Default)]
+struct Progress {
+    devices: usize,
+    os_patches: usize,
+    sw_patches: usize,
+    os_installs: usize,
+    sw_installs: usize,
+    joining: bool,
+}
+
+impl Progress {
+    fn records(self) -> usize {
+        self.devices + self.os_patches + self.sw_patches + self.os_installs + self.sw_installs
+    }
+}
+
 /// All reactive state, shared via context. `RwSignal` is `Copy`, so this whole
 /// struct is `Copy` and cheap to hand to every component.
 #[derive(Clone, Copy)]
@@ -92,6 +109,16 @@ pub struct AppState {
 
     refreshing: RwSignal<bool>,
     toast_gen: RwSignal<u64>,
+
+    /// Wall-clock timing for the running-query progress bar / elapsed display.
+    /// `elapsed_tick` is bumped by a timer to re-evaluate the elapsed label.
+    query_started_ms: RwSignal<f64>,
+    elapsed_tick: RwSignal<u32>,
+    last_duration_ms: RwSignal<Option<f64>>,
+    /// Live record counts from backend `query:progress` events, plus a sequence
+    /// number stamped on each run so stale events from a superseded run are dropped.
+    progress: RwSignal<Progress>,
+    query_seq: RwSignal<u64>,
 }
 
 fn non_empty(s: String) -> Option<String> {
@@ -142,6 +169,11 @@ impl AppState {
             update_busy: RwSignal::new(false),
             refreshing: RwSignal::new(false),
             toast_gen: RwSignal::new(0),
+            query_started_ms: RwSignal::new(0.0),
+            elapsed_tick: RwSignal::new(0),
+            last_duration_ms: RwSignal::new(None),
+            progress: RwSignal::new(Progress::default()),
+            query_seq: RwSignal::new(0),
         }
     }
 
@@ -274,15 +306,50 @@ impl AppState {
             statuses,
             install_after_days: Some(self.install_days.get_untracked()),
         };
+        // Stamp this run so progress events from a superseded run are ignored, and
+        // clear the previous run's counts.
+        let seq = self.query_seq.get_untracked().wrapping_add(1);
+        self.query_seq.set(seq);
+        self.progress.set(Progress::default());
         let flag = if silent { self.refreshing } else { self.busy };
+        let started = js_sys::Date::now();
+        self.query_started_ms.set(started);
         flag.set(true);
         spawn_local(async move {
-            match api::query_patches(args).await {
+            match api::query_patches(args, seq).await {
                 Ok(r) => self.result.set(Some(r)),
                 Err(e) => self.notify(Toast::err(e)),
             }
+            // Record the round-trip so the next run can show "Last run took Ns"
+            // and drive the estimated progress bar.
+            self.last_duration_ms
+                .set(Some(js_sys::Date::now() - started));
             flag.set(false);
         });
+    }
+
+    /// Seconds since the running query started (re-evaluated on each timer tick).
+    fn elapsed_secs(self) -> f64 {
+        let _ = self.elapsed_tick.get();
+        let started = self.query_started_ms.get_untracked();
+        if started <= 0.0 {
+            0.0
+        } else {
+            ((js_sys::Date::now() - started) / 1000.0).max(0.0)
+        }
+    }
+
+    /// Estimated completion fraction (0.0–0.95) from the previous run's duration,
+    /// or `None` when there's no prior timing yet (→ indeterminate bar). Capped
+    /// below 1.0 so an over-running query doesn't claim to be finished.
+    fn progress_estimate(self) -> Option<f64> {
+        let _ = self.elapsed_tick.get();
+        let last = self.last_duration_ms.get()?;
+        if last <= 0.0 {
+            return None;
+        }
+        let elapsed = js_sys::Date::now() - self.query_started_ms.get_untracked();
+        Some((elapsed / last).clamp(0.0, 0.95))
     }
 
     fn apply_settings_view(self, v: SettingsView) {
@@ -346,6 +413,31 @@ pub fn App() -> impl IntoView {
             }
         }
     });
+
+    // Stream live record counts from the backend into `progress`, ignoring events
+    // from a run the user has already superseded.
+    api::on_query_progress(move |ev| {
+        if ev.query_id != state.query_seq.get_untracked() {
+            return;
+        }
+        state.progress.update(|p| match ev.stage.as_str() {
+            "devices" => p.devices = ev.loaded,
+            "osPatches" => p.os_patches = ev.loaded,
+            "swPatches" => p.sw_patches = ev.loaded,
+            "osInstalls" => p.os_installs = ev.loaded,
+            "swInstalls" => p.sw_installs = ev.loaded,
+            "joining" => p.joining = true,
+            _ => {}
+        });
+    });
+
+    // Tick the elapsed-time display roughly twice a second while a query runs.
+    gloo_timers::callback::Interval::new(500, move || {
+        if state.busy.get_untracked() || state.refreshing.get_untracked() {
+            state.elapsed_tick.update(|t| *t = t.wrapping_add(1));
+        }
+    })
+    .forget();
 
     // Auto-refresh: rebuild the interval whenever the cadence or auth changes.
     let interval = StoredValue::new_local(None::<gloo_timers::callback::Interval>);
@@ -1073,6 +1165,58 @@ fn QueryControls() -> impl IntoView {
                     "Export to Excel"
                 </button>
             </div>
+            <Show when=move || state.busy.get()>
+                <div class="query-progress">
+                    <div class="progress">
+                        {move || match state.progress_estimate() {
+                            Some(p) => {
+                                view! {
+                                    <div
+                                        class="progress-bar"
+                                        style=format!("width:{:.1}%", p * 100.0)
+                                    ></div>
+                                }
+                                    .into_any()
+                            }
+                            None => {
+                                view! { <div class="progress-bar progress-indeterminate"></div> }
+                                    .into_any()
+                            }
+                        }}
+                    </div>
+                    <span class="progress-label">
+                        {move || {
+                            let p = state.progress.get();
+                            let secs = state.elapsed_secs();
+                            if p.joining {
+                                format!("Running… {secs:.0}s · computing rollups…")
+                            } else {
+                                let n = p.records();
+                                if n > 0 {
+                                    format!(
+                                        "Running… {secs:.0}s · loaded {} records",
+                                        group_thousands(n),
+                                    )
+                                } else {
+                                    format!("Running… {secs:.0}s")
+                                }
+                            }
+                        }}
+                    </span>
+                </div>
+            </Show>
+            <Show when=move || {
+                !state.busy.get() && state.last_duration_ms.get().is_some()
+            }>
+                <p class="query-hint">
+                    {move || {
+                        format!(
+                            "Last run took {:.0}s",
+                            state.last_duration_ms.get().unwrap_or(0.0) / 1000.0,
+                        )
+                    }}
+                </p>
+            </Show>
         </section>
     }
 }
@@ -1394,6 +1538,20 @@ fn Toaster() -> impl IntoView {
 
 fn parse_opt(s: &str) -> Option<i64> {
     s.trim().parse().ok()
+}
+
+/// Formats a count with thousands separators (e.g. `12300` → `12,300`).
+fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    let len = digits.len();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn tab_class(active: Tab, this: Tab) -> &'static str {

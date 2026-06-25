@@ -16,6 +16,11 @@ use crate::error::truncate_body;
 const DEFAULT_PAGE_SIZE: u32 = 500;
 const MAX_RETRIES: u8 = 3;
 
+/// Sink for incremental pagination progress: invoked with the cumulative row
+/// count after each page is accumulated. Callers that don't stream progress to
+/// the UI pass `None`.
+pub type ProgressFn<'a> = dyn Fn(usize) + Send + Sync + 'a;
+
 #[derive(Clone)]
 pub struct NinjaApiClient {
     http: reqwest::Client,
@@ -132,6 +137,18 @@ impl NinjaApiClient {
         path: &str,
         base_query: &[(&str, String)],
     ) -> Result<Vec<T>> {
+        self.get_paginated_reporting(path, base_query, None).await
+    }
+
+    /// Like [`get_paginated`](Self::get_paginated), reporting the cumulative row
+    /// count to `on_progress` after each page so a long fetch can stream progress
+    /// to the UI.
+    pub async fn get_paginated_reporting<T: DeserializeOwned + Clone>(
+        &self,
+        path: &str,
+        base_query: &[(&str, String)],
+        on_progress: Option<&ProgressFn<'_>>,
+    ) -> Result<Vec<T>> {
         let mut all: Vec<T> = Vec::new();
         let mut seen_ids: HashSet<i64> = HashSet::new();
         let mut cursor: Option<String> = None;
@@ -168,6 +185,9 @@ impl NinjaApiClient {
                         let v: T = serde_json::from_value(item).context("deserialize page item")?;
                         all.push(v);
                     }
+                    if let Some(report) = on_progress {
+                        report(all.len());
+                    }
                     // A short page is the last page. Otherwise advance the cursor to
                     // the largest id seen; stop if it can't move forward (no id, or
                     // no new rows) so a misbehaving endpoint can't loop forever.
@@ -195,6 +215,9 @@ impl NinjaApiClient {
                         0
                     };
 
+                    if let Some(report) = on_progress {
+                        report(all.len());
+                    }
                     let next = next_cursor(obj.get("cursor"));
                     match next {
                         // No rows on this page means the cursor is exhausted even if
@@ -334,7 +357,7 @@ mod tests {
         );
         let client = NinjaApiClient::new(http, auth);
 
-        let devices = client.devices(None).await.expect("devices call");
+        let devices = client.devices(None, None).await.expect("devices call");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id, 7, "must retry with the refreshed token");
     }
@@ -362,7 +385,10 @@ mod tests {
         let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
         let client = NinjaApiClient::new(http, auth);
 
-        let devices = client.devices(Some("org = 5")).await.expect("devices call");
+        let devices = client
+            .devices(Some("org = 5"), None)
+            .await
+            .expect("devices call");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id, 10);
     }
@@ -399,7 +425,7 @@ mod tests {
         let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
         let client = NinjaApiClient::new(http, auth);
 
-        let devices = client.devices(None).await.expect("devices call");
+        let devices = client.devices(None, None).await.expect("devices call");
         assert_eq!(
             devices.len(),
             DEFAULT_PAGE_SIZE as usize + 3,
@@ -445,7 +471,7 @@ mod tests {
         let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
         let client = NinjaApiClient::new(http, auth);
 
-        let devices = client.devices(None).await.expect("devices call");
+        let devices = client.devices(None, None).await.expect("devices call");
         assert_eq!(
             devices.len(),
             DEFAULT_PAGE_SIZE as usize + 2,

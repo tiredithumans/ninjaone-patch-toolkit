@@ -3,8 +3,9 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{Duration, Utc};
 use serde::Deserialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
+use crate::api::ProgressFn;
 use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::model::{Device, Patch, PatchStatus, PatchType};
@@ -25,13 +26,40 @@ pub struct PatchQueryArgs {
     pub install_after_days: Option<i64>,
 }
 
+/// Incremental progress for an in-flight `query_patches`, emitted on the
+/// `query:progress` event so the UI can show live record counts. `query_id`
+/// echoes the value the frontend passed so it can drop events from a superseded
+/// run.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryProgressEvent {
+    query_id: u64,
+    stage: &'static str,
+    loaded: usize,
+}
+
+/// Best-effort emit of a progress event (a dropped event just means one fewer UI
+/// update, never a failed query).
+fn emit_progress(app: &AppHandle, query_id: u64, stage: &'static str, loaded: usize) {
+    let _ = app.emit(
+        "query:progress",
+        QueryProgressEvent {
+            query_id,
+            stage,
+            loaded,
+        },
+    );
+}
+
 /// Fetches devices and patches for the chosen filter/type/status, joins them into
 /// per-server detail rows, and computes the reboot/compliance rollups. The result
 /// is cached for the Excel exporter.
 #[tauri::command]
 pub async fn query_patches(
     state: State<'_, AppState>,
+    app: AppHandle,
     args: PatchQueryArgs,
+    query_id: Option<u64>,
 ) -> Result<QueryResult, UiError> {
     let settings = state.settings_snapshot();
     let api = state.api.clone();
@@ -60,40 +88,72 @@ pub async fn query_patches(
     // independent — fetch them concurrently so the latency is the slowest call,
     // not the sum of all of them. Conditional fetches resolve to empty when the
     // patch type / status doesn't request them.
+    // Per-stream progress reporters: each emits a cumulative count tagged with its
+    // stage so the UI can show live totals. `qid` (0 when the frontend omits it)
+    // lets the frontend drop events from a run it has already superseded.
+    let qid = query_id.unwrap_or(0);
+    let app_d = app.clone();
+    let p_devices = move |n: usize| emit_progress(&app_d, qid, "devices", n);
+    let app_o = app.clone();
+    let p_os = move |n: usize| emit_progress(&app_o, qid, "osPatches", n);
+    let app_s = app.clone();
+    let p_sw = move |n: usize| emit_progress(&app_s, qid, "swPatches", n);
+    let app_oi = app.clone();
+    let p_os_inst = move |n: usize| emit_progress(&app_oi, qid, "osInstalls", n);
+    let app_si = app.clone();
+    let p_sw_inst = move |n: usize| emit_progress(&app_si, qid, "swInstalls", n);
+
     let (devices, (orgs, locations, roles), os_current, sw_current, os_installs, sw_installs) =
         tokio::try_join!(
-            api.devices(df_ref),
+            api.devices(df_ref, Some(&p_devices as &ProgressFn)),
             state.lookups(),
             async {
                 if include_os {
-                    api.fleet_os_patches(df_ref, None).await
+                    api.fleet_os_patches(df_ref, None, Some(&p_os as &ProgressFn))
+                        .await
                 } else {
                     Ok(Vec::new())
                 }
             },
             async {
                 if include_sw {
-                    api.fleet_software_patches(df_ref, None).await
+                    api.fleet_software_patches(df_ref, None, Some(&p_sw as &ProgressFn))
+                        .await
                 } else {
                     Ok(Vec::new())
                 }
             },
             async {
                 if want_installed && include_os {
-                    api.fleet_os_patch_installs(df_ref, after, None).await
+                    api.fleet_os_patch_installs(
+                        df_ref,
+                        after,
+                        None,
+                        Some(&p_os_inst as &ProgressFn),
+                    )
+                    .await
                 } else {
                     Ok(Vec::new())
                 }
             },
             async {
                 if want_installed && include_sw {
-                    api.fleet_software_patch_installs(df_ref, after, None).await
+                    api.fleet_software_patch_installs(
+                        df_ref,
+                        after,
+                        None,
+                        Some(&p_sw_inst as &ProgressFn),
+                    )
+                    .await
                 } else {
                     Ok(Vec::new())
                 }
             },
         )
         .map_err(UiError::from)?;
+
+    // Fetches done; the rest is the in-memory join/rollup.
+    emit_progress(&app, qid, "joining", 0);
 
     let maps = LookupMaps::build(&orgs, &locations, &roles);
     let devices_by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
