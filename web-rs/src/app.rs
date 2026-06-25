@@ -223,7 +223,7 @@ impl AppState {
     }
 
     fn load_lookups(self) {
-        self.lookups_pending.set(3);
+        self.lookups_pending.set(2);
         spawn_local(async move {
             match api::list_orgs().await {
                 Ok(o) => self.orgs.set(o),
@@ -238,12 +238,16 @@ impl AppState {
             }
             self.lookup_done();
         });
+    }
+
+    /// Loads the static OS-type list. It needs no auth or API call, so it runs at
+    /// startup rather than waiting for sign-in like the org/role/location lookups.
+    fn load_node_classes(self) {
         spawn_local(async move {
             match api::list_node_classes().await {
                 Ok(n) => self.node_classes.set(n),
                 Err(e) => self.notify(Toast::err(format!("Couldn't load OS types: {e}"))),
             }
-            self.lookup_done();
         });
     }
 
@@ -428,7 +432,9 @@ pub fn App() -> impl IntoView {
     let state = AppState::new();
     provide_context(state);
 
-    // Initial load.
+    // Initial load. The OS-type facet is static, so load it immediately rather than
+    // gating it behind sign-in with the org/role/location lookups.
+    state.load_node_classes();
     spawn_local(async move {
         if let Ok(a) = api::auth_status().await {
             let authed = a.authenticated;
