@@ -11,6 +11,16 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Patch Status: Failed now returns results.** A "Failed" patch is an install
+  *result*, which NinjaOne reports in its patch-install history — not in the
+  current-patch feed (which lists only patches with no install attempts). The query
+  was looking for failed patches in the current feed, where they never appear, so a
+  Failed filter always came back empty. Failed patches are now read from the
+  install-history endpoints (like Installed), bounded by the same install-history
+  lookback window.
+
 ## [0.6.0] - 2026-06-25
 
 ### Added

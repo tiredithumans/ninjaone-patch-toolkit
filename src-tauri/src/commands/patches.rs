@@ -83,13 +83,25 @@ pub async fn query_patches(
     let patch_df = filter.patch_filter();
     let patch_df_ref = patch_df.as_deref();
 
-    // 1. Classify the requested statuses. "Installed" routes to the history
-    // endpoints; the rest narrow the current-patch set for display.
-    let want_installed = args.statuses.iter().any(|s| s.is_installed());
+    // 1. Classify the requested statuses. Install *results* ("Installed" and
+    // "Failed") route to the `*-patch-installs` history endpoints; the rest
+    // (MANUAL/APPROVED/REJECTED) narrow the current-patch feed for display. A
+    // FAILED patch is one whose install was attempted and failed, so it never
+    // appears in the current feed ("patches for which there were no installation
+    // attempts") — only in the install history (status FAILED/INSTALLED).
+    let want_installs = args.statuses.iter().any(|s| s.is_install_history());
     let current_status_set: HashSet<&'static str> = args
         .statuses
         .iter()
-        .filter(|s| !s.is_installed())
+        .filter(|s| !s.is_install_history())
+        .map(|s| s.api_value())
+        .collect();
+    // The install-history statuses the operator asked for (INSTALLED and/or
+    // FAILED); the install sources are narrowed to these client-side.
+    let install_status_set: HashSet<&'static str> = args
+        .statuses
+        .iter()
+        .filter(|s| s.is_install_history())
         .map(|s| s.api_value())
         .collect();
     let include_os = args.patch_type.includes_os();
@@ -140,7 +152,7 @@ pub async fn query_patches(
                 }
             },
             async {
-                if want_installed && include_os {
+                if want_installs && include_os {
                     api.fleet_os_patch_installs(
                         patch_df_ref,
                         after,
@@ -153,7 +165,7 @@ pub async fn query_patches(
                 }
             },
             async {
-                if want_installed && include_sw {
+                if want_installs && include_sw {
                     api.fleet_software_patch_installs(
                         patch_df_ref,
                         after,
@@ -193,18 +205,21 @@ pub async fn query_patches(
                 status_filter: Some(&current_status_set),
             },
         ];
-        if want_installed {
+        if want_installs {
+            // The install endpoints return both successful and failed records, so
+            // narrow each to the requested install statuses; the override labels a
+            // record that omits its own status (defaulting it to INSTALLED).
             sources.push(PatchSource {
                 patches: &os_installs,
                 type_label: "OS",
                 status_override: Some("INSTALLED"),
-                status_filter: None,
+                status_filter: Some(&install_status_set),
             });
             sources.push(PatchSource {
                 patches: &sw_installs,
                 type_label: "SOFTWARE",
                 status_override: Some("INSTALLED"),
-                status_filter: None,
+                status_filter: Some(&install_status_set),
             });
         }
         build_rows(&devices_by_id, &maps, &sources, &filter)
