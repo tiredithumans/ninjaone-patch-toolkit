@@ -1,0 +1,40 @@
+# cargo-deny configuration. Run via `just deny` (backend) and `just web-deny`
+# (frontend); CI gates on both. This file checks **licenses, bans, and sources**;
+# RustSec advisories are covered separately by `cargo audit` (`just audit`), so we
+# don't duplicate them here.
+
+[licenses]
+# Permissive + weak-copyleft (MPL-2.0, file-level) licenses present in the tree.
+# Multi-licensed crates (e.g. r-efi = "MIT OR Apache-2.0 OR LGPL-2.1-or-later")
+# are satisfied by a permissive option, so copyleft-only licenses are
+# intentionally NOT listed — a future copyleft-only crate should fail the gate
+# and get a conscious decision.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+# Dependency trees legitimately carry duplicate versions (windows-sys, syn, …);
+# warn rather than fail so the gate stays signal, not noise.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# Supply-chain guard: every crate must come from crates.io — no surprise git or
+# alternate-registry sources.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

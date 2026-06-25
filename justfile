@@ -10,6 +10,8 @@ default:
     @just --list
 
 # --- Daily development -------------------------------------------------------
+# Frontend recipes pass `--config web-rs/Trunk.toml` so trunk resolves paths from
+# web-rs/ without a shell `cd`, keeping them portable across sh and PowerShell.
 
 # Run the desktop app (Tauri auto-starts `trunk serve` via beforeDevCommand).
 dev:
@@ -17,15 +19,15 @@ dev:
 
 # Serve the frontend on http://localhost:8080 with hot reload.
 web-serve:
-    cd web-rs && trunk serve
+    trunk serve --config web-rs/Trunk.toml
 
 # Debug frontend build into web-rs/dist.
 web-build:
-    cd web-rs && trunk build
+    trunk build --config web-rs/Trunk.toml
 
 # Release frontend build into web-rs/dist.
 web-build-release:
-    cd web-rs && trunk build --release --locked
+    trunk build --release --locked --config web-rs/Trunk.toml
 
 # --- Verification (CI gates) -------------------------------------------------
 
@@ -65,6 +67,14 @@ audit:
     cargo audit --file src-tauri/Cargo.lock
     cargo audit --file web-rs/Cargo.lock
 
+# License + supply-chain + bans policy (deny.toml; requires `cargo install cargo-deny`).
+deny:
+    cargo deny --manifest-path src-tauri/Cargo.toml check --config deny.toml licenses bans sources
+
+# Same license/supply-chain policy for the frontend tree.
+web-deny:
+    cargo deny --manifest-path web-rs/Cargo.toml check --config deny.toml licenses bans sources
+
 # --- Release / packaging -----------------------------------------------------
 
 # Build distributable bundles (.dmg/.app, .msi/.nsis, AppImage).
@@ -81,4 +91,4 @@ icon:
 clean:
     cargo clean --manifest-path src-tauri/Cargo.toml
     cargo clean --manifest-path web-rs/Cargo.toml
-    rm -rf web-rs/dist
+    trunk clean --config web-rs/Trunk.toml
