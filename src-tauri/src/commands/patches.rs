@@ -64,8 +64,14 @@ pub async fn query_patches(
     let settings = state.settings_snapshot();
     let api = state.api.clone();
     let filter = args.filter;
-    let df = filter.device_filter();
-    let df_ref = df.as_deref();
+    // The device query honors the node-class facet (`class in (...)`); the patch/
+    // install queries don't (NinjaOne's /queries/* ignore `class`), so they use a
+    // class-less filter and the node-class facet is reapplied client-side via the
+    // device join in build_rows.
+    let device_df = filter.device_filter();
+    let device_df_ref = device_df.as_deref();
+    let patch_df = filter.patch_filter();
+    let patch_df_ref = patch_df.as_deref();
 
     // 1. Classify the requested statuses. "Installed" routes to the history
     // endpoints; the rest narrow the current-patch set for display.
@@ -105,11 +111,11 @@ pub async fn query_patches(
 
     let (devices, (orgs, locations, roles), os_current, sw_current, os_installs, sw_installs) =
         tokio::try_join!(
-            api.devices(df_ref, Some(&p_devices as &ProgressFn)),
+            api.devices(device_df_ref, Some(&p_devices as &ProgressFn)),
             state.lookups(),
             async {
                 if include_os {
-                    api.fleet_os_patches(df_ref, None, Some(&p_os as &ProgressFn))
+                    api.fleet_os_patches(patch_df_ref, None, Some(&p_os as &ProgressFn))
                         .await
                 } else {
                     Ok(Vec::new())
@@ -117,7 +123,7 @@ pub async fn query_patches(
             },
             async {
                 if include_sw {
-                    api.fleet_software_patches(df_ref, None, Some(&p_sw as &ProgressFn))
+                    api.fleet_software_patches(patch_df_ref, None, Some(&p_sw as &ProgressFn))
                         .await
                 } else {
                     Ok(Vec::new())
@@ -126,7 +132,7 @@ pub async fn query_patches(
             async {
                 if want_installed && include_os {
                     api.fleet_os_patch_installs(
-                        df_ref,
+                        patch_df_ref,
                         after,
                         None,
                         Some(&p_os_inst as &ProgressFn),
@@ -139,7 +145,7 @@ pub async fn query_patches(
             async {
                 if want_installed && include_sw {
                     api.fleet_software_patch_installs(
-                        df_ref,
+                        patch_df_ref,
                         after,
                         None,
                         Some(&p_sw_inst as &ProgressFn),
