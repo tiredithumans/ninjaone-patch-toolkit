@@ -52,12 +52,15 @@ pub struct AppState {
     auth: RwSignal<Option<AuthStatus>>,
     show_settings: RwSignal<bool>,
     busy: RwSignal<bool>,
+    signing_in: RwSignal<bool>,
     active_tab: RwSignal<Tab>,
 
     orgs: RwSignal<Vec<Organization>>,
     locations: RwSignal<Vec<Location>>,
     roles: RwSignal<Vec<Role>>,
     node_classes: RwSignal<Vec<NodeClass>>,
+    /// Count of in-flight org/role/class lookup requests; > 0 means "loading".
+    lookups_pending: RwSignal<u32>,
 
     org_id: RwSignal<Option<i64>>,
     loc_id: RwSignal<Option<i64>>,
@@ -107,11 +110,13 @@ impl AppState {
             auth: RwSignal::new(None),
             show_settings: RwSignal::new(false),
             busy: RwSignal::new(false),
+            signing_in: RwSignal::new(false),
             active_tab: RwSignal::new(Tab::Patches),
             orgs: RwSignal::new(Vec::new()),
             locations: RwSignal::new(Vec::new()),
             roles: RwSignal::new(Vec::new()),
             node_classes: RwSignal::new(Vec::new()),
+            lookups_pending: RwSignal::new(0),
             org_id: RwSignal::new(None),
             loc_id: RwSignal::new(None),
             role_id: RwSignal::new(None),
@@ -167,23 +172,37 @@ impl AppState {
         });
     }
 
+    fn loading_lookups(self) -> bool {
+        self.lookups_pending.get() > 0
+    }
+
     fn load_lookups(self) {
+        self.lookups_pending.set(3);
         spawn_local(async move {
             match api::list_orgs().await {
                 Ok(o) => self.orgs.set(o),
-                Err(e) => self.notify(Toast::err(e)),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load organizations: {e}"))),
             }
+            self.lookup_done();
         });
         spawn_local(async move {
-            if let Ok(r) = api::list_roles().await {
-                self.roles.set(r);
+            match api::list_roles().await {
+                Ok(r) => self.roles.set(r),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load roles: {e}"))),
             }
+            self.lookup_done();
         });
         spawn_local(async move {
-            if let Ok(n) = api::list_node_classes().await {
-                self.node_classes.set(n);
+            match api::list_node_classes().await {
+                Ok(n) => self.node_classes.set(n),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load OS types: {e}"))),
             }
+            self.lookup_done();
         });
+    }
+
+    fn lookup_done(self) {
+        self.lookups_pending.update(|n| *n = n.saturating_sub(1));
     }
 
     fn select_org(self, org: Option<i64>) {
@@ -192,8 +211,9 @@ impl AppState {
         self.locations.set(Vec::new());
         if let Some(id) = org {
             spawn_local(async move {
-                if let Ok(locs) = api::list_locations(id).await {
-                    self.locations.set(locs);
+                match api::list_locations(id).await {
+                    Ok(locs) => self.locations.set(locs),
+                    Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
                 }
             });
         }
@@ -290,9 +310,12 @@ impl AppState {
         if let Some(org) = f.organization_id {
             let want_loc = f.location_id;
             spawn_local(async move {
-                if let Ok(locs) = api::list_locations(org).await {
-                    self.locations.set(locs);
-                    self.loc_id.set(want_loc);
+                match api::list_locations(org).await {
+                    Ok(locs) => {
+                        self.locations.set(locs);
+                        self.loc_id.set(want_loc);
+                    }
+                    Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
                 }
             });
         }
@@ -357,6 +380,16 @@ pub fn App() -> impl IntoView {
 #[component]
 fn UpdateSplash() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // Escape dismisses the update splash (same as "Later"), unless an install is
+    // already running.
+    window_event_listener(leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape"
+            && state.update.get_untracked().is_some()
+            && !state.update_busy.get_untracked()
+        {
+            state.update.set(None);
+        }
+    });
     view! {
         {move || {
             let Some(info) = state.update.get() else {
@@ -389,8 +422,15 @@ fn UpdateSplash() -> impl IntoView {
             let dismiss = move |_| state.update.set(None);
             view! {
                 <div class="modal-overlay">
-                    <div class="modal">
-                        <h2>{format!("Update available — v{}", info.version)}</h2>
+                    <div
+                        class="modal"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="update-title"
+                    >
+                        <h2 id="update-title">
+                            {format!("Update available — v{}", info.version)}
+                        </h2>
                         <p class="modal-sub">
                             {format!(
                                 "You're on v{}. Install the new version now?",
@@ -462,7 +502,14 @@ fn Header() -> impl IntoView {
                         view! {
                             <button
                                 class="btn btn-primary"
+                                prop:disabled=move || state.signing_in.get()
                                 on:click=move |_| {
+                                    if state.signing_in.get_untracked() {
+                                        return;
+                                    }
+                                    state.signing_in.set(true);
+                                    state
+                                        .notify(Toast::ok("Complete the sign-in in your browser…"));
                                     spawn_local(async move {
                                         match api::sign_in().await {
                                             Ok(()) => {
@@ -472,10 +519,13 @@ fn Header() -> impl IntoView {
                                             }
                                             Err(e) => state.notify(Toast::err(e)),
                                         }
+                                        state.signing_in.set(false);
                                     });
                                 }
                             >
-                                "Sign in"
+                                {move || {
+                                    if state.signing_in.get() { "Signing in…" } else { "Sign in" }
+                                }}
                             </button>
                         }
                     }
@@ -484,9 +534,13 @@ fn Header() -> impl IntoView {
                         class="btn"
                         on:click=move |_| {
                             spawn_local(async move {
-                                let _ = api::sign_out().await;
-                                state.refresh_auth();
-                                state.notify(Toast::ok("Signed out"));
+                                match api::sign_out().await {
+                                    Ok(()) => {
+                                        state.refresh_auth();
+                                        state.notify(Toast::ok("Signed out"));
+                                    }
+                                    Err(e) => state.notify(Toast::err(e)),
+                                }
                             });
                         }
                     >
@@ -620,11 +674,14 @@ fn SettingsPanel() -> impl IntoView {
                     "Callback port"
                     <input
                         type="number"
+                        min="1024"
+                        max="65535"
                         prop:value=move || state.f_port.get().to_string()
-                        on:input=move |ev| {
-                            if let Ok(p) = event_target_value(&ev).parse() {
-                                state.f_port.set(p);
-                            }
+                        on:change=move |ev| {
+                            let v = event_target_value(&ev)
+                                .parse::<u16>()
+                                .unwrap_or_else(|_| state.f_port.get_untracked());
+                            state.f_port.set(v.clamp(1024, 65535));
                         }
                     />
                 </label>
@@ -632,11 +689,14 @@ fn SettingsPanel() -> impl IntoView {
                     "Install history window (days)"
                     <input
                         type="number"
+                        min="1"
+                        max="3650"
                         prop:value=move || state.f_install_days.get().to_string()
-                        on:input=move |ev| {
-                            if let Ok(d) = event_target_value(&ev).parse() {
-                                state.f_install_days.set(d);
-                            }
+                        on:change=move |ev| {
+                            let v = event_target_value(&ev)
+                                .parse::<i64>()
+                                .unwrap_or_else(|_| state.f_install_days.get_untracked());
+                            state.f_install_days.set(v.clamp(1, 3650));
                         }
                     />
                 </label>
@@ -644,11 +704,14 @@ fn SettingsPanel() -> impl IntoView {
                     "SLA window for aged criticals (days)"
                     <input
                         type="number"
+                        min="1"
+                        max="3650"
                         prop:value=move || state.f_sla.get().to_string()
-                        on:input=move |ev| {
-                            if let Ok(d) = event_target_value(&ev).parse() {
-                                state.f_sla.set(d);
-                            }
+                        on:change=move |ev| {
+                            let v = event_target_value(&ev)
+                                .parse::<i64>()
+                                .unwrap_or_else(|_| state.f_sla.get_untracked());
+                            state.f_sla.set(v.clamp(1, 3650));
                         }
                     />
                 </label>
@@ -693,7 +756,12 @@ fn FilterBar() -> impl IntoView {
 
     view! {
         <section class="panel">
-            <h2>"Filters"</h2>
+            <div class="row">
+                <h2>"Filters"</h2>
+                <Show when=move || state.loading_lookups()>
+                    <span class="chips-label">"Loading…"</span>
+                </Show>
+            </div>
             <div class="grid">
                 <label>
                     "Organization"
@@ -848,6 +916,7 @@ fn PresetRow() -> impl IntoView {
                     .into_iter()
                     .map(|p| {
                         let name = p.name.clone();
+                        let label_name = p.name.clone();
                         let p2 = p.clone();
                         let del_name = p.name.clone();
                         view! {
@@ -860,6 +929,7 @@ fn PresetRow() -> impl IntoView {
                                 </button>
                                 <button
                                     class="x"
+                                    aria-label=format!("Delete preset {label_name}")
                                     on:click=move |_| {
                                         let n = del_name.clone();
                                         spawn_local(async move {
@@ -947,11 +1017,14 @@ fn QueryControls() -> impl IntoView {
                         <input
                             type="number"
                             class="narrow"
+                            min="1"
+                            max="3650"
                             prop:value=move || state.install_days.get().to_string()
-                            on:input=move |ev| {
-                                if let Ok(d) = event_target_value(&ev).parse() {
-                                    state.install_days.set(d);
-                                }
+                            on:change=move |ev| {
+                                let v = event_target_value(&ev)
+                                    .parse::<i64>()
+                                    .unwrap_or_else(|_| state.install_days.get_untracked());
+                                state.install_days.set(v.clamp(1, 3650));
                             }
                         />
                     </label>
@@ -1010,13 +1083,15 @@ fn Results() -> impl IntoView {
     let tab = state.active_tab;
 
     let summary = move || {
-        state.result.get().map(|r| {
-            format!(
-                "{} patch rows · {} devices · generated {}",
-                r.rows.len(),
-                r.devices_total,
-                r.generated_at
-            )
+        state.result.with(|r| {
+            r.as_ref().map(|r| {
+                format!(
+                    "{} patch rows · {} devices · generated {}",
+                    r.rows.len(),
+                    r.devices_total,
+                    r.generated_at
+                )
+            })
         })
     };
 
@@ -1055,12 +1130,30 @@ fn Results() -> impl IntoView {
 #[component]
 fn PatchesTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let rows = move || state.result.get().map(|r| r.rows).unwrap_or_default();
-    let total = move || rows().len();
+    // Borrow via `.with` so the table reads lengths and the capped slice without
+    // cloning the entire Vec<PatchRow> on every render.
+    let total = move || {
+        state
+            .result
+            .with(|r| r.as_ref().map_or(0, |r| r.rows.len()))
+    };
+    let rows = move || {
+        state.result.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    r.rows
+                        .iter()
+                        .take(ROW_DISPLAY_CAP)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    };
 
     view! {
         <Show
-            when=move || state.result.get().is_some()
+            when=move || state.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
             <Show when=move || { total() > ROW_DISPLAY_CAP }>
@@ -1078,25 +1171,24 @@ fn PatchesTable() -> impl IntoView {
                 <table>
                     <thead>
                         <tr>
-                            <th>"Organization"</th>
-                            <th>"Location"</th>
-                            <th>"Role"</th>
-                            <th>"Device"</th>
-                            <th>"OS"</th>
-                            <th>"Type"</th>
-                            <th>"KB"</th>
-                            <th>"Patch"</th>
-                            <th>"Severity"</th>
-                            <th>"Status"</th>
-                            <th>"Release"</th>
-                            <th>"Installed"</th>
+                            <th scope="col">"Organization"</th>
+                            <th scope="col">"Location"</th>
+                            <th scope="col">"Role"</th>
+                            <th scope="col">"Device"</th>
+                            <th scope="col">"OS"</th>
+                            <th scope="col">"Type"</th>
+                            <th scope="col">"KB"</th>
+                            <th scope="col">"Patch"</th>
+                            <th scope="col">"Severity"</th>
+                            <th scope="col">"Status"</th>
+                            <th scope="col">"Release"</th>
+                            <th scope="col">"Installed"</th>
                         </tr>
                     </thead>
                     <tbody>
                         {move || {
                             rows()
                                 .into_iter()
-                                .take(ROW_DISPLAY_CAP)
                                 .map(|r| {
                                     let sev = sev_class(&r.severity);
                                     let stat = status_class(&r.status);
@@ -1133,23 +1225,32 @@ fn PatchesTable() -> impl IntoView {
 #[component]
 fn ComplianceTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let buckets = move || state.result.get().map(|r| r.compliance).unwrap_or_default();
+    let buckets = move || {
+        state
+            .result
+            .with(|r| r.as_ref().map(|r| r.compliance.clone()).unwrap_or_default())
+    };
+    let has_buckets = move || {
+        state
+            .result
+            .with(|r| r.as_ref().is_some_and(|r| !r.compliance.is_empty()))
+    };
 
     view! {
         <Show
-            when=move || !buckets().is_empty()
+            when=has_buckets
             fallback=|| view! { <p class="empty">"No compliance data yet."</p> }
         >
             <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
-                            <th>"Organization"</th>
-                            <th>"Devices"</th>
-                            <th>"Compliant"</th>
-                            <th>"Compliance"</th>
-                            <th>"Pending Crit/Imp"</th>
-                            <th>"Aged (past SLA)"</th>
+                            <th scope="col">"Organization"</th>
+                            <th scope="col">"Devices"</th>
+                            <th scope="col">"Compliant"</th>
+                            <th scope="col">"Compliance"</th>
+                            <th scope="col">"Pending Crit/Imp"</th>
+                            <th scope="col">"Aged (past SLA)"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1158,11 +1259,16 @@ fn ComplianceTable() -> impl IntoView {
                                 .into_iter()
                                 .map(|b| {
                                     let pct = format!("{:.0}%", b.compliance_pct);
-                                    let aged_class = if b.aged_critical > 0 {
-                                        "sev-critical"
+                                    let aged = b.aged_critical;
+                                    let aged_class = if aged > 0 { "sev-critical" } else { "" };
+                                    // Prefix a warning glyph so the aged backlog is
+                                    // distinguishable without relying on color.
+                                    let aged_label = if aged > 0 {
+                                        format!("⚠ {aged}")
                                     } else {
-                                        ""
+                                        aged.to_string()
                                     };
+                                    let aged_title = if aged > 0 { "Past SLA — needs attention" } else { "" };
                                     view! {
                                         <tr>
                                             <td>{b.organization}</td>
@@ -1171,7 +1277,9 @@ fn ComplianceTable() -> impl IntoView {
                                             <td>{pct}</td>
                                             <td>{b.pending_critical}</td>
                                             <td>
-                                                <span class=aged_class>{b.aged_critical}</span>
+                                                <span class=aged_class title=aged_title>
+                                                    {aged_label}
+                                                </span>
                                             </td>
                                         </tr>
                                     }
@@ -1188,34 +1296,43 @@ fn ComplianceTable() -> impl IntoView {
 #[component]
 fn RebootTable() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // Filter then clone via `.with` so only the needs-reboot subset is cloned,
+    // not the full device list, and the emptiness check clones nothing.
     let devices = move || {
-        state
-            .result
-            .get()
-            .map(|r| {
-                r.devices
-                    .into_iter()
-                    .filter(|d| d.needs_reboot)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+        state.result.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    r.devices
+                        .iter()
+                        .filter(|d| d.needs_reboot)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    };
+    let has_devices = move || {
+        state.result.with(|r| {
+            r.as_ref()
+                .is_some_and(|r| r.devices.iter().any(|d| d.needs_reboot))
+        })
     };
 
     view! {
         <Show
-            when=move || !devices().is_empty()
+            when=has_devices
             fallback=|| view! { <p class="empty">"No devices flagged for reboot."</p> }
         >
             <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
-                            <th>"Organization"</th>
-                            <th>"Location"</th>
-                            <th>"Role"</th>
-                            <th>"Device"</th>
-                            <th>"OS"</th>
-                            <th>"Pending patches"</th>
+                            <th scope="col">"Organization"</th>
+                            <th scope="col">"Location"</th>
+                            <th scope="col">"Role"</th>
+                            <th scope="col">"Device"</th>
+                            <th scope="col">"OS"</th>
+                            <th scope="col">"Pending patches"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1247,7 +1364,10 @@ fn RebootTable() -> impl IntoView {
 fn Toaster() -> impl IntoView {
     let state = expect_context::<AppState>();
     view! {
-        <Show when=move || state.toast.get().is_some()>
+        // Always-present live region: a screen reader announces the toast as it
+        // appears. An aria-live region created at the same moment as its content
+        // is not reliably announced, so the wrapper stays mounted.
+        <div class="toaster" role="status" aria-live="assertive" aria-atomic="true">
             {move || {
                 state
                     .toast
@@ -1257,14 +1377,18 @@ fn Toaster() -> impl IntoView {
                         view! {
                             <div class=cls>
                                 <span>{t.msg}</span>
-                                <button class="x" on:click=move |_| state.toast.set(None)>
+                                <button
+                                    class="x"
+                                    aria-label="Dismiss notification"
+                                    on:click=move |_| state.toast.set(None)
+                                >
                                     "×"
                                 </button>
                             </div>
                         }
                     })
             }}
-        </Show>
+        </div>
     }
 }
 

@@ -4,7 +4,7 @@
 //!
 //! Adapted from `ninjaone-patch-dashboard`'s `snapshot.rs` device↔patch join.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
@@ -49,6 +49,11 @@ pub struct PatchSource<'a> {
     pub patches: &'a [Patch],
     pub type_label: &'static str,
     pub status_override: Option<&'static str>,
+    /// When set, only patches whose raw status is in this set become rows — lets
+    /// the caller narrow the current-patch families to the requested statuses
+    /// without cloning the matched subset out first. Install sources leave it
+    /// `None` (they're already the requested set and carry a `status_override`).
+    pub status_filter: Option<&'a HashSet<&'static str>>,
 }
 
 fn fmt_dt(ts: Option<DateTime<Utc>>) -> Option<String> {
@@ -66,6 +71,16 @@ pub fn build_rows(
     let mut rows = Vec::new();
     for source in sources {
         for patch in source.patches {
+            if let Some(allowed) = source.status_filter {
+                let keep = patch
+                    .status
+                    .as_deref()
+                    .map(|s| allowed.contains(s))
+                    .unwrap_or(false);
+                if !keep {
+                    continue;
+                }
+            }
             let device = patch
                 .device_id
                 .and_then(|id| devices_by_id.get(&id))
@@ -183,6 +198,17 @@ pub fn build_compliance(
     let mut by_org: HashMap<String, Acc> = HashMap::new();
 
     for s in summaries {
+        // An offline device can't apply patches and reports no current patch
+        // records, so a zero pending count says nothing about its compliance.
+        // Exclude it from the denominator rather than scoring it compliant and
+        // inflating the headline metric.
+        let offline = devices_by_id
+            .get(&s.device_id)
+            .map(|d| d.is_offline())
+            .unwrap_or(false);
+        if offline {
+            continue;
+        }
         let acc = by_org.entry(s.organization.clone()).or_default();
         acc.total += 1;
         if s.pending_count == 0 {
@@ -207,7 +233,10 @@ pub fn build_compliance(
             .unwrap_or_else(|| "(unknown)".to_string());
         let acc = by_org.entry(org).or_default();
         acc.pending_critical += 1;
-        if p.released_at().map(|r| r < sla_cutoff).unwrap_or(false) {
+        // A pending Critical/Important patch with no known release date can't be
+        // proven fresh, so flag it as aged for review rather than assuming it is
+        // within SLA (which would understate the backlog).
+        if p.released_at().map(|r| r < sla_cutoff).unwrap_or(true) {
             acc.aged_critical += 1;
         }
     }
@@ -227,11 +256,7 @@ pub fn build_compliance(
             aged_critical: a.aged_critical,
         })
         .collect();
-    buckets.sort_by(|a, b| {
-        a.organization
-            .to_lowercase()
-            .cmp(&b.organization.to_lowercase())
-    });
+    buckets.sort_by_cached_key(|b| b.organization.to_lowercase());
     buckets
 }
 
@@ -275,7 +300,6 @@ mod tests {
             node_role_id: Some(2),
             node_class: Some("WINDOWS_SERVER".into()),
             offline: Some(false),
-            last_contact: None,
             os: Some(OsInfo {
                 name: Some(os.into()),
                 needs_reboot: Some(id % 2 == 0),
@@ -328,6 +352,7 @@ mod tests {
                 patches: &patches,
                 type_label: "OS",
                 status_override: None,
+                status_filter: None,
             }],
             &filter,
         );
@@ -353,6 +378,7 @@ mod tests {
                 patches: &patches,
                 type_label: "OS",
                 status_override: Some("INSTALLED"),
+                status_filter: None,
             }],
             &FilterParams::default(),
         );
@@ -382,6 +408,29 @@ mod tests {
     }
 
     #[test]
+    fn compliance_excludes_offline_devices_from_the_denominator() {
+        let online = device(1, 10, "Windows Server 2022"); // online, has a pending patch
+        let mut offline = device(2, 10, "Windows Server 2019");
+        offline.offline = Some(true); // offline → unknown, must not count
+        let by_id = HashMap::from([(1, &online), (2, &offline)]);
+        let maps = maps();
+        let current = vec![patch(1, "PENDING", "CRITICAL", Some(1))];
+        let counts = pending_counts(&current);
+        let summaries = build_device_summaries(&[online.clone(), offline.clone()], &counts, &maps);
+        let buckets = build_compliance(&summaries, &current, &by_id, &maps, 30, Utc::now());
+        assert_eq!(buckets.len(), 1);
+        let b = &buckets[0];
+        assert_eq!(
+            b.devices_total, 1,
+            "offline device excluded from denominator"
+        );
+        assert_eq!(
+            b.devices_compliant, 0,
+            "the online device has a pending patch"
+        );
+    }
+
+    #[test]
     fn query_result_serializes_camel_case_for_the_frontend() {
         // web-rs/src/types.rs deserializes the query result with
         // rename_all = "camelCase"; serializing snake_case here breaks decoding
@@ -397,6 +446,7 @@ mod tests {
                 patches: &patches,
                 type_label: "OS",
                 status_override: None,
+                status_filter: None,
             }],
             &FilterParams::default(),
         );

@@ -12,6 +12,8 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
+use crate::error::truncate_body;
+
 /// Read-only scope for a patching-operations toolkit. `offline_access` is required
 /// to receive a refresh token so the operator does not re-authenticate hourly.
 const SCOPE: &str = "monitoring offline_access";
@@ -178,7 +180,7 @@ impl AuthState {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = truncate_body(&resp.text().await.unwrap_or_default());
             // Clear invalid refresh token so the next attempt forces interactive login.
             let _ = delete_keyring(KEYRING_USER_REFRESH);
             self.clear_tokens_locked();
@@ -210,6 +212,19 @@ impl AuthState {
     fn clear_tokens_locked(&self) {
         if let Ok(mut inner) = self.inner.write() {
             inner.tokens = None;
+        }
+    }
+
+    /// Marks the cached access token stale so the next `access_token()` call
+    /// refreshes it. The API client calls this when a request returns 401 with an
+    /// otherwise-unexpired token (revoked/invalidated server-side): staleness is
+    /// purely time-based, so without this the same dead token would be resent on
+    /// every retry until the budget is exhausted.
+    pub fn invalidate_access_token(&self) {
+        if let Ok(mut inner) = self.inner.write()
+            && let Some(tokens) = inner.tokens.as_mut()
+        {
+            tokens.expires_at = Utc::now() - Duration::seconds(1);
         }
     }
 
@@ -330,7 +345,7 @@ impl AuthState {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = truncate_body(&resp.text().await.unwrap_or_default());
             bail!("token exchange failed ({status}): {text}");
         }
 
@@ -353,6 +368,32 @@ impl AuthState {
             tokens: Some(TokenSet {
                 access_token: access_token.to_string(),
                 refresh_token: None,
+                expires_at: Utc::now() + Duration::seconds(3600),
+            }),
+        };
+        Self {
+            inner: Arc::new(RwLock::new(inner)),
+            http,
+        }
+    }
+
+    /// Like `seeded`, but with a refresh token + client id so a 401 can drive a
+    /// real `refresh()` round-trip against a mock token endpoint.
+    pub(crate) fn seeded_refreshable(
+        http: reqwest::Client,
+        base_url: String,
+        access_token: &str,
+        refresh_token: &str,
+        client_id: &str,
+    ) -> Self {
+        let inner = Inner {
+            base_url,
+            callback_port: 0,
+            client_id: Some(client_id.to_string()),
+            client_secret: None,
+            tokens: Some(TokenSet {
+                access_token: access_token.to_string(),
+                refresh_token: Some(refresh_token.to_string()),
                 expires_at: Utc::now() + Duration::seconds(3600),
             }),
         };

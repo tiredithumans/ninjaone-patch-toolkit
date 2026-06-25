@@ -58,21 +58,43 @@ fn default_auto_check() -> bool {
     true
 }
 
+/// Rejects an instance URL that would carry OAuth tokens, codes, and the client
+/// secret in cleartext. `https` is required everywhere except a loopback host,
+/// where `http` is allowed for local testing against a mock server.
+fn require_https_instance(url: &str) -> Result<(), UiError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|_| UiError::new(format!("instance URL is not a valid URL: {url}")))?;
+    let host = parsed.host_str().unwrap_or_default();
+    let is_loopback = matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1");
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback => Ok(()),
+        _ => Err(UiError::new(
+            "instance URL must use https:// (http is allowed only for localhost)",
+        )),
+    }
+}
+
 #[tauri::command]
 pub fn save_settings(
     state: State<'_, AppState>,
     args: SaveSettingsArgs,
 ) -> Result<SettingsView, UiError> {
+    let instance_base_url = args
+        .instance_base_url
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    require_https_instance(&instance_base_url)?;
+
+    let instance_changed;
     let snapshot = {
         let mut guard = state
             .settings
             .lock()
             .map_err(|_| UiError::new("settings state poisoned"))?;
-        guard.instance_base_url = args
-            .instance_base_url
-            .trim()
-            .trim_end_matches('/')
-            .to_string();
+        instance_changed = guard.instance_base_url != instance_base_url;
+        guard.instance_base_url = instance_base_url;
         guard.client_id = args
             .client_id
             .map(|c| c.trim().to_string())
@@ -91,8 +113,12 @@ pub fn save_settings(
         snapshot.callback_port,
     );
     // The instance may have changed — drop cached lookups so a different tenant
-    // doesn't inherit stale org/location/role names.
+    // doesn't inherit stale org/location/role names, and drop the cached query
+    // result so an export can't write the previous tenant's rows.
     state.clear_lookups_cache();
+    if instance_changed {
+        state.clear_last_result();
+    }
 
     match args.client_secret.map(|s| s.trim().to_string()) {
         Some(secret) if !secret.is_empty() => {
@@ -140,4 +166,21 @@ pub fn delete_preset(state: State<'_, AppState>, name: String) -> Result<Vec<Pre
     guard.presets.retain(|p| p.name != name);
     guard.save().map_err(UiError::from)?;
     Ok(guard.presets.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_https_instance;
+
+    #[test]
+    fn https_instance_is_required() {
+        assert!(require_https_instance("https://us2.ninjarmm.com").is_ok());
+        // Loopback may use http for local testing.
+        assert!(require_https_instance("http://127.0.0.1:8080").is_ok());
+        assert!(require_https_instance("http://localhost").is_ok());
+        // Cleartext to a real host, a non-http scheme, and a non-URL are rejected.
+        assert!(require_https_instance("http://eu.ninjarmm.com").is_err());
+        assert!(require_https_instance("ftp://us2.ninjarmm.com").is_err());
+        assert!(require_https_instance("not a url").is_err());
+    }
 }

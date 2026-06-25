@@ -22,6 +22,7 @@ pub async fn sign_in(state: State<'_, AppState>) -> Result<(), UiError> {
 #[tauri::command]
 pub async fn sign_out(state: State<'_, AppState>) -> Result<(), UiError> {
     state.clear_lookups_cache();
+    state.clear_last_result();
     state.auth.logout().map_err(UiError::from)
 }
 

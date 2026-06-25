@@ -50,8 +50,6 @@ pub struct Device {
     #[serde(default)]
     pub offline: Option<bool>,
     #[serde(default)]
-    pub last_contact: Option<f64>,
-    #[serde(default)]
     pub os: Option<OsInfo>,
 }
 
@@ -72,6 +70,10 @@ impl Device {
             .as_ref()
             .and_then(|o| o.needs_reboot)
             .unwrap_or(false)
+    }
+
+    pub fn is_offline(&self) -> bool {
+        self.offline.unwrap_or(false)
     }
 }
 
@@ -162,13 +164,11 @@ impl Patch {
     }
 
     pub fn released_at(&self) -> Option<DateTime<Utc>> {
-        self.release_timestamp
-            .and_then(|s| DateTime::<Utc>::from_timestamp(s as i64, 0))
+        self.release_timestamp.and_then(unix_to_datetime)
     }
 
     pub fn installed_at(&self) -> Option<DateTime<Utc>> {
-        self.installed_timestamp
-            .and_then(|s| DateTime::<Utc>::from_timestamp(s as i64, 0))
+        self.installed_timestamp.and_then(unix_to_datetime)
     }
 
     /// Human-friendly patch label combining KB, vendor, name and version.
@@ -193,6 +193,16 @@ impl Patch {
             parts.join(" · ")
         }
     }
+}
+
+/// NinjaOne returns release/install times as Unix **seconds**, but some endpoints
+/// have historically returned **milliseconds** for `*At` fields. A seconds value
+/// for any realistic date is below 1e11 (year 5138), so treat anything larger as
+/// milliseconds — otherwise an `from_timestamp(ms, 0)` yields a ~50,000-year date
+/// that silently breaks SLA aging.
+fn unix_to_datetime(ts: f64) -> Option<DateTime<Utc>> {
+    let secs = if ts >= 1e11 { ts / 1000.0 } else { ts };
+    DateTime::<Utc>::from_timestamp(secs as i64, 0)
 }
 
 /// Patch family the operator wants to list. Selects which API endpoints to query.
@@ -298,5 +308,32 @@ mod tests {
         assert_eq!(Severity::from_raw("Critical"), Severity::Critical);
         assert_eq!(Severity::from_raw("important"), Severity::Important);
         assert_eq!(Severity::from_raw("garbage"), Severity::Unknown);
+    }
+
+    fn patch_with_release(ts: f64) -> Patch {
+        Patch {
+            device_id: None,
+            kb_number: None,
+            name: None,
+            version: None,
+            product_vendor: None,
+            severity: None,
+            status: None,
+            patch_type: None,
+            release_timestamp: Some(ts),
+            installed_timestamp: None,
+        }
+    }
+
+    #[test]
+    fn millisecond_release_timestamp_normalizes_to_seconds() {
+        let secs = 1_700_000_000.0; // 2023-11-14, comfortably in Unix-seconds range
+        let from_secs = patch_with_release(secs).released_at();
+        let from_millis = patch_with_release(secs * 1000.0).released_at();
+        assert!(from_secs.is_some());
+        assert_eq!(
+            from_secs, from_millis,
+            "a millisecond value must map to the same instant as seconds"
+        );
     }
 }
