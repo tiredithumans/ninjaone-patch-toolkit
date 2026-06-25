@@ -60,6 +60,16 @@ fn fmt_dt(ts: Option<DateTime<Utc>>) -> Option<String> {
     ts.map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
 }
 
+/// Maps a raw NinjaOne patch status to the operator-facing label. NinjaOne uses
+/// `MANUAL` for patches pending approval; show that as `PENDING` so the table
+/// matches the Status filter (and NinjaOne's own UI, which labels them "Pending").
+fn display_status(raw: &str) -> String {
+    match raw {
+        "MANUAL" => "PENDING".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Builds detail rows from the given patch sources, resolving device/org/location/
 /// role/OS names and applying the client-side OS-name and free-text filters.
 pub fn build_rows(
@@ -111,8 +121,9 @@ pub fn build_rows(
             }
             let status = patch
                 .status
-                .clone()
-                .or_else(|| source.status_override.map(str::to_string))
+                .as_deref()
+                .or(source.status_override)
+                .map(display_status)
                 .unwrap_or_else(|| "UNKNOWN".to_string());
 
             rows.push(PatchRow {
@@ -232,7 +243,9 @@ pub fn build_compliance(
 
     let sla_cutoff = now - Duration::days(sla_days);
     for p in current_patches {
-        let is_pending = matches!(p.status.as_deref(), Some("PENDING") | Some("APPROVED"));
+        // NinjaOne uses MANUAL (pending approval) and APPROVED for current patches
+        // not yet installed — both count toward the pending backlog.
+        let is_pending = matches!(p.status.as_deref(), Some("MANUAL") | Some("APPROVED"));
         if !is_pending {
             continue;
         }
@@ -275,11 +288,11 @@ pub fn build_compliance(
 }
 
 /// Counts current pending/approved patches per device for compliance and the
-/// reboot/summary views.
+/// reboot/summary views. NinjaOne uses `MANUAL` for pending-approval patches.
 pub fn pending_counts(current_patches: &[Patch]) -> HashMap<i64, usize> {
     let mut counts: HashMap<i64, usize> = HashMap::new();
     for p in current_patches {
-        if matches!(p.status.as_deref(), Some("PENDING") | Some("APPROVED"))
+        if matches!(p.status.as_deref(), Some("MANUAL") | Some("APPROVED"))
             && let Some(id) = p.device_id
         {
             *counts.entry(id).or_default() += 1;
@@ -458,14 +471,39 @@ mod tests {
     }
 
     #[test]
+    fn manual_status_matches_pending_filter_and_displays_as_pending() {
+        use crate::model::PatchStatus;
+        // The "Pending" status maps to NinjaOne's "MANUAL"; a MANUAL patch must pass
+        // the Pending filter and render with a "PENDING" label.
+        let d = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d)]);
+        let maps = maps();
+        let patches = vec![patch(1, "MANUAL", "CRITICAL", Some(1))];
+        let pending_set = HashSet::from([PatchStatus::Pending.api_value()]);
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &patches,
+                type_label: "OS",
+                status_override: None,
+                status_filter: Some(&pending_set),
+            }],
+            &FilterParams::default(),
+        );
+        assert_eq!(rows.len(), 1, "a MANUAL patch matches the Pending filter");
+        assert_eq!(rows[0].status, "PENDING", "MANUAL renders as PENDING");
+    }
+
+    #[test]
     fn compliance_counts_compliant_and_aged_backlog() {
         let d1 = device(1, 10, "Windows Server 2022"); // has pending
         let d2 = device(2, 10, "Windows Server 2019"); // compliant
         let by_id = HashMap::from([(1, &d1), (2, &d2)]);
         let maps = maps();
         let current = vec![
-            patch(1, "PENDING", "CRITICAL", Some(45)),  // aged
-            patch(1, "APPROVED", "IMPORTANT", Some(2)), // fresh
+            patch(1, "MANUAL", "CRITICAL", Some(45)), // pending (MANUAL), aged
+            patch(1, "APPROVED", "IMPORTANT", Some(2)), // approved, fresh
         ];
         let counts = pending_counts(&current);
         let summaries = build_device_summaries(&[d1.clone(), d2.clone()], &counts, &maps);
@@ -486,7 +524,7 @@ mod tests {
         offline.offline = Some(true); // offline → unknown, must not count
         let by_id = HashMap::from([(1, &online), (2, &offline)]);
         let maps = maps();
-        let current = vec![patch(1, "PENDING", "CRITICAL", Some(1))];
+        let current = vec![patch(1, "MANUAL", "CRITICAL", Some(1))];
         let counts = pending_counts(&current);
         let summaries = build_device_summaries(&[online.clone(), offline.clone()], &counts, &maps);
         let buckets = build_compliance(&summaries, &current, &by_id, &maps, 30, Utc::now());

@@ -237,10 +237,13 @@ pub enum PatchStatus {
 }
 
 impl PatchStatus {
-    /// The status string NinjaOne returns/accepts for this state.
+    /// The status string NinjaOne returns/accepts for this state. NinjaOne's
+    /// `/queries/{os,software}-patches` use `MANUAL` for patches pending approval
+    /// (its UI labels them "Pending"), so the operator-facing "Pending" maps to
+    /// `MANUAL` — not the literal `PENDING`, which the API never returns.
     pub fn api_value(self) -> &'static str {
         match self {
-            Self::Pending => "PENDING",
+            Self::Pending => "MANUAL",
             Self::Approved => "APPROVED",
             Self::Rejected => "REJECTED",
             Self::Installed => "INSTALLED",
@@ -297,7 +300,7 @@ mod tests {
 
     #[test]
     fn status_api_value_and_installed_routing() {
-        assert_eq!(PatchStatus::Pending.api_value(), "PENDING");
+        assert_eq!(PatchStatus::Pending.api_value(), "MANUAL");
         assert_eq!(PatchStatus::Installed.api_value(), "INSTALLED");
         assert!(PatchStatus::Installed.is_installed());
         assert!(!PatchStatus::Approved.is_installed());
