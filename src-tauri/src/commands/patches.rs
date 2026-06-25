@@ -8,12 +8,17 @@ use tauri::{AppHandle, Emitter, State};
 use crate::api::ProgressFn;
 use crate::error::UiError;
 use crate::filter::FilterParams;
-use crate::model::{Device, Patch, PatchStatus, PatchType};
+use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
-    LookupMaps, PatchSource, QueryResult, build_compliance, build_device_summaries, build_rows,
-    pending_counts,
+    LookupMaps, PatchSource, QueryResult, QuerySummary, build_compliance, build_device_summaries,
+    build_rows, pending_counts,
 };
 use crate::state::AppState;
+
+/// Size of the first page of detail rows returned inline by `query_patches`. Must
+/// match the frontend's `PATCHES_PAGE_SIZE` so the seeded page fills the table's
+/// first page exactly (later pages come from `get_patch_rows`).
+const FIRST_PAGE_ROWS: usize = 100;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,7 +65,7 @@ pub async fn query_patches(
     app: AppHandle,
     args: PatchQueryArgs,
     query_id: Option<u64>,
-) -> Result<QueryResult, UiError> {
+) -> Result<QuerySummary, UiError> {
     let settings = state.settings_snapshot();
     let api = state.api.clone();
     let mut filter = args.filter;
@@ -235,8 +240,32 @@ pub async fn query_patches(
         generated_at: Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
     };
 
+    // Hand the frontend a lightweight summary (first page + rollups) and keep the
+    // full result in the cache for paging (`get_patch_rows`) and export — moving it
+    // in rather than cloning every row.
+    let summary = QuerySummary::from_result(&result, FIRST_PAGE_ROWS);
     if let Ok(mut slot) = state.last_result.lock() {
-        *slot = Some(result.clone());
+        *slot = Some(result);
     }
-    Ok(result)
+    Ok(summary)
+}
+
+/// Serves one page of detail rows from the cached query result so the frontend can
+/// page through a large fleet without receiving every row over IPC. Returns an
+/// empty page when there is no cached result or the offset is past the end.
+#[tauri::command]
+pub async fn get_patch_rows(
+    state: State<'_, AppState>,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<PatchRow>, UiError> {
+    let slot = state
+        .last_result
+        .lock()
+        .map_err(|_| UiError::new("result cache poisoned"))?;
+    let rows = slot
+        .as_ref()
+        .map(|r| r.rows.iter().skip(offset).take(limit).cloned().collect())
+        .unwrap_or_default();
+    Ok(rows)
 }
