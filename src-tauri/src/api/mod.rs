@@ -109,10 +109,14 @@ impl NinjaApiClient {
         }
     }
 
-    /// Cursor-paginated GET. Handles both bare array responses and the
-    /// `{ results, cursor }` envelope NinjaOne uses for `/queries/*`. The cursor is
-    /// accepted either as a bare string or as a `{ name, offset, ... }` object (the
-    /// shape the queries endpoints return), passing the `name` back as `cursor`.
+    /// Cursor-paginated GET covering NinjaOne's two pagination styles. The
+    /// `/queries/*` endpoints return a `{ results, cursor }` envelope (cursor is a
+    /// bare string or a `{ name, offset, ... }` object, fed back as `cursor`); the
+    /// core list endpoints (`/devices-detailed`, `/organizations`, `/locations`, …)
+    /// return a bare array and page via `after=<last id>` and `pageSize`, ending
+    /// when a page is shorter than `pageSize`. Without the `after` paging a fleet
+    /// with more than `pageSize` devices would load only the first page, so the
+    /// device-to-patch join would miss every device after the first page.
     pub async fn get_paginated<T: DeserializeOwned + Clone>(
         &self,
         path: &str,
@@ -120,6 +124,7 @@ impl NinjaApiClient {
     ) -> Result<Vec<T>> {
         let mut all: Vec<T> = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut after: Option<i64> = None;
 
         loop {
             let mut query: Vec<(&str, String)> = base_query.to_vec();
@@ -127,16 +132,35 @@ impl NinjaApiClient {
             if let Some(c) = &cursor {
                 query.push(("cursor", c.clone()));
             }
+            if let Some(a) = after {
+                query.push(("after", a.to_string()));
+            }
 
             let raw: Value = self.request_raw(Method::GET, path, &query, None).await?;
 
             match raw {
                 Value::Array(items) => {
+                    let len = items.len();
+                    // Capture the last record's id for the next `after` page before
+                    // the items are consumed.
+                    let last_id = items
+                        .last()
+                        .and_then(|v| v.get("id"))
+                        .and_then(Value::as_i64);
                     for item in items {
                         let v: T = serde_json::from_value(item).context("deserialize page item")?;
                         all.push(v);
                     }
-                    return Ok(all);
+                    // A short page is the last page. Also stop if the server can't
+                    // give a forward-moving `after` (no id / no progress) so a
+                    // misbehaving endpoint can't loop forever.
+                    if len < DEFAULT_PAGE_SIZE as usize {
+                        return Ok(all);
+                    }
+                    match last_id {
+                        Some(id) if after.is_none_or(|prev| id > prev) => after = Some(id),
+                        _ => return Ok(all),
+                    }
                 }
                 Value::Object(mut obj) => {
                     let results = obj
@@ -271,5 +295,47 @@ mod tests {
         let devices = client.devices(Some("org = 5")).await.expect("devices call");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id, 10);
+    }
+
+    #[tokio::test]
+    async fn devices_detailed_paginates_via_after_cursor() {
+        use crate::auth::AuthState;
+        use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Page 1: a full page (DEFAULT_PAGE_SIZE devices, ids 1..=500), no `after`.
+        let page1: Vec<_> = (1..=DEFAULT_PAGE_SIZE as i64)
+            .map(|i| json!({ "id": i }))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .and(query_param_is_missing("after"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page1))
+            .mount(&server)
+            .await;
+
+        // Page 2: after=<last id of page 1> returns a short page → stop.
+        let page2: Vec<_> = (501..=503).map(|i| json!({ "id": i })).collect();
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .and(query_param("after", DEFAULT_PAGE_SIZE.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page2))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        let client = NinjaApiClient::new(http, auth);
+
+        let devices = client.devices(None).await.expect("devices call");
+        assert_eq!(
+            devices.len(),
+            DEFAULT_PAGE_SIZE as usize + 3,
+            "must page past the first 500 instead of stopping"
+        );
+        assert_eq!(devices.first().unwrap().id, 1);
+        assert_eq!(devices.last().unwrap().id, 503);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "ninjaone-patch-toolkit-web"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 rust-version = "1.96"
 description = "Leptos CSR frontend for the NinjaOne Patch Toolkit"
