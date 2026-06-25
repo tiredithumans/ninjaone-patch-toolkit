@@ -118,6 +118,14 @@ pub struct SettingsView {
 pub struct Preset {
     pub name: String,
     pub filter: FilterParams,
+    /// Patch-query selectors restored alongside the filter facets. Optional for
+    /// backward compatibility with presets saved before they were captured.
+    #[serde(default)]
+    pub patch_type: Option<String>,
+    #[serde(default)]
+    pub statuses: Option<Vec<String>>,
+    #[serde(default)]
+    pub install_days: Option<i64>,
 }
 
 /// Incremental progress for an in-flight `query_patches`, delivered on the

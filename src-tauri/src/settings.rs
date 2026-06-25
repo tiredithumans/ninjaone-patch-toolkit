@@ -11,11 +11,21 @@ pub const DEFAULT_CALLBACK_PORT: u16 = 11434;
 pub const DEFAULT_INSTALL_WINDOW_DAYS: i64 = 30;
 pub const DEFAULT_SLA_DAYS: i64 = 30;
 
-/// A named, reusable filter combination.
+/// A named, reusable filter combination. The device/OS/search/severity facets live
+/// in `filter`; the patch-query selectors (type/status/install window) are stored
+/// alongside so a preset restores the whole query. The selectors are optional for
+/// backward compatibility — a preset saved before this field existed leaves the
+/// current Type/Status/install-window untouched when applied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preset {
     pub name: String,
     pub filter: FilterParams,
+    #[serde(default)]
+    pub patch_type: Option<String>,
+    #[serde(default)]
+    pub statuses: Option<Vec<String>>,
+    #[serde(default)]
+    pub install_days: Option<i64>,
 }
 
 fn default_true() -> bool {

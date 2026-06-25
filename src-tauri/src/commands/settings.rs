@@ -149,7 +149,9 @@ pub fn save_preset(state: State<'_, AppState>, preset: Preset) -> Result<Vec<Pre
         .lock()
         .map_err(|_| UiError::new("settings state poisoned"))?;
     if let Some(existing) = guard.presets.iter_mut().find(|p| p.name == preset.name) {
-        existing.filter = preset.filter;
+        // Replace the whole record so re-saving a name also updates the patch-query
+        // selectors, not just `filter`.
+        *existing = preset;
     } else {
         guard.presets.push(preset);
     }

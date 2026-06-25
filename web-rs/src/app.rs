@@ -388,6 +388,17 @@ impl AppState {
 
     fn apply_preset(self, p: Preset) {
         let f = p.filter;
+        // Restore the patch-query selectors only when the preset captured them, so a
+        // legacy preset leaves the current Type/Status/install-window untouched.
+        if let Some(pt) = p.patch_type {
+            self.patch_type.set(pt);
+        }
+        if let Some(st) = p.statuses {
+            self.statuses.set(st);
+        }
+        if let Some(d) = p.install_days {
+            self.install_days.set(d);
+        }
         self.role_id.set(f.role_id);
         self.selected_classes.set(f.node_classes);
         self.selected_severities.set(f.severities);
@@ -1031,6 +1042,9 @@ fn PresetRow() -> impl IntoView {
         let preset = Preset {
             name: name.trim().to_string(),
             filter: state.current_filter(),
+            patch_type: Some(state.patch_type.get_untracked()),
+            statuses: Some(state.statuses.get_untracked()),
+            install_days: Some(state.install_days.get_untracked()),
         };
         spawn_local(async move {
             match api::save_preset(preset).await {
