@@ -69,6 +69,9 @@ pub struct PatchRow {
     pub installed_date: Option<String>,
 }
 
+/// A device row for the Needs-Reboot view. The backend only sends the
+/// reboot-needing subset, so this mirror omits the `needsReboot` flag (always true
+/// here) — extra fields in the JSON are ignored on deserialize.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSummary {
@@ -77,7 +80,6 @@ pub struct DeviceSummary {
     pub location: Option<String>,
     pub device_role: Option<String>,
     pub os_name: Option<String>,
-    pub needs_reboot: bool,
     pub pending_count: usize,
 }
 
@@ -92,11 +94,19 @@ pub struct ComplianceBucket {
     pub aged_critical: usize,
 }
 
+/// The summary the backend returns from `query_patches`: the first page of detail
+/// rows plus the rollups. The remaining detail rows stay in the backend cache and
+/// are fetched a page at a time via `get_patch_rows`, so a large fleet doesn't ship
+/// every row over IPC. Mirrors the backend `QuerySummary`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResult {
+    /// First page of detail rows; seeds the table without an extra round trip.
     pub rows: Vec<PatchRow>,
-    pub devices: Vec<DeviceSummary>,
+    /// Total detail-row count — the table pages over this, not `rows.len()`.
+    pub rows_total: usize,
+    /// Only the devices flagged for reboot (all the reboot view needs).
+    pub reboot_devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
     pub devices_total: usize,
     pub generated_at: String,

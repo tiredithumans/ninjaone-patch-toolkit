@@ -108,6 +108,9 @@ pub struct AppState {
     result: RwSignal<Option<QueryResult>>,
     /// Zero-based page index for the paginated Patches table.
     patches_page: RwSignal<usize>,
+    /// The detail rows for the currently displayed page, fetched from the backend
+    /// cache via `get_patch_rows` (the full row set is never shipped over IPC).
+    page_rows: RwSignal<Vec<PatchRow>>,
     presets: RwSignal<Vec<Preset>>,
     preset_name: RwSignal<String>,
 
@@ -176,6 +179,7 @@ impl AppState {
             refresh_secs: RwSignal::new(0),
             result: RwSignal::new(None),
             patches_page: RwSignal::new(0),
+            page_rows: RwSignal::new(Vec::new()),
             presets: RwSignal::new(Vec::new()),
             preset_name: RwSignal::new(String::new()),
             f_instance: RwSignal::new("https://us2.ninjarmm.com".to_string()),
@@ -358,12 +362,23 @@ impl AppState {
         spawn_local(async move {
             match api::query_patches(args, seq).await {
                 Ok(r) => {
-                    self.result.set(Some(r));
                     // Jump back to page 1 on a manual run; an auto-refresh keeps the
-                    // current page (it's clamped if the new result is shorter).
-                    if !silent {
-                        self.patches_page.set(0);
+                    // current page, clamped in case the new result is shorter.
+                    let page_count = r.rows_total.div_ceil(PATCHES_PAGE_SIZE).max(1);
+                    let page = if silent {
+                        self.patches_page.get_untracked().min(page_count - 1)
+                    } else {
+                        0
+                    };
+                    self.patches_page.set(page);
+                    // Page 0 ships inline with the summary, so seed it directly; any
+                    // other page (only reachable via a silent refresh) is fetched.
+                    if page == 0 {
+                        self.page_rows.set(r.rows.clone());
+                    } else {
+                        self.fetch_page(page);
                     }
+                    self.result.set(Some(r));
                 }
                 Err(e) => self.notify(Toast::err(e)),
             }
@@ -372,6 +387,18 @@ impl AppState {
             self.last_duration_ms
                 .set(Some(js_sys::Date::now() - started));
             flag.set(false);
+        });
+    }
+
+    /// Loads the detail rows for `page` from the backend's cached result into
+    /// `page_rows`. Paging fetches just the visible window rather than holding the
+    /// whole row set in the frontend.
+    fn fetch_page(self, page: usize) {
+        spawn_local(async move {
+            match api::get_patch_rows(page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE).await {
+                Ok(rows) => self.page_rows.set(rows),
+                Err(e) => self.notify(Toast::err(e)),
+            }
         });
     }
 
@@ -1380,9 +1407,7 @@ fn Results() -> impl IntoView {
             r.as_ref().map(|r| {
                 format!(
                     "{} patch rows · {} devices · generated {}",
-                    r.rows.len(),
-                    r.devices_total,
-                    r.generated_at
+                    r.rows_total, r.devices_total, r.generated_at
                 )
             })
         })
@@ -1423,32 +1448,18 @@ fn Results() -> impl IntoView {
 #[component]
 fn PatchesTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // Borrow via `.with` so the table reads lengths and the current page slice
-    // without cloning the entire Vec<PatchRow> on every render.
+    // The total row count comes from the summary; the visible page lives in
+    // `page_rows`, fetched from the backend cache rather than held in full here.
     let total = move || {
         state
             .result
-            .with(|r| r.as_ref().map_or(0, |r| r.rows.len()))
+            .with(|r| r.as_ref().map_or(0, |r| r.rows_total))
     };
     let page_count = move || total().div_ceil(PATCHES_PAGE_SIZE).max(1);
     // Clamp the stored page so a shorter result (e.g. after an auto-refresh) can't
     // leave us past the last page.
     let page = move || state.patches_page.get().min(page_count() - 1);
-    let rows = move || {
-        let start = page() * PATCHES_PAGE_SIZE;
-        state.result.with(|r| {
-            r.as_ref()
-                .map(|r| {
-                    r.rows
-                        .iter()
-                        .skip(start)
-                        .take(PATCHES_PAGE_SIZE)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        })
-    };
+    let rows = move || state.page_rows.get();
     let pager_summary = move || {
         let t = total();
         let start = page() * PATCHES_PAGE_SIZE;
@@ -1462,13 +1473,15 @@ fn PatchesTable() -> impl IntoView {
             page_count(),
         )
     };
-    let go_prev = move |_| state.patches_page.update(|p| *p = p.saturating_sub(1));
+    // Page navigation updates the index and fetches that page's rows on demand.
+    let go_to = move |target: usize| {
+        state.patches_page.set(target);
+        state.fetch_page(target);
+    };
+    let go_prev = move |_| go_to(page().saturating_sub(1));
     let go_next = move |_| {
         let last = page_count().saturating_sub(1);
-        state.patches_page.update(|p| {
-            let cur = (*p).min(last);
-            *p = (cur + 1).min(last);
-        });
+        go_to((page().min(last) + 1).min(last));
     };
 
     view! {
@@ -1635,26 +1648,19 @@ fn ComplianceTable() -> impl IntoView {
 #[component]
 fn RebootTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // Filter then clone via `.with` so only the needs-reboot subset is cloned,
-    // not the full device list, and the emptiness check clones nothing.
+    // The backend already trimmed the device list to the needs-reboot subset, so
+    // clone that directly; the emptiness check clones nothing.
     let devices = move || {
         state.result.with(|r| {
             r.as_ref()
-                .map(|r| {
-                    r.devices
-                        .iter()
-                        .filter(|d| d.needs_reboot)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                })
+                .map(|r| r.reboot_devices.clone())
                 .unwrap_or_default()
         })
     };
     let has_devices = move || {
-        state.result.with(|r| {
-            r.as_ref()
-                .is_some_and(|r| r.devices.iter().any(|d| d.needs_reboot))
-        })
+        state
+            .result
+            .with(|r| r.as_ref().is_some_and(|r| !r.reboot_devices.is_empty()))
     };
 
     view! {
