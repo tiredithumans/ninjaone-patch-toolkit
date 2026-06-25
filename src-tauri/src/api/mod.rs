@@ -75,8 +75,10 @@ impl NinjaApiClient {
                 continue;
             }
             if status == StatusCode::UNAUTHORIZED && attempt < MAX_RETRIES {
-                // Access token may have been invalidated server-side — force a
-                // refresh on the next attempt.
+                // The token was rejected server-side. Staleness is time-based, so
+                // invalidate the cached token to force access_token() to refresh
+                // on the next attempt instead of resending the same dead token.
+                self.auth.invalidate_access_token();
                 attempt += 1;
                 continue;
             }
@@ -267,6 +269,56 @@ mod tests {
         let orgs = client.organizations().await.expect("organizations call");
         let names: Vec<_> = orgs.into_iter().map(|o| o.name).collect();
         assert_eq!(names, vec!["Alpha", "Beta"]);
+    }
+
+    #[tokio::test]
+    async fn retries_with_refreshed_token_after_401() {
+        use crate::auth::AuthState;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // The cached (but server-invalidated) token is rejected.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .and(header("authorization", "Bearer stale-token"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        // The 401 must drive a refresh that exchanges the refresh token for a new
+        // access token (no refresh_token in the response → no keyring write).
+        Mock::given(method("POST"))
+            .and(path("/ws/oauth/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "fresh-token",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+
+        // The retry must use the refreshed token, not the stale one.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .and(header("authorization", "Bearer fresh-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{ "id": 7 }])))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded_refreshable(
+            http.clone(),
+            server.uri(),
+            "stale-token",
+            "refresh-abc",
+            "client-1",
+        );
+        let client = NinjaApiClient::new(http, auth);
+
+        let devices = client.devices(None).await.expect("devices call");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, 7, "must retry with the refreshed token");
     }
 
     #[tokio::test]
