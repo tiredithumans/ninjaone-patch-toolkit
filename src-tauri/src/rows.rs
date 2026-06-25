@@ -801,4 +801,107 @@ mod tests {
         let compliance = build_compliance(&[], &[], &by_id, &maps, 30, Utc::now());
         assert!(compliance.is_empty());
     }
+
+    fn assert_keys_present(value: &serde_json::Value, required: &[&str], what: &str) {
+        let obj = value
+            .as_object()
+            .unwrap_or_else(|| panic!("{what} did not serialize to a JSON object"));
+        for key in required {
+            assert!(
+                obj.contains_key(*key),
+                "{what} is missing frontend-required key `{key}` — web-rs/src/types.rs and the \
+                 backend struct have drifted (a renamed/dropped field would silently break the UI)"
+            );
+        }
+    }
+
+    /// Pins the IPC wire contract: every key the frontend's mirror DTOs in
+    /// `web-rs/src/types.rs` deserialize must be present in the backend's serialized
+    /// output. Renaming/removing a backend field the UI reads fails here, before a
+    /// user's session silently loses a column, instead of relying on a manual review
+    /// of the two independent crates staying in sync.
+    #[test]
+    fn serialized_shapes_carry_every_frontend_required_key() {
+        let d = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d)]);
+        let maps = maps();
+        let patches = vec![patch(1, "MANUAL", "CRITICAL", Some(1))];
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &patches,
+                type_label: "OS",
+                status_override: None,
+                status_filter: None,
+            }],
+            &FilterParams::default(),
+        );
+        assert_keys_present(
+            &serde_json::to_value(&rows[0]).unwrap(),
+            &[
+                "deviceName",
+                "organization",
+                "location",
+                "deviceRole",
+                "osName",
+                "patchType",
+                "kb",
+                "name",
+                "severity",
+                "status",
+                "releaseDate",
+                "installedDate",
+            ],
+            "PatchRow",
+        );
+
+        let summaries = build_device_summaries(&[d.clone()], &pending_counts(&patches), &maps);
+        assert_keys_present(
+            &serde_json::to_value(&summaries[0]).unwrap(),
+            &[
+                "deviceName",
+                "organization",
+                "location",
+                "deviceRole",
+                "osName",
+                "pendingCount",
+            ],
+            "DeviceSummary",
+        );
+
+        let compliance = build_compliance(&summaries, &patches, &by_id, &maps, 30, Utc::now());
+        assert_keys_present(
+            &serde_json::to_value(&compliance[0]).unwrap(),
+            &[
+                "organization",
+                "devicesTotal",
+                "devicesCompliant",
+                "compliancePct",
+                "pendingCritical",
+                "agedCritical",
+            ],
+            "ComplianceBucket",
+        );
+
+        let result = QueryResult {
+            rows,
+            devices: summaries,
+            compliance,
+            devices_total: 1,
+            generated_at: "2026-01-01 00:00:00 UTC".into(),
+        };
+        assert_keys_present(
+            &serde_json::to_value(QuerySummary::from_result(&result, 100)).unwrap(),
+            &[
+                "rows",
+                "rowsTotal",
+                "rebootDevices",
+                "compliance",
+                "devicesTotal",
+                "generatedAt",
+            ],
+            "QuerySummary",
+        );
+    }
 }
