@@ -28,3 +28,15 @@ impl std::fmt::Display for UiError {
         f.write_str(&self.message)
     }
 }
+
+/// Caps a server-returned body before it goes into a log line or a user-facing
+/// error message. Responses can be large and may echo back request parameters,
+/// so neither the toast nor the trace log should carry the whole thing.
+pub(crate) fn truncate_body(s: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut out: String = s.chars().take(MAX_CHARS).collect();
+    if out.len() < s.len() {
+        out.push('…');
+    }
+    out
+}

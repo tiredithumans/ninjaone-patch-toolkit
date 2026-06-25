@@ -12,6 +12,8 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
+use crate::error::truncate_body;
+
 /// Read-only scope for a patching-operations toolkit. `offline_access` is required
 /// to receive a refresh token so the operator does not re-authenticate hourly.
 const SCOPE: &str = "monitoring offline_access";
@@ -178,7 +180,7 @@ impl AuthState {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = truncate_body(&resp.text().await.unwrap_or_default());
             // Clear invalid refresh token so the next attempt forces interactive login.
             let _ = delete_keyring(KEYRING_USER_REFRESH);
             self.clear_tokens_locked();
@@ -343,7 +345,7 @@ impl AuthState {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = truncate_body(&resp.text().await.unwrap_or_default());
             bail!("token exchange failed ({status}): {text}");
         }
 

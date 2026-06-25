@@ -11,6 +11,7 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::auth::AuthState;
+use crate::error::truncate_body;
 
 const DEFAULT_PAGE_SIZE: u32 = 500;
 const MAX_RETRIES: u8 = 3;
@@ -84,7 +85,7 @@ impl NinjaApiClient {
                 continue;
             }
             if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
+                let text = truncate_body(&resp.text().await.unwrap_or_default());
                 warn!(%method, %url, %status, body = %text, "http error");
                 bail!("{method} {url} failed ({status}): {text}");
             }
@@ -203,7 +204,10 @@ impl NinjaApiClient {
                     }
                 }
                 Value::Null => return Ok(all),
-                other => bail!("unexpected paginated body shape: {other}"),
+                other => bail!(
+                    "unexpected paginated body shape: {}",
+                    truncate_body(&other.to_string())
+                ),
             }
         }
     }
