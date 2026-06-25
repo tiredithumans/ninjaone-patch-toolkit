@@ -15,6 +15,14 @@ pub struct FilterParams {
     /// Patch severities to keep (e.g. `CRITICAL`); empty = all.
     #[serde(default)]
     pub severities: Vec<String>,
+    /// Release-date filter: relative window (last N days) and/or absolute bounds
+    /// (Unix seconds) for a custom range.
+    #[serde(default)]
+    pub release_within_days: Option<i64>,
+    #[serde(default)]
+    pub release_after: Option<i64>,
+    #[serde(default)]
+    pub release_before: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
