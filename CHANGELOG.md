@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-25
+
 ### Added
 
 - **Release date filter in the Patch section.** Narrow patches by when they were
