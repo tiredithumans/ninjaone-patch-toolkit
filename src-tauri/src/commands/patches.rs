@@ -63,7 +63,12 @@ pub async fn query_patches(
 ) -> Result<QueryResult, UiError> {
     let settings = state.settings_snapshot();
     let api = state.api.clone();
-    let filter = args.filter;
+    let mut filter = args.filter;
+    // Resolve the relative release-date window into an absolute lower bound; the
+    // filter is applied client-side in build_rows, which has no clock.
+    if let Some(days) = filter.release_within_days {
+        filter.release_after = Some((Utc::now() - Duration::days(days.max(0))).timestamp());
+    }
     // The device query honors the node-class facet (`class in (...)`); the patch/
     // install queries don't (NinjaOne's /queries/* ignore `class`), so they use a
     // class-less filter and the node-class facet is reapplied client-side via the

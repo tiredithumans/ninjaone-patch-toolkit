@@ -95,6 +95,10 @@ pub struct AppState {
     selected_severities: RwSignal<Vec<String>>,
     os_name: RwSignal<String>,
     search: RwSignal<String>,
+    /// Release-date filter: "" (any), "1"/"7"/"30"/"90" (last N days), or "custom".
+    release_window: RwSignal<String>,
+    release_after_date: RwSignal<String>,
+    release_before_date: RwSignal<String>,
 
     patch_type: RwSignal<String>,
     statuses: RwSignal<Vec<String>>,
@@ -163,6 +167,9 @@ impl AppState {
             selected_severities: RwSignal::new(Vec::new()),
             os_name: RwSignal::new(String::new()),
             search: RwSignal::new(String::new()),
+            release_window: RwSignal::new(String::new()),
+            release_after_date: RwSignal::new(String::new()),
+            release_before_date: RwSignal::new(String::new()),
             patch_type: RwSignal::new("ALL".to_string()),
             statuses: RwSignal::new(vec!["PENDING".to_string()]),
             install_days: RwSignal::new(30),
@@ -280,6 +287,17 @@ impl AppState {
     }
 
     fn current_filter(self) -> FilterParams {
+        let window = self.release_window.get_untracked();
+        let (release_within_days, release_after, release_before) = match window.as_str() {
+            "1" | "7" | "30" | "90" => (window.parse::<i64>().ok(), None, None),
+            "custom" => (
+                None,
+                date_to_epoch(&self.release_after_date.get_untracked()),
+                // Include the whole "before" day (end of day in UTC).
+                date_to_epoch(&self.release_before_date.get_untracked()).map(|e| e + 86_399),
+            ),
+            _ => (None, None, None),
+        };
         FilterParams {
             organization_id: self.org_id.get_untracked(),
             location_id: self.loc_id.get_untracked(),
@@ -288,6 +306,9 @@ impl AppState {
             os_name_contains: non_empty(self.os_name.get_untracked()),
             search: non_empty(self.search.get_untracked()),
             severities: self.selected_severities.get_untracked(),
+            release_within_days,
+            release_after,
+            release_before,
         }
     }
 
@@ -408,6 +429,24 @@ impl AppState {
         self.selected_severities.set(f.severities);
         self.os_name.set(f.os_name_contains.unwrap_or_default());
         self.search.set(f.search.unwrap_or_default());
+        // Restore the release-date filter UI from the stored bounds.
+        match (f.release_within_days, f.release_after, f.release_before) {
+            (Some(d), _, _) => {
+                self.release_window.set(d.to_string());
+                self.release_after_date.set(String::new());
+                self.release_before_date.set(String::new());
+            }
+            (None, after, before) if after.is_some() || before.is_some() => {
+                self.release_window.set("custom".to_string());
+                self.release_after_date.set(epoch_to_date(after));
+                self.release_before_date.set(epoch_to_date(before));
+            }
+            _ => {
+                self.release_window.set(String::new());
+                self.release_after_date.set(String::new());
+                self.release_before_date.set(String::new());
+            }
+        }
         // Load the org's locations, then restore the saved location.
         self.org_id.set(f.organization_id);
         self.loc_id.set(None);
@@ -1081,6 +1120,44 @@ fn Filters() -> impl IntoView {
                     on:input=move |ev| state.search.set(event_target_value(&ev))
                 />
             </label>
+            <div class="controls">
+                <label class="inline">
+                    "Released"
+                    <select
+                        prop:value=move || state.release_window.get()
+                        on:change=move |ev| state.release_window.set(event_target_value(&ev))
+                    >
+                        <option value="">"Any time"</option>
+                        <option value="1">"Last 24 hours"</option>
+                        <option value="7">"Last 7 days"</option>
+                        <option value="30">"Last 30 days"</option>
+                        <option value="90">"Last 90 days"</option>
+                        <option value="custom">"Custom range…"</option>
+                    </select>
+                </label>
+                <Show when=move || state.release_window.get() == "custom">
+                    <label class="inline">
+                        "After"
+                        <input
+                            type="date"
+                            prop:value=move || state.release_after_date.get()
+                            on:change=move |ev| {
+                                state.release_after_date.set(event_target_value(&ev))
+                            }
+                        />
+                    </label>
+                    <label class="inline">
+                        "Before"
+                        <input
+                            type="date"
+                            prop:value=move || state.release_before_date.get()
+                            on:change=move |ev| {
+                                state.release_before_date.set(event_target_value(&ev))
+                            }
+                        />
+                    </label>
+                </Show>
+            </div>
             <Show when=installed_selected>
                 <label class="inline">
                     "Installed within (days)"
@@ -1656,6 +1733,32 @@ fn Toaster() -> impl IntoView {
 
 fn parse_opt(s: &str) -> Option<i64> {
     s.trim().parse().ok()
+}
+
+/// Parses a `yyyy-mm-dd` date string to Unix seconds (UTC midnight), or `None`.
+fn date_to_epoch(date: &str) -> Option<i64> {
+    let trimmed = date.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let ms = js_sys::Date::parse(trimmed);
+    if ms.is_nan() {
+        None
+    } else {
+        Some((ms / 1000.0) as i64)
+    }
+}
+
+/// Formats Unix seconds back to a `yyyy-mm-dd` date string (UTC), or "" for `None`.
+fn epoch_to_date(epoch: Option<i64>) -> String {
+    let Some(e) = epoch else {
+        return String::new();
+    };
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64((e * 1000) as f64));
+    d.to_iso_string()
+        .as_string()
+        .map(|s| s.chars().take(10).collect())
+        .unwrap_or_default()
 }
 
 /// Formats a count with thousands separators (e.g. `12300` → `12,300`).
