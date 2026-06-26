@@ -241,9 +241,12 @@ secrets are **not** stored there — see below).
   outside Tauri so an undefined global never throws, and `App` startup branches — under Tauri it runs
   the auth/lookups/settings flow; in a browser it sets `web_mode`, fills the static OS-type facet
   from `demo::sample_node_classes()`, and calls `load_demo()`. `web-rs/src/demo.rs` is the **only**
-  source of sample data — a pure `QueryResult` builder (no `js_sys`/IPC), so it host-tests via
-  `just web-test`. The "Load sample data" button calls the same `load_demo()`; `web_mode` disables the
-  backend-only actions (sign-in, live query, export). The Pages build (`just web-build-pages`,
+  source of sample data — pure builders (no `js_sys`/IPC), so they host-test via `just web-test`.
+  `load_demo()` seeds the org/role/location/OS-type lookups from the sample and resets the filters;
+  **Run query** routes to `run_demo_query` → `demo::filtered_result(...)`, which mirrors the backend's
+  *display* filtering (identity/class/text facets + date windows) over the sample rows so the demo's
+  controls actually filter — Compliance/Reboot stay representative (narrowed only by org). `web_mode`
+  disables the backend-only actions (sign-in, **export**). The Pages build (`just web-build-pages`,
   `.github/workflows/pages.yml`) sets the subpath base href via `--public-url` — **never** put
   `public_url` in `Trunk.toml`, or Tauri's relative-dist webview breaks. Pages deploys only from
   `main`; backend features (queries, export, auth) are desktop-only and intentionally inert in the

@@ -16,7 +16,11 @@ version and start a fresh `[Unreleased]`.
 - **Demo mode with sample data.** A **Load sample data** button fills the patch,
   compliance, and needs-reboot views with a representative fictional fleet — no
   NinjaOne account or sign-in required — so you can explore the UI (and capture
-  screenshots) without exposing real fleet data.
+  screenshots) without exposing real fleet data. The filter controls work too:
+  Organization, Location, Device Role, OS Type, status, severity, type, search, and
+  the date windows all filter the sample (press **Run query**) just like a live
+  query would. Compliance and Needs-Reboot stay representative, narrowing by
+  organization.
 - **Live web demo.** The frontend now also runs as a browser-only demo published to
   GitHub Pages at <https://tiredithumans.github.io/ninjaone-patch-toolkit/>; it loads
   the sample data automatically. Sign-in, live NinjaOne queries, and Excel export
