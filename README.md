@@ -86,6 +86,9 @@ On first launch open **Settings**, pick your **Region/Instance** (e.g. `us2`), p
 **Client ID** (and Secret if applicable), then **Sign in** to complete the PKCE browser
 flow.
 
+Sign-in hanging, a 404, an empty export, or blank fields? See
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
 ## Build & verify
 
 ```sh

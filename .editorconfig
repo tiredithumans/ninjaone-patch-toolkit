@@ -1,0 +1,25 @@
+# EditorConfig — consistent whitespace across editors/OSes (https://editorconfig.org).
+# Rust formatting is owned by rustfmt (`just fmt`); this just sets the basics so a
+# non-rustfmt editor and Windows checkouts don't introduce CRLF/whitespace churn.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{toml,yml,yaml,json}]
+indent_size = 2
+
+[*.md]
+# Markdown uses trailing whitespace for hard line breaks — don't strip it.
+trim_trailing_whitespace = false
+
+[justfile]
+indent_size = 4
+
+[Makefile]
+indent_style = tab

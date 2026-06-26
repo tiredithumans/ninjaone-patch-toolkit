@@ -153,6 +153,17 @@ jobs:
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -color
 
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # The Claude hook scripts gate commits/docs locally; lint them in CI too so a
+      # broken hook is caught here, not when it silently fails to fire. shellcheck is
+      # preinstalled on the ubuntu-latest runner.
+      - name: shellcheck
+        run: shellcheck .claude/hooks/*.sh
+
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest
