@@ -100,6 +100,45 @@ pub struct ComplianceBucket {
     pub aged_critical: usize,
 }
 
+// Backend also sends patchType, severityRank and latestFailureTs; serde ignores
+// undeclared fields. Only what the failures table renders is mirrored here.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailureGroup {
+    pub kb: Option<String>,
+    pub name: String,
+    pub severity: String,
+    pub affected_devices: usize,
+    /// Every affected device name (the full list, not a sample).
+    pub device_names: Vec<String>,
+    pub latest_failure: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeverityCounts {
+    pub critical: usize,
+    pub important: usize,
+    pub moderate: usize,
+    pub low: usize,
+    pub optional: usize,
+    pub unknown: usize,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSeverity {
+    pub organization: String,
+    pub counts: SeverityCounts,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgeBucket {
+    pub label: String,
+    pub count: usize,
+}
+
 /// The summary the backend returns from `query_patches`: the first page of detail
 /// rows plus the rollups. The remaining detail rows stay in the backend cache and
 /// are fetched a page at a time via `get_patch_rows`, so a large fleet doesn't ship
@@ -114,6 +153,12 @@ pub struct QueryResult {
     /// Only the devices flagged for reboot (all the reboot view needs).
     pub reboot_devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// FAILED-install rollup (empty unless the FAILED status was queried).
+    pub failures: Vec<FailureGroup>,
+    /// Per-org pending-patch severity breakdown for the dashboard charts.
+    pub severity_by_org: Vec<OrgSeverity>,
+    /// Pending-patch age histogram for the dashboard charts.
+    pub age_buckets: Vec<AgeBucket>,
     pub devices_total: usize,
     pub generated_at: String,
 }

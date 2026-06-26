@@ -5,6 +5,7 @@ mod error;
 mod export;
 mod filter;
 mod model;
+mod report;
 mod rows;
 mod settings;
 mod state;
@@ -48,6 +49,7 @@ pub fn run() {
             commands::patches::query_patches,
             commands::patches::get_patch_rows,
             commands::export::export_patches_xlsx,
+            commands::export::export_report_html,
             commands::update::check_for_update,
             commands::update::install_update,
         ])

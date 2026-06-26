@@ -4,6 +4,7 @@
 //!
 //! Adapted from `ninjaone-patch-dashboard`'s `snapshot.rs` device↔patch join.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
@@ -309,6 +310,207 @@ pub fn pending_counts(current_patches: &[Patch]) -> HashMap<i64, usize> {
     counts
 }
 
+/// A fleet-wide rollup of FAILED install records grouped by patch, so the operator
+/// can see which patches are failing across the most devices during a patch cycle.
+/// Built from the FAILED rows already present in the result — no extra fetch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailureGroup {
+    pub patch_type: String,
+    pub kb: Option<String>,
+    pub name: String,
+    pub severity: String,
+    pub severity_rank: u8,
+    /// Distinct devices the patch failed on (the headline count).
+    pub affected_devices: usize,
+    /// Every affected device name, so the table and Excel/HTML export carry the
+    /// complete list (not a truncated sample).
+    pub device_names: Vec<String>,
+    pub latest_failure: Option<String>,
+    pub latest_failure_ts: Option<i64>,
+}
+
+/// Pending-patch counts by MSRC severity bucket, for the dashboard breakdown.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeverityCounts {
+    pub critical: usize,
+    pub important: usize,
+    pub moderate: usize,
+    pub low: usize,
+    pub optional: usize,
+    pub unknown: usize,
+}
+
+/// A per-organization pending-patch severity breakdown for the dashboard charts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSeverity {
+    pub organization: String,
+    pub counts: SeverityCounts,
+}
+
+/// One bucket of the pending-patch age histogram (by release age).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgeBucket {
+    pub label: String,
+    pub count: usize,
+}
+
+/// Whether a current-patch status counts toward the pending backlog. NinjaOne uses
+/// `MANUAL` (pending approval) and `APPROVED` for patches not yet installed.
+fn is_pending(status: Option<&str>) -> bool {
+    matches!(status, Some("MANUAL") | Some("APPROVED"))
+}
+
+/// Groups the FAILED detail rows by patch (`patch_type` + `kb` + `name`), counting
+/// the distinct devices each failed on, the most recent failure, and the full list
+/// of affected device names. Sorted by affected-device count then severity, desc.
+pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
+    struct Acc {
+        patch_type: String,
+        kb: Option<String>,
+        name: String,
+        severity: String,
+        severity_rank: u8,
+        devices: HashSet<i64>,
+        device_names: Vec<String>,
+        latest_ts: Option<i64>,
+        latest_date: Option<String>,
+    }
+    let mut groups: HashMap<(String, Option<String>, String), Acc> = HashMap::new();
+    for r in rows {
+        if r.status != "FAILED" {
+            continue;
+        }
+        let acc = groups
+            .entry((r.patch_type.clone(), r.kb.clone(), r.name.clone()))
+            .or_insert_with(|| Acc {
+                patch_type: r.patch_type.clone(),
+                kb: r.kb.clone(),
+                name: r.name.clone(),
+                severity: r.severity.clone(),
+                severity_rank: r.severity_rank,
+                devices: HashSet::new(),
+                device_names: Vec::new(),
+                latest_ts: None,
+                latest_date: None,
+            });
+        // Count distinct devices by id, but only add a name the first time we see
+        // that device, so the name list has no duplicates.
+        if acc.devices.insert(r.device_id) {
+            acc.device_names.push(r.device_name.clone());
+        }
+        // Surface the highest severity seen for the group (records can disagree).
+        if r.severity_rank > acc.severity_rank {
+            acc.severity_rank = r.severity_rank;
+            acc.severity = r.severity.clone();
+        }
+        if let Some(ts) = r.installed_ts
+            && acc.latest_ts.map(|cur| ts > cur).unwrap_or(true)
+        {
+            acc.latest_ts = Some(ts);
+            acc.latest_date = r.installed_date.clone();
+        }
+    }
+    let mut out: Vec<FailureGroup> = groups
+        .into_values()
+        .map(|a| FailureGroup {
+            patch_type: a.patch_type,
+            kb: a.kb,
+            name: a.name,
+            severity: a.severity,
+            severity_rank: a.severity_rank,
+            affected_devices: a.devices.len(),
+            device_names: a.device_names,
+            latest_failure: a.latest_date,
+            latest_failure_ts: a.latest_ts,
+        })
+        .collect();
+    out.sort_by_cached_key(|g| (Reverse(g.affected_devices), Reverse(g.severity_rank)));
+    out
+}
+
+/// Buckets pending (MANUAL/APPROVED) current patches by org and MSRC severity for
+/// the dashboard's severity breakdown. Sorted by organization name.
+pub fn build_severity_by_org(
+    current_patches: &[Patch],
+    devices_by_id: &HashMap<i64, &Device>,
+    maps: &LookupMaps,
+) -> Vec<OrgSeverity> {
+    let mut by_org: HashMap<String, SeverityCounts> = HashMap::new();
+    for p in current_patches {
+        if !is_pending(p.status.as_deref()) {
+            continue;
+        }
+        let org = p
+            .device_id
+            .and_then(|id| devices_by_id.get(&id))
+            .map(|d| maps.org_name(d.organization_id))
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let counts = by_org.entry(org).or_default();
+        match p.severity_enum() {
+            Severity::Critical => counts.critical += 1,
+            Severity::Important => counts.important += 1,
+            Severity::Moderate => counts.moderate += 1,
+            Severity::Low => counts.low += 1,
+            Severity::Optional => counts.optional += 1,
+            Severity::Unknown => counts.unknown += 1,
+        }
+    }
+    let mut out: Vec<OrgSeverity> = by_org
+        .into_iter()
+        .map(|(organization, counts)| OrgSeverity {
+            organization,
+            counts,
+        })
+        .collect();
+    out.sort_by_cached_key(|o| o.organization.to_lowercase());
+    out
+}
+
+/// Fixed labels for the pending-patch age histogram, oldest bucket last.
+const AGE_BUCKET_LABELS: [&str; 5] = [
+    "0-30 days",
+    "31-60 days",
+    "61-90 days",
+    "91-180 days",
+    "180+ days",
+];
+
+/// Builds the pending-patch age histogram from release age. A pending patch with no
+/// known release date can't be proven fresh, so it falls into the oldest bucket —
+/// the same "can't prove fresh → aged" convention `build_compliance` uses.
+pub fn build_age_buckets(current_patches: &[Patch], now: DateTime<Utc>) -> Vec<AgeBucket> {
+    let mut counts = [0usize; 5];
+    for p in current_patches {
+        if !is_pending(p.status.as_deref()) {
+            continue;
+        }
+        let age_days = p
+            .released_at()
+            .map(|r| (now - r).num_days().max(0))
+            .unwrap_or(i64::MAX);
+        let idx = match age_days {
+            0..=30 => 0,
+            31..=60 => 1,
+            61..=90 => 2,
+            91..=180 => 3,
+            _ => 4,
+        };
+        counts[idx] += 1;
+    }
+    AGE_BUCKET_LABELS
+        .iter()
+        .zip(counts)
+        .map(|(label, count)| AgeBucket {
+            label: (*label).to_string(),
+            count,
+        })
+        .collect()
+}
+
 /// The full result of a patch query. Cached in `AppState.last_result` and read by
 /// the Excel exporter; **not** sent wholesale over IPC — the frontend gets a
 /// [`QuerySummary`] and pages the detail rows on demand via `get_patch_rows`.
@@ -318,6 +520,12 @@ pub struct QueryResult {
     pub rows: Vec<PatchRow>,
     pub devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// FAILED-install rollup (empty unless the FAILED status was queried).
+    pub failures: Vec<FailureGroup>,
+    /// Per-org pending-patch severity breakdown for the dashboard.
+    pub severity_by_org: Vec<OrgSeverity>,
+    /// Pending-patch age histogram for the dashboard.
+    pub age_buckets: Vec<AgeBucket>,
     pub devices_total: usize,
     pub generated_at: String,
 }
@@ -338,6 +546,13 @@ pub struct QuerySummary {
     /// device list stays in the cache for export.
     pub reboot_devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// FAILED-install rollup — small (one entry per failing patch), so it ships
+    /// whole rather than paged like the detail rows.
+    pub failures: Vec<FailureGroup>,
+    /// Per-org pending-patch severity breakdown for the dashboard charts.
+    pub severity_by_org: Vec<OrgSeverity>,
+    /// Pending-patch age histogram for the dashboard charts.
+    pub age_buckets: Vec<AgeBucket>,
     pub devices_total: usize,
     pub generated_at: String,
 }
@@ -356,6 +571,9 @@ impl QuerySummary {
                 .cloned()
                 .collect(),
             compliance: result.compliance.clone(),
+            failures: result.failures.clone(),
+            severity_by_org: result.severity_by_org.clone(),
+            age_buckets: result.age_buckets.clone(),
             devices_total: result.devices_total,
             generated_at: result.generated_at.clone(),
         }
@@ -676,6 +894,9 @@ mod tests {
             rows,
             devices,
             compliance,
+            failures: Vec::new(),
+            severity_by_org: Vec::new(),
+            age_buckets: Vec::new(),
             devices_total: 1,
             generated_at: "2026-01-01 00:00 UTC".into(),
         };
@@ -727,6 +948,9 @@ mod tests {
             rows,
             devices,
             compliance,
+            failures: Vec::new(),
+            severity_by_org: Vec::new(),
+            age_buckets: Vec::new(),
             devices_total: 2,
             generated_at: "2026-01-01 00:00 UTC".into(),
         };
@@ -889,6 +1113,9 @@ mod tests {
             rows,
             devices: summaries,
             compliance,
+            failures: Vec::new(),
+            severity_by_org: Vec::new(),
+            age_buckets: Vec::new(),
             devices_total: 1,
             generated_at: "2026-01-01 00:00:00 UTC".into(),
         };
@@ -899,10 +1126,143 @@ mod tests {
                 "rowsTotal",
                 "rebootDevices",
                 "compliance",
+                "failures",
+                "severityByOrg",
+                "ageBuckets",
                 "devicesTotal",
                 "generatedAt",
             ],
             "QuerySummary",
+        );
+    }
+
+    fn failed_row(device_id: i64, device: &str, kb: &str, installed_ts: Option<i64>) -> PatchRow {
+        PatchRow {
+            device_id,
+            device_name: device.into(),
+            organization: "Contoso".into(),
+            location: None,
+            device_role: None,
+            os_name: None,
+            node_class: None,
+            needs_reboot: false,
+            patch_type: "OS".into(),
+            kb: Some(kb.into()),
+            name: "Cumulative Update".into(),
+            severity: "Critical".into(),
+            severity_rank: 5,
+            status: "FAILED".into(),
+            release_date: None,
+            installed_date: installed_ts.map(|_| "2026-01-01 00:00 UTC".into()),
+            release_ts: None,
+            installed_ts,
+        }
+    }
+
+    #[test]
+    fn build_failures_groups_by_patch_and_counts_distinct_devices() {
+        let rows = vec![
+            failed_row(1, "srv1", "KB1", Some(100)),
+            failed_row(2, "srv2", "KB1", Some(200)), // same patch, second device
+            failed_row(1, "srv1", "KB1", Some(50)),  // duplicate device + older
+            failed_row(3, "srv3", "KB2", Some(10)),
+            // A non-FAILED row in the same set must be ignored.
+            PatchRow {
+                status: "PENDING".into(),
+                ..failed_row(9, "srv9", "KB1", Some(999))
+            },
+        ];
+        let groups = build_failures(&rows);
+        assert_eq!(groups.len(), 2, "two distinct failing patches");
+        // KB1 fails on 2 distinct devices → sorted ahead of KB2 (1 device).
+        let kb1 = &groups[0];
+        assert_eq!(kb1.kb.as_deref(), Some("KB1"));
+        assert_eq!(kb1.affected_devices, 2, "distinct devices, not records");
+        assert_eq!(kb1.latest_failure_ts, Some(200), "most recent failure");
+        assert_eq!(kb1.device_names.len(), 2, "full deduped device list");
+        assert_eq!(groups[1].affected_devices, 1);
+    }
+
+    #[test]
+    fn build_severity_by_org_buckets_pending_patches() {
+        let d1 = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d1)]);
+        let maps = maps();
+        let current = vec![
+            patch(1, "MANUAL", "CRITICAL", Some(1)),
+            patch(1, "APPROVED", "IMPORTANT", Some(1)),
+            patch(1, "REJECTED", "CRITICAL", Some(1)), // not pending → ignored
+        ];
+        let sev = build_severity_by_org(&current, &by_id, &maps);
+        assert_eq!(sev.len(), 1);
+        assert_eq!(sev[0].organization, "Contoso");
+        assert_eq!(sev[0].counts.critical, 1);
+        assert_eq!(sev[0].counts.important, 1);
+        assert_eq!(sev[0].counts.moderate, 0);
+    }
+
+    #[test]
+    fn build_age_buckets_route_pending_by_age_and_unknown_to_oldest() {
+        let mut unknown = patch(1, "MANUAL", "CRITICAL", Some(5));
+        unknown.release_timestamp = None; // can't prove fresh → oldest bucket
+        let current = vec![
+            patch(1, "MANUAL", "CRITICAL", Some(5)),   // 0-30
+            patch(1, "MANUAL", "CRITICAL", Some(200)), // 180+
+            unknown,
+            patch(1, "INSTALLED", "CRITICAL", Some(5)), // not pending → ignored
+        ];
+        let buckets = build_age_buckets(&current, Utc::now());
+        assert_eq!(buckets.len(), 5, "fixed five-bucket layout");
+        assert_eq!(buckets[0].count, 1, "0-30 bucket");
+        assert_eq!(
+            buckets[4].count, 2,
+            "180+ holds the aged and unknown-release"
+        );
+    }
+
+    #[test]
+    fn aggregate_shapes_carry_camel_case_keys() {
+        let failures = build_failures(&[failed_row(1, "srv1", "KB1", Some(1))]);
+        assert_keys_present(
+            &serde_json::to_value(&failures[0]).unwrap(),
+            &[
+                "patchType",
+                "kb",
+                "name",
+                "severity",
+                "severityRank",
+                "affectedDevices",
+                "deviceNames",
+                "latestFailure",
+                "latestFailureTs",
+            ],
+            "FailureGroup",
+        );
+
+        let d1 = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d1)]);
+        let sev =
+            build_severity_by_org(&[patch(1, "MANUAL", "CRITICAL", Some(1))], &by_id, &maps());
+        let sev_json = serde_json::to_value(&sev[0]).unwrap();
+        assert_keys_present(&sev_json, &["organization", "counts"], "OrgSeverity");
+        assert_keys_present(
+            &sev_json["counts"],
+            &[
+                "critical",
+                "important",
+                "moderate",
+                "low",
+                "optional",
+                "unknown",
+            ],
+            "SeverityCounts",
+        );
+
+        let buckets = build_age_buckets(&[patch(1, "MANUAL", "CRITICAL", Some(1))], Utc::now());
+        assert_keys_present(
+            &serde_json::to_value(&buckets[0]).unwrap(),
+            &["label", "count"],
+            "AgeBucket",
         );
     }
 }

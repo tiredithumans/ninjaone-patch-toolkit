@@ -58,8 +58,9 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   └── lookups.rs               # orgs / locations / roles / node classes
 ├── src/filter.rs                # FilterParams → df DSL + client-side OS-name / KB-search facets
 ├── src/model.rs                 # domain types (Device, Patch, PatchType, PatchStatus, …)
-├── src/rows.rs                  # join → PatchRow, compliance %, SLA aging, reboot/pending counts
-├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / Needs-Reboot)
+├── src/rows.rs                  # join → PatchRow, compliance %, SLA aging, reboot/pending + failure/severity/age rollups
+├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / Needs-Reboot / Patch Failures)
+├── src/report.rs                # standalone HTML executive report (inline SVG charts) from the cached QueryResult
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets)
 ├── src/error.rs                 # UiError { message } — the IPC error shape
 ├── src/commands/                # #[tauri::command] handlers (auth, lookups, patches, export, settings, update)
@@ -74,7 +75,8 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ├── src/app/                     # view components split out as descendant modules of `app`
 │   ├── filters.rs               # Filters panel
 │   ├── settings.rs              # SettingsPanel
-│   ├── tables.rs                # Results + Patches/Compliance/Reboot tables
+│   ├── charts.rs                # Compliance-tab inline-SVG charts (compliance / severity / age) + host-tested geometry
+│   ├── tables.rs                # Results tabs: Patches / Compliance (charts + table) / Needs Reboot / Failures
 │   └── util.rs                  # JS-free pure helpers (format/parse/CSS-class) + their host tests
 ├── src/api.rs                   # typed invoke(...) wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder (QueryResult) for demo / web mode
@@ -156,12 +158,21 @@ secrets are **not** stored there — see below).
 
 - **`query_patches` → cache → export/paging coupling (load-bearing).** `query_patches` caches the
   full `QueryResult` in `AppState.last_result` (a `Mutex`) on success and returns only a lightweight
-  `QuerySummary` (first page of rows + `rows_total` + the reboot-device subset + compliance) over IPC
-  — a 10k+ row fleet is never serialized wholesale into the WASM webview. The detail table pages the
-  rest on demand via `get_patch_rows(offset, limit)`, which slices the same cache; `export_patches_xlsx`
-  reads it too. So the cache is the single source of truth for both export **and** row paging: export
-  or paging with no prior successful query = empty. Don't add a second source of truth for the rows,
-  and keep the backend `QuerySummary` ⇄ frontend `QueryResult` (`web-rs/src/types.rs`) shapes in sync.
+  `QuerySummary` (first page of rows + `rows_total` + the reboot-device subset + compliance + the
+  compact dashboard/failure aggregates) over IPC — a 10k+ row fleet is never serialized wholesale into
+  the WASM webview. The detail table pages the rest on demand via `get_patch_rows(offset, limit)`,
+  which slices the same cache; `export_patches_xlsx` **and** `export_report_html` read it too. So the
+  cache is the single source of truth for export, the HTML report, **and** row paging: any of them with
+  no prior successful query = empty. Don't add a second source of truth for the rows.
+  - **Compact aggregates ride in the summary, not the rows.** Fleet-wide distributions the frontend
+    charts/failure tab need — `failures` (FAILED-install rollup, `build_failures`), `severity_by_org`
+    (`build_severity_by_org`), `age_buckets` (`build_age_buckets`) — are computed backend-side in
+    `rows.rs` and carried on **both** `QueryResult` (cached; the HTML report reads it) and `QuerySummary`
+    (IPC; the dashboard reads it). They're bounded (one entry per failing patch / per org / 5 buckets),
+    so they ship whole rather than paged. Add such a field in lockstep: `QueryResult` + `QuerySummary` +
+    clone in `QuerySummary::from_result` + the `web-rs/src/types.rs` mirror + the demo's `assemble`, and
+    assert its key in `serialized_shapes_carry_every_frontend_required_key`. Keep the backend
+    `QuerySummary` ⇄ frontend `QueryResult` (`web-rs/src/types.rs`) shapes in sync.
 
 - **`AppState` locks are brief — never held across `.await`.** `settings`/`last_result` are
   `std::sync::Mutex`. Take a `settings_snapshot()` (clone) before any `.await`; don't hold a guard

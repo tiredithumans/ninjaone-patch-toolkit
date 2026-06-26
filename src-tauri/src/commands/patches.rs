@@ -12,8 +12,8 @@ use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus, PatchType, Role};
 use crate::rows::{
-    LookupMaps, PatchSource, QueryResult, QuerySummary, build_compliance, build_device_summaries,
-    build_rows, pending_counts,
+    LookupMaps, PatchSource, QueryResult, QuerySummary, build_age_buckets, build_compliance,
+    build_device_summaries, build_failures, build_rows, build_severity_by_org, pending_counts,
 };
 use crate::state::AppState;
 
@@ -302,10 +302,20 @@ where
         now,
     );
 
+    // 8. Dashboard/failure rollups. Failures are derived from the FAILED rows already
+    // joined (present only when the FAILED status was requested — no extra fetch);
+    // the severity/age distributions come from the current pending backlog.
+    let failures = build_failures(&rows);
+    let severity_by_org = build_severity_by_org(&all_current, &devices_by_id, &maps);
+    let age_buckets = build_age_buckets(&all_current, now);
+
     Ok(QueryResult {
         rows,
         devices: summaries,
         compliance,
+        failures,
+        severity_by_org,
+        age_buckets,
         devices_total: devices.len(),
         generated_at: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
     })
@@ -513,5 +523,67 @@ mod tests {
         assert_eq!(row.kb.as_deref(), Some("KBOK"));
         assert_eq!(row.status, "INSTALLED");
         assert!(row.installed_date.is_some());
+
+        // No FAILED status was requested, so the failure rollup is empty.
+        assert!(result.failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false },
+                { "id": 20, "systemName": "web-02", "organizationId": 1, "offline": false }
+            ])))
+            .mount(&server)
+            .await;
+
+        // Current feed contributes nothing for a FAILED-only query.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [], "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        // The same KB fails on two devices; a different KB fails on one.
+        let failed_at = fixed_now().timestamp() - 2 * 86_400;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patch-installs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    { "deviceId": 10, "kbNumber": "KBFAIL", "status": "FAILED",
+                      "severity": "CRITICAL", "installedAt": failed_at },
+                    { "deviceId": 20, "kbNumber": "KBFAIL", "status": "FAILED",
+                      "severity": "CRITICAL", "installedAt": failed_at },
+                    { "deviceId": 10, "kbNumber": "KBOTHER", "status": "FAILED",
+                      "severity": "IMPORTANT", "installedAt": failed_at }
+                ],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let progress = |_: &'static str, _: usize| {};
+        let result = run_query(
+            &client(&server),
+            async { Ok::<_, anyhow::Error>(lookups()) },
+            30,
+            30,
+            args(PatchType::Os, vec![PatchStatus::Failed]),
+            fixed_now(),
+            &progress,
+        )
+        .await
+        .expect("query");
+
+        assert_eq!(result.failures.len(), 2, "one group per failing patch");
+        let top = &result.failures[0];
+        assert_eq!(top.kb.as_deref(), Some("KBFAIL"));
+        assert_eq!(top.affected_devices, 2, "KBFAIL failed on two devices");
     }
 }

@@ -39,12 +39,19 @@ pub(crate) fn Results() -> impl IntoView {
                 >
                     "Needs Reboot"
                 </button>
+                <button
+                    class=move || tab_class(tab.get(), Tab::Failures)
+                    on:click=move |_| tab.set(Tab::Failures)
+                >
+                    "Failures"
+                </button>
                 <span class="result-summary">{summary}</span>
             </div>
             {move || match tab.get() {
                 Tab::Patches => view! { <PatchesTable/> }.into_any(),
-                Tab::Compliance => view! { <ComplianceTable/> }.into_any(),
+                Tab::Compliance => view! { <ComplianceTab/> }.into_any(),
                 Tab::Reboot => view! { <RebootTable/> }.into_any(),
+                Tab::Failures => view! { <FailuresTable/> }.into_any(),
             }}
         </section>
     }
@@ -94,6 +101,7 @@ fn PatchesTable() -> impl IntoView {
             when=move || state.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
+            <p class="scope-note">"Every patch matching your filters (device scope + patch filters)."</p>
             <Show
                 when=move || { total() > 0 }
                 fallback=|| {
@@ -180,6 +188,25 @@ fn PatchesTable() -> impl IntoView {
 }
 
 #[component]
+fn ComplianceTab() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let has_result = move || state.result.with(|r| r.is_some());
+    view! {
+        <Show
+            when=has_result
+            fallback=|| view! { <p class="empty">"Run a query to see compliance."</p> }
+        >
+            <p class="scope-note">
+                "Fleet compliance for the selected device scope (organization / location / role / OS type). "
+                "Reflects the whole pending backlog — not narrowed by status, severity, KB search, or the date window."
+            </p>
+            <ComplianceCharts/>
+            <ComplianceTable/>
+        </Show>
+    }
+}
+
+#[component]
 fn ComplianceTable() -> impl IntoView {
     let state = expect_context::<AppState>();
     let buckets = move || {
@@ -251,6 +278,74 @@ fn ComplianceTable() -> impl IntoView {
 }
 
 #[component]
+fn FailuresTable() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    // Backend ships the failure rollup whole (one entry per failing patch) in the
+    // summary, already sorted by affected-device count — render it as-is.
+    let failures = move || {
+        state
+            .result
+            .with(|r| r.as_ref().map(|r| r.failures.clone()).unwrap_or_default())
+    };
+    let has_failures = move || {
+        state
+            .result
+            .with(|r| r.as_ref().is_some_and(|r| !r.failures.is_empty()))
+    };
+
+    view! {
+        <Show
+            when=has_failures
+            fallback=|| {
+                view! {
+                    <p class="empty">
+                        "No patch failures. Select the FAILED status and Run query to analyze failures."
+                    </p>
+                }
+            }
+        >
+            <p class="scope-note">"Failed installs matching your filters (device scope + patch filters)."</p>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th scope="col">"Severity"</th>
+                            <th scope="col">"KB"</th>
+                            <th scope="col">"Patch"</th>
+                            <th scope="col">"Affected devices"</th>
+                            <th scope="col">"Latest failure"</th>
+                            <th scope="col">"Devices"</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {move || {
+                            failures()
+                                .into_iter()
+                                .map(|f| {
+                                    let sev = sev_class(&f.severity);
+                                    view! {
+                                        <tr>
+                                            <td>
+                                                <span class=sev>{f.severity}</span>
+                                            </td>
+                                            <td>{f.kb.unwrap_or_default()}</td>
+                                            <td class="patch-name">{f.name}</td>
+                                            <td>{f.affected_devices}</td>
+                                            <td>{f.latest_failure.unwrap_or_default()}</td>
+                                            <td class="device-list">{f.device_names.join(", ")}</td>
+                                        </tr>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </tbody>
+                </table>
+            </div>
+        </Show>
+    }
+}
+
+#[component]
 fn RebootTable() -> impl IntoView {
     let state = expect_context::<AppState>();
     // The backend already trimmed the device list to the needs-reboot subset, so
@@ -273,6 +368,9 @@ fn RebootTable() -> impl IntoView {
             when=has_devices
             fallback=|| view! { <p class="empty">"No devices flagged for reboot."</p> }
         >
+            <p class="scope-note">
+                "Devices in the selected device scope flagged for reboot — not narrowed by status, severity, or search."
+            </p>
             <div class="table-wrap">
                 <table>
                     <thead>

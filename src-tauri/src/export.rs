@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rust_xlsxwriter::{Color, Format, Workbook};
 
 use crate::model::PatchRow;
-use crate::rows::{ComplianceBucket, DeviceSummary};
+use crate::rows::{ComplianceBucket, DeviceSummary, FailureGroup};
 
 const DETAIL_HEADERS: [&str; 14] = [
     "Organization",
@@ -39,6 +39,16 @@ const REBOOT_HEADERS: [&str; 6] = [
     "Pending Patches",
 ];
 
+const FAILURE_HEADERS: [&str; 7] = [
+    "Severity",
+    "Patch Type",
+    "KB",
+    "Patch",
+    "Affected Devices",
+    "Latest Failure",
+    "Devices",
+];
+
 fn header_format() -> Format {
     Format::new()
         .set_bold()
@@ -47,13 +57,15 @@ fn header_format() -> Format {
 }
 
 /// Writes a workbook with a Patches detail sheet (one row per device×patch), a
-/// Compliance summary sheet, and a Needs Reboot sheet for devices flagged for
-/// reboot. Sheets with no data are omitted.
+/// Compliance summary sheet, a Needs Reboot sheet for devices flagged for reboot,
+/// and a Patch Failures sheet rolling up FAILED installs. Sheets with no data are
+/// omitted.
 pub fn write_workbook(
     path: &str,
     rows: &[PatchRow],
     compliance: &[ComplianceBucket],
     reboot_devices: &[DeviceSummary],
+    failures: &[FailureGroup],
 ) -> Result<()> {
     let mut workbook = Workbook::new();
     let header = header_format();
@@ -64,6 +76,9 @@ pub fn write_workbook(
     }
     if !reboot_devices.is_empty() {
         write_reboot_sheet(&mut workbook, &header, reboot_devices)?;
+    }
+    if !failures.is_empty() {
+        write_failures_sheet(&mut workbook, &header, failures)?;
     }
 
     workbook.save(path).context("save workbook")?;
@@ -181,6 +196,38 @@ fn write_reboot_sheet(
     Ok(())
 }
 
+fn write_failures_sheet(
+    workbook: &mut Workbook,
+    header: &Format,
+    failures: &[FailureGroup],
+) -> Result<()> {
+    let sheet = workbook.add_worksheet();
+    sheet
+        .set_name("Patch Failures")
+        .context("name failures sheet")?;
+
+    for (col, title) in FAILURE_HEADERS.iter().enumerate() {
+        sheet
+            .write_string_with_format(0, col as u16, *title, header)
+            .context("write header")?;
+    }
+
+    for (i, f) in failures.iter().enumerate() {
+        let row = (i + 1) as u32;
+        sheet.write_string(row, 0, &f.severity)?;
+        sheet.write_string(row, 1, &f.patch_type)?;
+        sheet.write_string(row, 2, f.kb.as_deref().unwrap_or_default())?;
+        sheet.write_string(row, 3, &f.name)?;
+        sheet.write_number(row, 4, f.affected_devices as f64)?;
+        sheet.write_string(row, 5, f.latest_failure.as_deref().unwrap_or_default())?;
+        sheet.write_string(row, 6, f.device_names.join(", "))?;
+    }
+
+    sheet.set_freeze_panes(1, 0).context("freeze header")?;
+    apply_widths(sheet, &[11.0, 11.0, 12.0, 40.0, 16.0, 20.0, 60.0])?;
+    Ok(())
+}
+
 fn apply_widths(sheet: &mut rust_xlsxwriter::Worksheet, widths: &[f64]) -> Result<()> {
     for (col, w) in widths.iter().enumerate() {
         sheet
@@ -231,7 +278,7 @@ mod tests {
             pending_critical: 3,
             aged_critical: 1,
         }];
-        write_workbook(&path_str, &rows, &compliance, &[]).unwrap();
+        write_workbook(&path_str, &rows, &compliance, &[], &[]).unwrap();
 
         // Read it back to prove it is a valid, populated workbook.
         use calamine::{Reader, Xlsx, open_workbook};
@@ -268,7 +315,7 @@ mod tests {
             needs_reboot: true,
             pending_count: 4,
         }];
-        write_workbook(&path.to_string_lossy(), &[], &[], &reboot).unwrap();
+        write_workbook(&path.to_string_lossy(), &[], &[], &reboot, &[]).unwrap();
 
         let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
         let sheets = wb.sheet_names().to_owned();
@@ -278,12 +325,53 @@ mod tests {
             !sheets.contains(&"Compliance".to_string()),
             "an empty compliance set omits the Compliance sheet"
         );
+        assert!(
+            !sheets.contains(&"Patch Failures".to_string()),
+            "an empty failure set omits the Patch Failures sheet"
+        );
         let reboot_range = wb.worksheet_range("Needs Reboot").unwrap();
         assert_eq!(
             reboot_range.get_value((0, 0)).unwrap().to_string(),
             "Organization"
         );
         assert_eq!(reboot_range.get_value((1, 3)).unwrap().to_string(), "srv07");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn writes_the_patch_failures_sheet_when_present() {
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = std::env::temp_dir().join("npt-export-failures.xlsx");
+
+        let failures = vec![FailureGroup {
+            patch_type: "OS".into(),
+            kb: Some("KB5040434".into()),
+            name: "Cumulative Update".into(),
+            severity: "Critical".into(),
+            severity_rank: 5,
+            affected_devices: 3,
+            device_names: vec!["srv01".into(), "srv02".into(), "srv03".into()],
+            latest_failure: Some("2026-05-01 00:00 UTC".into()),
+            latest_failure_ts: Some(1_777_000_000),
+        }];
+        write_workbook(&path.to_string_lossy(), &[], &[], &[], &failures).unwrap();
+
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let range = wb.worksheet_range("Patch Failures").unwrap();
+        assert_eq!(range.get_value((0, 0)).unwrap().to_string(), "Severity");
+        assert_eq!(range.get_value((1, 2)).unwrap().to_string(), "KB5040434");
+        assert_eq!(range.get_value((1, 4)).unwrap().to_string(), "3");
+        assert_eq!(
+            range.get_value((0, 6)).unwrap().to_string(),
+            "Devices",
+            "the device list is the last column"
+        );
+        assert_eq!(
+            range.get_value((1, 6)).unwrap().to_string(),
+            "srv01, srv02, srv03",
+            "every affected device name is comma-joined"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
