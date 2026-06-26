@@ -70,7 +70,12 @@ src-tauri/                       # Tauri 2 backend (native target)
 
 web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 crate
 ├── src/main.rs                  # entry, theme, root mount
-├── src/app.rs                   # views, components, handlers
+├── src/app.rs                   # AppState + context, App/Header/RunControls/Toaster/UpdateSplash
+├── src/app/                     # view components split out as descendant modules of `app`
+│   ├── filters.rs               # Filters panel
+│   ├── settings.rs              # SettingsPanel
+│   ├── tables.rs                # Results + Patches/Compliance/Reboot tables
+│   └── util.rs                  # JS-free pure helpers (format/parse/CSS-class) + their host tests
 ├── src/api.rs                   # typed invoke(...) wrappers (one per backend command)
 ├── src/types.rs                 # request/response types mirrored from the backend
 ├── styles.css                   # plain global CSS (BEM-ish names)
