@@ -432,44 +432,19 @@ impl AppState {
         });
     }
 
-    /// Loads the bundled sample data into the results — no API call, no sign-in.
-    /// Powers the "Load sample data" button and the browser/Pages demo. The whole
-    /// sample fits on page 0, so there is no backend cache to page from.
-    ///
-    /// Also seeds the facet sources (orgs/roles/OS-types) from the sample so every
-    /// dropdown filters it, and resets the filter controls to "everything" so the
-    /// full sample shown here matches the controls. From there, adjusting a filter
-    /// and pressing **Run query** re-filters the sample via `run_demo_query`.
-    fn load_demo(self) {
+    /// Enters demo mode (browser/Pages) without populating results: seeds the facet
+    /// dropdowns from the sample and flags `demo` so **Run query** filters the sample
+    /// locally. The results stay empty ("Run a query to list patches") until the user
+    /// runs a query — exactly like the real app, which lists nothing until queried.
+    fn enter_demo(self) {
         self.orgs.set(demo::sample_orgs());
         self.roles.set(demo::sample_roles());
         self.node_classes.set(demo::sample_node_classes());
-        self.org_id.set(None);
-        self.loc_id.set(None);
-        self.locations.set(Vec::new());
-        self.role_id.set(None);
-        self.selected_classes.set(Vec::new());
-        self.selected_severities.set(Vec::new());
-        self.os_name.set(String::new());
-        self.search.set(String::new());
-        self.release_window.set(String::new());
-        self.release_after_date.set(String::new());
-        self.release_before_date.set(String::new());
-        self.patch_type.set("ALL".to_string());
-        self.statuses
-            .set(STATUS_OPTIONS.iter().map(|s| s.to_string()).collect());
-
-        let r = demo::sample_query_result();
-        self.patches_page.set(0);
-        self.active_tab.set(Tab::Patches);
-        self.page_rows.set(r.rows.clone());
-        self.result.set(Some(r));
         self.demo.set(true);
     }
 
     /// Demo-mode counterpart to `run_query`: filters the in-memory sample with the
-    /// current facets (no backend, no auth) and recomputes the row count. Used in
-    /// both the native demo and browser/web mode.
+    /// current facets (no backend, no auth) and recomputes the row count.
     fn run_demo_query(self, silent: bool) {
         let statuses = self.statuses.get_untracked();
         if statuses.is_empty() {
@@ -609,11 +584,10 @@ pub fn App() -> impl IntoView {
         });
     } else {
         // Browser/Pages demo: there is no backend, so every IPC call would fail.
-        // Fill the static OS-type facet locally and show sample data up front
-        // instead of a shell gated behind a sign-in that can't happen here.
+        // Enter demo mode (facets seeded from the sample) but leave the results
+        // empty until the user presses Run query, just like the real app.
         state.web_mode.set(true);
-        state.node_classes.set(demo::sample_node_classes());
-        state.load_demo();
+        state.enter_demo();
     }
 
     // Stream live record counts from the backend into `progress`, ignoring events
@@ -659,7 +633,7 @@ pub fn App() -> impl IntoView {
             <Header/>
             <Show when=move || state.demo.get()>
                 <p class="demo-banner" role="note">
-                    "Showing sample data — not a live fleet."
+                    "Demo mode — press Run query to list sample patches (not a live fleet)."
                 </p>
             </Show>
             <Show when=move || state.show_settings.get()>
@@ -902,14 +876,6 @@ fn RunControls() -> impl IntoView {
                 >
                     "Export to Excel"
                 </button>
-                // Demo mode is the web/Pages experience only — the desktop release
-                // is a pure production tool, so this is gated to browser mode (where
-                // it doubles as a reset back to the full sample).
-                <Show when=move || state.web_mode.get()>
-                    <button class="btn" on:click=move |_| state.load_demo()>
-                        "Load sample data"
-                    </button>
-                </Show>
                 <Show when=move || state.refreshing.get()>
                     <span class="chips-label">"↻ refreshing…"</span>
                 </Show>
