@@ -25,7 +25,10 @@ pub(crate) fn Filters() -> impl IntoView {
                 </button>
             </div>
             <Show when=move || !state.filters_collapsed.get()>
-            <div class="subhead">"Device"</div>
+            <div class="subhead">
+                "Device scope"
+                <span class="subhead-note">"applies to every tab"</span>
+            </div>
             <div class="grid">
                 <label>
                     "Organization"
@@ -133,7 +136,10 @@ pub(crate) fn Filters() -> impl IntoView {
                     />
                 </div>
             </div>
-            <div class="subhead">"Patch"</div>
+            <div class="subhead">
+                "Patch filters"
+                <span class="subhead-note">"Patches & Failures tabs only"</span>
+            </div>
             <div class="stacked-filters">
                 <div class="control-group">
                     <span class="chips-label">"Type:"</span>

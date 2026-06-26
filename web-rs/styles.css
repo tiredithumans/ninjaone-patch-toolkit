@@ -639,10 +639,34 @@ tbody tr:hover {
   color: var(--muted);
 }
 
+/* --- Scope clarity: per-tab caption + filter-section note --- */
+.scope-note {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.subhead-note {
+  margin-left: 8px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Failures: the full affected-device list can be long — keep the cell readable. */
+.device-list {
+  max-width: 380px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 /* --- Dashboard charts (inline SVG) --- */
 .charts {
   display: grid;
   gap: 16px;
+  margin-bottom: 16px;
 }
 
 .chart-card {

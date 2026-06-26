@@ -11,7 +11,7 @@ mod settings;
 mod tables;
 mod util;
 
-use charts::Dashboard;
+use charts::ComplianceCharts;
 use filters::Filters;
 use settings::SettingsPanel;
 use tables::Results;
@@ -47,7 +47,6 @@ const SEVERITY_OPTIONS: [(&str, &str); 5] = [
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Tab {
     Patches,
-    Dashboard,
     Compliance,
     Reboot,
     Failures,

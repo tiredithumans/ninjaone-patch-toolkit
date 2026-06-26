@@ -323,8 +323,9 @@ pub struct FailureGroup {
     pub severity_rank: u8,
     /// Distinct devices the patch failed on (the headline count).
     pub affected_devices: usize,
-    /// A few affected device names for context (capped, not the full list).
-    pub sample_devices: Vec<String>,
+    /// Every affected device name, so the table and Excel/HTML export carry the
+    /// complete list (not a truncated sample).
+    pub device_names: Vec<String>,
     pub latest_failure: Option<String>,
     pub latest_failure_ts: Option<i64>,
 }
@@ -364,9 +365,9 @@ fn is_pending(status: Option<&str>) -> bool {
 }
 
 /// Groups the FAILED detail rows by patch (`patch_type` + `kb` + `name`), counting
-/// the distinct devices each failed on, the most recent failure, and a sample of
-/// affected device names. Sorted by affected-device count then severity, both desc.
-pub fn build_failures(rows: &[PatchRow], sample_limit: usize) -> Vec<FailureGroup> {
+/// the distinct devices each failed on, the most recent failure, and the full list
+/// of affected device names. Sorted by affected-device count then severity, desc.
+pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
     struct Acc {
         patch_type: String,
         kb: Option<String>,
@@ -374,7 +375,7 @@ pub fn build_failures(rows: &[PatchRow], sample_limit: usize) -> Vec<FailureGrou
         severity: String,
         severity_rank: u8,
         devices: HashSet<i64>,
-        sample: Vec<String>,
+        device_names: Vec<String>,
         latest_ts: Option<i64>,
         latest_date: Option<String>,
     }
@@ -392,18 +393,19 @@ pub fn build_failures(rows: &[PatchRow], sample_limit: usize) -> Vec<FailureGrou
                 severity: r.severity.clone(),
                 severity_rank: r.severity_rank,
                 devices: HashSet::new(),
-                sample: Vec::new(),
+                device_names: Vec::new(),
                 latest_ts: None,
                 latest_date: None,
             });
-        acc.devices.insert(r.device_id);
+        // Count distinct devices by id, but only add a name the first time we see
+        // that device, so the name list has no duplicates.
+        if acc.devices.insert(r.device_id) {
+            acc.device_names.push(r.device_name.clone());
+        }
         // Surface the highest severity seen for the group (records can disagree).
         if r.severity_rank > acc.severity_rank {
             acc.severity_rank = r.severity_rank;
             acc.severity = r.severity.clone();
-        }
-        if acc.sample.len() < sample_limit && !acc.sample.contains(&r.device_name) {
-            acc.sample.push(r.device_name.clone());
         }
         if let Some(ts) = r.installed_ts
             && acc.latest_ts.map(|cur| ts > cur).unwrap_or(true)
@@ -421,7 +423,7 @@ pub fn build_failures(rows: &[PatchRow], sample_limit: usize) -> Vec<FailureGrou
             severity: a.severity,
             severity_rank: a.severity_rank,
             affected_devices: a.devices.len(),
-            sample_devices: a.sample,
+            device_names: a.device_names,
             latest_failure: a.latest_date,
             latest_failure_ts: a.latest_ts,
         })
@@ -1170,14 +1172,14 @@ mod tests {
                 ..failed_row(9, "srv9", "KB1", Some(999))
             },
         ];
-        let groups = build_failures(&rows, 5);
+        let groups = build_failures(&rows);
         assert_eq!(groups.len(), 2, "two distinct failing patches");
         // KB1 fails on 2 distinct devices → sorted ahead of KB2 (1 device).
         let kb1 = &groups[0];
         assert_eq!(kb1.kb.as_deref(), Some("KB1"));
         assert_eq!(kb1.affected_devices, 2, "distinct devices, not records");
         assert_eq!(kb1.latest_failure_ts, Some(200), "most recent failure");
-        assert_eq!(kb1.sample_devices.len(), 2, "deduped sample names");
+        assert_eq!(kb1.device_names.len(), 2, "full deduped device list");
         assert_eq!(groups[1].affected_devices, 1);
     }
 
@@ -1220,7 +1222,7 @@ mod tests {
 
     #[test]
     fn aggregate_shapes_carry_camel_case_keys() {
-        let failures = build_failures(&[failed_row(1, "srv1", "KB1", Some(1))], 5);
+        let failures = build_failures(&[failed_row(1, "srv1", "KB1", Some(1))]);
         assert_keys_present(
             &serde_json::to_value(&failures[0]).unwrap(),
             &[
@@ -1230,7 +1232,7 @@ mod tests {
                 "severity",
                 "severityRank",
                 "affectedDevices",
-                "sampleDevices",
+                "deviceNames",
                 "latestFailure",
                 "latestFailureTs",
             ],

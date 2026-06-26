@@ -261,18 +261,18 @@ fn write_failures_table(buf: &mut String, failures: &[FailureGroup]) {
     }
     buf.push_str(
         "<table><thead><tr><th>Severity</th><th>KB</th><th>Patch</th>\
-         <th>Affected devices</th><th>Sample devices</th><th>Latest failure</th></tr></thead><tbody>",
+         <th>Affected devices</th><th>Devices</th><th>Latest failure</th></tr></thead><tbody>",
     );
     for f in failures.iter().take(MAX_TABLE_ROWS) {
         let sev = escape_html(&f.severity);
         let kb = escape_html(f.kb.as_deref().unwrap_or("\u{2014}"));
         let name = escape_html(&f.name);
-        let sample = escape_html(&f.sample_devices.join(", "));
+        let devices = escape_html(&f.device_names.join(", "));
         let latest = escape_html(f.latest_failure.as_deref().unwrap_or("\u{2014}"));
         let _ = write!(
             buf,
             "<tr><td>{sev}</td><td>{kb}</td><td>{name}</td>\
-             <td class=\"num\">{n}</td><td>{sample}</td><td>{latest}</td></tr>",
+             <td class=\"num\">{n}</td><td>{devices}</td><td>{latest}</td></tr>",
             n = f.affected_devices
         );
     }
@@ -421,7 +421,7 @@ mod tests {
                 severity: "Critical".into(),
                 severity_rank: 5,
                 affected_devices: 4,
-                sample_devices: vec!["web-01".into()],
+                device_names: vec!["web-01".into()],
                 latest_failure: Some("2026-05-01 00:00 UTC".into()),
                 latest_failure_ts: Some(1_777_000_000),
             }],

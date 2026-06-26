@@ -331,9 +331,9 @@ fn demo_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
         match groups.iter_mut().find(|g| g.kb == r.kb && g.name == r.name) {
             Some(g) => {
                 // Count each device once; keep the latest (max YYYY-MM-DD) failure.
-                if !g.sample_devices.contains(&r.device_name) {
+                if !g.device_names.contains(&r.device_name) {
                     g.affected_devices += 1;
-                    g.sample_devices.push(r.device_name.clone());
+                    g.device_names.push(r.device_name.clone());
                 }
                 if r.installed_date.as_deref() > g.latest_failure.as_deref() {
                     g.latest_failure = r.installed_date.clone();
@@ -344,7 +344,7 @@ fn demo_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
                 name: r.name.clone(),
                 severity: r.severity.clone(),
                 affected_devices: 1,
-                sample_devices: vec![r.device_name.clone()],
+                device_names: vec![r.device_name.clone()],
                 latest_failure: r.installed_date.clone(),
             }),
         }

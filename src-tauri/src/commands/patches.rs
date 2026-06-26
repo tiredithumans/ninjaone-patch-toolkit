@@ -26,10 +26,6 @@ type Lookups = (Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>);
 /// first page exactly (later pages come from `get_patch_rows`).
 const FIRST_PAGE_ROWS: usize = 100;
 
-/// How many affected device names the failure rollup keeps per patch for context;
-/// the headline `affected_devices` count is exact regardless.
-const FAILURE_SAMPLE_DEVICES: usize = 5;
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchQueryArgs {
@@ -309,7 +305,7 @@ where
     // 8. Dashboard/failure rollups. Failures are derived from the FAILED rows already
     // joined (present only when the FAILED status was requested — no extra fetch);
     // the severity/age distributions come from the current pending backlog.
-    let failures = build_failures(&rows, FAILURE_SAMPLE_DEVICES);
+    let failures = build_failures(&rows);
     let severity_by_org = build_severity_by_org(&all_current, &devices_by_id, &maps);
     let age_buckets = build_age_buckets(&all_current, now);
 

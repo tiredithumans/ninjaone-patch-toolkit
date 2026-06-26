@@ -109,7 +109,8 @@ pub struct FailureGroup {
     pub name: String,
     pub severity: String,
     pub affected_devices: usize,
-    pub sample_devices: Vec<String>,
+    /// Every affected device name (the full list, not a sample).
+    pub device_names: Vec<String>,
     pub latest_failure: Option<String>,
 }
 

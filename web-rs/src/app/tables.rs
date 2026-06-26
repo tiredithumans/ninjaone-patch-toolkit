@@ -28,12 +28,6 @@ pub(crate) fn Results() -> impl IntoView {
                     "Patches"
                 </button>
                 <button
-                    class=move || tab_class(tab.get(), Tab::Dashboard)
-                    on:click=move |_| tab.set(Tab::Dashboard)
-                >
-                    "Dashboard"
-                </button>
-                <button
                     class=move || tab_class(tab.get(), Tab::Compliance)
                     on:click=move |_| tab.set(Tab::Compliance)
                 >
@@ -55,8 +49,7 @@ pub(crate) fn Results() -> impl IntoView {
             </div>
             {move || match tab.get() {
                 Tab::Patches => view! { <PatchesTable/> }.into_any(),
-                Tab::Dashboard => view! { <Dashboard/> }.into_any(),
-                Tab::Compliance => view! { <ComplianceTable/> }.into_any(),
+                Tab::Compliance => view! { <ComplianceTab/> }.into_any(),
                 Tab::Reboot => view! { <RebootTable/> }.into_any(),
                 Tab::Failures => view! { <FailuresTable/> }.into_any(),
             }}
@@ -108,6 +101,7 @@ fn PatchesTable() -> impl IntoView {
             when=move || state.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
+            <p class="scope-note">"Every patch matching your filters (device scope + patch filters)."</p>
             <Show
                 when=move || { total() > 0 }
                 fallback=|| {
@@ -189,6 +183,25 @@ fn PatchesTable() -> impl IntoView {
                 </table>
                 </div>
             </Show>
+        </Show>
+    }
+}
+
+#[component]
+fn ComplianceTab() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let has_result = move || state.result.with(|r| r.is_some());
+    view! {
+        <Show
+            when=has_result
+            fallback=|| view! { <p class="empty">"Run a query to see compliance."</p> }
+        >
+            <p class="scope-note">
+                "Fleet compliance for the selected device scope (organization / location / role / OS type). "
+                "Reflects the whole pending backlog — not narrowed by status, severity, KB search, or the date window."
+            </p>
+            <ComplianceCharts/>
+            <ComplianceTable/>
         </Show>
     }
 }
@@ -291,6 +304,7 @@ fn FailuresTable() -> impl IntoView {
                 }
             }
         >
+            <p class="scope-note">"Failed installs matching your filters (device scope + patch filters)."</p>
             <div class="table-wrap">
                 <table>
                     <thead>
@@ -299,7 +313,7 @@ fn FailuresTable() -> impl IntoView {
                             <th scope="col">"KB"</th>
                             <th scope="col">"Patch"</th>
                             <th scope="col">"Affected devices"</th>
-                            <th scope="col">"Sample devices"</th>
+                            <th scope="col">"Devices"</th>
                             <th scope="col">"Latest failure"</th>
                         </tr>
                     </thead>
@@ -317,7 +331,7 @@ fn FailuresTable() -> impl IntoView {
                                             <td>{f.kb.unwrap_or_default()}</td>
                                             <td class="patch-name">{f.name}</td>
                                             <td>{f.affected_devices}</td>
-                                            <td>{f.sample_devices.join(", ")}</td>
+                                            <td class="device-list">{f.device_names.join(", ")}</td>
                                             <td>{f.latest_failure.unwrap_or_default()}</td>
                                         </tr>
                                     }
@@ -354,6 +368,9 @@ fn RebootTable() -> impl IntoView {
             when=has_devices
             fallback=|| view! { <p class="empty">"No devices flagged for reboot."</p> }
         >
+            <p class="scope-note">
+                "Devices in the selected device scope flagged for reboot — not narrowed by status, severity, or search."
+            </p>
             <div class="table-wrap">
                 <table>
                     <thead>

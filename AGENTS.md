@@ -75,8 +75,8 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ├── src/app/                     # view components split out as descendant modules of `app`
 │   ├── filters.rs               # Filters panel
 │   ├── settings.rs              # SettingsPanel
-│   ├── charts.rs                # Dashboard inline-SVG charts (compliance / severity / age) + host-tested geometry
-│   ├── tables.rs                # Results tabs: Patches / Dashboard / Compliance / Needs Reboot / Failures
+│   ├── charts.rs                # Compliance-tab inline-SVG charts (compliance / severity / age) + host-tested geometry
+│   ├── tables.rs                # Results tabs: Patches / Compliance (charts + table) / Needs Reboot / Failures
 │   └── util.rs                  # JS-free pure helpers (format/parse/CSS-class) + their host tests
 ├── src/api.rs                   # typed invoke(...) wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder (QueryResult) for demo / web mode

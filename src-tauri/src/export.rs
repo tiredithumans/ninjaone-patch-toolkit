@@ -45,7 +45,7 @@ const FAILURE_HEADERS: [&str; 7] = [
     "KB",
     "Patch",
     "Affected Devices",
-    "Sample Devices",
+    "Devices",
     "Latest Failure",
 ];
 
@@ -219,7 +219,7 @@ fn write_failures_sheet(
         sheet.write_string(row, 2, f.kb.as_deref().unwrap_or_default())?;
         sheet.write_string(row, 3, &f.name)?;
         sheet.write_number(row, 4, f.affected_devices as f64)?;
-        sheet.write_string(row, 5, f.sample_devices.join(", "))?;
+        sheet.write_string(row, 5, f.device_names.join(", "))?;
         sheet.write_string(row, 6, f.latest_failure.as_deref().unwrap_or_default())?;
     }
 
@@ -351,7 +351,7 @@ mod tests {
             severity: "Critical".into(),
             severity_rank: 5,
             affected_devices: 3,
-            sample_devices: vec!["srv01".into(), "srv02".into()],
+            device_names: vec!["srv01".into(), "srv02".into(), "srv03".into()],
             latest_failure: Some("2026-05-01 00:00 UTC".into()),
             latest_failure_ts: Some(1_777_000_000),
         }];
@@ -364,8 +364,8 @@ mod tests {
         assert_eq!(range.get_value((1, 4)).unwrap().to_string(), "3");
         assert_eq!(
             range.get_value((1, 5)).unwrap().to_string(),
-            "srv01, srv02",
-            "sample devices are comma-joined"
+            "srv01, srv02, srv03",
+            "every affected device name is comma-joined"
         );
 
         let _ = std::fs::remove_file(&path);

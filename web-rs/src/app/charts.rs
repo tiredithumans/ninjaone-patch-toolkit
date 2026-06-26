@@ -125,32 +125,25 @@ fn severity_segments(c: &SeverityCounts, track: f64) -> Vec<Segment> {
     out
 }
 
-/// The dashboard tab: compliance / severity / age charts stacked in cards. Empty
-/// until a query has run (same gate as the other result tabs).
+/// The compliance overview charts (compliance / severity / age) shown at the top of
+/// the Compliance tab, above the per-org table. The caller gates on a query result.
 #[component]
-pub(crate) fn Dashboard() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    let has_result = move || state.result.with(|r| r.is_some());
+pub(crate) fn ComplianceCharts() -> impl IntoView {
     view! {
-        <Show
-            when=has_result
-            fallback=|| view! { <p class="empty">"Run a query to see the dashboard."</p> }
-        >
-            <div class="charts">
-                <div class="chart-card">
-                    <h3 class="chart-title">"Compliance by organization"</h3>
-                    <ComplianceBars/>
-                </div>
-                <div class="chart-card">
-                    <h3 class="chart-title">"Pending patches by severity"</h3>
-                    <SeverityBreakdown/>
-                </div>
-                <div class="chart-card">
-                    <h3 class="chart-title">"Pending patch age"</h3>
-                    <AgeHistogram/>
-                </div>
+        <div class="charts">
+            <div class="chart-card">
+                <h3 class="chart-title">"Compliance by organization"</h3>
+                <ComplianceBars/>
             </div>
-        </Show>
+            <div class="chart-card">
+                <h3 class="chart-title">"Pending patches by severity"</h3>
+                <SeverityBreakdown/>
+            </div>
+            <div class="chart-card">
+                <h3 class="chart-title">"Pending patch age"</h3>
+                <AgeHistogram/>
+            </div>
+        </div>
     }
 }
 
