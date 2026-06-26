@@ -18,11 +18,14 @@ const DEFAULT_PAGE_SIZE: u32 = 500;
 /// install history). These are cursor-paginated, so a larger page only means
 /// fewer *sequential* round trips on a big fleet — the cursor (not the page size)
 /// decides when paging stops, so an API that silently caps the page still returns
-/// every row. Kept a conservative 2× of `DEFAULT_PAGE_SIZE`; raise once a tenant's
-/// real limit is confirmed. The `after`-paginated list endpoints stay at
-/// `DEFAULT_PAGE_SIZE` (their stop condition compares the page length to the
-/// requested size, so they must not over-request).
-const REPORTING_PAGE_SIZE: u32 = 1000;
+/// every row (the `Value::Object` envelope branch never compares page length to the
+/// requested size). The NinjaOne spec documents this reporting family with a
+/// `pageSize` max of `10000` (default `1000`); `5000` is a safe margin under that
+/// cap that cuts round trips ~5× versus the old `1000`. The `after`-paginated list
+/// endpoints stay at `DEFAULT_PAGE_SIZE` — their stop condition compares page length
+/// to the requested size, so over-requesting there would end paging early and drop
+/// the rest of the fleet.
+const REPORTING_PAGE_SIZE: u32 = 5000;
 const MAX_RETRIES: u8 = 3;
 
 /// Sink for incremental pagination progress: invoked with the cumulative row

@@ -44,6 +44,26 @@ version and start a fresh `[Unreleased]`.
   backend, so they're disabled in the demo. The downloadable desktop app is
   unaffected — it's the production tool, with no sample-data mode.
 
+### Changed
+
+- **Instant re-filtering between queries.** The device inventory and current patches
+  are now fetched once for the whole fleet and cached, so changing the organization,
+  location, role, OS type, severity, or patch type and pressing **Run query** re-filters
+  the data on the spot instead of making a fresh round trip to NinjaOne every time —
+  switching scope feels immediate. Live patch state still stays current: the existing
+  **Auto-refresh** dropdown refetches on the cadence you choose, a new **↻ Refresh**
+  button pulls fresh data on demand, and a "patch data as of …" stamp shows how current
+  the figures are. The device list — which changes rarely — is reused for ~15 minutes,
+  so an auto-refresh during a patching operation re-pulls only the patch data that's
+  actually moving.
+- **Faster Failed/Installed queries.** When you filter to a single install result
+  (just **Failed**, or just **Installed**), the toolkit now asks NinjaOne for only
+  those records instead of downloading the entire install history for the window and
+  discarding the rest. On a healthy fleet — where successful installs vastly
+  outnumber failures — a **Failures** query in particular pulls far less data and
+  returns noticeably quicker. Large fleets also page through patch reports in bigger
+  chunks (fewer round trips), trimming overall query time.
+
 ## [0.6.2] - 2026-06-25
 
 ### Added

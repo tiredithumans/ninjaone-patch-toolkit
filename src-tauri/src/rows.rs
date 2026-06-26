@@ -178,7 +178,7 @@ pub struct DeviceSummary {
 }
 
 pub fn build_device_summaries(
-    devices: &[Device],
+    devices: &[&Device],
     pending_counts: &HashMap<i64, usize>,
     maps: &LookupMaps,
 ) -> Vec<DeviceSummary> {
@@ -527,7 +527,12 @@ pub struct QueryResult {
     /// Pending-patch age histogram for the dashboard.
     pub age_buckets: Vec<AgeBucket>,
     pub devices_total: usize,
+    /// When the query was computed (the join/rollup clock).
     pub generated_at: String,
+    /// When the underlying whole-fleet patch data was last fetched from NinjaOne —
+    /// distinct from `generated_at` because a re-filter recomputes over the cached
+    /// fetch without a new round trip. Drives the UI's "patch data as of …" label.
+    pub data_fetched_at: String,
 }
 
 /// The lightweight view of a query returned to the frontend over IPC: the first
@@ -555,6 +560,9 @@ pub struct QuerySummary {
     pub age_buckets: Vec<AgeBucket>,
     pub devices_total: usize,
     pub generated_at: String,
+    /// When the underlying whole-fleet patch data was last fetched (see
+    /// [`QueryResult::data_fetched_at`]).
+    pub data_fetched_at: String,
 }
 
 impl QuerySummary {
@@ -576,6 +584,7 @@ impl QuerySummary {
             age_buckets: result.age_buckets.clone(),
             devices_total: result.devices_total,
             generated_at: result.generated_at.clone(),
+            data_fetched_at: result.data_fetched_at.clone(),
         }
     }
 }
@@ -833,7 +842,7 @@ mod tests {
             patch(1, "APPROVED", "IMPORTANT", Some(2)), // approved, fresh
         ];
         let counts = pending_counts(&current);
-        let summaries = build_device_summaries(&[d1.clone(), d2.clone()], &counts, &maps);
+        let summaries = build_device_summaries(&[&d1, &d2], &counts, &maps);
         let buckets = build_compliance(&summaries, &current, &by_id, &maps, 30, Utc::now());
         assert_eq!(buckets.len(), 1);
         let b = &buckets[0];
@@ -853,7 +862,7 @@ mod tests {
         let maps = maps();
         let current = vec![patch(1, "MANUAL", "CRITICAL", Some(1))];
         let counts = pending_counts(&current);
-        let summaries = build_device_summaries(&[online.clone(), offline.clone()], &counts, &maps);
+        let summaries = build_device_summaries(&[&online, &offline], &counts, &maps);
         let buckets = build_compliance(&summaries, &current, &by_id, &maps, 30, Utc::now());
         assert_eq!(buckets.len(), 1);
         let b = &buckets[0];
@@ -888,7 +897,7 @@ mod tests {
             &FilterParams::default(),
         );
         let counts = pending_counts(&patches);
-        let devices = build_device_summaries(std::slice::from_ref(&d), &counts, &maps);
+        let devices = build_device_summaries(&[&d], &counts, &maps);
         let compliance = build_compliance(&devices, &patches, &by_id, &maps, 30, Utc::now());
         let result = QueryResult {
             rows,
@@ -899,6 +908,7 @@ mod tests {
             age_buckets: Vec::new(),
             devices_total: 1,
             generated_at: "2026-01-01 00:00 UTC".into(),
+            data_fetched_at: "2026-01-01 00:00 UTC".into(),
         };
 
         let json = serde_json::to_string(&result).expect("serialize QueryResult");
@@ -942,7 +952,7 @@ mod tests {
             &FilterParams::default(),
         );
         let counts = pending_counts(&patches);
-        let devices = build_device_summaries(&[d1.clone(), d2.clone()], &counts, &maps);
+        let devices = build_device_summaries(&[&d1, &d2], &counts, &maps);
         let compliance = build_compliance(&devices, &patches, &by_id, &maps, 30, Utc::now());
         let result = QueryResult {
             rows,
@@ -953,6 +963,7 @@ mod tests {
             age_buckets: Vec::new(),
             devices_total: 2,
             generated_at: "2026-01-01 00:00 UTC".into(),
+            data_fetched_at: "2026-01-01 00:00 UTC".into(),
         };
 
         let summary = QuerySummary::from_result(&result, 1);
@@ -1080,8 +1091,7 @@ mod tests {
             "PatchRow",
         );
 
-        let summaries =
-            build_device_summaries(std::slice::from_ref(&d), &pending_counts(&patches), &maps);
+        let summaries = build_device_summaries(&[&d], &pending_counts(&patches), &maps);
         assert_keys_present(
             &serde_json::to_value(&summaries[0]).unwrap(),
             &[
@@ -1118,6 +1128,7 @@ mod tests {
             age_buckets: Vec::new(),
             devices_total: 1,
             generated_at: "2026-01-01 00:00:00 UTC".into(),
+            data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         };
         assert_keys_present(
             &serde_json::to_value(QuerySummary::from_result(&result, 100)).unwrap(),
@@ -1131,6 +1142,7 @@ mod tests {
                 "ageBuckets",
                 "devicesTotal",
                 "generatedAt",
+                "dataFetchedAt",
             ],
             "QuerySummary",
         );

@@ -15,7 +15,7 @@ use crate::rows::{
     LookupMaps, PatchSource, QueryResult, QuerySummary, build_age_buckets, build_compliance,
     build_device_summaries, build_failures, build_rows, build_severity_by_org, pending_counts,
 };
-use crate::state::AppState;
+use crate::state::{AppState, CurrentPatches};
 
 /// The org/location/role lookups a query joins against, each shared behind `Arc`
 /// so a cache hit hands out a cheap refcount bump instead of a deep clone.
@@ -71,20 +71,38 @@ pub async fn query_patches(
     app: AppHandle,
     args: PatchQueryArgs,
     query_id: Option<u64>,
+    force_refresh: Option<bool>,
 ) -> Result<QuerySummary, UiError> {
     let settings = state.settings_snapshot();
     // `qid` (0 when the frontend omits it) lets the frontend drop progress events
     // tagged with a run it has already superseded.
     let qid = query_id.unwrap_or(0);
+    // A re-filter (Run query) reuses the cached whole-fleet data; an auto-refresh
+    // tick / manual refresh passes `force_refresh` to pull fresh patch state.
+    let force = force_refresh.unwrap_or(false);
     let progress =
         move |stage: &'static str, loaded: usize| emit_progress(&app, qid, stage, loaded);
 
-    // The org/location/role lookups are served from `AppState`'s short-TTL cache;
-    // the fetch→join→rollup itself lives in `run_query`, which takes them as a
-    // future so they still resolve concurrently with the inventory/patch fetches.
+    // Whole-fleet devices + current patches come from `AppState`'s caches, so a scope
+    // change re-filters them client-side with no refetch. Both are taken as futures
+    // (each carrying its own progress reporter) so a *cold* fetch still resolves
+    // concurrently with the lookups and install-history fetches inside `run_query`;
+    // a cache hit resolves instantly. `force` bypasses the current-patch TTL.
+    let p_devices = |n: usize| progress("devices", n);
+    let p_os = |n: usize| progress("osPatches", n);
+    let p_sw = |n: usize| progress("swPatches", n);
+    let devices_fut = state.fleet_devices(Some(&p_devices as &ProgressFn));
+    let current_fut = state.fleet_current_patches(
+        force,
+        Some(&p_os as &ProgressFn),
+        Some(&p_sw as &ProgressFn),
+    );
+
     let result = run_query(
         &state.api,
         state.lookups(),
+        devices_fut,
+        current_fut,
         settings.install_window_days,
         settings.sla_days,
         args,
@@ -107,19 +125,24 @@ pub async fn query_patches(
     Ok(summary)
 }
 
-/// The fetch→join→rollup core of [`query_patches`], split out so it can be driven
-/// in tests against a mock NinjaOne server without a Tauri `AppHandle`/`State`.
+/// The fetch→scope→join→rollup core of [`query_patches`], split out so it can be
+/// driven in tests against a mock NinjaOne server without a Tauri `AppHandle`/`State`.
 ///
-/// `lookups` is taken as a *future* (not a resolved value) so the org/location/role
-/// fetch runs concurrently with the inventory and patch fetches — `query_patches`
-/// passes `AppState::lookups()` (the cached fetch); a test passes a ready tuple.
-/// `progress` (the UI sink, keyed by stage) and `now` (the clock, for the release/
-/// install windows, SLA aging, and `generated_at`) are injected so the caller owns
-/// both, keeping this function deterministic and side-effect free.
+/// `lookups`, `devices_fut`, and `current_fut` are taken as *futures* (not resolved
+/// values) so the cached-or-fetched org/location/role lookups, the whole-fleet device
+/// inventory, and the whole-fleet current patches all resolve concurrently with the
+/// per-query install-history fetch — a cache hit resolves its future instantly.
+/// `query_patches` passes the `AppState` cache accessors; a test passes ready values.
+/// The whole-fleet devices and current patches are then scoped to the requested
+/// identity facets **client-side** (so a re-filter needs no refetch). `progress` (the
+/// UI sink, keyed by stage) and `now` (the clock, for the release/install windows, SLA
+/// aging, and `generated_at`) are injected so the caller owns both.
 #[allow(clippy::too_many_arguments)]
-async fn run_query<L>(
+async fn run_query<L, D, C>(
     api: &NinjaApiClient,
     lookups: L,
+    devices_fut: D,
+    current_fut: C,
     install_window_days: i64,
     sla_days: i64,
     args: PatchQueryArgs,
@@ -128,6 +151,8 @@ async fn run_query<L>(
 ) -> anyhow::Result<QueryResult>
 where
     L: std::future::Future<Output = anyhow::Result<Lookups>>,
+    D: std::future::Future<Output = anyhow::Result<Arc<Vec<Device>>>>,
+    C: std::future::Future<Output = anyhow::Result<CurrentPatches>>,
 {
     let mut filter = args.filter;
     // Resolve the relative release-date window into an absolute lower bound; the
@@ -135,12 +160,9 @@ where
     if let Some(days) = filter.release_within_days {
         filter.release_after = Some((now - Duration::days(days.max(0))).timestamp());
     }
-    // The device query honors the node-class facet (`class in (...)`); the patch/
-    // install queries don't (NinjaOne's /queries/* ignore `class`), so they use a
-    // class-less filter and the node-class facet is reapplied client-side via the
-    // device join in build_rows.
-    let device_df = filter.device_filter();
-    let device_df_ref = device_df.as_deref();
+    // Install-history queries are fetched fresh per query and narrowed server-side by
+    // identity (org/location/role) via the patch `df`; the node-class facet and the
+    // cached whole-fleet device/current-patch sets are scoped client-side below.
     let patch_df = filter.patch_filter();
     let patch_df_ref = patch_df.as_deref();
 
@@ -165,6 +187,15 @@ where
         .filter(|s| s.is_install_history())
         .map(|s| s.api_value())
         .collect();
+    // When exactly one install status is requested, push it to the history
+    // endpoints server-side so a FAILED-only query (the failure dashboard) doesn't
+    // download every successful install just to drop it. With both requested we
+    // need both records, so leave it unset; the client-side `install_status_set`
+    // filter in build_rows stays as a harmless backstop either way.
+    let install_status: Option<&'static str> = match install_status_set.len() {
+        1 => install_status_set.iter().copied().next(),
+        _ => None,
+    };
     let include_os = args.patch_type.includes_os();
     let include_sw = args.patch_type.includes_software();
     // The configured window is validated >= 1 in save_settings; clamp the optional
@@ -176,41 +207,22 @@ where
         .max(1);
     let after = (now - Duration::days(days)).timestamp();
 
-    // 2. Inventory, lookups (cached), and current/installed patches are all
-    // independent — fetch them concurrently so the latency is the slowest call,
-    // not the sum of all of them. Conditional fetches resolve to empty when the
-    // patch type / status doesn't request them.
-    // Per-stream progress reporters: each emits a cumulative count tagged with its
-    // stage so the UI can show live totals.
-    let p_devices = |n: usize| progress("devices", n);
-    let p_os = |n: usize| progress("osPatches", n);
-    let p_sw = |n: usize| progress("swPatches", n);
+    // 2. The cached whole-fleet devices/current-patches (futures), the lookups, and
+    // the per-query install history are all independent — resolve them concurrently
+    // so latency is the slowest call, not the sum. The install fetch resolves to
+    // empty when no install status / matching family is requested.
     let p_os_inst = |n: usize| progress("osInstalls", n);
     let p_sw_inst = |n: usize| progress("swInstalls", n);
 
-    let (devices, (orgs, locations, roles), os_current, sw_current, os_installs, sw_installs) = tokio::try_join!(
-        api.devices(device_df_ref, Some(&p_devices as &ProgressFn)),
+    let (devices, current, (orgs, locations, roles), os_installs, sw_installs) = tokio::try_join!(
+        devices_fut,
+        current_fut,
         lookups,
-        async {
-            if include_os {
-                api.fleet_os_patches(patch_df_ref, None, Some(&p_os as &ProgressFn))
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        },
-        async {
-            if include_sw {
-                api.fleet_software_patches(patch_df_ref, None, Some(&p_sw as &ProgressFn))
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        },
         async {
             if want_installs && include_os {
                 api.fleet_os_patch_installs(
                     patch_df_ref,
+                    install_status,
                     after,
                     None,
                     Some(&p_os_inst as &ProgressFn),
@@ -224,6 +236,7 @@ where
             if want_installs && include_sw {
                 api.fleet_software_patch_installs(
                     patch_df_ref,
+                    install_status,
                     after,
                     None,
                     Some(&p_sw_inst as &ProgressFn),
@@ -235,26 +248,56 @@ where
         },
     )?;
 
-    // Fetches done; the rest is the in-memory join/rollup.
+    // Fetches done; the rest is the in-memory scope + join/rollup.
     progress("joining", 0);
 
     let maps = LookupMaps::build(&orgs, &locations, &roles);
-    let devices_by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
 
-    // 5/6. Build detail rows directly from the fetched families. The current-patch
-    // sources carry the requested-status filter so build_rows narrows them in
-    // place — no need to clone the matched subset out before joining. The borrow
-    // ends with the block so the families can then move into `all_current`.
+    // 3. Scope the whole-fleet caches to the selected identity facets (org/location/
+    // role/class) client-side — this is what makes a re-filter a no-refetch
+    // operation, replacing the old per-query device/patch `df`. `devices_by_id` then
+    // holds only in-scope devices, so every downstream rollup is scoped through it.
+    let has_scope = filter.has_identity_scope();
+    let scoped_devices: Vec<&Device> = devices
+        .iter()
+        .filter(|d| filter.device_allowed(d))
+        .collect();
+    let devices_by_id: HashMap<i64, &Device> = scoped_devices.iter().map(|d| (d.id, *d)).collect();
+
+    // Narrow the cached current patches to the same scope and the requested families.
+    // With no identity scope every patch is kept (orphans included, as before); with
+    // a scope, only patches whose device is in the scoped set survive. The scoped
+    // subset is cloned out of the `Arc` cache — bounded by the selected scope — so
+    // the existing rollups consume owned `&[Patch]` slices unchanged. (When the whole
+    // fleet is in view the clone is larger but one-off; the win is that subsequent
+    // scoped re-filters hit the cache instead of the network.)
+    let in_scope = |p: &Patch| {
+        !has_scope
+            || p.device_id
+                .is_some_and(|id| devices_by_id.contains_key(&id))
+    };
+    let scoped_os_current: Vec<Patch> = if include_os {
+        current.os.iter().filter(|p| in_scope(p)).cloned().collect()
+    } else {
+        Vec::new()
+    };
+    let scoped_sw_current: Vec<Patch> = if include_sw {
+        current.sw.iter().filter(|p| in_scope(p)).cloned().collect()
+    } else {
+        Vec::new()
+    };
+
+    // 4. Build detail rows from the scoped current families plus the install history.
     let mut rows = {
         let mut sources = vec![
             PatchSource {
-                patches: &os_current,
+                patches: &scoped_os_current,
                 type_label: "OS",
                 status_override: None,
                 status_filter: Some(&current_status_set),
             },
             PatchSource {
-                patches: &sw_current,
+                patches: &scoped_sw_current,
                 type_label: "SOFTWARE",
                 status_override: None,
                 status_filter: Some(&current_status_set),
@@ -289,10 +332,14 @@ where
         )
     });
 
-    // 7. Compliance + reboot rollups from the complete current set.
-    let all_current: Vec<Patch> = os_current.into_iter().chain(sw_current).collect();
+    // 5. Compliance + reboot rollups from the scoped current set.
+    let all_current: Vec<Patch> = scoped_os_current
+        .iter()
+        .chain(&scoped_sw_current)
+        .cloned()
+        .collect();
     let counts = pending_counts(&all_current);
-    let summaries = build_device_summaries(&devices, &counts, &maps);
+    let summaries = build_device_summaries(&scoped_devices, &counts, &maps);
     let compliance = build_compliance(
         &summaries,
         &all_current,
@@ -302,7 +349,7 @@ where
         now,
     );
 
-    // 8. Dashboard/failure rollups. Failures are derived from the FAILED rows already
+    // 6. Dashboard/failure rollups. Failures are derived from the FAILED rows already
     // joined (present only when the FAILED status was requested — no extra fetch);
     // the severity/age distributions come from the current pending backlog.
     let failures = build_failures(&rows);
@@ -316,8 +363,12 @@ where
         failures,
         severity_by_org,
         age_buckets,
-        devices_total: devices.len(),
+        devices_total: scoped_devices.len(),
         generated_at: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        data_fetched_at: current
+            .fetched_at
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string(),
     })
 }
 
@@ -346,7 +397,7 @@ mod tests {
     use super::*;
     use crate::auth::AuthState;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// A fixed clock so the release/install windows, SLA aging, and `generated_at`
@@ -374,12 +425,59 @@ mod tests {
         NinjaApiClient::new(http, auth)
     }
 
+    /// The whole-fleet device future `run_query` now expects, backed by the test's
+    /// `/devices-detailed` mock (the caching itself lives in `AppState` and is
+    /// exercised separately). Keeps the existing per-test device mocks in play.
+    async fn fleet_devices_via(c: &NinjaApiClient) -> anyhow::Result<Arc<Vec<Device>>> {
+        Ok(Arc::new(c.devices(None, None).await?))
+    }
+
+    /// The whole-fleet current-patches future, backed by the test's
+    /// `/queries/os-patches` mock (software-patches is left empty — the OS feed is
+    /// what these joins assert). `fetched_at` is fixed for determinism.
+    async fn fleet_current_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPatches> {
+        Ok(CurrentPatches {
+            os: Arc::new(c.fleet_os_patches(None, None, None).await?),
+            sw: Arc::new(Vec::new()),
+            fetched_at: fixed_now(),
+        })
+    }
+
     fn args(patch_type: PatchType, statuses: Vec<PatchStatus>) -> PatchQueryArgs {
         PatchQueryArgs {
             filter: FilterParams::default(),
             patch_type,
             statuses,
             install_after_days: None,
+        }
+    }
+
+    fn dev(id: i64, org: i64) -> Device {
+        Device {
+            id,
+            system_name: Some(format!("srv{id}")),
+            display_name: None,
+            organization_id: Some(org),
+            location_id: None,
+            node_role_id: None,
+            node_class: Some("WINDOWS_SERVER".into()),
+            offline: Some(false),
+            os: None,
+        }
+    }
+
+    fn cur(device_id: i64, kb: &str, status: &str, severity: &str) -> Patch {
+        Patch {
+            device_id: Some(device_id),
+            kb_number: Some(kb.into()),
+            name: None,
+            version: None,
+            product_vendor: None,
+            severity: Some(severity.into()),
+            status: Some(status.into()),
+            patch_type: None,
+            release_timestamp: Some(fixed_now().timestamp() as f64),
+            installed_timestamp: None,
         }
     }
 
@@ -424,6 +522,8 @@ mod tests {
         let result = run_query(
             &client(&server),
             async { Ok::<_, anyhow::Error>(lookups()) },
+            fleet_devices_via(&client(&server)),
+            fleet_current_via(&client(&server)),
             30,
             30,
             args(PatchType::Os, vec![PatchStatus::Pending]),
@@ -507,6 +607,8 @@ mod tests {
         let result = run_query(
             &client(&server),
             async { Ok::<_, anyhow::Error>(lookups()) },
+            fleet_devices_via(&client(&server)),
+            fleet_current_via(&client(&server)),
             30,
             30,
             args(PatchType::Os, vec![PatchStatus::Installed]),
@@ -572,6 +674,8 @@ mod tests {
         let result = run_query(
             &client(&server),
             async { Ok::<_, anyhow::Error>(lookups()) },
+            fleet_devices_via(&client(&server)),
+            fleet_current_via(&client(&server)),
             30,
             30,
             args(PatchType::Os, vec![PatchStatus::Failed]),
@@ -585,5 +689,197 @@ mod tests {
         let top = &result.failures[0];
         assert_eq!(top.kb.as_deref(), Some("KBFAIL"));
         assert_eq!(top.affected_devices, 2, "KBFAIL failed on two devices");
+    }
+
+    #[tokio::test]
+    async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false }
+            ])))
+            .mount(&server)
+            .await;
+
+        // The current feed is still fetched (it drives compliance) but contributes
+        // no rows for a FAILED-only query.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [], "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        // This install mock matches ONLY when status=FAILED is present. If the
+        // server-side pushdown regressed (no status param sent), nothing would match
+        // the install request and run_query would error on the 404 instead of
+        // returning the FAILED row — so the assertion below is the pushdown proof.
+        let failed_at = fixed_now().timestamp() - 2 * 86_400;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patch-installs"))
+            .and(query_param("status", "FAILED"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    { "deviceId": 10, "kbNumber": "KBFAIL", "status": "FAILED",
+                      "severity": "CRITICAL", "installedAt": failed_at }
+                ],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let progress = |_: &'static str, _: usize| {};
+        let result = run_query(
+            &client(&server),
+            async { Ok::<_, anyhow::Error>(lookups()) },
+            fleet_devices_via(&client(&server)),
+            fleet_current_via(&client(&server)),
+            30,
+            30,
+            args(PatchType::Os, vec![PatchStatus::Failed]),
+            fixed_now(),
+            &progress,
+        )
+        .await
+        .expect("a FAILED-only query must send status=FAILED to the install endpoint");
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].status, "FAILED");
+        assert_eq!(result.failures.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn installed_and_failed_query_omits_the_server_side_status_filter() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false }
+            ])))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [], "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        // Both INSTALLED and FAILED are requested, so neither can be dropped
+        // server-side — the call must omit `status`, and this mock matches only then.
+        let ts = fixed_now().timestamp() - 86_400;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patch-installs"))
+            .and(query_param_is_missing("status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    { "deviceId": 10, "kbNumber": "KBOK", "status": "INSTALLED", "installedAt": ts },
+                    { "deviceId": 10, "kbNumber": "KBBAD", "status": "FAILED", "installedAt": ts }
+                ],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let progress = |_: &'static str, _: usize| {};
+        let result = run_query(
+            &client(&server),
+            async { Ok::<_, anyhow::Error>(lookups()) },
+            fleet_devices_via(&client(&server)),
+            fleet_current_via(&client(&server)),
+            30,
+            30,
+            args(
+                PatchType::Os,
+                vec![PatchStatus::Installed, PatchStatus::Failed],
+            ),
+            fixed_now(),
+            &progress,
+        )
+        .await
+        .expect("an INSTALLED+FAILED query must omit the server-side status filter");
+
+        // Both records survive: one INSTALLED, one FAILED.
+        assert_eq!(result.rows.len(), 2);
+        assert!(result.rows.iter().any(|r| r.status == "INSTALLED"));
+        assert!(result.rows.iter().any(|r| r.status == "FAILED"));
+    }
+
+    #[tokio::test]
+    async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
+        // The whole-fleet devices + current patches are supplied directly (as the
+        // caches would hand them over), spanning two orgs. An org=1 scope must narrow
+        // them client-side — no `df`, no API call (no install status is requested, so
+        // the api client is never touched) — leaving only Alpha's device and patch in
+        // the rows AND the compliance rollup.
+        let devices = Arc::new(vec![dev(10, 1), dev(20, 2)]);
+        let os_current = Arc::new(vec![
+            cur(10, "KB1", "MANUAL", "CRITICAL"), // org 1 (Alpha) — in scope
+            cur(20, "KB2", "MANUAL", "CRITICAL"), // org 2 (Beta) — out of scope
+        ]);
+        let lookups = (
+            Arc::new(vec![
+                Organization {
+                    id: 1,
+                    name: "Alpha".into(),
+                },
+                Organization {
+                    id: 2,
+                    name: "Beta".into(),
+                },
+            ]),
+            Arc::new(vec![]),
+            Arc::new(vec![]),
+        );
+
+        let mut a = args(PatchType::Os, vec![PatchStatus::Pending]);
+        a.filter.organization_id = Some(1);
+
+        let http = reqwest::Client::new();
+        let api = NinjaApiClient::new(
+            http.clone(),
+            AuthState::seeded(http, "http://127.0.0.1:0".into(), "t"),
+        );
+        let progress = |_: &'static str, _: usize| {};
+        let result = run_query(
+            &api,
+            async { Ok::<_, anyhow::Error>(lookups) },
+            async { Ok::<_, anyhow::Error>(devices) },
+            async {
+                Ok::<_, anyhow::Error>(CurrentPatches {
+                    os: os_current,
+                    sw: Arc::new(Vec::new()),
+                    fetched_at: fixed_now(),
+                })
+            },
+            30,
+            30,
+            a,
+            fixed_now(),
+            &progress,
+        )
+        .await
+        .expect("query");
+
+        assert_eq!(
+            result.devices_total, 1,
+            "only the in-scope org's device counts"
+        );
+        assert_eq!(result.rows.len(), 1, "only Alpha's patch becomes a row");
+        assert_eq!(result.rows[0].kb.as_deref(), Some("KB1"));
+        assert_eq!(result.rows[0].organization, "Alpha");
+        assert_eq!(
+            result.compliance.len(),
+            1,
+            "only Alpha in the compliance roll"
+        );
+        assert_eq!(result.compliance[0].organization, "Alpha");
+        assert_eq!(result.compliance[0].pending_critical, 1);
     }
 }

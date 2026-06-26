@@ -458,6 +458,7 @@ fn assemble(rows: Vec<PatchRow>, org_filter: Option<i64>) -> QueryResult {
         age_buckets: sample_age_buckets(),
         devices_total,
         generated_at: GENERATED_AT.to_string(),
+        data_fetched_at: GENERATED_AT.to_string(),
     }
 }
 

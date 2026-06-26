@@ -39,15 +39,19 @@ impl NinjaApiClient {
         .await
     }
 
-    /// Installed-OS-patch history within a time window (Unix seconds).
+    /// OS-patch install history within a time window (Unix seconds). The history
+    /// endpoint returns both successful and failed records; `status` narrows it to a
+    /// single NinjaOne install status (`FAILED`/`INSTALLED`) server-side, so a query
+    /// for just one of them isn't forced to download the other and discard it.
     pub async fn fleet_os_patch_installs(
         &self,
         df: Option<&str>,
+        status: Option<&str>,
         installed_after: i64,
         installed_before: Option<i64>,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
-        let query = install_query(df, installed_after, installed_before);
+        let query = install_query(df, status, installed_after, installed_before);
         self.get_paginated_reporting(
             "/queries/os-patch-installs",
             &query,
@@ -57,15 +61,17 @@ impl NinjaApiClient {
         .await
     }
 
-    /// Installed-software-patch history within a time window (Unix seconds).
+    /// Software-patch install history within a time window (Unix seconds). `status`
+    /// narrows to a single install status server-side — see `fleet_os_patch_installs`.
     pub async fn fleet_software_patch_installs(
         &self,
         df: Option<&str>,
+        status: Option<&str>,
         installed_after: i64,
         installed_before: Option<i64>,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
-        let query = install_query(df, installed_after, installed_before);
+        let query = install_query(df, status, installed_after, installed_before);
         self.get_paginated_reporting(
             "/queries/software-patch-installs",
             &query,
@@ -93,10 +99,14 @@ fn df_query(df: Option<&str>) -> Vec<(&'static str, String)> {
 
 fn install_query(
     df: Option<&str>,
+    status: Option<&str>,
     installed_after: i64,
     installed_before: Option<i64>,
 ) -> Vec<(&'static str, String)> {
     let mut query = df_query(df);
+    if let Some(s) = status {
+        query.push(("status", s.to_string()));
+    }
     query.push(("installedAfter", installed_after.to_string()));
     if let Some(before) = installed_before {
         query.push(("installedBefore", before.to_string()));
