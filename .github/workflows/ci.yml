@@ -85,6 +85,58 @@ jobs:
         run: just web-clippy
       - name: build
         run: just web-build
+      # Pure-helper unit tests run on the host target (the wasm build excludes the
+      # #[cfg(test)] module); the helpers under test are JS-free.
+      - name: test
+        run: just web-test
+
+  coverage:
+    name: Coverage (backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # cargo-llvm-cov needs the llvm-tools-preview component for instrumentation.
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
+        with:
+          tool: just,cargo-llvm-cov
+      - name: Install system deps (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+      # Same compile-time frontendDist stub the backend `rust` job needs.
+      - name: Stub frontend dist
+        shell: bash
+        run: |
+          mkdir -p web-rs/dist
+          printf '<!doctype html><title>stub</title>' > web-rs/dist/index.html
+      # Measurement only — no minimum threshold is enforced yet, so a dip never
+      # fails the build. The lcov report is published as an artifact and a per-file
+      # summary is surfaced on the run page; ratchet a `--fail-under-lines` gate in
+      # once the baseline settles.
+      - name: coverage
+        run: just coverage
+      - name: Summary to run page
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Backend coverage'
+            echo '```'
+            cargo llvm-cov --manifest-path src-tauri/Cargo.toml report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload lcov report
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: coverage-lcov
+          path: src-tauri/target/lcov.info
+          if-no-files-found: error
 
   actionlint:
     name: actionlint
@@ -100,6 +152,17 @@ jobs:
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -color
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # The Claude hook scripts gate commits/docs locally; lint them in CI too so a
+      # broken hook is caught here, not when it silently fails to fire. shellcheck is
+      # preinstalled on the ubuntu-latest runner.
+      - name: shellcheck
+        run: shellcheck .claude/hooks/*.sh
 
   audit:
     name: cargo-audit

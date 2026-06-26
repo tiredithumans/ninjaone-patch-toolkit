@@ -604,4 +604,56 @@ mod tests {
         // monitoring + offline_access, URL-encoded space.
         assert!(url.contains("scope=monitoring%20offline_access"));
     }
+
+    /// Drives `wait_for_callback` end-to-end: binds a loopback listener, connects a
+    /// client, sends a single raw HTTP request line, and returns the parsed result.
+    async fn drive_callback(request_target: &str) -> CallbackResult {
+        use tokio::net::TcpStream;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(wait_for_callback(listener));
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "GET {request_target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        // Drain the browser-facing response so the server task finishes cleanly.
+        let mut resp = Vec::new();
+        let _ = client.read_to_end(&mut resp).await;
+
+        server.await.unwrap().expect("callback parsed")
+    }
+
+    #[tokio::test]
+    async fn callback_extracts_code_and_state() {
+        let r = drive_callback("/?code=abc123&state=xyz").await;
+        assert_eq!(r.code.as_deref(), Some("abc123"));
+        assert_eq!(r.state, "xyz");
+        assert!(r.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn callback_surfaces_provider_error() {
+        let r = drive_callback("/?error=access_denied&state=xyz").await;
+        assert_eq!(r.error.as_deref(), Some("access_denied"));
+        assert!(r.code.is_none());
+    }
+
+    #[tokio::test]
+    async fn callback_url_decodes_percent_encoded_values() {
+        let r = drive_callback("/?code=a%20b&state=s%2Fx").await;
+        assert_eq!(r.code.as_deref(), Some("a b"));
+        assert_eq!(r.state, "s/x");
+    }
+
+    #[tokio::test]
+    async fn callback_without_code_or_error_yields_neither() {
+        // The "missing code" 400 path — the caller treats this as a failed sign-in.
+        let r = drive_callback("/?state=xyz").await;
+        assert!(r.code.is_none());
+        assert!(r.error.is_none());
+        assert_eq!(r.state, "xyz");
+    }
 }

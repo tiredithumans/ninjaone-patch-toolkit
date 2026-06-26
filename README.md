@@ -86,12 +86,16 @@ On first launch open **Settings**, pick your **Region/Instance** (e.g. `us2`), p
 **Client ID** (and Secret if applicable), then **Sign in** to complete the PKCE browser
 flow.
 
+Sign-in hanging, a 404, an empty export, or blank fields? See
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
 ## Build & verify
 
 ```sh
 just build        # distributable bundles (.dmg/.app, .msi/.nsis, AppImage)
 just verify       # fmt-check + clippy + tests + wasm check + wasm clippy
 just test         # backend unit + wiremock integration tests
+just coverage     # backend test coverage (cargo-llvm-cov) → summary + lcov report
 ```
 
 ## Security

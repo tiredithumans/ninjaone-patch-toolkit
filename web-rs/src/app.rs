@@ -4,6 +4,19 @@ use leptos::task::spawn_local;
 use crate::api;
 use crate::types::*;
 
+mod filters;
+mod settings;
+mod tables;
+mod util;
+
+use filters::Filters;
+use settings::SettingsPanel;
+use tables::Results;
+use util::{
+    date_to_epoch, epoch_to_date, group_thousands, non_empty, parse_opt, sev_class, status_class,
+    tab_class,
+};
+
 const PATCHES_PAGE_SIZE: usize = 100;
 
 const REGIONS: [(&str, &str); 5] = [
@@ -26,7 +39,7 @@ const SEVERITY_OPTIONS: [(&str, &str); 5] = [
 ];
 
 #[derive(Clone, Copy, PartialEq)]
-enum Tab {
+pub(crate) enum Tab {
     Patches,
     Compliance,
     Reboot,
@@ -141,15 +154,6 @@ pub struct AppState {
     /// number stamped on each run so stale events from a superseded run are dropped.
     progress: RwSignal<Progress>,
     query_seq: RwSignal<u64>,
-}
-
-fn non_empty(s: String) -> Option<String> {
-    let t = s.trim();
-    if t.is_empty() {
-        None
-    } else {
-        Some(t.to_string())
-    }
 }
 
 impl AppState {
@@ -755,556 +759,6 @@ fn Header() -> impl IntoView {
 }
 
 #[component]
-fn SettingsPanel() -> impl IntoView {
-    let state = expect_context::<AppState>();
-
-    let save = move |_| {
-        let args = SaveSettingsArgs {
-            instance_base_url: state.f_instance.get_untracked(),
-            client_id: non_empty(state.f_client_id.get_untracked()),
-            callback_port: state.f_port.get_untracked(),
-            install_window_days: state.f_install_days.get_untracked(),
-            sla_days: state.f_sla.get_untracked(),
-            client_secret: non_empty(state.f_client_secret.get_untracked()),
-            clear_secret: false,
-            auto_check_updates: state.f_auto_update.get_untracked(),
-        };
-        spawn_local(async move {
-            match api::save_settings(args).await {
-                Ok(v) => {
-                    state.apply_settings_view(v);
-                    state.f_client_secret.set(String::new());
-                    state.refresh_auth();
-                    state.notify(Toast::ok("Settings saved"));
-                }
-                Err(e) => state.notify(Toast::err(e)),
-            }
-        });
-    };
-
-    let clear_secret = move |_| {
-        spawn_local(async move {
-            let args = SaveSettingsArgs {
-                instance_base_url: state.f_instance.get_untracked(),
-                client_id: non_empty(state.f_client_id.get_untracked()),
-                callback_port: state.f_port.get_untracked(),
-                install_window_days: state.f_install_days.get_untracked(),
-                sla_days: state.f_sla.get_untracked(),
-                client_secret: None,
-                clear_secret: true,
-                auto_check_updates: state.f_auto_update.get_untracked(),
-            };
-            match api::save_settings(args).await {
-                Ok(v) => {
-                    state.apply_settings_view(v);
-                    state.notify(Toast::ok("Cleared stored secret"));
-                }
-                Err(e) => state.notify(Toast::err(e)),
-            }
-        });
-    };
-
-    let check_now = move |_| {
-        if state.update_busy.get_untracked() {
-            return;
-        }
-        state.update_busy.set(true);
-        spawn_local(async move {
-            match api::check_for_update().await {
-                Ok(Some(info)) => state.update.set(Some(info)),
-                Ok(None) => state.notify(Toast::ok("You're on the latest version")),
-                Err(e) => state.notify(Toast::err(e)),
-            }
-            state.update_busy.set(false);
-        });
-    };
-
-    view! {
-        <section class="panel settings">
-            <h2>"Connection"</h2>
-            <div class="grid">
-                <label>
-                    "Region / Instance"
-                    <select on:change=move |ev| state.f_instance.set(event_target_value(&ev))>
-                        {REGIONS
-                            .iter()
-                            .map(|(url, label)| {
-                                let url = url.to_string();
-                                let sel = {
-                                    let url = url.clone();
-                                    move || state.f_instance.get() == url
-                                };
-                                view! {
-                                    <option value=url.clone() selected=sel>
-                                        {label.to_string()}
-                                    </option>
-                                }
-                            })
-                            .collect_view()}
-                        <option value="">"Custom…"</option>
-                    </select>
-                </label>
-                <label>
-                    "Instance URL"
-                    <input
-                        prop:value=move || state.f_instance.get()
-                        on:input=move |ev| state.f_instance.set(event_target_value(&ev))
-                    />
-                </label>
-                <label>
-                    "Client ID"
-                    <input
-                        prop:value=move || state.f_client_id.get()
-                        on:input=move |ev| state.f_client_id.set(event_target_value(&ev))
-                    />
-                </label>
-                <label>
-                    {move || {
-                        if state.has_secret.get() {
-                            "Client secret (leave blank to keep)"
-                        } else {
-                            "Client secret (Native apps have none)"
-                        }
-                    }}
-                    <input
-                        type="password"
-                        prop:value=move || state.f_client_secret.get()
-                        on:input=move |ev| state.f_client_secret.set(event_target_value(&ev))
-                    />
-                </label>
-                <label>
-                    "Callback port"
-                    <input
-                        type="number"
-                        min="1024"
-                        max="65535"
-                        prop:value=move || state.f_port.get().to_string()
-                        on:change=move |ev| {
-                            let v = event_target_value(&ev)
-                                .parse::<u16>()
-                                .unwrap_or_else(|_| state.f_port.get_untracked());
-                            state.f_port.set(v.clamp(1024, 65535));
-                        }
-                    />
-                </label>
-                <label>
-                    "Install history window (days)"
-                    <input
-                        type="number"
-                        min="1"
-                        max="3650"
-                        prop:value=move || state.f_install_days.get().to_string()
-                        on:change=move |ev| {
-                            let v = event_target_value(&ev)
-                                .parse::<i64>()
-                                .unwrap_or_else(|_| state.f_install_days.get_untracked());
-                            state.f_install_days.set(v.clamp(1, 3650));
-                        }
-                    />
-                </label>
-                <label>
-                    "SLA window for aged criticals (days)"
-                    <input
-                        type="number"
-                        min="1"
-                        max="3650"
-                        prop:value=move || state.f_sla.get().to_string()
-                        on:change=move |ev| {
-                            let v = event_target_value(&ev)
-                                .parse::<i64>()
-                                .unwrap_or_else(|_| state.f_sla.get_untracked());
-                            state.f_sla.set(v.clamp(1, 3650));
-                        }
-                    />
-                </label>
-                <label class="inline">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || state.f_auto_update.get()
-                        on:change=move |ev| state.f_auto_update.set(event_target_checked(&ev))
-                    />
-                    "Automatically check for updates on launch"
-                </label>
-            </div>
-            <div class="row">
-                <button class="btn btn-primary" on:click=save>
-                    "Save settings"
-                </button>
-                <Show when=move || state.has_secret.get()>
-                    <button class="btn btn-ghost" on:click=clear_secret>
-                        "Clear stored secret"
-                    </button>
-                </Show>
-                <button
-                    class="btn btn-ghost"
-                    prop:disabled=move || state.update_busy.get()
-                    on:click=check_now
-                >
-                    {move || {
-                        if state.update_busy.get() { "Checking…" } else { "Check for updates" }
-                    }}
-                </button>
-            </div>
-            <p class="app-version">
-                {concat!("NinjaOne Patch Toolkit v", env!("CARGO_PKG_VERSION"))}
-            </p>
-        </section>
-    }
-}
-
-#[component]
-fn Filters() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    let installed_selected = move || state.statuses.get().iter().any(|s| s == "INSTALLED");
-
-    view! {
-        <section class="panel">
-            <div class="row">
-                <h2>"Filters"</h2>
-                <Show when=move || state.loading_lookups()>
-                    <span class="chips-label">"Loading…"</span>
-                </Show>
-                <button
-                    class="btn btn-ghost filters-toggle"
-                    aria-expanded=move || (!state.filters_collapsed.get()).to_string()
-                    on:click=move |_| state.filters_collapsed.update(|c| *c = !*c)
-                >
-                    {move || {
-                        if state.filters_collapsed.get() { "Show ▸" } else { "Hide ▾" }
-                    }}
-                </button>
-            </div>
-            <Show when=move || !state.filters_collapsed.get()>
-            <div class="subhead">"Device"</div>
-            <div class="grid">
-                <label>
-                    "Organization"
-                    <select
-                        prop:value=move || {
-                            state.org_id.get().map(|id| id.to_string()).unwrap_or_default()
-                        }
-                        on:change=move |ev| {
-                            state.select_org(parse_opt(&event_target_value(&ev)));
-                        }
-                    >
-                        <option value="">"All organizations"</option>
-                        {move || {
-                            state
-                                .orgs
-                                .get()
-                                .into_iter()
-                                .map(|o| {
-                                    view! { <option value=o.id.to_string()>{o.name}</option> }
-                                })
-                                .collect_view()
-                        }}
-                    </select>
-                </label>
-                <label>
-                    "Location"
-                    <select
-                        prop:disabled=move || state.locations.get().is_empty()
-                        prop:value=move || {
-                            state.loc_id.get().map(|id| id.to_string()).unwrap_or_default()
-                        }
-                        on:change=move |ev| state.loc_id.set(parse_opt(&event_target_value(&ev)))
-                    >
-                        <option value="">"All locations"</option>
-                        {move || {
-                            state
-                                .locations
-                                .get()
-                                .into_iter()
-                                .map(|l| {
-                                    view! { <option value=l.id.to_string()>{l.name}</option> }
-                                })
-                                .collect_view()
-                        }}
-                    </select>
-                </label>
-                <label>
-                    "Device Role"
-                    <select
-                        prop:value=move || {
-                            state.role_id.get().map(|id| id.to_string()).unwrap_or_default()
-                        }
-                        on:change=move |ev| {
-                            state.role_id.set(parse_opt(&event_target_value(&ev)))
-                        }
-                    >
-                        <option value="">"All roles"</option>
-                        {move || {
-                            state
-                                .roles
-                                .get()
-                                .into_iter()
-                                .map(|r| {
-                                    view! { <option value=r.id.to_string()>{r.name}</option> }
-                                })
-                                .collect_view()
-                        }}
-                    </select>
-                </label>
-            </div>
-            <div class="stacked-filters">
-                <div class="control-group">
-                    <span class="chips-label">"OS Type:"</span>
-                    {move || {
-                        state
-                            .node_classes
-                            .get()
-                            .into_iter()
-                            .map(|nc| {
-                                let value = nc.value.clone();
-                                let checked = move || state.selected_classes.get().contains(&value);
-                                let toggle_value = nc.value.clone();
-                                view! {
-                                    <label class="chip">
-                                        <input
-                                            type="checkbox"
-                                            prop:checked=checked
-                                            on:change=move |_| {
-                                                state.toggle_in(state.selected_classes, toggle_value.clone())
-                                            }
-                                        />
-                                        {nc.label}
-                                    </label>
-                                }
-                            })
-                            .collect_view()
-                    }}
-                </div>
-                <div class="control-group">
-                    <span class="chips-label">"OS name contains:"</span>
-                    <input
-                        placeholder="e.g. Server 2022"
-                        prop:value=move || state.os_name.get()
-                        on:input=move |ev| state.os_name.set(event_target_value(&ev))
-                    />
-                </div>
-            </div>
-            <div class="subhead">"Patch"</div>
-            <div class="stacked-filters">
-                <div class="control-group">
-                    <span class="chips-label">"Type:"</span>
-                    {["ALL", "OS", "SOFTWARE"]
-                        .iter()
-                        .map(|t| {
-                            let t = t.to_string();
-                            let val = t.clone();
-                            let active = move || state.patch_type.get() == val;
-                            let set = t.clone();
-                            view! {
-                                <button
-                                    class=move || if active() { "seg seg-on" } else { "seg" }
-                                    on:click=move |_| state.patch_type.set(set.clone())
-                                >
-                                    {t}
-                                </button>
-                            }
-                        })
-                        .collect_view()}
-                </div>
-                <div class="control-group">
-                    <span class="chips-label">"Status:"</span>
-                    {STATUS_OPTIONS
-                        .iter()
-                        .map(|s| {
-                            let s = s.to_string();
-                            let value = s.clone();
-                            let checked = move || state.statuses.get().contains(&value);
-                            let toggle = s.clone();
-                            view! {
-                                <label class="chip">
-                                    <input
-                                        type="checkbox"
-                                        prop:checked=checked
-                                        on:change=move |_| {
-                                            state.toggle_in(state.statuses, toggle.clone())
-                                        }
-                                    />
-                                    {s}
-                                </label>
-                            }
-                        })
-                        .collect_view()}
-                </div>
-                <div class="control-group">
-                    <span class="chips-label">"Severity:"</span>
-                    {SEVERITY_OPTIONS
-                        .iter()
-                        .map(|&(value, label)| {
-                            let v_checked = value.to_string();
-                            let checked = move || {
-                                state.selected_severities.get().contains(&v_checked)
-                            };
-                            let v_toggle = value.to_string();
-                            view! {
-                                <label class="chip">
-                                    <input
-                                        type="checkbox"
-                                        prop:checked=checked
-                                        on:change=move |_| {
-                                            state.toggle_in(state.selected_severities, v_toggle.clone())
-                                        }
-                                    />
-                                    {label}
-                                </label>
-                            }
-                        })
-                        .collect_view()}
-                </div>
-                <div class="control-group">
-                    <span class="chips-label">"Search (KB or name):"</span>
-                    <input
-                        placeholder="e.g. KB5040434"
-                        prop:value=move || state.search.get()
-                        on:input=move |ev| state.search.set(event_target_value(&ev))
-                    />
-                </div>
-                <div class="control-group">
-                    <span class="chips-label">"Released:"</span>
-                    <select
-                        prop:value=move || state.release_window.get()
-                        on:change=move |ev| state.release_window.set(event_target_value(&ev))
-                    >
-                        <option value="">"Any time"</option>
-                        <option value="1">"Last 24 hours"</option>
-                        <option value="7">"Last 7 days"</option>
-                        <option value="30">"Last 30 days"</option>
-                        <option value="90">"Last 90 days"</option>
-                        <option value="custom">"Custom range…"</option>
-                    </select>
-                    <Show when=move || state.release_window.get() == "custom">
-                        <label class="inline">
-                            "After"
-                            <input
-                                type="date"
-                                prop:value=move || state.release_after_date.get()
-                                on:change=move |ev| {
-                                    state.release_after_date.set(event_target_value(&ev))
-                                }
-                            />
-                        </label>
-                        <label class="inline">
-                            "Before"
-                            <input
-                                type="date"
-                                prop:value=move || state.release_before_date.get()
-                                on:change=move |ev| {
-                                    state.release_before_date.set(event_target_value(&ev))
-                                }
-                            />
-                        </label>
-                    </Show>
-                </div>
-            </div>
-            <Show when=installed_selected>
-                <label class="inline">
-                    "Installed within (days)"
-                    <input
-                        type="number"
-                        class="narrow"
-                        min="1"
-                        max="3650"
-                        prop:value=move || state.install_days.get().to_string()
-                        on:change=move |ev| {
-                            let v = event_target_value(&ev)
-                                .parse::<i64>()
-                                .unwrap_or_else(|_| state.install_days.get_untracked());
-                            state.install_days.set(v.clamp(1, 3650));
-                        }
-                    />
-                </label>
-            </Show>
-            </Show>
-        </section>
-    }
-}
-
-#[component]
-fn PresetRow() -> impl IntoView {
-    let state = expect_context::<AppState>();
-
-    let save_preset = move |_| {
-        let name = state.preset_name.get_untracked();
-        if name.trim().is_empty() {
-            state.notify(Toast::err("Name the preset first"));
-            return;
-        }
-        let preset = Preset {
-            name: name.trim().to_string(),
-            filter: state.current_filter(),
-            patch_type: Some(state.patch_type.get_untracked()),
-            statuses: Some(state.statuses.get_untracked()),
-            install_days: Some(state.install_days.get_untracked()),
-        };
-        spawn_local(async move {
-            match api::save_preset(preset).await {
-                Ok(p) => {
-                    state.presets.set(p);
-                    state.preset_name.set(String::new());
-                    state.notify(Toast::ok("Preset saved"));
-                }
-                Err(e) => state.notify(Toast::err(e)),
-            }
-        });
-    };
-
-    view! {
-        <div class="row presets">
-            <span class="chips-label">"Presets:"</span>
-            {move || {
-                state
-                    .presets
-                    .get()
-                    .into_iter()
-                    .map(|p| {
-                        let name = p.name.clone();
-                        let label_name = p.name.clone();
-                        let p2 = p.clone();
-                        let del_name = p.name.clone();
-                        view! {
-                            <span class="chip chip-preset">
-                                <button
-                                    class="link"
-                                    on:click=move |_| state.apply_preset(p2.clone())
-                                >
-                                    {name}
-                                </button>
-                                <button
-                                    class="x"
-                                    aria-label=format!("Delete preset {label_name}")
-                                    on:click=move |_| {
-                                        let n = del_name.clone();
-                                        spawn_local(async move {
-                                            if let Ok(p) = api::delete_preset(n).await {
-                                                state.presets.set(p);
-                                            }
-                                        });
-                                    }
-                                >
-                                    "×"
-                                </button>
-                            </span>
-                        }
-                    })
-                    .collect_view()
-            }}
-            <input
-                class="preset-name"
-                placeholder="Preset name"
-                prop:value=move || state.preset_name.get()
-                on:input=move |ev| state.preset_name.set(event_target_value(&ev))
-            />
-            <button class="btn btn-ghost" on:click=save_preset>
-                "Save preset"
-            </button>
-        </div>
-    }
-}
-
-#[component]
 fn RunControls() -> impl IntoView {
     let state = expect_context::<AppState>();
 
@@ -1413,314 +867,6 @@ fn RunControls() -> impl IntoView {
 }
 
 #[component]
-fn Results() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    let tab = state.active_tab;
-
-    let summary = move || {
-        state.result.with(|r| {
-            r.as_ref().map(|r| {
-                format!(
-                    "{} patch rows · {} devices · generated {}",
-                    r.rows_total, r.devices_total, r.generated_at
-                )
-            })
-        })
-    };
-
-    view! {
-        <section class="panel results">
-            <div class="tabs">
-                <button
-                    class=move || tab_class(tab.get(), Tab::Patches)
-                    on:click=move |_| tab.set(Tab::Patches)
-                >
-                    "Patches"
-                </button>
-                <button
-                    class=move || tab_class(tab.get(), Tab::Compliance)
-                    on:click=move |_| tab.set(Tab::Compliance)
-                >
-                    "Compliance"
-                </button>
-                <button
-                    class=move || tab_class(tab.get(), Tab::Reboot)
-                    on:click=move |_| tab.set(Tab::Reboot)
-                >
-                    "Needs Reboot"
-                </button>
-                <span class="result-summary">{summary}</span>
-            </div>
-            {move || match tab.get() {
-                Tab::Patches => view! { <PatchesTable/> }.into_any(),
-                Tab::Compliance => view! { <ComplianceTable/> }.into_any(),
-                Tab::Reboot => view! { <RebootTable/> }.into_any(),
-            }}
-        </section>
-    }
-}
-
-#[component]
-fn PatchesTable() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    // The total row count comes from the summary; the visible page lives in
-    // `page_rows`, fetched from the backend cache rather than held in full here.
-    let total = move || {
-        state
-            .result
-            .with(|r| r.as_ref().map_or(0, |r| r.rows_total))
-    };
-    let page_count = move || total().div_ceil(PATCHES_PAGE_SIZE).max(1);
-    // Clamp the stored page so a shorter result (e.g. after an auto-refresh) can't
-    // leave us past the last page.
-    let page = move || state.patches_page.get().min(page_count() - 1);
-    let rows = move || state.page_rows.get();
-    let pager_summary = move || {
-        let t = total();
-        let start = page() * PATCHES_PAGE_SIZE;
-        let end = (start + PATCHES_PAGE_SIZE).min(t);
-        format!(
-            "Rows {}\u{2013}{} of {} \u{00b7} Page {} of {}",
-            start + 1,
-            end,
-            group_thousands(t),
-            page() + 1,
-            page_count(),
-        )
-    };
-    // Page navigation updates the index and fetches that page's rows on demand.
-    let go_to = move |target: usize| {
-        state.patches_page.set(target);
-        state.fetch_page(target);
-    };
-    let go_prev = move |_| go_to(page().saturating_sub(1));
-    let go_next = move |_| {
-        let last = page_count().saturating_sub(1);
-        go_to((page().min(last) + 1).min(last));
-    };
-
-    view! {
-        <Show
-            when=move || state.result.with(|r| r.is_some())
-            fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
-        >
-            <Show
-                when=move || { total() > 0 }
-                fallback=|| {
-                    view! {
-                        <p class="empty">
-                            "No patches matched your filters. Try widening the organization, severity, or status selection."
-                        </p>
-                    }
-                }
-            >
-                <Show when=move || { page_count() > 1 }>
-                    <div class="pager">
-                        <button
-                            class="btn"
-                            prop:disabled=move || page() == 0
-                            on:click=go_prev
-                        >
-                            "‹ Prev"
-                        </button>
-                        <span class="pager-info">{pager_summary}</span>
-                        <button
-                            class="btn"
-                            prop:disabled=move || { page() + 1 >= page_count() }
-                            on:click=go_next
-                        >
-                            "Next ›"
-                        </button>
-                    </div>
-                </Show>
-                <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th scope="col">"Organization"</th>
-                            <th scope="col">"Location"</th>
-                            <th scope="col">"Role"</th>
-                            <th scope="col">"Device"</th>
-                            <th scope="col">"OS"</th>
-                            <th scope="col">"Type"</th>
-                            <th scope="col">"KB"</th>
-                            <th scope="col">"Patch"</th>
-                            <th scope="col">"Severity"</th>
-                            <th scope="col">"Status"</th>
-                            <th scope="col">"Release"</th>
-                            <th scope="col">"Installed"</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {move || {
-                            rows()
-                                .into_iter()
-                                .map(|r| {
-                                    let sev = sev_class(&r.severity);
-                                    let stat = status_class(&r.status);
-                                    view! {
-                                        <tr>
-                                            <td>{r.organization}</td>
-                                            <td>{r.location.unwrap_or_default()}</td>
-                                            <td>{r.device_role.unwrap_or_default()}</td>
-                                            <td>{r.device_name}</td>
-                                            <td>{r.os_name.unwrap_or_default()}</td>
-                                            <td>{r.patch_type}</td>
-                                            <td>{r.kb.unwrap_or_default()}</td>
-                                            <td class="patch-name">{r.name}</td>
-                                            <td>
-                                                <span class=sev>{r.severity}</span>
-                                            </td>
-                                            <td>
-                                                <span class=stat>{r.status}</span>
-                                            </td>
-                                            <td>{r.release_date.unwrap_or_default()}</td>
-                                            <td>{r.installed_date.unwrap_or_default()}</td>
-                                        </tr>
-                                    }
-                                })
-                                .collect_view()
-                        }}
-                    </tbody>
-                </table>
-                </div>
-            </Show>
-        </Show>
-    }
-}
-
-#[component]
-fn ComplianceTable() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    let buckets = move || {
-        state
-            .result
-            .with(|r| r.as_ref().map(|r| r.compliance.clone()).unwrap_or_default())
-    };
-    let has_buckets = move || {
-        state
-            .result
-            .with(|r| r.as_ref().is_some_and(|r| !r.compliance.is_empty()))
-    };
-
-    view! {
-        <Show
-            when=has_buckets
-            fallback=|| view! { <p class="empty">"No compliance data yet."</p> }
-        >
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th scope="col">"Organization"</th>
-                            <th scope="col">"Devices"</th>
-                            <th scope="col">"Compliant"</th>
-                            <th scope="col">"Compliance"</th>
-                            <th scope="col">"Pending Critical/Important Patches"</th>
-                            <th scope="col">"Aged (past SLA)"</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {move || {
-                            buckets()
-                                .into_iter()
-                                .map(|b| {
-                                    let pct = format!("{:.0}%", b.compliance_pct);
-                                    let aged = b.aged_critical;
-                                    let aged_class = if aged > 0 { "sev-critical" } else { "" };
-                                    // Prefix a warning glyph so the aged backlog is
-                                    // distinguishable without relying on color.
-                                    let aged_label = if aged > 0 {
-                                        format!("⚠ {aged}")
-                                    } else {
-                                        aged.to_string()
-                                    };
-                                    let aged_title = if aged > 0 { "Past SLA — needs attention" } else { "" };
-                                    view! {
-                                        <tr>
-                                            <td>{b.organization}</td>
-                                            <td>{b.devices_total}</td>
-                                            <td>{b.devices_compliant}</td>
-                                            <td>{pct}</td>
-                                            <td>{b.pending_critical}</td>
-                                            <td>
-                                                <span class=aged_class title=aged_title>
-                                                    {aged_label}
-                                                </span>
-                                            </td>
-                                        </tr>
-                                    }
-                                })
-                                .collect_view()
-                        }}
-                    </tbody>
-                </table>
-            </div>
-        </Show>
-    }
-}
-
-#[component]
-fn RebootTable() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    // The backend already trimmed the device list to the needs-reboot subset, so
-    // clone that directly; the emptiness check clones nothing.
-    let devices = move || {
-        state.result.with(|r| {
-            r.as_ref()
-                .map(|r| r.reboot_devices.clone())
-                .unwrap_or_default()
-        })
-    };
-    let has_devices = move || {
-        state
-            .result
-            .with(|r| r.as_ref().is_some_and(|r| !r.reboot_devices.is_empty()))
-    };
-
-    view! {
-        <Show
-            when=has_devices
-            fallback=|| view! { <p class="empty">"No devices flagged for reboot."</p> }
-        >
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th scope="col">"Organization"</th>
-                            <th scope="col">"Location"</th>
-                            <th scope="col">"Role"</th>
-                            <th scope="col">"Device"</th>
-                            <th scope="col">"OS"</th>
-                            <th scope="col">"Pending patches"</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {move || {
-                            devices()
-                                .into_iter()
-                                .map(|d| {
-                                    view! {
-                                        <tr>
-                                            <td>{d.organization}</td>
-                                            <td>{d.location.unwrap_or_default()}</td>
-                                            <td>{d.device_role.unwrap_or_default()}</td>
-                                            <td>{d.device_name}</td>
-                                            <td>{d.os_name.unwrap_or_default()}</td>
-                                            <td>{d.pending_count}</td>
-                                        </tr>
-                                    }
-                                })
-                                .collect_view()
-                        }}
-                    </tbody>
-                </table>
-            </div>
-        </Show>
-    }
-}
-
-#[component]
 fn Toaster() -> impl IntoView {
     let state = expect_context::<AppState>();
     view! {
@@ -1751,72 +897,84 @@ fn Toaster() -> impl IntoView {
         </div>
     }
 }
+#[component]
+fn PresetRow() -> impl IntoView {
+    let state = expect_context::<AppState>();
 
-fn parse_opt(s: &str) -> Option<i64> {
-    s.trim().parse().ok()
-}
-
-/// Parses a `yyyy-mm-dd` date string to Unix seconds (UTC midnight), or `None`.
-fn date_to_epoch(date: &str) -> Option<i64> {
-    let trimmed = date.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let ms = js_sys::Date::parse(trimmed);
-    if ms.is_nan() {
-        None
-    } else {
-        Some((ms / 1000.0) as i64)
-    }
-}
-
-/// Formats Unix seconds back to a `yyyy-mm-dd` date string (UTC), or "" for `None`.
-fn epoch_to_date(epoch: Option<i64>) -> String {
-    let Some(e) = epoch else {
-        return String::new();
-    };
-    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64((e * 1000) as f64));
-    d.to_iso_string()
-        .as_string()
-        .map(|s| s.chars().take(10).collect())
-        .unwrap_or_default()
-}
-
-/// Formats a count with thousands separators (e.g. `12300` → `12,300`).
-fn group_thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    let len = digits.len();
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (len - i).is_multiple_of(3) {
-            out.push(',');
+    let save_preset = move |_| {
+        let name = state.preset_name.get_untracked();
+        if name.trim().is_empty() {
+            state.notify(Toast::err("Name the preset first"));
+            return;
         }
-        out.push(ch);
-    }
-    out
-}
+        let preset = Preset {
+            name: name.trim().to_string(),
+            filter: state.current_filter(),
+            patch_type: Some(state.patch_type.get_untracked()),
+            statuses: Some(state.statuses.get_untracked()),
+            install_days: Some(state.install_days.get_untracked()),
+        };
+        spawn_local(async move {
+            match api::save_preset(preset).await {
+                Ok(p) => {
+                    state.presets.set(p);
+                    state.preset_name.set(String::new());
+                    state.notify(Toast::ok("Preset saved"));
+                }
+                Err(e) => state.notify(Toast::err(e)),
+            }
+        });
+    };
 
-fn tab_class(active: Tab, this: Tab) -> &'static str {
-    if active == this { "tab tab-on" } else { "tab" }
-}
-
-fn sev_class(sev: &str) -> &'static str {
-    match sev {
-        "Critical" => "sev sev-critical",
-        "Important" => "sev sev-important",
-        "Moderate" => "sev sev-moderate",
-        "Low" => "sev sev-low",
-        _ => "sev sev-none",
-    }
-}
-
-fn status_class(status: &str) -> &'static str {
-    match status {
-        "INSTALLED" => "stat stat-installed",
-        "APPROVED" => "stat stat-approved",
-        "PENDING" => "stat stat-pending",
-        "REJECTED" => "stat stat-rejected",
-        "FAILED" => "stat stat-failed",
-        _ => "stat",
+    view! {
+        <div class="row presets">
+            <span class="chips-label">"Presets:"</span>
+            {move || {
+                state
+                    .presets
+                    .get()
+                    .into_iter()
+                    .map(|p| {
+                        let name = p.name.clone();
+                        let label_name = p.name.clone();
+                        let p2 = p.clone();
+                        let del_name = p.name.clone();
+                        view! {
+                            <span class="chip chip-preset">
+                                <button
+                                    class="link"
+                                    on:click=move |_| state.apply_preset(p2.clone())
+                                >
+                                    {name}
+                                </button>
+                                <button
+                                    class="x"
+                                    aria-label=format!("Delete preset {label_name}")
+                                    on:click=move |_| {
+                                        let n = del_name.clone();
+                                        spawn_local(async move {
+                                            if let Ok(p) = api::delete_preset(n).await {
+                                                state.presets.set(p);
+                                            }
+                                        });
+                                    }
+                                >
+                                    "×"
+                                </button>
+                            </span>
+                        }
+                    })
+                    .collect_view()
+            }}
+            <input
+                class="preset-name"
+                placeholder="Preset name"
+                prop:value=move || state.preset_name.get()
+                on:input=move |ev| state.preset_name.set(event_target_value(&ev))
+            />
+            <button class="btn btn-ghost" on:click=save_preset>
+                "Save preset"
+            </button>
+        </div>
     }
 }

@@ -53,12 +53,27 @@ web-clippy:
 test:
     cargo test --manifest-path src-tauri/Cargo.toml
 
+# Backend test coverage (requires `cargo install cargo-llvm-cov`). Runs the
+# instrumented suite once, prints a per-file summary, then writes an lcov report
+# to src-tauri/target/lcov.info. The wasm frontend has no test suite, so coverage
+# is backend-only (the `web-check`/`web-clippy` gates cover that crate).
+coverage:
+    cargo llvm-cov --manifest-path src-tauri/Cargo.toml --no-report
+    cargo llvm-cov --manifest-path src-tauri/Cargo.toml report --summary-only
+    cargo llvm-cov --manifest-path src-tauri/Cargo.toml report --lcov --output-path src-tauri/target/lcov.info
+
 # Type-check the frontend for the wasm target.
 web-check:
     cargo check --manifest-path web-rs/Cargo.toml --target {{wasm}}
 
+# Frontend pure-helper unit tests on the host target. The wasm build excludes the
+# #[cfg(test)] module, and the helpers under test are JS-free so they run natively
+# (no wasm/browser runner). Components and js_sys-backed helpers aren't covered.
+web-test:
+    cargo test --manifest-path web-rs/Cargo.toml
+
 # Run every CI gate in sequence.
-verify: fmt-check clippy test web-check web-clippy
+verify: fmt-check clippy test web-check web-clippy web-test
 
 # --- Dependency policy -------------------------------------------------------
 

@@ -75,6 +75,24 @@ fn require_https_instance(url: &str) -> Result<(), UiError> {
     }
 }
 
+/// Rejects numeric settings that would break a query or the OAuth redirect, rather
+/// than silently clamping an operator typo (e.g. a `0` window) into a value they
+/// didn't choose. The callback port must be a real port (`0` means "any" to the OS,
+/// so it can't match a registered redirect URI), and the install/SLA windows must
+/// be at least one day.
+fn validate_settings_input(args: &SaveSettingsArgs) -> Result<(), UiError> {
+    if args.callback_port == 0 {
+        return Err(UiError::new("Callback port must be between 1 and 65535."));
+    }
+    if args.install_window_days < 1 {
+        return Err(UiError::new("Install window (days) must be at least 1."));
+    }
+    if args.sla_days < 1 {
+        return Err(UiError::new("SLA (days) must be at least 1."));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn save_settings(
     state: State<'_, AppState>,
@@ -86,6 +104,7 @@ pub fn save_settings(
         .trim_end_matches('/')
         .to_string();
     require_https_instance(&instance_base_url)?;
+    validate_settings_input(&args)?;
 
     let instance_changed;
     let snapshot = {
@@ -99,9 +118,10 @@ pub fn save_settings(
             .client_id
             .map(|c| c.trim().to_string())
             .filter(|c| !c.is_empty());
+        // Already range-checked by validate_settings_input above.
         guard.callback_port = args.callback_port;
-        guard.install_window_days = args.install_window_days.max(1);
-        guard.sla_days = args.sla_days.max(1);
+        guard.install_window_days = args.install_window_days;
+        guard.sla_days = args.sla_days;
         guard.auto_check_updates = args.auto_check_updates;
         guard.save().map_err(UiError::from)?;
         guard.clone()
@@ -172,7 +192,7 @@ pub fn delete_preset(state: State<'_, AppState>, name: String) -> Result<Vec<Pre
 
 #[cfg(test)]
 mod tests {
-    use super::require_https_instance;
+    use super::{SaveSettingsArgs, require_https_instance, validate_settings_input};
 
     #[test]
     fn https_instance_is_required() {
@@ -184,5 +204,29 @@ mod tests {
         assert!(require_https_instance("http://eu.ninjarmm.com").is_err());
         assert!(require_https_instance("ftp://us2.ninjarmm.com").is_err());
         assert!(require_https_instance("not a url").is_err());
+    }
+
+    fn args(callback_port: u16, install_window_days: i64, sla_days: i64) -> SaveSettingsArgs {
+        SaveSettingsArgs {
+            instance_base_url: "https://us2.ninjarmm.com".into(),
+            client_id: None,
+            callback_port,
+            install_window_days,
+            sla_days,
+            client_secret: None,
+            clear_secret: false,
+            auto_check_updates: true,
+        }
+    }
+
+    #[test]
+    fn numeric_settings_reject_invalid_values_instead_of_clamping() {
+        assert!(validate_settings_input(&args(11434, 30, 30)).is_ok());
+        // Port 0 ("any") can't match a registered redirect URI.
+        assert!(validate_settings_input(&args(0, 30, 30)).is_err());
+        // Sub-day windows are operator typos, surfaced rather than clamped to 1.
+        assert!(validate_settings_input(&args(11434, 0, 30)).is_err());
+        assert!(validate_settings_input(&args(11434, -5, 30)).is_err());
+        assert!(validate_settings_input(&args(11434, 30, 0)).is_err());
     }
 }

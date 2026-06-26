@@ -1,5 +1,11 @@
 //! DTOs mirroring the Tauri backend. Serialized field names use camelCase to match
 //! the backend's serde contract across the IPC boundary.
+//!
+//! These types are a hand-maintained mirror of the backend arg/result structs
+//! (`src-tauri/src/{rows,model,commands}.rs`). A backend test,
+//! `serialized_shapes_carry_every_frontend_required_key` in `src-tauri/src/rows.rs`,
+//! fails if the backend drops/renames a key the mirrors below read — so drift is
+//! caught in CI rather than as a silently blank column at runtime.
 
 use serde::{Deserialize, Serialize};
 

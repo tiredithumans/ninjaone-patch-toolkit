@@ -14,7 +14,7 @@ Unlike a workspace, the two crates are **independent**: `src-tauri/` (backend, n
 |---|---|
 | **Task runner** | `just` — recipes in `/justfile`; Tauri's `before{Dev,Build}Command` call Trunk directly. |
 | **Setup / Dev** | `just dev` (`cargo tauri dev`; auto-starts `trunk serve` on `:8080`). |
-| **Verify** | `just verify` (fmt-check → clippy → test → web-check → web-clippy). |
+| **Verify** | `just verify` (fmt-check → clippy → test → web-check → web-clippy → web-test). |
 | **Crates** | `src-tauri` (backend) + `web-rs` (frontend WASM). No cargo workspace. |
 | **IPC** | Global `window.__TAURI__.core.invoke` (`withGlobalTauri`), wrapped in `web-rs/src/api.rs`. |
 
@@ -70,7 +70,12 @@ src-tauri/                       # Tauri 2 backend (native target)
 
 web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 crate
 ├── src/main.rs                  # entry, theme, root mount
-├── src/app.rs                   # views, components, handlers
+├── src/app.rs                   # AppState + context, App/Header/RunControls/Toaster/UpdateSplash
+├── src/app/                     # view components split out as descendant modules of `app`
+│   ├── filters.rs               # Filters panel
+│   ├── settings.rs              # SettingsPanel
+│   ├── tables.rs                # Results + Patches/Compliance/Reboot tables
+│   └── util.rs                  # JS-free pure helpers (format/parse/CSS-class) + their host tests
 ├── src/api.rs                   # typed invoke(...) wrappers (one per backend command)
 ├── src/types.rs                 # request/response types mirrored from the backend
 ├── styles.css                   # plain global CSS (BEM-ish names)
@@ -109,7 +114,9 @@ just fmt-check       # rustfmt --check BOTH crates (covers web-rs too)
 just clippy          # backend clippy (-D warnings)
 just web-clippy      # frontend clippy (wasm target, -D warnings)
 just test            # backend unit + wiremock integration tests
+just coverage        # backend test coverage (cargo-llvm-cov) → summary + target/lcov.info
 just web-check       # cargo check the frontend (wasm target)
+just web-test        # frontend pure-helper unit tests (host target; wasm excludes them)
 just web-build       # trunk build → web-rs/dist (debug)
 
 # Dependency policy:
@@ -123,8 +130,10 @@ just icon            # regenerate icon formats from src-tauri/icons/icon.png
 just clean           # cargo clean both crates + remove web-rs/dist
 ```
 
-Note: `fmt-check` formats **both** crates, so there is no separate `web-fmt-check`. The frontend has
-no test suite, so `verify` runs `web-check` (compile) rather than a `web-test`.
+Note: `fmt-check` formats **both** crates, so there is no separate `web-fmt-check`. The frontend's
+`web-test` covers only the JS-free **pure helpers** (run on the host target; the wasm build excludes
+the `#[cfg(test)]` module). Components and `js_sys`-backed helpers aren't unit-tested, so `verify`
+still leans on `web-check` (compile) + `web-clippy` for the rest of the frontend.
 
 The app needs no build-time config: the **Region/Instance**, **Client ID**, and optional **Secret**
 are entered at runtime in **Settings** (persisted to `settings.json` via the `directories` crate;
@@ -253,9 +262,13 @@ each gate is also callable independently. Use the recipe flags from `/justfile`;
 4. **Frontend compile** — `just web-check` (wasm target; `web-rs` is a separate crate the backend
    gates never reach).
 5. **Lint (frontend)** — `just web-clippy` (`-D warnings`, wasm target).
-6. **Dependency audit** *(optional locally)* — `just audit` (RustSec advisories, both lockfiles)
+   **Test (frontend)** — `just web-test` (pure helpers, host target; wasm excludes the test module).
+6. **Coverage** *(measurement-only; CI `coverage` job)* — `just coverage` (cargo-llvm-cov, backend
+   only). No minimum threshold is enforced yet, so a dip never fails the build; the CI job publishes
+   `lcov.info` as an artifact and a per-file summary on the run page.
+7. **Dependency audit** *(optional locally)* — `just audit` (RustSec advisories, both lockfiles)
    + `just deny` / `just web-deny` (licenses + supply-chain sources + bans via `deny.toml`).
-7. **CodeQL** *(GitHub-side)* — Rust security queries, build-mode `none` (`.github/workflows/codeql.yml`).
+8. **CodeQL** *(GitHub-side)* — Rust security queries, build-mode `none` (`.github/workflows/codeql.yml`).
 
 For behavior changes not provable by a unit test, run `just dev` and exercise the view.
 

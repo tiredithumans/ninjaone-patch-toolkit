@@ -249,4 +249,42 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn omits_empty_sheets_and_writes_the_reboot_sheet() {
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = std::env::temp_dir().join("npt-export-conditional.xlsx");
+
+        // Reboot devices present but no compliance rows: the Compliance sheet is
+        // omitted while Needs Reboot is written.
+        let reboot = vec![DeviceSummary {
+            device_id: 7,
+            device_name: "srv07".into(),
+            organization: "Contoso".into(),
+            location: Some("HQ".into()),
+            device_role: None,
+            os_name: Some("Windows Server 2022".into()),
+            node_class: None,
+            needs_reboot: true,
+            pending_count: 4,
+        }];
+        write_workbook(&path.to_string_lossy(), &[], &[], &reboot).unwrap();
+
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let sheets = wb.sheet_names().to_owned();
+        assert!(sheets.contains(&"Patches".to_string()));
+        assert!(sheets.contains(&"Needs Reboot".to_string()));
+        assert!(
+            !sheets.contains(&"Compliance".to_string()),
+            "an empty compliance set omits the Compliance sheet"
+        );
+        let reboot_range = wb.worksheet_range("Needs Reboot").unwrap();
+        assert_eq!(
+            reboot_range.get_value((0, 0)).unwrap().to_string(),
+            "Organization"
+        );
+        assert_eq!(reboot_range.get_value((1, 3)).unwrap().to_string(), "srv07");
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
