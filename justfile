@@ -29,6 +29,13 @@ web-build:
 web-build-release:
     trunk build --release --locked --config web-rs/Trunk.toml
 
+# Release frontend build for GitHub Pages. Sets the base href to the repo subpath
+# so assets resolve under https://<user>.github.io/<repo>/. The desktop build keeps
+# the default "/" base — never set public_url in Trunk.toml or Tauri's webview (which
+# loads from a relative dist) breaks.
+web-build-pages base="/ninjaone-patch-toolkit/":
+    trunk build --release --locked --public-url {{base}} --config web-rs/Trunk.toml
+
 # --- Verification (CI gates) -------------------------------------------------
 
 # Format both crates.
