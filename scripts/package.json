@@ -1,0 +1,13 @@
+{
+  "name": "ninjaone-patch-toolkit-screenshot",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless capture of the web demo for the README. Dev/CI tool only — not shipped with the app.",
+  "scripts": {
+    "screenshot": "node screenshot.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.49.1"
+  }
+}

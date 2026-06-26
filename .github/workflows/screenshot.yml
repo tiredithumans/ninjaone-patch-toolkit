@@ -1,0 +1,62 @@
+name: Screenshot
+
+# Regenerates the README demo screenshot (docs/images/screenshot.png) by driving the
+# built web demo in headless Chromium, then opens a PR with the refreshed image.
+# Manual trigger — run it after a UI change you want reflected in the README.
+on:
+  workflow_dispatch:
+
+# Needs to push a branch and open a PR with the new image.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: screenshot
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    name: Capture demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: web-rs
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
+        with:
+          tool: just,trunk
+
+      # Build the demo, install Playwright + its Chromium (system deps included on
+      # the Linux runner), then capture. The runner ships Node, so no setup-node.
+      - name: Build the web demo
+        run: just web-build
+      - name: Install Playwright Chromium
+        run: |
+          npm --prefix scripts install --no-audit --no-fund
+          (cd scripts && npx playwright install --with-deps chromium)
+      - name: Capture screenshot
+        run: node scripts/screenshot.mjs
+
+      - name: Open a PR if the screenshot changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet -- docs/images/screenshot.png; then
+            echo "Screenshot unchanged — nothing to open."
+            exit 0
+          fi
+          branch="chore/refresh-screenshot-${{ github.run_id }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add docs/images/screenshot.png
+          git commit -m "docs: refresh the README demo screenshot"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "docs: refresh the README demo screenshot" \
+            --body "Automated capture of the live web demo via \`scripts/screenshot.mjs\` (\`.github/workflows/screenshot.yml\`). Review the image and merge."
