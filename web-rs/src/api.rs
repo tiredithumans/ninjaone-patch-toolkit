@@ -150,6 +150,13 @@ pub async fn export_patches() -> Result<Option<String>, String> {
     invoke("export_patches_xlsx", no_args()).await
 }
 
+/// Writes the cached query result as a self-contained HTML executive report
+/// (compliance/severity/age charts + failure & reboot tables) the operator can
+/// print to PDF. Like the Excel export, backend-only — inert in browser/demo mode.
+pub async fn export_report() -> Result<Option<String>, String> {
+    invoke("export_report_html", no_args()).await
+}
+
 // --- Updates -----------------------------------------------------------------
 
 pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {

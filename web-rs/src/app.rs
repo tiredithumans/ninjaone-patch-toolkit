@@ -5,11 +5,13 @@ use crate::api;
 use crate::demo;
 use crate::types::*;
 
+mod charts;
 mod filters;
 mod settings;
 mod tables;
 mod util;
 
+use charts::Dashboard;
 use filters::Filters;
 use settings::SettingsPanel;
 use tables::Results;
@@ -45,8 +47,10 @@ const SEVERITY_OPTIONS: [(&str, &str); 5] = [
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Tab {
     Patches,
+    Dashboard,
     Compliance,
     Reboot,
+    Failures,
 }
 
 #[derive(Clone)]
@@ -875,6 +879,32 @@ fn RunControls() -> impl IntoView {
                     }
                 >
                     "Export to Excel"
+                </button>
+                <button
+                    class="btn"
+                    prop:disabled=move || {
+                        state.result.get().is_none() || state.web_mode.get() || state.demo.get()
+                    }
+                    title=move || {
+                        if state.web_mode.get() || state.demo.get() {
+                            "The HTML report needs a live query in the desktop app"
+                        } else {
+                            ""
+                        }
+                    }
+                    on:click=move |_| {
+                        spawn_local(async move {
+                            match api::export_report().await {
+                                Ok(Some(p)) => {
+                                    state.notify(Toast::ok(format!("Report saved to {p}")))
+                                }
+                                Ok(None) => {}
+                                Err(e) => state.notify(Toast::err(e)),
+                            }
+                        });
+                    }
+                >
+                    "Export report"
                 </button>
                 <Show when=move || state.refreshing.get()>
                     <span class="chips-label">"↻ refreshing…"</span>

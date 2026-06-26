@@ -151,6 +151,9 @@ mod tests {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: Vec::new(),
+            failures: Vec::new(),
+            severity_by_org: Vec::new(),
+            age_buckets: Vec::new(),
             devices_total: 0,
             generated_at: "2026-01-01 00:00:00 UTC".into(),
         });

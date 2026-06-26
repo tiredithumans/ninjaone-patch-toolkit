@@ -638,3 +638,130 @@ tbody tr:hover {
   font-size: 11px;
   color: var(--muted);
 }
+
+/* --- Dashboard charts (inline SVG) --- */
+.charts {
+  display: grid;
+  gap: 16px;
+}
+
+.chart-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+  padding: 14px 16px;
+}
+
+.chart-title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.chart {
+  max-width: 100%;
+  height: auto;
+}
+
+.chart-lbl {
+  fill: var(--muted);
+  font-size: 12px;
+}
+
+.chart-val {
+  fill: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-track {
+  fill: var(--border);
+}
+
+/* Compliance bar fills, by health band. */
+.chart .bar-good {
+  fill: var(--accent);
+}
+
+.chart .bar-warn {
+  fill: var(--warn);
+}
+
+.chart .bar-bad {
+  fill: var(--danger);
+}
+
+/* Severity segment fills (stacked bar) — solid variants of the .sev-* badges. */
+.chart .seg-critical {
+  fill: #f87171;
+}
+
+.chart .seg-important {
+  fill: #fb923c;
+}
+
+.chart .seg-moderate {
+  fill: #fbbf24;
+}
+
+.chart .seg-low {
+  fill: #60a5fa;
+}
+
+.chart .seg-optional {
+  fill: var(--muted);
+}
+
+.chart .seg-unknown {
+  fill: #6b7280;
+}
+
+.chart-legend {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 0 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chart-legend li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chart-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.chart-swatch.seg-critical {
+  background: #f87171;
+}
+
+.chart-swatch.seg-important {
+  background: #fb923c;
+}
+
+.chart-swatch.seg-moderate {
+  background: #fbbf24;
+}
+
+.chart-swatch.seg-low {
+  background: #60a5fa;
+}
+
+.chart-swatch.seg-optional {
+  background: var(--muted);
+}
+
+.chart-swatch.seg-unknown {
+  background: #6b7280;
+}

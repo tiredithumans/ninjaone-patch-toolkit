@@ -19,8 +19,8 @@
 
 use crate::types::QueryResult;
 use crate::types::{
-    ComplianceBucket, DeviceSummary, FilterParams, Location, NodeClass, Organization, PatchRow,
-    Role,
+    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams, Location, NodeClass,
+    OrgSeverity, Organization, PatchRow, Role, SeverityCounts,
 };
 
 /// Wall-clock label shown in the results summary. Fixed (not "now") so the build
@@ -319,6 +319,82 @@ fn reboot(
     }
 }
 
+/// Groups the demo's FAILED display rows by patch (KB + name) — the demo mirror of
+/// the backend `build_failures`, so the Top-failures tab reacts to the status facet
+/// (it stays empty until FAILED is selected, exactly like the real app).
+fn demo_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
+    let mut groups: Vec<FailureGroup> = Vec::new();
+    for r in rows
+        .iter()
+        .filter(|r| r.status.eq_ignore_ascii_case("FAILED"))
+    {
+        match groups.iter_mut().find(|g| g.kb == r.kb && g.name == r.name) {
+            Some(g) => {
+                // Count each device once; keep the latest (max YYYY-MM-DD) failure.
+                if !g.sample_devices.contains(&r.device_name) {
+                    g.affected_devices += 1;
+                    g.sample_devices.push(r.device_name.clone());
+                }
+                if r.installed_date.as_deref() > g.latest_failure.as_deref() {
+                    g.latest_failure = r.installed_date.clone();
+                }
+            }
+            None => groups.push(FailureGroup {
+                kb: r.kb.clone(),
+                name: r.name.clone(),
+                severity: r.severity.clone(),
+                affected_devices: 1,
+                sample_devices: vec![r.device_name.clone()],
+                latest_failure: r.installed_date.clone(),
+            }),
+        }
+    }
+    groups.sort_by_key(|g| std::cmp::Reverse(g.affected_devices));
+    groups
+}
+
+/// Representative per-org pending-patch severity breakdown for the dashboard. Like
+/// `sample_compliance`, it's a backend computation in a real deployment, so the demo
+/// keeps it static and narrows it by the organization facet.
+fn sample_severity_by_org() -> Vec<OrgSeverity> {
+    fn org(name: &str, c: usize, i: usize, m: usize, l: usize) -> OrgSeverity {
+        OrgSeverity {
+            organization: name.to_string(),
+            counts: SeverityCounts {
+                critical: c,
+                important: i,
+                moderate: m,
+                low: l,
+                optional: 0,
+                unknown: 0,
+            },
+        }
+    }
+    vec![
+        org("Contoso Ltd", 5, 3, 1, 2),
+        org("Northwind Traders", 3, 2, 2, 1),
+        org("Fabrikam Inc", 1, 1, 0, 1),
+    ]
+}
+
+/// Representative fleet-wide pending-patch age histogram. The labels match the
+/// backend's fixed buckets (`build_age_buckets`), oldest last.
+fn sample_age_buckets() -> Vec<AgeBucket> {
+    [
+        ("0-30 days", 13),
+        ("31-60 days", 6),
+        ("61-90 days", 4),
+        ("91-180 days", 3),
+        ("180+ days", 2),
+    ]
+    .into_iter()
+    .map(|(label, count)| AgeBucket {
+        label: label.to_string(),
+        count,
+    })
+    .collect()
+}
+
 /// The sample filtered like a real query: device facets (org/location/role/OS-type/
 /// OS-name) and patch facets (type/status/severity/search/release-window/install-
 /// window) applied to the rows, with the row count recomputed. Compliance / reboot
@@ -341,30 +417,45 @@ pub fn filtered_result(
 /// Builds a `QueryResult` from already-filtered display rows, narrowing the rollups
 /// to `org_filter` (the organization facet) when one is set.
 fn assemble(rows: Vec<PatchRow>, org_filter: Option<i64>) -> QueryResult {
-    let (compliance, reboot_devices, devices_total) = match org_filter.and_then(org_name) {
-        Some(name) => {
-            let compliance: Vec<_> = sample_compliance()
-                .into_iter()
-                .filter(|b| b.organization == name)
-                .collect();
-            let reboot_devices = sample_reboot()
-                .into_iter()
-                .filter(|d| d.organization == name)
-                .collect();
-            let devices_total = compliance.iter().map(|b| b.devices_total).sum();
-            (compliance, reboot_devices, devices_total)
-        }
-        None => {
-            let compliance = sample_compliance();
-            let devices_total = compliance.iter().map(|b| b.devices_total).sum();
-            (compliance, sample_reboot(), devices_total)
-        }
-    };
+    // Failures derive from the already-filtered rows, so the tab reacts to filters.
+    let failures = demo_failures(&rows);
+    let (compliance, reboot_devices, severity_by_org, devices_total) =
+        match org_filter.and_then(org_name) {
+            Some(name) => {
+                let compliance: Vec<_> = sample_compliance()
+                    .into_iter()
+                    .filter(|b| b.organization == name)
+                    .collect();
+                let reboot_devices = sample_reboot()
+                    .into_iter()
+                    .filter(|d| d.organization == name)
+                    .collect();
+                let severity_by_org = sample_severity_by_org()
+                    .into_iter()
+                    .filter(|o| o.organization == name)
+                    .collect();
+                let devices_total = compliance.iter().map(|b| b.devices_total).sum();
+                (compliance, reboot_devices, severity_by_org, devices_total)
+            }
+            None => {
+                let compliance = sample_compliance();
+                let devices_total = compliance.iter().map(|b| b.devices_total).sum();
+                (
+                    compliance,
+                    sample_reboot(),
+                    sample_severity_by_org(),
+                    devices_total,
+                )
+            }
+        };
     QueryResult {
         rows_total: rows.len(),
         rows,
         reboot_devices,
         compliance,
+        failures,
+        severity_by_org,
+        age_buckets: sample_age_buckets(),
         devices_total,
         generated_at: GENERATED_AT.to_string(),
     }
@@ -558,6 +649,40 @@ mod tests {
                 .iter()
                 .all(|d| d.organization == "Contoso Ltd")
         );
+        assert_eq!(r.severity_by_org.len(), 1);
+        assert_eq!(r.severity_by_org[0].organization, "Contoso Ltd");
+    }
+
+    #[test]
+    fn failed_query_populates_demo_failure_rollup() {
+        let r = filtered_result(&filter(), "ALL", &["FAILED".to_string()], Some(3650));
+        assert!(
+            !r.failures.is_empty(),
+            "FAILED rows feed the failure rollup"
+        );
+        assert!(r.failures.iter().all(|f| f.affected_devices >= 1));
+        // Sorted by affected-device count, descending.
+        assert!(
+            r.failures
+                .windows(2)
+                .all(|w| w[0].affected_devices >= w[1].affected_devices)
+        );
+    }
+
+    #[test]
+    fn pending_only_query_has_no_failures() {
+        let r = filtered_result(&filter(), "ALL", &["PENDING".to_string()], Some(3650));
+        assert!(
+            r.failures.is_empty(),
+            "no FAILED rows selected → empty failure rollup, like the real app"
+        );
+    }
+
+    #[test]
+    fn dashboard_rollups_are_always_populated() {
+        let r = filtered_result(&filter(), "ALL", &all_statuses(), Some(3650));
+        assert!(!r.severity_by_org.is_empty());
+        assert_eq!(r.age_buckets.len(), 5, "fixed five-bucket histogram");
     }
 
     #[test]

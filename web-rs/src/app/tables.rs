@@ -28,6 +28,12 @@ pub(crate) fn Results() -> impl IntoView {
                     "Patches"
                 </button>
                 <button
+                    class=move || tab_class(tab.get(), Tab::Dashboard)
+                    on:click=move |_| tab.set(Tab::Dashboard)
+                >
+                    "Dashboard"
+                </button>
+                <button
                     class=move || tab_class(tab.get(), Tab::Compliance)
                     on:click=move |_| tab.set(Tab::Compliance)
                 >
@@ -39,12 +45,20 @@ pub(crate) fn Results() -> impl IntoView {
                 >
                     "Needs Reboot"
                 </button>
+                <button
+                    class=move || tab_class(tab.get(), Tab::Failures)
+                    on:click=move |_| tab.set(Tab::Failures)
+                >
+                    "Failures"
+                </button>
                 <span class="result-summary">{summary}</span>
             </div>
             {move || match tab.get() {
                 Tab::Patches => view! { <PatchesTable/> }.into_any(),
+                Tab::Dashboard => view! { <Dashboard/> }.into_any(),
                 Tab::Compliance => view! { <ComplianceTable/> }.into_any(),
                 Tab::Reboot => view! { <RebootTable/> }.into_any(),
+                Tab::Failures => view! { <FailuresTable/> }.into_any(),
             }}
         </section>
     }
@@ -238,6 +252,73 @@ fn ComplianceTable() -> impl IntoView {
                                                     {aged_label}
                                                 </span>
                                             </td>
+                                        </tr>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </tbody>
+                </table>
+            </div>
+        </Show>
+    }
+}
+
+#[component]
+fn FailuresTable() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    // Backend ships the failure rollup whole (one entry per failing patch) in the
+    // summary, already sorted by affected-device count — render it as-is.
+    let failures = move || {
+        state
+            .result
+            .with(|r| r.as_ref().map(|r| r.failures.clone()).unwrap_or_default())
+    };
+    let has_failures = move || {
+        state
+            .result
+            .with(|r| r.as_ref().is_some_and(|r| !r.failures.is_empty()))
+    };
+
+    view! {
+        <Show
+            when=has_failures
+            fallback=|| {
+                view! {
+                    <p class="empty">
+                        "No patch failures. Select the FAILED status and Run query to analyze failures."
+                    </p>
+                }
+            }
+        >
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th scope="col">"Severity"</th>
+                            <th scope="col">"KB"</th>
+                            <th scope="col">"Patch"</th>
+                            <th scope="col">"Affected devices"</th>
+                            <th scope="col">"Sample devices"</th>
+                            <th scope="col">"Latest failure"</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {move || {
+                            failures()
+                                .into_iter()
+                                .map(|f| {
+                                    let sev = sev_class(&f.severity);
+                                    view! {
+                                        <tr>
+                                            <td>
+                                                <span class=sev>{f.severity}</span>
+                                            </td>
+                                            <td>{f.kb.unwrap_or_default()}</td>
+                                            <td class="patch-name">{f.name}</td>
+                                            <td>{f.affected_devices}</td>
+                                            <td>{f.sample_devices.join(", ")}</td>
+                                            <td>{f.latest_failure.unwrap_or_default()}</td>
                                         </tr>
                                     }
                                 })
