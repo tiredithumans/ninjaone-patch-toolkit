@@ -107,6 +107,15 @@ build:
 icon:
     cargo tauri icon src-tauri/icons/icon.png
 
+# Regenerate the README demo screenshot (docs/images/screenshot.png) by driving the
+# built web demo in headless Chromium. Needs Node; first run installs Playwright +
+# its Chromium under scripts/ (both gitignored). CI runs the same via screenshot.yml.
+screenshot:
+    just web-build
+    npm --prefix scripts install --no-audit --no-fund
+    cd scripts && npx playwright install chromium
+    node scripts/screenshot.mjs
+
 # --- Housekeeping ------------------------------------------------------------
 
 # Remove build artifacts from both crates and the frontend dist.

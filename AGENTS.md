@@ -84,7 +84,10 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ├── styles.css                   # plain global CSS (BEM-ish names)
 └── Trunk.toml                   # WASM build/serve (127.0.0.1:8080)
 
-.github/workflows/               # ci.yml · codeql.yml · pages.yml · release.yml
+scripts/                         # dev/CI tooling (not shipped)
+└── screenshot.mjs               # headless-Chromium capture of the web demo → docs/images/screenshot.png (Playwright)
+
+.github/workflows/               # ci.yml · codeql.yml · pages.yml · release.yml · screenshot.yml
 ```
 
 ## Common patterns
@@ -132,6 +135,7 @@ just web-deny        # same policy for the web-rs tree
 # Packaging / housekeeping:
 just build           # cargo tauri build → bundles (.dmg/.app, .msi/.nsis, AppImage)
 just icon            # regenerate icon formats from src-tauri/icons/icon.png
+just screenshot      # rebuild the README demo screenshot via headless Chromium (Playwright; also a CI workflow)
 just clean           # cargo clean both crates + remove web-rs/dist
 ```
 
