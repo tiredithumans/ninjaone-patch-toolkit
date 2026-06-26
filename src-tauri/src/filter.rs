@@ -1,13 +1,16 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::Severity;
+use crate::model::{Device, Severity};
 
-/// Filter facets chosen by the operator in the UI. Identity facets (org/location/
-/// role) go into the `df` for both the device and patch queries; the coarse OS-type
-/// facet (`node_classes`) goes into the device `df` only (the patch `/queries/*`
-/// endpoints ignore `class`) and is reapplied client-side via the device join.
-/// `os_name_contains`, `search`, and `severities` are applied client-side against
-/// patch rows after fetch.
+/// Filter facets chosen by the operator in the UI. The device inventory and current
+/// patches are prefetched **whole-fleet** and cached, so every identity facet
+/// (org/location/role + the coarse OS-type `node_classes`) is applied **client-side**
+/// against the cached devices via [`FilterParams::device_allowed`] — switching scope
+/// re-filters the cache with no new round trip. The install-history queries, which
+/// are fetched fresh per query, still narrow org/location/role server-side via
+/// [`FilterParams::patch_filter`] (the `/queries/*` endpoints ignore `class`, so it
+/// is reapplied client-side via the device join). `os_name_contains`, `search`, and
+/// `severities` are applied client-side against patch rows after fetch.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FilterParams {
@@ -53,11 +56,39 @@ impl FilterParams {
         parts
     }
 
-    /// Builds the NinjaOne `df` DSL for the **device** query from the identity
-    /// facets plus the coarse OS-type (node-class) facet. Returns `None` when no
-    /// server-side facet is selected (query the whole fleet).
-    pub fn device_filter(&self) -> Option<String> {
-        let mut parts = self.identity_clauses();
+    /// Whether any identity facet (org/location/role/class) is active. When none is,
+    /// the query spans the whole fleet and [`device_allowed`](Self::device_allowed)
+    /// matches every device (so orphan patches whose device isn't in inventory are
+    /// kept rather than scoped out).
+    pub fn has_identity_scope(&self) -> bool {
+        self.organization_id.is_some()
+            || self.location_id.is_some()
+            || self.role_id.is_some()
+            || self.node_classes.iter().any(|c| !c.trim().is_empty())
+    }
+
+    /// Client-side identity match against a cached device: keeps it only when it
+    /// satisfies every active facet (org / location / role / node-class). This is the
+    /// device-query equivalent of the old `df` `class in (...)` + identity clauses,
+    /// moved client-side so a scope change re-filters the whole-fleet cache without a
+    /// refetch. An inactive facet matches everything; node-class compares
+    /// case-insensitively.
+    pub fn device_allowed(&self, device: &Device) -> bool {
+        if let Some(org) = self.organization_id
+            && device.organization_id != Some(org)
+        {
+            return false;
+        }
+        if let Some(loc) = self.location_id
+            && device.location_id != Some(loc)
+        {
+            return false;
+        }
+        if let Some(role) = self.role_id
+            && device.node_role_id != Some(role)
+        {
+            return false;
+        }
         let classes: Vec<String> = self
             .node_classes
             .iter()
@@ -65,16 +96,20 @@ impl FilterParams {
             .filter(|c| !c.is_empty())
             .collect();
         if !classes.is_empty() {
-            parts.push(format!("class in ({})", classes.join(", ")));
+            match device.node_class.as_deref() {
+                Some(nc) if classes.iter().any(|c| c == &nc.to_ascii_uppercase()) => {}
+                _ => return false,
+            }
         }
-        (!parts.is_empty()).then(|| parts.join(" AND "))
+        true
     }
 
-    /// Builds the `df` for the **patch / install** queries. NinjaOne's `/queries/*`
-    /// endpoints don't honor `class` in `df` — passing it returns no rows even when
-    /// matching devices exist — so the node-class facet is omitted here and applied
-    /// client-side via the device join in `rows::build_rows`. Only the identity
-    /// facets (which the query endpoints do honor) are sent server-side.
+    /// Builds the `df` for the **install-history** queries (which are fetched fresh
+    /// per query, not cached whole-fleet like the current-patch feed). NinjaOne's
+    /// `/queries/*` endpoints don't honor `class` in `df` — passing it returns no
+    /// rows even when matching devices exist — so the node-class facet is omitted
+    /// here and applied client-side via the device join in `rows::build_rows`. Only
+    /// the identity facets (which the query endpoints do honor) are sent server-side.
     pub fn patch_filter(&self) -> Option<String> {
         let parts = self.identity_clauses();
         (!parts.is_empty()).then(|| parts.join(" AND "))
@@ -192,74 +227,79 @@ impl PreparedFilter {
 mod tests {
     use super::*;
 
-    #[test]
-    fn empty_state_yields_none() {
-        assert!(FilterParams::default().device_filter().is_none());
+    fn device(org: i64, location: i64, role: i64, class: &str) -> Device {
+        Device {
+            id: 1,
+            system_name: None,
+            display_name: None,
+            organization_id: Some(org),
+            location_id: Some(location),
+            node_role_id: Some(role),
+            node_class: Some(class.into()),
+            offline: None,
+            os: None,
+        }
     }
 
     #[test]
-    fn single_org_clause() {
+    fn empty_state_has_no_identity_scope_and_allows_every_device() {
+        let f = FilterParams::default();
+        assert!(!f.has_identity_scope());
+        assert!(f.device_allowed(&device(7, 2, 3, "WINDOWS_SERVER")));
+    }
+
+    #[test]
+    fn device_allowed_matches_each_identity_facet() {
         let f = FilterParams {
             organization_id: Some(7),
             ..Default::default()
         };
-        assert_eq!(f.device_filter().as_deref(), Some("org = 7"));
-    }
+        assert!(f.has_identity_scope());
+        assert!(f.device_allowed(&device(7, 2, 3, "WINDOWS_SERVER")));
+        assert!(!f.device_allowed(&device(8, 2, 3, "WINDOWS_SERVER")));
 
-    #[test]
-    fn combined_identity_and_class_clauses() {
-        let f = FilterParams {
+        // Every active facet must match (AND semantics, like the old `df` clauses).
+        let all = FilterParams {
             organization_id: Some(1),
             location_id: Some(2),
             role_id: Some(3),
             node_classes: vec!["windows_server".into(), "LINUX_SERVER".into()],
             ..Default::default()
         };
-        assert_eq!(
-            f.device_filter().as_deref(),
-            Some(
-                "org = 1 AND location = 2 AND role = 3 AND class in (WINDOWS_SERVER, LINUX_SERVER)"
-            )
-        );
+        assert!(all.device_allowed(&device(1, 2, 3, "WINDOWS_SERVER")));
+        assert!(all.device_allowed(&device(1, 2, 3, "linux_server"))); // class case-insensitive
+        assert!(!all.device_allowed(&device(1, 2, 3, "MAC"))); // class not in set
+        assert!(!all.device_allowed(&device(1, 99, 3, "WINDOWS_SERVER"))); // wrong location
     }
 
     #[test]
-    fn patch_filter_omits_node_class() {
-        // The patch query keeps identity facets but drops `class` (the /queries/*
-        // endpoints ignore it), so the node-class facet is applied client-side.
+    fn class_only_scope_drops_class_from_the_install_df() {
+        // A class-only selection is an active scope, but `class` can't go in the
+        // install-history `df` (the /queries/* endpoints ignore it), so patch_filter
+        // is whole-fleet (None) and the class is reapplied via device_allowed.
+        let f = FilterParams {
+            node_classes: vec!["LINUX_SERVER".into()],
+            ..Default::default()
+        };
+        assert!(f.has_identity_scope());
+        assert!(f.patch_filter().is_none());
+        assert!(f.device_allowed(&device(1, 2, 3, "LINUX_SERVER")));
+        assert!(!f.device_allowed(&device(1, 2, 3, "WINDOWS_SERVER")));
+    }
+
+    #[test]
+    fn patch_filter_keeps_identity_but_omits_node_class() {
+        // The install-history query keeps identity facets but drops `class`.
         let f = FilterParams {
             organization_id: Some(1),
+            location_id: Some(2),
+            role_id: Some(3),
             node_classes: vec!["LINUX_SERVER".into()],
             ..Default::default()
         };
         assert_eq!(
-            f.device_filter().as_deref(),
-            Some("org = 1 AND class in (LINUX_SERVER)")
-        );
-        assert_eq!(f.patch_filter().as_deref(), Some("org = 1"));
-
-        // Class-only selection → patch filter is whole-fleet (None); class is
-        // reconstructed via the device join.
-        let g = FilterParams {
-            node_classes: vec!["LINUX_SERVER".into()],
-            ..Default::default()
-        };
-        assert_eq!(
-            g.device_filter().as_deref(),
-            Some("class in (LINUX_SERVER)")
-        );
-        assert!(g.patch_filter().is_none());
-    }
-
-    #[test]
-    fn class_only_filter() {
-        let f = FilterParams {
-            node_classes: vec!["WINDOWS_WORKSTATION".into()],
-            ..Default::default()
-        };
-        assert_eq!(
-            f.device_filter().as_deref(),
-            Some("class in (WINDOWS_WORKSTATION)")
+            f.patch_filter().as_deref(),
+            Some("org = 1 AND location = 2 AND role = 3")
         );
     }
 

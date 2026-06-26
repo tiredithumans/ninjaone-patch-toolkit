@@ -49,14 +49,14 @@ Key files to read before editing:
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
 ├── src/main.rs                  # binary entry → lib::run()
-├── src/state.rs                 # AppState: auth, api client, settings (Mutex), last_result cache
+├── src/state.rs                 # AppState: auth, api client, settings (Mutex), last_result + whole-fleet device/current-patch caches
 ├── src/auth.rs                  # OAuth2 PKCE (S256, loopback redirect), keyring, token refresh
 ├── src/api/                     # NinjaOne Public API client
 │   ├── mod.rs                   # NinjaApiClient: /api/v2, bearer, retry (timeout/429/401), cursor paging
 │   ├── devices.rs               # device inventory (df filter)
 │   ├── patches.rs               # current patches + install-history endpoints
 │   └── lookups.rs               # orgs / locations / roles / node classes
-├── src/filter.rs                # FilterParams → df DSL + client-side OS-name / KB-search facets
+├── src/filter.rs                # FilterParams → install-query df DSL + client-side device_allowed (identity scope) / OS-name / KB-search facets
 ├── src/model.rs                 # domain types (Device, Patch, PatchType, PatchStatus, …)
 ├── src/rows.rs                  # join → PatchRow, compliance %, SLA aging, reboot/pending + failure/severity/age rollups
 ├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / Needs-Reboot / Patch Failures)
@@ -99,8 +99,9 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 - **New NinjaOne endpoint** — add a method on `NinjaApiClient` (`api/<domain>.rs`); reuse
   `get_paginated` / `request_raw` rather than hand-rolling reqwest + retry + cursor logic.
 
-- **New filter facet** — server-side (identity/class) goes in `FilterParams::device_filter()` (the
-  `df` DSL); client-side (substring/text) goes in an `*_allowed()` method matched against rows.
+- **New filter facet** — an identity/scope facet (matched against a cached device) extends
+  `FilterParams::device_allowed` (+ `has_identity_scope`) and, if the install-history `df` honors it,
+  `patch_filter`; a substring/text facet goes in an `*_allowed()` method matched against rows.
 
 ## Canonical commands
 
@@ -174,6 +175,23 @@ secrets are **not** stored there — see below).
     assert its key in `serialized_shapes_carry_every_frontend_required_key`. Keep the backend
     `QuerySummary` ⇄ frontend `QueryResult` (`web-rs/src/types.rs`) shapes in sync.
 
+- **Whole-fleet prefetch + client-side scoping (load-bearing).** The device inventory and current
+  patches (OS + 3rd-party) are fetched **whole-fleet** (no `df`) and cached in `AppState`
+  (`fleet_devices_cache`, `DEVICE_TTL` ~15 min since devices change rarely; `fleet_current_cache`,
+  refreshed on `force_refresh` or past `CURRENT_PATCHES_TTL`). `run_query` then scopes them to the
+  selected identity facets (org/location/role/class) **client-side** via `FilterParams::device_allowed`
+  — so changing org/location/role/type/severity re-filters the cache with **no** round trip. This is
+  why `query_patches` takes the cached devices/current as *futures* (concurrent cold fetch) and why
+  `device_filter` no longer exists. **`force_refresh`** (camelCase `forceRefresh`, the auto-refresh tick
+  / manual ↻) bypasses the current-patch TTL to pull fresh patch state mid-patching; a normal Run query
+  leaves it false. Install history is **not** prefetched — it's fetched fresh per query, scoped
+  server-side by `patch_filter` + status-pushed-down (too large to cache). The summary carries
+  `data_fetched_at` (when the patch data was last fetched, distinct from `generated_at`) for the UI's
+  "patch data as of …" label. The whole-fleet caches are tenant-scoped, so `clear_lookups_cache` drops
+  them too. Trade-off: the scoped current-patch subset is cloned out of the `Arc` cache per query
+  (bounded by scope; a one-off larger clone only in the whole-fleet view) so the rollups keep consuming
+  owned `&[Patch]` slices unchanged.
+
 - **`AppState` locks are brief — never held across `.await`.** `settings`/`last_result` are
   `std::sync::Mutex`. Take a `settings_snapshot()` (clone) before any `.await`; don't hold a guard
   across an API call.
@@ -196,12 +214,16 @@ secrets are **not** stored there — see below).
   `{ name, offset, … }` object; it stops when a page returns 0 rows even if the server echoes a
   stale token. Don't hand-roll a second reqwest/cursor loop.
 
-- **Filter — server-side `df` DSL vs client-side facets.** `FilterParams::device_filter()` builds
-  the NinjaOne `df` string from identity facets (`org`/`location`/`role`) + the coarse OS-type facet
-  (`class in (...)`, upper-cased), returning `None` to mean "whole fleet". The granular OS-name
-  substring (`os_name_allowed`) and free-text KB/name search (`search_allowed`, which accepts a `KB`
-  prefix on either side) are applied **client-side** against rows after fetch. Keep the split: a new
-  identity/class facet extends the DSL; a new substring/text facet is a client-side `*_allowed()`.
+- **Filter — client-side identity scope vs server-side install `df` vs client-side facets.** Because
+  devices/current patches are prefetched whole-fleet (above), **all** identity facets
+  (`org`/`location`/`role` + the coarse OS-type `class`) are matched **client-side** by
+  `FilterParams::device_allowed` (case-insensitive class), and `has_identity_scope` reports whether any
+  is active. The install-history queries, fetched fresh per query, still send identity facets
+  server-side via `FilterParams::patch_filter` (the `df`; `class` is omitted — `/queries/*` ignore it —
+  and reapplied via the device join in `build_rows`). The granular OS-name substring (`os_name_allowed`)
+  and free-text KB/name search (`search_allowed`, which accepts a `KB` prefix on either side) are
+  applied **client-side** against rows after fetch. Keep the split: an identity/scope facet extends
+  `device_allowed`; a substring/text facet is a client-side `*_allowed()`.
 
 - **Installed/Failed vs current patches (status routing — load-bearing).** Per the official spec,
   the current `/queries/{os,software}-patches` feed returns only patches "for which there were **no
@@ -213,6 +235,13 @@ secrets are **not** stored there — see below).
   this. Routing `Failed` to the current feed (it never appears there) was a real bug — a FAILED query
   returned nothing. Current patches are **always** fetched regardless of the status filter (they drive
   compliance % and pending/reboot counts). See `commands/patches.rs`.
+  - **Install-status pushdown.** The `*-patch-installs` endpoints honor a server-side `status`
+    (`FAILED`/`INSTALLED`). When the operator requests **exactly one** install status, `run_query`
+    passes it to `fleet_*_patch_installs` so a FAILED-only (failure-dashboard) query doesn't download
+    the window's successful installs just to drop them; with **both** requested it's left unset (both
+    records are needed). The client-side `install_status_set` narrowing in `build_rows` stays as a
+    backstop. The current feed is **not** status-filtered server-side — narrowing it would starve the
+    compliance/severity/age rollups, which need the full `MANUAL`/`APPROVED`/`REJECTED` set.
 
 - **camelCase ↔ snake_case across IPC.** Backend arg/result structs sent to/from the frontend carry
   `#[serde(rename_all = "camelCase")]`; `web-rs/src/types.rs` mirrors them. NinjaOne API JSON (e.g.

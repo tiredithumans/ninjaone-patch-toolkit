@@ -344,18 +344,27 @@ impl AppState {
         }
     }
 
+    /// Manual **Run query** / filter change: re-scopes the cached whole-fleet data
+    /// client-side (no refetch unless the cache is cold or past its staleness bound).
     fn run_query(self) {
-        self.run_query_inner(false);
+        self.run_query_inner(false, false);
     }
 
     /// Auto-refresh variant: flags a subtle `refreshing` state instead of the main
     /// `busy` one (so the Run-query button doesn't flicker each tick) and stays
-    /// quiet about precondition failures.
+    /// quiet about precondition failures. Forces a refetch of the live patch data —
+    /// the point of the cadence is fresh patch state during a patching operation.
     fn run_query_auto(self) {
-        self.run_query_inner(true);
+        self.run_query_inner(true, true);
     }
 
-    fn run_query_inner(self, silent: bool) {
+    /// Manual ↻ **Refresh**: user-initiated refetch of the live patch data for the
+    /// current filter (shows the main busy/progress, unlike the silent auto tick).
+    fn refresh_now(self) {
+        self.run_query_inner(false, true);
+    }
+
+    fn run_query_inner(self, silent: bool, force: bool) {
         if self.busy.get_untracked() || self.refreshing.get_untracked() {
             return;
         }
@@ -393,7 +402,7 @@ impl AppState {
         self.query_started_ms.set(started);
         flag.set(true);
         spawn_local(async move {
-            match api::query_patches(args, seq).await {
+            match api::query_patches(args, seq, force).await {
                 Ok(r) => {
                     // Jump back to page 1 on a manual run; an auto-refresh keeps the
                     // current page, clamped in case the new result is shorter.
@@ -926,6 +935,28 @@ fn RunControls() -> impl IntoView {
                             .collect_view()}
                     </select>
                 </label>
+                <button
+                    class="btn"
+                    prop:disabled=move || {
+                        state.busy.get() || state.refreshing.get() || state.web_mode.get()
+                            || state.demo.get() || state.result.get().is_none()
+                    }
+                    title="Refetch live patch data from NinjaOne for the current filter"
+                    on:click=move |_| state.refresh_now()
+                >
+                    "↻ Refresh"
+                </button>
+                <Show when=move || state.result.get().is_some()>
+                    <span class="chips-label">
+                        {move || {
+                            state
+                                .result
+                                .get()
+                                .map(|r| format!("patch data as of {}", r.data_fetched_at))
+                                .unwrap_or_default()
+                        }}
+                    </span>
+                </Show>
                 <PresetRow/>
             </div>
             <Show when=move || state.busy.get()>

@@ -161,6 +161,9 @@ pub struct QueryResult {
     pub age_buckets: Vec<AgeBucket>,
     pub devices_total: usize,
     pub generated_at: String,
+    /// When the underlying whole-fleet patch data was last fetched (vs. when this
+    /// re-filter was computed). Drives the "patch data as of …" label.
+    pub data_fetched_at: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -445,6 +445,7 @@ mod tests {
             ],
             devices_total: 10,
             generated_at: "2026-01-01 00:00:00 UTC".into(),
+            data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }
     }
 
@@ -487,6 +488,7 @@ mod tests {
             age_buckets: Vec::new(),
             devices_total: 0,
             generated_at: "2026-01-01 00:00:00 UTC".into(),
+            data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         };
         let html = render_report(&empty);
         assert!(html.contains("No compliance data"));

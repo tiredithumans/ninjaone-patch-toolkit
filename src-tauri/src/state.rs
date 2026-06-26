@@ -2,11 +2,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use tracing::warn;
 
-use crate::api::NinjaApiClient;
+use crate::api::{NinjaApiClient, ProgressFn};
 use crate::auth::AuthState;
-use crate::model::{Location, Organization, Role};
+use crate::model::{Device, Location, Organization, Patch, Role};
 use crate::rows::QueryResult;
 use crate::settings::Settings;
 
@@ -15,6 +16,19 @@ use crate::settings::Settings;
 /// tick from three extra round trips.
 const LOOKUP_TTL: Duration = Duration::from_secs(300);
 
+/// How long the whole-fleet device inventory stays fresh. Devices change rarely
+/// (membership shifts over days, not minutes), so even a patching-operation
+/// auto-refresh reuses the cached inventory instead of re-pulling thousands of
+/// detailed devices each tick — only the live patch state is refetched.
+const DEVICE_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// How long whole-fleet current patches stay fresh for a *non-forced* run (a
+/// re-filter / Run query). A bound, not the freshness control: an auto-refresh tick
+/// or the manual refresh forces a refetch regardless (see `fleet_current_patches`),
+/// so this only caps staleness when the user is rapidly re-filtering without asking
+/// for fresh data.
+const CURRENT_PATCHES_TTL: Duration = Duration::from_secs(120);
+
 struct LookupCache {
     at: Instant,
     // Held behind `Arc` so a cache hit (and every auto-refresh tick) hands out a
@@ -22,6 +36,28 @@ struct LookupCache {
     orgs: Arc<Vec<Organization>>,
     locations: Arc<Vec<Location>>,
     roles: Arc<Vec<Role>>,
+}
+
+struct DeviceCache {
+    at: Instant,
+    devices: Arc<Vec<Device>>,
+}
+
+struct CurrentPatchesCache {
+    at: Instant,
+    fetched_at: DateTime<Utc>,
+    os: Arc<Vec<Patch>>,
+    sw: Arc<Vec<Patch>>,
+}
+
+/// Whole-fleet current patches handed to a query: both families behind `Arc` (a
+/// cache hit is a refcount bump) plus the wall-clock fetch time for the UI's
+/// "patch data as of …" label.
+#[derive(Clone)]
+pub struct CurrentPatches {
+    pub os: Arc<Vec<Patch>>,
+    pub sw: Arc<Vec<Patch>>,
+    pub fetched_at: DateTime<Utc>,
 }
 
 /// Process-wide application state injected into every Tauri command.
@@ -35,6 +71,11 @@ pub struct AppState {
     pub last_result: Mutex<Option<QueryResult>>,
     /// Near-static lookups (orgs/locations/roles) cached with a short TTL.
     lookups_cache: Mutex<Option<LookupCache>>,
+    /// Whole-fleet device inventory cached with a long TTL ([`DEVICE_TTL`]).
+    fleet_devices_cache: Mutex<Option<DeviceCache>>,
+    /// Whole-fleet current patches (OS + 3rd-party) cached so a re-filter recomputes
+    /// without a refetch; refreshed on force or past [`CURRENT_PATCHES_TTL`].
+    fleet_current_cache: Mutex<Option<CurrentPatchesCache>>,
 }
 
 impl AppState {
@@ -64,6 +105,8 @@ impl AppState {
             settings: Mutex::new(settings),
             last_result: Mutex::new(None),
             lookups_cache: Mutex::new(None),
+            fleet_devices_cache: Mutex::new(None),
+            fleet_current_cache: Mutex::new(None),
         })
     }
 
@@ -118,10 +161,80 @@ impl AppState {
         Ok((orgs, locations, roles))
     }
 
+    /// Whole-fleet device inventory (no `df`), served from a long-TTL cache so
+    /// identity facets can be applied client-side without re-pulling the fleet on
+    /// every scope change. Fetches on a miss / past [`DEVICE_TTL`]. The lock is never
+    /// held across the `.await`.
+    pub async fn fleet_devices(
+        &self,
+        on_progress: Option<&ProgressFn<'_>>,
+    ) -> Result<Arc<Vec<Device>>> {
+        if let Ok(guard) = self.fleet_devices_cache.lock()
+            && let Some(c) = guard.as_ref()
+            && c.at.elapsed() < DEVICE_TTL
+        {
+            return Ok(c.devices.clone());
+        }
+        let devices = Arc::new(self.api.devices(None, on_progress).await?);
+        if let Ok(mut guard) = self.fleet_devices_cache.lock() {
+            *guard = Some(DeviceCache {
+                at: Instant::now(),
+                devices: devices.clone(),
+            });
+        }
+        Ok(devices)
+    }
+
+    /// Whole-fleet current patches (OS + 3rd-party, no `df`), cached so a re-filter
+    /// recomputes without a refetch. `force` (an auto-refresh tick or the manual
+    /// refresh) bypasses the TTL to pull fresh patch state mid-patching; otherwise
+    /// the cache serves until it passes [`CURRENT_PATCHES_TTL`]. Both families are
+    /// fetched concurrently. The lock is never held across the `.await`.
+    pub async fn fleet_current_patches(
+        &self,
+        force: bool,
+        on_os: Option<&ProgressFn<'_>>,
+        on_sw: Option<&ProgressFn<'_>>,
+    ) -> Result<CurrentPatches> {
+        if !force
+            && let Ok(guard) = self.fleet_current_cache.lock()
+            && let Some(c) = guard.as_ref()
+            && c.at.elapsed() < CURRENT_PATCHES_TTL
+        {
+            return Ok(CurrentPatches {
+                os: c.os.clone(),
+                sw: c.sw.clone(),
+                fetched_at: c.fetched_at,
+            });
+        }
+        let (os, sw) = tokio::try_join!(
+            self.api.fleet_os_patches(None, None, on_os),
+            self.api.fleet_software_patches(None, None, on_sw),
+        )?;
+        let fetched_at = Utc::now();
+        let (os, sw) = (Arc::new(os), Arc::new(sw));
+        if let Ok(mut guard) = self.fleet_current_cache.lock() {
+            *guard = Some(CurrentPatchesCache {
+                at: Instant::now(),
+                fetched_at,
+                os: os.clone(),
+                sw: sw.clone(),
+            });
+        }
+        Ok(CurrentPatches { os, sw, fetched_at })
+    }
+
     /// Drops cached lookups so a different tenant (after sign-out or an instance
-    /// change) doesn't see stale org/location/role names.
+    /// change) doesn't see stale org/location/role names. Also drops the whole-fleet
+    /// device/patch caches, which are likewise tenant-scoped.
     pub fn clear_lookups_cache(&self) {
         if let Ok(mut guard) = self.lookups_cache.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.fleet_devices_cache.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.fleet_current_cache.lock() {
             *guard = None;
         }
     }
@@ -156,6 +269,7 @@ mod tests {
             age_buckets: Vec::new(),
             devices_total: 0,
             generated_at: "2026-01-01 00:00:00 UTC".into(),
+            data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         });
         assert!(state.last_result.lock().unwrap().is_some());
 

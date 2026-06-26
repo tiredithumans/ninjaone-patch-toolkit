@@ -103,14 +103,30 @@ pub async fn list_node_classes() -> Result<Vec<NodeClass>, String> {
 
 // --- Patches + export --------------------------------------------------------
 
-pub async fn query_patches(args: PatchQueryArgs, query_id: u64) -> Result<QueryResult, String> {
+/// Runs a patch query. `force_refresh` (an auto-refresh tick or the manual ↻) tells
+/// the backend to refetch the whole-fleet patch data; a normal Run query / re-filter
+/// leaves it `false` so the cached fleet is re-scoped client-side with no round trip.
+pub async fn query_patches(
+    args: PatchQueryArgs,
+    query_id: u64,
+    force_refresh: bool,
+) -> Result<QueryResult, String> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Wrap {
         args: PatchQueryArgs,
         query_id: u64,
+        force_refresh: bool,
     }
-    invoke("query_patches", args_of(&Wrap { args, query_id })).await
+    invoke(
+        "query_patches",
+        args_of(&Wrap {
+            args,
+            query_id,
+            force_refresh,
+        }),
+    )
+    .await
 }
 
 /// Fetches one page of detail rows from the backend's cached query result. The
