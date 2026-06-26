@@ -17,6 +17,16 @@ extern "C" {
     fn tauri_listen(event: &str, handler: &JsValue) -> JsValue;
 }
 
+/// Whether the app is running inside the Tauri webview rather than a plain browser
+/// (e.g. the GitHub Pages demo). The desktop build injects `window.__TAURI__` via
+/// `withGlobalTauri`; a browser has no backend, so the frontend must skip every IPC
+/// call and fall back to demo data instead of throwing on an undefined global.
+pub fn is_tauri() -> bool {
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("__TAURI__"))
+        .map(|v| !v.is_undefined() && !v.is_null())
+        .unwrap_or(false)
+}
+
 #[derive(serde::Deserialize)]
 struct ErrShape {
     message: Option<String>,
@@ -33,6 +43,11 @@ fn error_message(err: JsValue) -> String {
 }
 
 async fn invoke<R: DeserializeOwned>(cmd: &str, args: JsValue) -> Result<R, String> {
+    // In a plain browser there is no backend; calling the undefined global would
+    // throw. Fail cleanly so callers degrade to demo mode instead.
+    if !is_tauri() {
+        return Err(format!("\"{cmd}\" is only available in the desktop app"));
+    }
     match tauri_invoke(cmd, args).await {
         Ok(value) => {
             serde_wasm_bindgen::from_value(value).map_err(|e| format!("decode {cmd}: {e}"))
@@ -115,6 +130,11 @@ pub async fn get_patch_rows(offset: usize, limit: usize) -> Result<Vec<PatchRow>
 /// decoding each event's payload and handing it to `handler`. The Tauri unlisten
 /// handle is intentionally dropped — the subscription lives as long as the app.
 pub fn on_query_progress(mut handler: impl FnMut(QueryProgressEvent) + 'static) {
+    // No Tauri event bus in a plain browser — skip the subscription rather than
+    // call an undefined global at startup.
+    if !is_tauri() {
+        return;
+    }
     let cb = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
         if let Ok(payload) = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
             && let Ok(ev) = serde_wasm_bindgen::from_value::<QueryProgressEvent>(payload)
