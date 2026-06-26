@@ -14,15 +14,16 @@ version and start a fresh `[Unreleased]`.
 ### Added
 
 - **Live web demo.** The frontend now also runs as a browser-only demo published to
-  GitHub Pages at <https://tiredithumans.github.io/ninjaone-patch-toolkit/>, loaded
-  with a representative fictional fleet so you can explore the UI with no install,
-  account, or sign-in (and with no real fleet data exposed). The filter controls
-  work against the sample: Organization, Location, Device Role, OS Type, status,
-  severity, type, search, and the date windows all filter it (press **Run query**)
-  just like a live query would; Compliance and Needs-Reboot stay representative,
-  narrowing by organization. Sign-in, live NinjaOne queries, and Excel export need
-  the native backend, so they're disabled in the demo. The downloadable desktop app
-  is unaffected — it's the production tool, with no sample-data mode.
+  GitHub Pages at <https://tiredithumans.github.io/ninjaone-patch-toolkit/>, backed
+  by a representative fictional fleet so you can explore the UI with no install,
+  account, or sign-in (and with no real fleet data exposed). It starts empty and
+  lists patches when you press **Run query**, exactly like the real app, and the
+  filter controls work against the sample: Organization, Location, Device Role, OS
+  Type, status, severity, type, search, and the date windows all filter it just like
+  a live query would; Compliance and Needs-Reboot stay representative, narrowing by
+  organization. Sign-in, live NinjaOne queries, and Excel export need the native
+  backend, so they're disabled in the demo. The downloadable desktop app is
+  unaffected — it's the production tool, with no sample-data mode.
 
 ## [0.6.2] - 2026-06-25
 

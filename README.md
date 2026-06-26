@@ -12,8 +12,9 @@ lists individual patches per server, and exports to Excel.
 ![NinjaOne Patch Toolkit — main window](docs/images/screenshot.png)
 
 > **[▶ Try the live web demo →](https://tiredithumans.github.io/ninjaone-patch-toolkit/)** — the full UI
-> loaded with sample data, right in your browser (no install, no sign-in). Live NinjaOne queries and
-> Excel export need the native backend, so they're disabled in the hosted demo.
+> with sample data, right in your browser (no install, no sign-in). Press **Run query** to list the
+> sample patches and try the filters. Live NinjaOne queries and Excel export need the native backend,
+> so they're disabled in the hosted demo.
 
 ## Features
 
