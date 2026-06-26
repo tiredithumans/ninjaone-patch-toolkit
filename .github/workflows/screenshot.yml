@@ -42,7 +42,7 @@ jobs:
       - name: Capture screenshot
         run: node scripts/screenshot.mjs
 
-      - name: Open a PR if the screenshot changed
+      - name: Push the refreshed screenshot and open a PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -57,6 +57,12 @@ jobs:
           git add docs/images/screenshot.png
           git commit -m "docs: refresh the README demo screenshot"
           git push origin "$branch"
-          gh pr create --base main --head "$branch" \
-            --title "docs: refresh the README demo screenshot" \
-            --body "Automated capture of the live web demo via \`scripts/screenshot.mjs\` (\`.github/workflows/screenshot.yml\`). Review the image and merge."
+          # Opening the PR needs the repo setting "Allow GitHub Actions to create and
+          # approve pull requests" (off by default for security). If it's blocked,
+          # don't fail the run — the branch is pushed; surface a one-click link for a
+          # maintainer (or `gh pr create`) to open the PR.
+          if ! gh pr create --base main --head "$branch" \
+                --title "docs: refresh the README demo screenshot" \
+                --body "Automated capture of the live web demo via \`scripts/screenshot.mjs\` (\`.github/workflows/screenshot.yml\`). Review the image and merge."; then
+            echo "::notice title=Open the PR::Pushed ${branch}; open it at https://github.com/${{ github.repository }}/compare/main...${branch}?expand=1"
+          fi

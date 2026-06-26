@@ -9,7 +9,9 @@
 //   SCREENSHOT_DIST  static dir to serve   (default: web-rs/dist)
 //   SCREENSHOT_OUT   output PNG path        (default: docs/images/screenshot.png)
 //   SCREENSHOT_URL   capture this URL instead of serving DIST (e.g. the live demo)
-//   SCREENSHOT_W / SCREENSHOT_H  CSS viewport size (default 680x420, captured @2x)
+//   SCREENSHOT_W / SCREENSHOT_H  CSS viewport size (default 1360x820, the wide
+//                                desktop layout — narrow widths give the stacked
+//                                mobile layout); SCREENSHOT_DSF sets the scale.
 //
 // The demo detects the absence of `window.__TAURI__` and runs in browser/demo mode
 // with bundled sample data, so no backend or sign-in is involved.
@@ -22,8 +24,9 @@ import { chromium } from "playwright";
 const DIST = process.env.SCREENSHOT_DIST || "web-rs/dist";
 const OUT = process.env.SCREENSHOT_OUT || "docs/images/screenshot.png";
 const REMOTE = process.env.SCREENSHOT_URL || "";
-const WIDTH = Number(process.env.SCREENSHOT_W || 680);
-const HEIGHT = Number(process.env.SCREENSHOT_H || 420);
+const WIDTH = Number(process.env.SCREENSHOT_W || 1360);
+const HEIGHT = Number(process.env.SCREENSHOT_H || 820);
+const DSF = Number(process.env.SCREENSHOT_DSF || 1);
 
 // Minimal MIME map — enough for a Trunk dist (the WASM streaming compile needs the
 // exact application/wasm type, which a naive static server omits).
@@ -90,16 +93,19 @@ await withServer(async (url) => {
     // No __TAURI__ in plain Chromium → the app enters demo mode automatically.
     const page = await browser.newPage({
       viewport: { width: WIDTH, height: HEIGHT },
-      deviceScaleFactor: 2,
+      deviceScaleFactor: DSF,
     });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     // The demo starts empty ("Run a query to list patches") until Run query, just
     // like the real app — click it, then wait for the result summary to render.
     await page.getByRole("button", { name: "Run query" }).click();
     await page.getByText(/patch rows/).first().waitFor({ timeout: 15000 });
+    // Clicking can scroll the button into view; reset to the top so the capture
+    // starts at the header, not wherever the click left the scroll position.
+    await page.evaluate(() => window.scrollTo(0, 0));
     await page.waitForTimeout(400); // let fonts/layout settle before the capture
-    await page.screenshot({ path: OUT });
-    console.log(`wrote ${OUT} (${WIDTH}x${HEIGHT} @2x)`);
+    await page.screenshot({ path: OUT }); // viewport (header → first result rows)
+    console.log(`wrote ${OUT} (${WIDTH}x${HEIGHT} @${DSF}x)`);
   } finally {
     await browser.close();
   }
