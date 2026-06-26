@@ -856,7 +856,8 @@ mod tests {
             "PatchRow",
         );
 
-        let summaries = build_device_summaries(&[d.clone()], &pending_counts(&patches), &maps);
+        let summaries =
+            build_device_summaries(std::slice::from_ref(&d), &pending_counts(&patches), &maps);
         assert_keys_present(
             &serde_json::to_value(&summaries[0]).unwrap(),
             &[
