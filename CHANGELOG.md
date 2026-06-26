@@ -11,6 +11,29 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-25
+
+### Added
+
+- **Troubleshooting guide** ([docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md))
+  covering sign-in hangs and callback-port conflicts, the OAuth 404
+  instance/Client-ID mismatch, Native-vs-Web client setup, empty exports, blank
+  location names, and keyring issues.
+
+### Changed
+
+- **Settings validation.** An invalid **Callback port** (`0`) or a sub-day
+  **Install window** / **SLA** is now rejected with a clear message instead of
+  being silently clamped, so a typo surfaces rather than quietly changing your
+  configuration.
+
+### Fixed
+
+- **More robust API handling.** A malformed paginated response from NinjaOne now
+  surfaces an error instead of silently returning a truncated result set as if it
+  were complete, and previously-swallowed locations-fetch and result-cache
+  failures are now logged.
+
 ## [0.6.1] - 2026-06-25
 
 ### Fixed
