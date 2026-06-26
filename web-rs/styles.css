@@ -193,6 +193,12 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
   max-width: 100%;
 }
 
+/* The install-window field is a small number input — keep it compact rather than
+   stretching to the shared 260px column width above. */
+.stacked-filters > .control-group > input.narrow {
+  width: 80px;
+}
+
 select:disabled {
   opacity: 0.5;
 }
