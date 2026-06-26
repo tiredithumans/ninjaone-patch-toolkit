@@ -245,8 +245,10 @@ secrets are **not** stored there — see below).
   `load_demo()` seeds the org/role/location/OS-type lookups from the sample and resets the filters;
   **Run query** routes to `run_demo_query` → `demo::filtered_result(...)`, which mirrors the backend's
   *display* filtering (identity/class/text facets + date windows) over the sample rows so the demo's
-  controls actually filter — Compliance/Reboot stay representative (narrowed only by org). `web_mode`
-  disables the backend-only actions (sign-in, **export**). The Pages build (`just web-build-pages`,
+  controls actually filter — Compliance/Reboot stay representative (narrowed only by org). Demo mode
+  is **web-only**: the "Load sample data" button is gated behind `web_mode`, so the desktop release
+  never enters it (no button, no auto-load → `demo` stays false and the normal auth path runs).
+  `web_mode` also disables the backend-only actions (sign-in, **export**). The Pages build (`just web-build-pages`,
   `.github/workflows/pages.yml`) sets the subpath base href via `--public-url` — **never** put
   `public_url` in `Trunk.toml`, or Tauri's relative-dist webview breaks. Pages deploys only from
   `main`; backend features (queries, export, auth) are desktop-only and intentionally inert in the

@@ -902,9 +902,14 @@ fn RunControls() -> impl IntoView {
                 >
                     "Export to Excel"
                 </button>
-                <button class="btn" on:click=move |_| state.load_demo()>
-                    "Load sample data"
-                </button>
+                // Demo mode is the web/Pages experience only — the desktop release
+                // is a pure production tool, so this is gated to browser mode (where
+                // it doubles as a reset back to the full sample).
+                <Show when=move || state.web_mode.get()>
+                    <button class="btn" on:click=move |_| state.load_demo()>
+                        "Load sample data"
+                    </button>
+                </Show>
                 <Show when=move || state.refreshing.get()>
                     <span class="chips-label">"↻ refreshing…"</span>
                 </Show>
