@@ -76,12 +76,13 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   ├── settings.rs              # SettingsPanel
 │   ├── tables.rs                # Results + Patches/Compliance/Reboot tables
 │   └── util.rs                  # JS-free pure helpers (format/parse/CSS-class) + their host tests
-├── src/api.rs                   # typed invoke(...) wrappers (one per backend command)
+├── src/api.rs                   # typed invoke(...) wrappers + is_tauri() browser-mode guard
+├── src/demo.rs                  # pure sample-data builder (QueryResult) for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
 ├── styles.css                   # plain global CSS (BEM-ish names)
 └── Trunk.toml                   # WASM build/serve (127.0.0.1:8080)
 
-.github/workflows/               # ci.yml · codeql.yml · release.yml
+.github/workflows/               # ci.yml · codeql.yml · pages.yml · release.yml
 ```
 
 ## Common patterns
@@ -118,6 +119,7 @@ just coverage        # backend test coverage (cargo-llvm-cov) → summary + targ
 just web-check       # cargo check the frontend (wasm target)
 just web-test        # frontend pure-helper unit tests (host target; wasm excludes them)
 just web-build       # trunk build → web-rs/dist (debug)
+just web-build-pages # release build with the Pages subpath base href (used by pages.yml)
 
 # Dependency policy:
 just audit           # RustSec advisories — scans BOTH lockfiles (src-tauri + web-rs)
@@ -232,6 +234,20 @@ secrets are **not** stored there — see below).
 
 - **Frontend reactivity is closure-based (Leptos CSR).** `{move || sig.get()}` to track, `.get()` /
   `.with()` to read; state is `RwSignal<T>`. CSS is plain global `web-rs/styles.css`.
+
+- **Demo mode + browser/Pages guard.** The same frontend serves two contexts. Inside Tauri it talks
+  to the backend over IPC; in a plain browser (the GitHub Pages live demo) there is **no** backend.
+  `api::is_tauri()` (checks `window.__TAURI__`) gates this: `invoke` and `on_query_progress` no-op
+  outside Tauri so an undefined global never throws, and `App` startup branches — under Tauri it runs
+  the auth/lookups/settings flow; in a browser it sets `web_mode`, fills the static OS-type facet
+  from `demo::sample_node_classes()`, and calls `load_demo()`. `web-rs/src/demo.rs` is the **only**
+  source of sample data — a pure `QueryResult` builder (no `js_sys`/IPC), so it host-tests via
+  `just web-test`. The "Load sample data" button calls the same `load_demo()`; `web_mode` disables the
+  backend-only actions (sign-in, live query, export). The Pages build (`just web-build-pages`,
+  `.github/workflows/pages.yml`) sets the subpath base href via `--public-url` — **never** put
+  `public_url` in `Trunk.toml`, or Tauri's relative-dist webview breaks. Pages deploys only from
+  `main`; backend features (queries, export, auth) are desktop-only and intentionally inert in the
+  hosted demo.
 
 ## Coding fundamentals
 

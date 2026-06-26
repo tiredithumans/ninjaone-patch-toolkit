@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::api;
+use crate::demo;
 use crate::types::*;
 
 mod filters;
@@ -28,6 +29,9 @@ const REGIONS: [(&str, &str); 5] = [
 ];
 
 const STATUS_OPTIONS: [&str; 5] = ["PENDING", "APPROVED", "REJECTED", "INSTALLED", "FAILED"];
+
+/// Releases page linked from the web demo's "Get the app" call to action.
+const RELEASES_URL: &str = "https://github.com/tiredithumans/ninjaone-patch-toolkit/releases";
 
 /// Severity facet options as (raw value sent to the backend, display label).
 const SEVERITY_OPTIONS: [(&str, &str); 5] = [
@@ -154,6 +158,12 @@ pub struct AppState {
     /// number stamped on each run so stale events from a superseded run are dropped.
     progress: RwSignal<Progress>,
     query_seq: RwSignal<u64>,
+
+    /// Sample data is loaded (drives the "sample data" banner). Set by `load_demo`.
+    demo: RwSignal<bool>,
+    /// Running in a plain browser with no Tauri backend — the GitHub Pages demo.
+    /// Disables the backend-only actions (sign-in, live query, export).
+    web_mode: RwSignal<bool>,
 }
 
 impl AppState {
@@ -207,6 +217,8 @@ impl AppState {
             last_duration_ms: RwSignal::new(None),
             progress: RwSignal::new(Progress::default()),
             query_seq: RwSignal::new(0),
+            demo: RwSignal::new(false),
+            web_mode: RwSignal::new(false),
         }
     }
 
@@ -410,6 +422,18 @@ impl AppState {
         });
     }
 
+    /// Loads the bundled sample data into the results — no API call, no sign-in.
+    /// Powers the "Load sample data" button and the browser/Pages demo. The whole
+    /// sample fits on page 0, so there is no backend cache to page from.
+    fn load_demo(self) {
+        let r = demo::sample_query_result();
+        self.patches_page.set(0);
+        self.active_tab.set(Tab::Patches);
+        self.page_rows.set(r.rows.clone());
+        self.result.set(Some(r));
+        self.demo.set(true);
+    }
+
     /// Seconds since the running query started (re-evaluated on each timer tick).
     fn elapsed_secs(self) -> f64 {
         let _ = self.elapsed_tick.get();
@@ -506,27 +530,36 @@ pub fn App() -> impl IntoView {
     let state = AppState::new();
     provide_context(state);
 
-    // Initial load. The OS-type facet is static, so load it immediately rather than
-    // gating it behind sign-in with the org/role/location lookups.
-    state.load_node_classes();
-    spawn_local(async move {
-        if let Ok(a) = api::auth_status().await {
-            let authed = a.authenticated;
-            state.auth.set(Some(a));
-            if authed {
-                state.load_lookups();
+    if api::is_tauri() {
+        // Initial load. The OS-type facet is static, so load it immediately rather
+        // than gating it behind sign-in with the org/role/location lookups.
+        state.load_node_classes();
+        spawn_local(async move {
+            if let Ok(a) = api::auth_status().await {
+                let authed = a.authenticated;
+                state.auth.set(Some(a));
+                if authed {
+                    state.load_lookups();
+                }
             }
-        }
-    });
-    spawn_local(async move {
-        if let Ok(s) = api::get_settings().await {
-            let auto = s.auto_check_updates;
-            state.apply_settings_view(s);
-            if auto && let Ok(Some(info)) = api::check_for_update().await {
-                state.update.set(Some(info));
+        });
+        spawn_local(async move {
+            if let Ok(s) = api::get_settings().await {
+                let auto = s.auto_check_updates;
+                state.apply_settings_view(s);
+                if auto && let Ok(Some(info)) = api::check_for_update().await {
+                    state.update.set(Some(info));
+                }
             }
-        }
-    });
+        });
+    } else {
+        // Browser/Pages demo: there is no backend, so every IPC call would fail.
+        // Fill the static OS-type facet locally and show sample data up front
+        // instead of a shell gated behind a sign-in that can't happen here.
+        state.web_mode.set(true);
+        state.node_classes.set(demo::sample_node_classes());
+        state.load_demo();
+    }
 
     // Stream live record counts from the backend into `progress`, ignoring events
     // from a run the user has already superseded.
@@ -569,6 +602,11 @@ pub fn App() -> impl IntoView {
     view! {
         <main>
             <Header/>
+            <Show when=move || state.demo.get()>
+                <p class="demo-banner" role="note">
+                    "Showing sample data — not a live fleet."
+                </p>
+            </Show>
             <Show when=move || state.show_settings.get()>
                 <SettingsPanel/>
             </Show>
@@ -696,6 +734,18 @@ fn Header() -> impl IntoView {
                 </div>
             </div>
             <div class="actions">
+                <Show when=move || state.web_mode.get()>
+                    <span class="pill pill-demo">"Demo"</span>
+                    <a
+                        class="btn btn-primary"
+                        href=RELEASES_URL
+                        target="_blank"
+                        rel="noreferrer"
+                    >
+                        "Get the app ↗"
+                    </a>
+                </Show>
+                <Show when=move || !state.web_mode.get()>
                 <span class=move || if authed() { "pill pill-on" } else { "pill pill-off" }>
                     {move || if authed() { "Connected" } else { "Not signed in" }}
                 </span>
@@ -753,6 +803,7 @@ fn Header() -> impl IntoView {
                         "Sign out"
                     </button>
                 </Show>
+                </Show>
             </div>
         </header>
     }
@@ -767,14 +818,28 @@ fn RunControls() -> impl IntoView {
             <div class="controls">
                 <button
                     class="btn btn-primary"
-                    prop:disabled=move || state.busy.get()
+                    prop:disabled=move || state.busy.get() || state.web_mode.get()
+                    title=move || {
+                        if state.web_mode.get() {
+                            "Live queries run in the desktop app"
+                        } else {
+                            ""
+                        }
+                    }
                     on:click=move |_| state.run_query()
                 >
                     {move || if state.busy.get() { "Running…" } else { "Run query" }}
                 </button>
                 <button
                     class="btn"
-                    prop:disabled=move || state.result.get().is_none()
+                    prop:disabled=move || state.result.get().is_none() || state.web_mode.get()
+                    title=move || {
+                        if state.web_mode.get() {
+                            "Excel export runs in the desktop app"
+                        } else {
+                            ""
+                        }
+                    }
                     on:click=move |_| {
                         spawn_local(async move {
                             match api::export_patches().await {
@@ -786,6 +851,9 @@ fn RunControls() -> impl IntoView {
                     }
                 >
                     "Export to Excel"
+                </button>
+                <button class="btn" on:click=move |_| state.load_demo()>
+                    "Load sample data"
                 </button>
                 <Show when=move || state.refreshing.get()>
                     <span class="chips-label">"↻ refreshing…"</span>

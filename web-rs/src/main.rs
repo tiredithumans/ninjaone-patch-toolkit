@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod demo;
 mod types;
 
 use app::App;

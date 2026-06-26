@@ -99,6 +99,22 @@ h2 {
   color: var(--muted);
 }
 
+.pill-demo {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+/* Sample-data notice shown under the header in demo / web mode. */
+.demo-banner {
+  margin: 0;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  color: var(--warn);
+  font-size: 13px;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);

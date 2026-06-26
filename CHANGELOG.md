@@ -11,6 +11,17 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **Demo mode with sample data.** A **Load sample data** button fills the patch,
+  compliance, and needs-reboot views with a representative fictional fleet — no
+  NinjaOne account or sign-in required — so you can explore the UI (and capture
+  screenshots) without exposing real fleet data.
+- **Live web demo.** The frontend now also runs as a browser-only demo published to
+  GitHub Pages at <https://tiredithumans.github.io/ninjaone-patch-toolkit/>; it loads
+  the sample data automatically. Sign-in, live NinjaOne queries, and Excel export
+  need the native backend, so they're disabled in the hosted demo.
+
 ## [0.6.2] - 2026-06-25
 
 ### Added

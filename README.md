@@ -3,12 +3,17 @@
 [![CI](https://github.com/tiredithumans/ninjaone-patch-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/tiredithumans/ninjaone-patch-toolkit/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/tiredithumans/ninjaone-patch-toolkit/actions/workflows/codeql.yml/badge.svg)](https://github.com/tiredithumans/ninjaone-patch-toolkit/actions/workflows/codeql.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Live demo](https://img.shields.io/badge/live%20demo-online-2ea44f?logo=github)](https://tiredithumans.github.io/ninjaone-patch-toolkit/)
 
 A native desktop toolkit (Rust / Leptos / Tauri 2) for patching‑operations teams. It
 authenticates to the NinjaOne Public API with **OAuth 2.0 + PKCE**, filters the fleet,
 lists individual patches per server, and exports to Excel.
 
 ![NinjaOne Patch Toolkit — main window](docs/images/screenshot.png)
+
+> **[▶ Try the live web demo →](https://tiredithumans.github.io/ninjaone-patch-toolkit/)** — the full UI
+> loaded with sample data, right in your browser (no install, no sign-in). Live NinjaOne queries and
+> Excel export need the native backend, so they're disabled in the hosted demo.
 
 ## Features
 
