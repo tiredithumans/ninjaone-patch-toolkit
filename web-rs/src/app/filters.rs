@@ -248,25 +248,28 @@ pub(crate) fn Filters() -> impl IntoView {
                         </label>
                     </Show>
                 </div>
+                // Install-window field: only relevant when INSTALLED is selected.
+                // Lives inside `stacked-filters` as a control-group so its label
+                // shares the same aligned column (and row gap) as the rows above.
+                <Show when=installed_selected>
+                    <div class="control-group">
+                        <span class="chips-label">"Installed within (days):"</span>
+                        <input
+                            type="number"
+                            class="narrow"
+                            min="1"
+                            max="3650"
+                            prop:value=move || state.install_days.get().to_string()
+                            on:change=move |ev| {
+                                let v = event_target_value(&ev)
+                                    .parse::<i64>()
+                                    .unwrap_or_else(|_| state.install_days.get_untracked());
+                                state.install_days.set(v.clamp(1, 3650));
+                            }
+                        />
+                    </div>
+                </Show>
             </div>
-            <Show when=installed_selected>
-                <label class="inline">
-                    "Installed within (days)"
-                    <input
-                        type="number"
-                        class="narrow"
-                        min="1"
-                        max="3650"
-                        prop:value=move || state.install_days.get().to_string()
-                        on:change=move |ev| {
-                            let v = event_target_value(&ev)
-                                .parse::<i64>()
-                                .unwrap_or_else(|_| state.install_days.get_untracked());
-                            state.install_days.set(v.clamp(1, 3650));
-                        }
-                    />
-                </label>
-            </Show>
             </Show>
         </section>
     }
