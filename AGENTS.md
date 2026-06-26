@@ -239,16 +239,17 @@ secrets are **not** stored there — see below).
   to the backend over IPC; in a plain browser (the GitHub Pages live demo) there is **no** backend.
   `api::is_tauri()` (checks `window.__TAURI__`) gates this: `invoke` and `on_query_progress` no-op
   outside Tauri so an undefined global never throws, and `App` startup branches — under Tauri it runs
-  the auth/lookups/settings flow; in a browser it sets `web_mode`, fills the static OS-type facet
-  from `demo::sample_node_classes()`, and calls `load_demo()`. `web-rs/src/demo.rs` is the **only**
-  source of sample data — pure builders (no `js_sys`/IPC), so they host-test via `just web-test`.
-  `load_demo()` seeds the org/role/location/OS-type lookups from the sample and resets the filters;
-  **Run query** routes to `run_demo_query` → `demo::filtered_result(...)`, which mirrors the backend's
-  *display* filtering (identity/class/text facets + date windows) over the sample rows so the demo's
-  controls actually filter — Compliance/Reboot stay representative (narrowed only by org). Demo mode
-  is **web-only**: the "Load sample data" button is gated behind `web_mode`, so the desktop release
-  never enters it (no button, no auto-load → `demo` stays false and the normal auth path runs).
-  `web_mode` also disables the backend-only actions (sign-in, **export**). The Pages build (`just web-build-pages`,
+  the auth/lookups/settings flow; in a browser it sets `web_mode` and calls `enter_demo()`.
+  `web-rs/src/demo.rs` is the **only** source of sample data — pure builders (no `js_sys`/IPC), so
+  they host-test via `just web-test`. `enter_demo()` seeds the org/role/OS-type lookup dropdowns from
+  the sample and flags `demo`, but leaves the results **empty** ("Run a query to list patches") until
+  the user presses **Run query** — exactly like the real app. **Run query** routes to `run_demo_query`
+  → `demo::filtered_result(...)`, which mirrors the backend's *display* filtering (identity/class/text
+  facets + date windows) over the sample rows so the demo's controls actually filter — Compliance/
+  Reboot stay representative (narrowed only by org). Demo mode is **web-only**: there is no
+  "load sample data" affordance and the desktop release never enters it (no auto-load → `demo` stays
+  false and the normal auth path runs). `web_mode` also disables the backend-only actions (sign-in,
+  **export**). The Pages build (`just web-build-pages`,
   `.github/workflows/pages.yml`) sets the subpath base href via `--public-url` — **never** put
   `public_url` in `Trunk.toml`, or Tauri's relative-dist webview breaks. Pages deploys only from
   `main`; backend features (queries, export, auth) are desktop-only and intentionally inert in the

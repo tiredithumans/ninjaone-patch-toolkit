@@ -1,11 +1,11 @@
 //! Sample-data builder + client-side filtering for the app's demo mode.
 //!
-//! Produces a fully-formed [`QueryResult`] (and the org/location/role/OS-type
-//! lookups) from invented orgs/devices/patches so the UI can render — and actually
-//! *filter* — populated tables with no NinjaOne account, sign-in, or real fleet
-//! data. Two callers use it:
-//! - the "Load sample data" button (`AppState::load_demo`), for demos/screenshots; and
-//! - browser/web mode (the GitHub Pages demo), where there is no Tauri backend.
+//! Produces the org/location/role/OS-type lookups and, via [`filtered_result`], a
+//! [`QueryResult`] over invented orgs/devices/patches — so browser/web mode (the
+//! GitHub Pages demo, where there is no Tauri backend) can render and *filter*
+//! populated tables with no NinjaOne account, sign-in, or real fleet data. Like the
+//! real app, the results stay empty until the user presses **Run query**, which
+//! routes to `AppState::run_demo_query` → `filtered_result`.
 //!
 //! In a real deployment the backend applies the filters (server-side `df` for
 //! identity/class facets, client-side for the rest) against live NinjaOne data.
@@ -319,11 +319,6 @@ fn reboot(
     }
 }
 
-/// The full, unfiltered sample — every row plus the representative rollups.
-pub fn sample_query_result() -> QueryResult {
-    assemble(demo_rows().into_iter().map(|d| d.row).collect(), None)
-}
-
 /// The sample filtered like a real query: device facets (org/location/role/OS-type/
 /// OS-name) and patch facets (type/status/severity/search/release-window/install-
 /// window) applied to the rows, with the row count recomputed. Compliance / reboot
@@ -499,21 +494,20 @@ mod tests {
     }
 
     #[test]
-    fn full_sample_is_internally_consistent() {
-        let r = sample_query_result();
-        assert!(!r.rows.is_empty());
+    fn unfiltered_filter_keeps_every_row_and_is_consistent() {
+        // ALL type + every status + default (empty) facets keeps every row.
+        let r = filtered_result(&filter(), "ALL", &all_statuses(), Some(3650));
+        assert_eq!(r.rows_total, demo_rows().len());
         assert_eq!(r.rows_total, r.rows.len());
         assert!(!r.compliance.is_empty());
         assert!(!r.reboot_devices.is_empty());
         let summed: usize = r.compliance.iter().map(|b| b.devices_total).sum();
         assert_eq!(r.devices_total, summed);
-    }
-
-    #[test]
-    fn unfiltered_filter_matches_full_sample() {
-        // ALL type + every status + default (empty) facets keeps every row.
-        let r = filtered_result(&filter(), "ALL", &all_statuses(), Some(3650));
-        assert_eq!(r.rows_total, sample_query_result().rows_total);
+        assert!(
+            r.compliance
+                .iter()
+                .all(|b| b.devices_compliant <= b.devices_total)
+        );
     }
 
     #[test]
