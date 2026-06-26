@@ -13,6 +13,18 @@ version and start a fresh `[Unreleased]`.
 
 ### Added
 
+- **Patch failure analysis.** A new **Failures** tab rolls up FAILED installs by
+  patch across the fleet — for each failing patch you see the affected-device count,
+  a sample of affected devices, and the most recent failure — so a fleet-wide
+  install problem (e.g. "this update failed on 23 devices") is visible at a glance
+  instead of buried in the detail rows. It populates when the **FAILED** status is
+  part of the query; the Excel export gains a matching **Patch Failures** sheet.
+- **Dashboard charts + shareable report.** A new **Dashboard** tab visualizes the
+  rollups: per-organization compliance bars, a pending-patch severity breakdown, and
+  a pending-patch age histogram. **Export report** saves a self-contained HTML
+  executive summary (the same charts plus failure and reboot tables) that you can
+  open in any browser and print to PDF for management or auditors. Like the Excel
+  export, the report needs a live query in the desktop app.
 - **Live web demo.** The frontend now also runs as a browser-only demo published to
   GitHub Pages at <https://tiredithumans.github.io/ninjaone-patch-toolkit/>, backed
   by a representative fictional fleet so you can explore the UI with no install,
