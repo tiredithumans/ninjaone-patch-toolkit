@@ -8,6 +8,8 @@ A native desktop toolkit (Rust / Leptos / Tauri 2) for patching‑operations tea
 authenticates to the NinjaOne Public API with **OAuth 2.0 + PKCE**, filters the fleet,
 lists individual patches per server, and exports to Excel.
 
+![NinjaOne Patch Toolkit — main window](docs/images/screenshot.png)
+
 ## Features
 
 - **PKCE OAuth 2.0** against `/ws/oauth/authorize` + `/ws/oauth/token` (S256, loopback
