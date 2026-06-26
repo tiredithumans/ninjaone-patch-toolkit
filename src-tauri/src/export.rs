@@ -45,8 +45,8 @@ const FAILURE_HEADERS: [&str; 7] = [
     "KB",
     "Patch",
     "Affected Devices",
-    "Devices",
     "Latest Failure",
+    "Devices",
 ];
 
 fn header_format() -> Format {
@@ -219,12 +219,12 @@ fn write_failures_sheet(
         sheet.write_string(row, 2, f.kb.as_deref().unwrap_or_default())?;
         sheet.write_string(row, 3, &f.name)?;
         sheet.write_number(row, 4, f.affected_devices as f64)?;
-        sheet.write_string(row, 5, f.device_names.join(", "))?;
-        sheet.write_string(row, 6, f.latest_failure.as_deref().unwrap_or_default())?;
+        sheet.write_string(row, 5, f.latest_failure.as_deref().unwrap_or_default())?;
+        sheet.write_string(row, 6, f.device_names.join(", "))?;
     }
 
     sheet.set_freeze_panes(1, 0).context("freeze header")?;
-    apply_widths(sheet, &[11.0, 11.0, 12.0, 40.0, 16.0, 40.0, 20.0])?;
+    apply_widths(sheet, &[11.0, 11.0, 12.0, 40.0, 16.0, 20.0, 60.0])?;
     Ok(())
 }
 
@@ -363,7 +363,12 @@ mod tests {
         assert_eq!(range.get_value((1, 2)).unwrap().to_string(), "KB5040434");
         assert_eq!(range.get_value((1, 4)).unwrap().to_string(), "3");
         assert_eq!(
-            range.get_value((1, 5)).unwrap().to_string(),
+            range.get_value((0, 6)).unwrap().to_string(),
+            "Devices",
+            "the device list is the last column"
+        );
+        assert_eq!(
+            range.get_value((1, 6)).unwrap().to_string(),
             "srv01, srv02, srv03",
             "every affected device name is comma-joined"
         );

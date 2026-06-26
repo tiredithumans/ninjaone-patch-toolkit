@@ -313,8 +313,8 @@ fn FailuresTable() -> impl IntoView {
                             <th scope="col">"KB"</th>
                             <th scope="col">"Patch"</th>
                             <th scope="col">"Affected devices"</th>
-                            <th scope="col">"Devices"</th>
                             <th scope="col">"Latest failure"</th>
+                            <th scope="col">"Devices"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -331,8 +331,8 @@ fn FailuresTable() -> impl IntoView {
                                             <td>{f.kb.unwrap_or_default()}</td>
                                             <td class="patch-name">{f.name}</td>
                                             <td>{f.affected_devices}</td>
-                                            <td class="device-list">{f.device_names.join(", ")}</td>
                                             <td>{f.latest_failure.unwrap_or_default()}</td>
+                                            <td class="device-list">{f.device_names.join(", ")}</td>
                                         </tr>
                                     }
                                 })

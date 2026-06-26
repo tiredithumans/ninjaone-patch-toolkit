@@ -261,7 +261,7 @@ fn write_failures_table(buf: &mut String, failures: &[FailureGroup]) {
     }
     buf.push_str(
         "<table><thead><tr><th>Severity</th><th>KB</th><th>Patch</th>\
-         <th>Affected devices</th><th>Devices</th><th>Latest failure</th></tr></thead><tbody>",
+         <th>Affected devices</th><th>Latest failure</th><th>Devices</th></tr></thead><tbody>",
     );
     for f in failures.iter().take(MAX_TABLE_ROWS) {
         let sev = escape_html(&f.severity);
@@ -272,7 +272,7 @@ fn write_failures_table(buf: &mut String, failures: &[FailureGroup]) {
         let _ = write!(
             buf,
             "<tr><td>{sev}</td><td>{kb}</td><td>{name}</td>\
-             <td class=\"num\">{n}</td><td>{devices}</td><td>{latest}</td></tr>",
+             <td class=\"num\">{n}</td><td>{latest}</td><td>{devices}</td></tr>",
             n = f.affected_devices
         );
     }
