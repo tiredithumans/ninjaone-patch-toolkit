@@ -9,9 +9,11 @@
 //   SCREENSHOT_DIST  static dir to serve   (default: web-rs/dist)
 //   SCREENSHOT_OUT   output PNG path        (default: docs/images/screenshot.png)
 //   SCREENSHOT_URL   capture this URL instead of serving DIST (e.g. the live demo)
-//   SCREENSHOT_W / SCREENSHOT_H  CSS viewport size (default 1360x820, the wide
-//                                desktop layout — narrow widths give the stacked
-//                                mobile layout); SCREENSHOT_DSF sets the scale.
+//   SCREENSHOT_W / SCREENSHOT_H  CSS viewport size (default 1360x1040, the wide
+//                                desktop layout, tall enough to show the filters,
+//                                controls, and the first patch rows — narrow widths
+//                                give the stacked mobile layout); SCREENSHOT_DSF
+//                                sets the device scale.
 //
 // The demo detects the absence of `window.__TAURI__` and runs in browser/demo mode
 // with bundled sample data, so no backend or sign-in is involved.
@@ -25,7 +27,7 @@ const DIST = process.env.SCREENSHOT_DIST || "web-rs/dist";
 const OUT = process.env.SCREENSHOT_OUT || "docs/images/screenshot.png";
 const REMOTE = process.env.SCREENSHOT_URL || "";
 const WIDTH = Number(process.env.SCREENSHOT_W || 1360);
-const HEIGHT = Number(process.env.SCREENSHOT_H || 820);
+const HEIGHT = Number(process.env.SCREENSHOT_H || 1040);
 const DSF = Number(process.env.SCREENSHOT_DSF || 1);
 
 // Minimal MIME map — enough for a Trunk dist (the WASM streaming compile needs the
