@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-26
+
 ### Added
 
 - **Patch failure analysis.** A new **Failures** tab rolls up FAILED installs by
