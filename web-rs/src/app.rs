@@ -291,6 +291,11 @@ impl AppState {
         self.loc_id.set(None);
         self.locations.set(Vec::new());
         if let Some(id) = org {
+            // Demo mode resolves locations from the sample, not the backend.
+            if self.demo.get_untracked() {
+                self.locations.set(demo::sample_locations(id));
+                return;
+            }
             spawn_local(async move {
                 match api::list_locations(id).await {
                     Ok(locs) => self.locations.set(locs),
@@ -349,6 +354,11 @@ impl AppState {
 
     fn run_query_inner(self, silent: bool) {
         if self.busy.get_untracked() || self.refreshing.get_untracked() {
+            return;
+        }
+        // In demo mode there is no backend to query — filter the sample locally.
+        if self.demo.get_untracked() {
+            self.run_demo_query(silent);
             return;
         }
         if !self.is_authed() {
@@ -425,13 +435,58 @@ impl AppState {
     /// Loads the bundled sample data into the results — no API call, no sign-in.
     /// Powers the "Load sample data" button and the browser/Pages demo. The whole
     /// sample fits on page 0, so there is no backend cache to page from.
+    ///
+    /// Also seeds the facet sources (orgs/roles/OS-types) from the sample so every
+    /// dropdown filters it, and resets the filter controls to "everything" so the
+    /// full sample shown here matches the controls. From there, adjusting a filter
+    /// and pressing **Run query** re-filters the sample via `run_demo_query`.
     fn load_demo(self) {
+        self.orgs.set(demo::sample_orgs());
+        self.roles.set(demo::sample_roles());
+        self.node_classes.set(demo::sample_node_classes());
+        self.org_id.set(None);
+        self.loc_id.set(None);
+        self.locations.set(Vec::new());
+        self.role_id.set(None);
+        self.selected_classes.set(Vec::new());
+        self.selected_severities.set(Vec::new());
+        self.os_name.set(String::new());
+        self.search.set(String::new());
+        self.release_window.set(String::new());
+        self.release_after_date.set(String::new());
+        self.release_before_date.set(String::new());
+        self.patch_type.set("ALL".to_string());
+        self.statuses
+            .set(STATUS_OPTIONS.iter().map(|s| s.to_string()).collect());
+
         let r = demo::sample_query_result();
         self.patches_page.set(0);
         self.active_tab.set(Tab::Patches);
         self.page_rows.set(r.rows.clone());
         self.result.set(Some(r));
         self.demo.set(true);
+    }
+
+    /// Demo-mode counterpart to `run_query`: filters the in-memory sample with the
+    /// current facets (no backend, no auth) and recomputes the row count. Used in
+    /// both the native demo and browser/web mode.
+    fn run_demo_query(self, silent: bool) {
+        let statuses = self.statuses.get_untracked();
+        if statuses.is_empty() {
+            if !silent {
+                self.notify(Toast::err("Select at least one status"));
+            }
+            return;
+        }
+        let r = demo::filtered_result(
+            &self.current_filter(),
+            &self.patch_type.get_untracked(),
+            &statuses,
+            Some(self.install_days.get_untracked()),
+        );
+        self.patches_page.set(0);
+        self.page_rows.set(r.rows.clone());
+        self.result.set(Some(r));
     }
 
     /// Seconds since the running query started (re-evaluated on each timer tick).
@@ -818,24 +873,19 @@ fn RunControls() -> impl IntoView {
             <div class="controls">
                 <button
                     class="btn btn-primary"
-                    prop:disabled=move || state.busy.get() || state.web_mode.get()
-                    title=move || {
-                        if state.web_mode.get() {
-                            "Live queries run in the desktop app"
-                        } else {
-                            ""
-                        }
-                    }
+                    prop:disabled=move || state.busy.get()
                     on:click=move |_| state.run_query()
                 >
                     {move || if state.busy.get() { "Running…" } else { "Run query" }}
                 </button>
                 <button
                     class="btn"
-                    prop:disabled=move || state.result.get().is_none() || state.web_mode.get()
+                    prop:disabled=move || {
+                        state.result.get().is_none() || state.web_mode.get() || state.demo.get()
+                    }
                     title=move || {
-                        if state.web_mode.get() {
-                            "Excel export runs in the desktop app"
+                        if state.web_mode.get() || state.demo.get() {
+                            "Excel export needs a live query in the desktop app"
                         } else {
                             ""
                         }
@@ -852,9 +902,14 @@ fn RunControls() -> impl IntoView {
                 >
                     "Export to Excel"
                 </button>
-                <button class="btn" on:click=move |_| state.load_demo()>
-                    "Load sample data"
-                </button>
+                // Demo mode is the web/Pages experience only — the desktop release
+                // is a pure production tool, so this is gated to browser mode (where
+                // it doubles as a reset back to the full sample).
+                <Show when=move || state.web_mode.get()>
+                    <button class="btn" on:click=move |_| state.load_demo()>
+                        "Load sample data"
+                    </button>
+                </Show>
                 <Show when=move || state.refreshing.get()>
                     <span class="chips-label">"↻ refreshing…"</span>
                 </Show>
