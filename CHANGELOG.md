@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-27
+
 ### Fixed
 
 - **Filters panel on mobile.** Removed the dead space below the "Filters" title
