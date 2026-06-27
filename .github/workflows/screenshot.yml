@@ -2,9 +2,13 @@ name: Screenshot
 
 # Regenerates the README demo screenshot (docs/images/screenshot.png) by driving the
 # built web demo in headless Chromium, then opens a PR with the refreshed image.
-# Manual trigger — run it after a UI change you want reflected in the README.
+# Runs automatically when a release is published (so the README image tracks each
+# shipped version) and on manual dispatch — run it after a UI change you want
+# reflected in the README. Either way it only opens a PR when the image changed.
 on:
   workflow_dispatch:
+  release:
+    types: [published]
 
 # Needs to push a branch and open a PR with the new image.
 permissions:
