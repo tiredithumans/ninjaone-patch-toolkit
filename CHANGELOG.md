@@ -11,6 +11,13 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Filters panel on mobile.** Removed the dead space below the "Filters" title
+  (the heading is now aligned with the Show/Hide toggle) and made the filter rows
+  stack cleanly on narrow / phone-width viewports, where the fixed label and control
+  widths previously crowded the screen.
+
 ## [0.7.0] - 2026-06-26
 
 ### Added

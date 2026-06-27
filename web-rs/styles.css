@@ -218,6 +218,13 @@ select:disabled {
   margin-top: 12px;
 }
 
+/* The Filters header is the only `.row` with an h2; its default bottom margin
+   leaves dead space below the title and offsets it from the Show/Hide toggle.
+   The row supplies its own gap, so drop the heading margin here. */
+.row h2 {
+  margin: 0;
+}
+
 .controls {
   gap: 14px;
 }
@@ -788,4 +795,30 @@ tbody tr:hover {
 
 .chart-swatch.seg-unknown {
   background: #6b7280;
+}
+
+/* --- Mobile / narrow viewports --- */
+@media (max-width: 640px) {
+  main {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .panel {
+    padding: 12px 13px;
+  }
+
+  /* Each stacked filter row puts its label on its own line and lets the
+     controls span the full width, instead of fighting the fixed 148px label
+     column + 260px control width that crowd a phone screen. */
+  .stacked-filters > .control-group > .chips-label {
+    flex-basis: 100%;
+    min-width: 0;
+    margin-right: 0;
+  }
+
+  .stacked-filters > .control-group > input,
+  .stacked-filters > .control-group > select {
+    width: 100%;
+  }
 }
