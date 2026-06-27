@@ -40,7 +40,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: |
             src-tauri
@@ -64,13 +64,13 @@ jobs:
           cargo fetch --locked --manifest-path web-rs/Cargo.toml --target wasm32-unknown-unknown
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
+        uses: github/codeql-action/init@1a818fd5f97ed0ee9a823421bd5b171add01227f # v4.36.2
         with:
           languages: rust
           build-mode: none
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
+        uses: github/codeql-action/analyze@1a818fd5f97ed0ee9a823421bd5b171add01227f # v4.36.2
         with:
           category: "/language:rust"
