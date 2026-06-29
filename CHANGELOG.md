@@ -11,6 +11,14 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **Compliance by OS.** The Compliance tab now has a "Compliance by OS" section — a
+  per-OS compliance bar chart and table (devices, compliant, compliance %, pending
+  Critical/Important, aged past SLA), grouped by each device's reported OS — so a
+  lagging OS version is easy to spot alongside the existing per-organization view. Like
+  the rest of the tab it reflects the selected device scope's whole pending backlog.
+
 ### Changed
 
 - **Clearer data scope across the result tabs.** The results area now groups the tabs

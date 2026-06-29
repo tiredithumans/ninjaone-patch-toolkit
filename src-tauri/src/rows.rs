@@ -296,6 +296,98 @@ pub fn build_compliance(
     buckets
 }
 
+/// Per-OS compliance rollup (grouped by the device's reported OS name) for the
+/// Compliance tab's "Compliance by OS" section. Same shape as [`ComplianceBucket`]
+/// but keyed on OS instead of organization.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OsCompliance {
+    pub os: String,
+    pub devices_total: usize,
+    pub devices_compliant: usize,
+    pub compliance_pct: f64,
+    pub pending_critical: usize,
+    pub aged_critical: usize,
+}
+
+/// Computes compliance grouped by OS name, mirroring [`build_compliance`] (offline
+/// devices excluded from the denominator; pending Critical/Important counted, and
+/// flagged aged when older than the SLA window or undated). Devices and patches with
+/// no reported OS fall under "(unknown)".
+pub fn build_compliance_by_os(
+    summaries: &[DeviceSummary],
+    current_patches: &[Patch],
+    devices_by_id: &HashMap<i64, &Device>,
+    sla_days: i64,
+    now: DateTime<Utc>,
+) -> Vec<OsCompliance> {
+    #[derive(Default)]
+    struct Acc {
+        total: usize,
+        compliant: usize,
+        pending_critical: usize,
+        aged_critical: usize,
+    }
+    let unknown = || "(unknown)".to_string();
+    let mut by_os: HashMap<String, Acc> = HashMap::new();
+
+    for s in summaries {
+        let offline = devices_by_id
+            .get(&s.device_id)
+            .map(|d| d.is_offline())
+            .unwrap_or(false);
+        if offline {
+            continue;
+        }
+        let acc = by_os
+            .entry(s.os_name.clone().unwrap_or_else(unknown))
+            .or_default();
+        acc.total += 1;
+        if s.pending_count == 0 {
+            acc.compliant += 1;
+        }
+    }
+
+    let sla_cutoff = now - Duration::days(sla_days);
+    for p in current_patches {
+        let is_pending = matches!(p.status.as_deref(), Some("MANUAL") | Some("APPROVED"));
+        if !is_pending {
+            continue;
+        }
+        if p.severity_enum().rank() < Severity::Important.rank() {
+            continue;
+        }
+        let os = p
+            .device_id
+            .and_then(|id| devices_by_id.get(&id))
+            .and_then(|d| d.os_name())
+            .unwrap_or_else(unknown);
+        let acc = by_os.entry(os).or_default();
+        acc.pending_critical += 1;
+        if p.released_at().map(|r| r < sla_cutoff).unwrap_or(true) {
+            acc.aged_critical += 1;
+        }
+    }
+
+    let mut buckets: Vec<OsCompliance> = by_os
+        .into_iter()
+        .map(|(os, a)| OsCompliance {
+            os,
+            devices_total: a.total,
+            devices_compliant: a.compliant,
+            compliance_pct: if a.total == 0 {
+                100.0
+            } else {
+                (a.compliant as f64 / a.total as f64) * 100.0
+            },
+            pending_critical: a.pending_critical,
+            aged_critical: a.aged_critical,
+        })
+        .collect();
+    buckets.sort_by_cached_key(|b| b.os.to_lowercase());
+    buckets
+}
+
 /// Counts current pending/approved patches per device for compliance and the
 /// reboot/summary views. NinjaOne uses `MANUAL` for pending-approval patches.
 pub fn pending_counts(current_patches: &[Patch]) -> HashMap<i64, usize> {
@@ -520,6 +612,8 @@ pub struct QueryResult {
     pub rows: Vec<PatchRow>,
     pub devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// Compliance grouped by OS name (the Compliance tab's "Compliance by OS").
+    pub compliance_by_os: Vec<OsCompliance>,
     /// FAILED-install rollup (empty unless the FAILED status was queried).
     pub failures: Vec<FailureGroup>,
     /// Per-org pending-patch severity breakdown for the dashboard.
@@ -551,6 +645,8 @@ pub struct QuerySummary {
     /// device list stays in the cache for export.
     pub reboot_devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// Compliance grouped by OS name (the Compliance tab's "Compliance by OS").
+    pub compliance_by_os: Vec<OsCompliance>,
     /// FAILED-install rollup — small (one entry per failing patch), so it ships
     /// whole rather than paged like the detail rows.
     pub failures: Vec<FailureGroup>,
@@ -579,6 +675,7 @@ impl QuerySummary {
                 .cloned()
                 .collect(),
             compliance: result.compliance.clone(),
+            compliance_by_os: result.compliance_by_os.clone(),
             failures: result.failures.clone(),
             severity_by_org: result.severity_by_org.clone(),
             age_buckets: result.age_buckets.clone(),
@@ -877,6 +974,38 @@ mod tests {
     }
 
     #[test]
+    fn compliance_by_os_groups_devices_and_patches_by_os() {
+        let d1 = device(1, 10, "Windows Server 2022"); // pending → not compliant
+        let d2 = device(2, 10, "Windows 11 Pro"); // no pending → compliant
+        let by_id = HashMap::from([(1, &d1), (2, &d2)]);
+        let maps = maps();
+        let current = vec![patch(1, "MANUAL", "CRITICAL", Some(45))]; // aged, on d1
+        let counts = pending_counts(&current);
+        let summaries = build_device_summaries(&[&d1, &d2], &counts, &maps);
+        let buckets = build_compliance_by_os(&summaries, &current, &by_id, 30, Utc::now());
+        assert_eq!(buckets.len(), 2, "one bucket per distinct OS");
+        // Sorted by OS name (case-insensitive): "Windows 11 Pro" before "Windows Server 2022".
+        let win11 = &buckets[0];
+        assert_eq!(win11.os, "Windows 11 Pro");
+        assert_eq!(win11.devices_total, 1);
+        assert_eq!(win11.devices_compliant, 1);
+        assert_eq!(win11.pending_critical, 0);
+        assert!((win11.compliance_pct - 100.0).abs() < 1e-9);
+        let server = &buckets[1];
+        assert_eq!(server.os, "Windows Server 2022");
+        assert_eq!(server.devices_total, 1);
+        assert_eq!(
+            server.devices_compliant, 0,
+            "the device has a pending patch"
+        );
+        assert_eq!(server.pending_critical, 1);
+        assert_eq!(
+            server.aged_critical, 1,
+            "released 45d ago, past the 30d SLA"
+        );
+    }
+
+    #[test]
     fn query_result_serializes_camel_case_for_the_frontend() {
         // web-rs/src/types.rs deserializes the query result with
         // rename_all = "camelCase"; serializing snake_case here breaks decoding
@@ -903,6 +1032,7 @@ mod tests {
             rows,
             devices,
             compliance,
+            compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
@@ -958,6 +1088,7 @@ mod tests {
             rows,
             devices,
             compliance,
+            compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
@@ -1119,10 +1250,25 @@ mod tests {
             "ComplianceBucket",
         );
 
+        let by_os = build_compliance_by_os(&summaries, &patches, &by_id, 30, Utc::now());
+        assert_keys_present(
+            &serde_json::to_value(&by_os[0]).unwrap(),
+            &[
+                "os",
+                "devicesTotal",
+                "devicesCompliant",
+                "compliancePct",
+                "pendingCritical",
+                "agedCritical",
+            ],
+            "OsCompliance",
+        );
+
         let result = QueryResult {
             rows,
             devices: summaries,
             compliance,
+            compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
@@ -1137,6 +1283,7 @@ mod tests {
                 "rowsTotal",
                 "rebootDevices",
                 "compliance",
+                "complianceByOs",
                 "failures",
                 "severityByOrg",
                 "ageBuckets",

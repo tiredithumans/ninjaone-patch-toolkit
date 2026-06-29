@@ -291,6 +291,13 @@ fn ComplianceTab() -> impl IntoView {
             />
             <ComplianceCharts/>
             <ComplianceTable/>
+            <section class="compliance-os">
+                <h3 class="chart-title">"Compliance by OS"</h3>
+                <div class="chart-card">
+                    <ComplianceByOsBars/>
+                </div>
+                <ComplianceByOsTable/>
+            </section>
         </Show>
     }
 }
@@ -345,6 +352,77 @@ fn ComplianceTable() -> impl IntoView {
                                     view! {
                                         <tr>
                                             <td>{b.organization}</td>
+                                            <td>{b.devices_total}</td>
+                                            <td>{b.devices_compliant}</td>
+                                            <td>{pct}</td>
+                                            <td>{b.pending_critical}</td>
+                                            <td>
+                                                <span class=aged_class title=aged_title>
+                                                    {aged_label}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </tbody>
+                </table>
+            </div>
+        </Show>
+    }
+}
+
+#[component]
+fn ComplianceByOsTable() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let buckets = move || {
+        state.result.with(|r| {
+            r.as_ref()
+                .map(|r| r.compliance_by_os.clone())
+                .unwrap_or_default()
+        })
+    };
+    let has_buckets = move || {
+        state
+            .result
+            .with(|r| r.as_ref().is_some_and(|r| !r.compliance_by_os.is_empty()))
+    };
+
+    view! {
+        <Show
+            when=has_buckets
+            fallback=|| view! { <p class="empty">"No compliance data yet."</p> }
+        >
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th scope="col">"OS"</th>
+                            <th scope="col">"Devices"</th>
+                            <th scope="col">"Compliant"</th>
+                            <th scope="col">"Compliance"</th>
+                            <th scope="col">"Pending Critical/Important Patches"</th>
+                            <th scope="col">"Aged (past SLA)"</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {move || {
+                            buckets()
+                                .into_iter()
+                                .map(|b| {
+                                    let pct = format!("{:.0}%", b.compliance_pct);
+                                    let aged = b.aged_critical;
+                                    let aged_class = if aged > 0 { "sev-critical" } else { "" };
+                                    let aged_label = if aged > 0 {
+                                        format!("⚠ {aged}")
+                                    } else {
+                                        aged.to_string()
+                                    };
+                                    let aged_title = if aged > 0 { "Past SLA — needs attention" } else { "" };
+                                    view! {
+                                        <tr>
+                                            <td>{b.os}</td>
                                             <td>{b.devices_total}</td>
                                             <td>{b.devices_compliant}</td>
                                             <td>{pct}</td>
