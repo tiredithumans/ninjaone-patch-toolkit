@@ -652,10 +652,46 @@ tbody tr:hover {
 }
 
 .changelog-body {
-  white-space: pre-wrap;
   font-size: 13px;
   line-height: 1.5;
   color: var(--text);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.changelog-body h4 {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.changelog-body ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.changelog-body li {
+  margin: 0 0 4px;
+}
+
+.changelog-body p {
+  margin: 0 0 8px;
+}
+
+.changelog-body strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.changelog-body > :first-child {
+  margin-top: 0;
+}
+
+.changelog-body > :last-child {
+  margin-bottom: 0;
 }
 
 .modal-actions {
