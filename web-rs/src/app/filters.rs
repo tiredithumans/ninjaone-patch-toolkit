@@ -6,6 +6,9 @@ use super::*;
 pub(crate) fn Filters() -> impl IntoView {
     let state = expect_context::<AppState>();
     let installed_selected = move || state.statuses.get().iter().any(|s| s == "INSTALLED");
+    // Fleet-health tabs (Compliance / Needs Reboot) ignore the patch filters, so hide
+    // those controls there rather than imply they'd change the device-scope numbers.
+    let fleet = move || is_fleet_tab(state.active_tab.get());
 
     view! {
         <section class="panel">
@@ -138,8 +141,26 @@ pub(crate) fn Filters() -> impl IntoView {
             </div>
             <div class="subhead">
                 "Patch filters"
-                <span class="subhead-note">"Patches & Failures tabs only"</span>
+                <span class="subhead-note">
+                    {move || {
+                        if fleet() {
+                            "hidden \u{2014} not applicable to Fleet-health tabs"
+                        } else {
+                            "Patches & Failures tabs only"
+                        }
+                    }}
+                </span>
             </div>
+            <Show
+                when=move || !fleet()
+                fallback=|| {
+                    view! {
+                        <p class="filters-hidden-note">
+                            "Patch filters don't affect Compliance or Needs Reboot. Switch to the Patches or Failures tab to use them."
+                        </p>
+                    }
+                }
+            >
             <div class="stacked-filters">
                 <div class="control-group">
                     <span class="chips-label">"Type:"</span>
@@ -276,6 +297,7 @@ pub(crate) fn Filters() -> impl IntoView {
                     </div>
                 </Show>
             </div>
+            </Show>
             </Show>
         </section>
     }

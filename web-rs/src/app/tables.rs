@@ -8,12 +8,18 @@ pub(crate) fn Results() -> impl IntoView {
     let tab = state.active_tab;
 
     let summary = move || {
+        // Read the active tab so the line re-renders (and re-describes) on switch.
+        let tab = tab.get();
         state.result.with(|r| {
             r.as_ref().map(|r| {
-                format!(
-                    "{} patch rows · {} devices · generated {}",
-                    r.rows_total, r.devices_total, r.generated_at
-                )
+                let c = SummaryCounts {
+                    rows_total: r.rows_total,
+                    devices_total: r.devices_total,
+                    failures: r.failures.len(),
+                    orgs: r.compliance.len(),
+                    reboot: r.reboot_devices.len(),
+                };
+                summary_line(tab, &c, &r.generated_at)
             })
         })
     };
@@ -21,32 +27,40 @@ pub(crate) fn Results() -> impl IntoView {
     view! {
         <section class="panel results">
             <div class="tabs">
-                <button
-                    class=move || tab_class(tab.get(), Tab::Patches)
-                    on:click=move |_| tab.set(Tab::Patches)
-                >
-                    "Patches"
-                </button>
-                <button
-                    class=move || tab_class(tab.get(), Tab::Compliance)
-                    on:click=move |_| tab.set(Tab::Compliance)
-                >
-                    "Compliance"
-                </button>
-                <button
-                    class=move || tab_class(tab.get(), Tab::Reboot)
-                    on:click=move |_| tab.set(Tab::Reboot)
-                >
-                    "Needs Reboot"
-                </button>
-                <button
-                    class=move || tab_class(tab.get(), Tab::Failures)
-                    on:click=move |_| tab.set(Tab::Failures)
-                >
-                    "Failures"
-                </button>
+                <div class="tab-group">
+                    <span class="tab-group-label">"Filtered results"</span>
+                    <button
+                        class=move || tab_class(tab.get(), Tab::Patches)
+                        on:click=move |_| tab.set(Tab::Patches)
+                    >
+                        "Patches"
+                    </button>
+                    <button
+                        class=move || tab_class(tab.get(), Tab::Failures)
+                        on:click=move |_| tab.set(Tab::Failures)
+                    >
+                        "Failures"
+                    </button>
+                </div>
+                <span class="tab-divider" aria-hidden="true"></span>
+                <div class="tab-group">
+                    <span class="tab-group-label">"Fleet health"</span>
+                    <button
+                        class=move || tab_class(tab.get(), Tab::Compliance)
+                        on:click=move |_| tab.set(Tab::Compliance)
+                    >
+                        "Compliance"
+                    </button>
+                    <button
+                        class=move || tab_class(tab.get(), Tab::Reboot)
+                        on:click=move |_| tab.set(Tab::Reboot)
+                    >
+                        "Needs Reboot"
+                    </button>
+                </div>
                 <span class="result-summary">{summary}</span>
             </div>
+            <AppliedFilterChips/>
             {move || match tab.get() {
                 Tab::Patches => view! { <PatchesTable/> }.into_any(),
                 Tab::Compliance => view! { <ComplianceTab/> }.into_any(),
@@ -54,6 +68,74 @@ pub(crate) fn Results() -> impl IntoView {
                 Tab::Failures => view! { <FailuresTable/> }.into_any(),
             }}
         </section>
+    }
+}
+
+/// Read-only chips describing the filters that produced the current result (snapshot
+/// taken at Run time). Patch-tier chips grey out + strike through on Fleet-health tabs,
+/// where those filters are ignored — making the silent scope change explicit.
+#[component]
+fn AppliedFilterChips() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    view! {
+        <Show when=move || state.applied_filters.with(|a| a.is_some())>
+            <div
+                class="applied-filters"
+                role="group"
+                aria-label="Filters applied to the current results"
+            >
+                {move || {
+                    let chips = state
+                        .applied_filters
+                        .with(|a| a.as_ref().map(filter_chips).unwrap_or_default());
+                    let fleet = is_fleet_tab(state.active_tab.get());
+                    if chips.is_empty() {
+                        return view! {
+                            <span class="applied-chip applied-chip-none">
+                                "No filters — whole fleet"
+                            </span>
+                        }
+                            .into_any();
+                    }
+                    chips
+                        .into_iter()
+                        .map(|c| {
+                            let dim = c.patch && fleet;
+                            let cls = if dim {
+                                "applied-chip applied-chip-dim"
+                            } else {
+                                "applied-chip"
+                            };
+                            let title = if dim { "Ignored on this tab" } else { "" };
+                            view! { <span class=cls title=title>{c.label}</span> }
+                        })
+                        .collect_view()
+                        .into_any()
+                }}
+            </div>
+        </Show>
+    }
+}
+
+/// The contract banner shown at the top of every results tab: which tier it belongs
+/// to, what it reflects, and exactly which filters apply or are ignored. `kind` picks
+/// the accent ("filtered" = patch-filtered tier, "fleet" = device-scope-only tier).
+#[component]
+fn ScopeBanner(
+    kind: &'static str,
+    tier: &'static str,
+    reflects: &'static str,
+    filters: &'static str,
+) -> impl IntoView {
+    view! {
+        <div class=format!("scope-banner scope-banner-{kind}")>
+            <span class="scope-banner-tier">{tier}</span>
+            <p class="scope-banner-text">
+                <strong>"Showing "</strong>
+                {reflects}
+            </p>
+            <p class="scope-banner-filters">{filters}</p>
+        </div>
     }
 }
 
@@ -101,7 +183,12 @@ fn PatchesTable() -> impl IntoView {
             when=move || state.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
-            <p class="scope-note">"Every patch matching your filters (device scope + patch filters)."</p>
+            <ScopeBanner
+                kind="filtered"
+                tier="Filtered results"
+                reflects="every patch matching your device scope and all patch filters."
+                filters="Device scope + Type, Status, Severity, Search, Released and Installed-within are all applied."
+            />
             <Show
                 when=move || { total() > 0 }
                 fallback=|| {
@@ -196,10 +283,12 @@ fn ComplianceTab() -> impl IntoView {
             when=has_result
             fallback=|| view! { <p class="empty">"Run a query to see compliance."</p> }
         >
-            <p class="scope-note">
-                "Fleet compliance for the selected device scope (organization / location / role / OS type). "
-                "Reflects the whole pending backlog — not narrowed by status, severity, KB search, or the date window."
-            </p>
+            <ScopeBanner
+                kind="fleet"
+                tier="Fleet health"
+                reflects="the whole pending backlog for the selected device scope."
+                filters="Device scope only (Org / Location / Role / OS Type / OS name). Status, Severity, Search, Released and Installed-within are ignored here."
+            />
             <ComplianceCharts/>
             <ComplianceTable/>
         </Show>
@@ -304,7 +393,12 @@ fn FailuresTable() -> impl IntoView {
                 }
             }
         >
-            <p class="scope-note">"Failed installs matching your filters (device scope + patch filters)."</p>
+            <ScopeBanner
+                kind="filtered"
+                tier="Filtered results"
+                reflects="failed installs matching your device scope and all patch filters."
+                filters="Restricted to Status = FAILED — select FAILED and Run query to populate this tab."
+            />
             <div class="table-wrap">
                 <table>
                     <thead>
@@ -368,9 +462,12 @@ fn RebootTable() -> impl IntoView {
             when=has_devices
             fallback=|| view! { <p class="empty">"No devices flagged for reboot."</p> }
         >
-            <p class="scope-note">
-                "Devices in the selected device scope flagged for reboot — not narrowed by status, severity, or search."
-            </p>
+            <ScopeBanner
+                kind="fleet"
+                tier="Fleet health"
+                reflects="devices in the selected device scope flagged for reboot."
+                filters="Device scope only. Status, Severity, Search, Released and Installed-within are ignored here."
+            />
             <div class="table-wrap">
                 <table>
                     <thead>

@@ -16,8 +16,8 @@ use filters::Filters;
 use settings::SettingsPanel;
 use tables::Results;
 use util::{
-    date_to_epoch, epoch_to_date, group_thousands, non_empty, parse_opt, sev_class, status_class,
-    tab_class,
+    SummaryCounts, date_to_epoch, epoch_to_date, filter_chips, group_thousands, is_fleet_tab,
+    non_empty, parse_opt, sev_class, status_class, summary_line, tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;
@@ -50,6 +50,27 @@ pub(crate) enum Tab {
     Compliance,
     Reboot,
     Failures,
+}
+
+/// A snapshot of the filters that produced the currently displayed result, captured
+/// at Run time (ids resolved to display names, raw values to labels) so the chip row
+/// always describes the on-screen data — even after the user edits a control but has
+/// not re-run. Frontend-only; never crosses IPC, so it is not mirrored in `types.rs`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct AppliedFilters {
+    pub organization: Option<String>,
+    pub location: Option<String>,
+    pub role: Option<String>,
+    pub os_types: Vec<String>,
+    pub os_name: Option<String>,
+    pub patch_type: String,
+    pub statuses: Vec<String>,
+    pub severities: Vec<String>,
+    pub search: Option<String>,
+    pub release_window: String,
+    pub release_after: String,
+    pub release_before: String,
+    pub install_days: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -126,6 +147,10 @@ pub struct AppState {
     refresh_secs: RwSignal<u32>,
 
     result: RwSignal<Option<QueryResult>>,
+    /// Filters that produced `result`, snapshotted on the last successful run. Drives
+    /// the read-only applied-filter chip row (kept in sync with the displayed result,
+    /// not the live controls).
+    applied_filters: RwSignal<Option<AppliedFilters>>,
     /// Zero-based page index for the paginated Patches table.
     patches_page: RwSignal<usize>,
     /// The detail rows for the currently displayed page, fetched from the backend
@@ -198,6 +223,7 @@ impl AppState {
             install_days: RwSignal::new(30),
             refresh_secs: RwSignal::new(0),
             result: RwSignal::new(None),
+            applied_filters: RwSignal::new(None),
             patches_page: RwSignal::new(0),
             page_rows: RwSignal::new(Vec::new()),
             filters_collapsed: RwSignal::new(false),
@@ -344,6 +370,69 @@ impl AppState {
         }
     }
 
+    /// Snapshots the active filters for the applied-filter chips, resolving org/loc/role
+    /// ids to display names and severity raw values to labels. All reads are untracked
+    /// (this runs imperatively at Run time, not inside a reactive scope).
+    fn snapshot_filters(self) -> AppliedFilters {
+        let statuses = self.statuses.get_untracked();
+        let install_days = statuses
+            .iter()
+            .any(|s| s == "INSTALLED")
+            .then(|| self.install_days.get_untracked());
+
+        let organization = self.org_id.get_untracked().and_then(|id| {
+            self.orgs
+                .get_untracked()
+                .into_iter()
+                .find(|o| o.id == id)
+                .map(|o| o.name)
+        });
+        let location = self.loc_id.get_untracked().and_then(|id| {
+            self.locations
+                .get_untracked()
+                .into_iter()
+                .find(|l| l.id == id)
+                .map(|l| l.name)
+        });
+        let role = self.role_id.get_untracked().and_then(|id| {
+            self.roles
+                .get_untracked()
+                .into_iter()
+                .find(|r| r.id == id)
+                .map(|r| r.name)
+        });
+        let selected = self.selected_classes.get_untracked();
+        let os_types = self
+            .node_classes
+            .get_untracked()
+            .into_iter()
+            .filter(|nc| selected.contains(&nc.value))
+            .map(|nc| nc.label)
+            .collect();
+        let sev_raw = self.selected_severities.get_untracked();
+        let severities = SEVERITY_OPTIONS
+            .iter()
+            .filter(|(v, _)| sev_raw.iter().any(|s| s == v))
+            .map(|(_, label)| label.to_string())
+            .collect();
+
+        AppliedFilters {
+            organization,
+            location,
+            role,
+            os_types,
+            os_name: non_empty(self.os_name.get_untracked()),
+            patch_type: self.patch_type.get_untracked(),
+            statuses,
+            severities,
+            search: non_empty(self.search.get_untracked()),
+            release_window: self.release_window.get_untracked(),
+            release_after: self.release_after_date.get_untracked(),
+            release_before: self.release_before_date.get_untracked(),
+            install_days,
+        }
+    }
+
     /// Manual **Run query** / filter change: re-scopes the cached whole-fleet data
     /// client-side (no refetch unless the cache is cold or past its staleness bound).
     fn run_query(self) {
@@ -392,6 +481,9 @@ impl AppState {
             statuses,
             install_after_days: Some(self.install_days.get_untracked()),
         };
+        // Snapshot the filters driving this run; applied only if the query succeeds, so
+        // a failed run leaves the chips matching the still-displayed prior result.
+        let snapshot = self.snapshot_filters();
         // Stamp this run so progress events from a superseded run are ignored, and
         // clear the previous run's counts.
         let seq = self.query_seq.get_untracked().wrapping_add(1);
@@ -421,6 +513,7 @@ impl AppState {
                         self.fetch_page(page);
                     }
                     self.result.set(Some(r));
+                    self.applied_filters.set(Some(snapshot));
                 }
                 Err(e) => self.notify(Toast::err(e)),
             }
@@ -474,6 +567,7 @@ impl AppState {
         self.patches_page.set(0);
         self.page_rows.set(r.rows.clone());
         self.result.set(Some(r));
+        self.applied_filters.set(Some(self.snapshot_filters()));
     }
 
     /// Seconds since the running query started (re-evaluated on each timer tick).

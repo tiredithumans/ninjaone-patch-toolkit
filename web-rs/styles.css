@@ -365,6 +365,28 @@ select:disabled {
   font-size: 12px;
 }
 
+/* Tab bar grouped by scope tier (Filtered results | Fleet health). */
+.tab-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tab-group-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-right: 2px;
+}
+
+.tab-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  margin: 0 6px;
+}
+
 .table-wrap {
   overflow: auto;
   max-height: 56vh;
@@ -646,11 +668,71 @@ tbody tr:hover {
   color: var(--muted);
 }
 
-/* --- Scope clarity: per-tab caption + filter-section note --- */
-.scope-note {
+/* --- Scope clarity: per-tab scope banner + filter-section note --- */
+.scope-banner {
   margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.scope-banner-filtered {
+  border-left-color: var(--accent);
+}
+
+.scope-banner-fleet {
+  border-left-color: var(--warn);
+}
+
+.scope-banner-tier {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--muted);
-  font-size: 0.8rem;
+}
+
+.scope-banner-text {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.scope-banner-filters {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Applied-filter chips: read-only snapshot of the filters behind the current result. */
+.applied-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.applied-chip {
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+/* Patch-tier chip on a Fleet-health tab — the filter is set but ignored here. */
+.applied-chip-dim {
+  opacity: 0.4;
+  text-decoration: line-through;
+  cursor: help;
+}
+
+.applied-chip-none {
+  color: var(--muted);
+  font-style: italic;
 }
 
 .subhead-note {
@@ -660,6 +742,13 @@ tbody tr:hover {
   font-weight: 400;
   font-size: 11px;
   color: var(--muted);
+}
+
+/* Shown in place of the patch-filter controls while a Fleet-health tab is active. */
+.filters-hidden-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 /* Failures: the full affected-device list can be long — keep the cell readable. */
