@@ -57,6 +57,7 @@ pub async fn export_patches_xlsx(
         &path_str,
         &result.rows,
         &result.compliance,
+        &result.compliance_by_os,
         &reboot,
         &result.failures,
     )
