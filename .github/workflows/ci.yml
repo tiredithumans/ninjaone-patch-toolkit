@@ -21,16 +21,49 @@ permissions:
   contents: read
 
 jobs:
+  # Detects whether a PR touches anything outside the docs allowlist. Pure-docs PRs
+  # (markdown / docs/ / LICENSE only) skip the Rust + WASM jobs below; their required
+  # checks still post — as skipped → success — because this workflow always triggers
+  # (a `paths-ignore` on the trigger would leave required checks stuck pending and
+  # block the merge). Non-PR events (push to main, weekly cron) always run everything.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Detect non-docs changes
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename')
+          # Run the Rust/WASM jobs unless every changed file is docs.
+          if printf '%s\n' "$files" | grep -qvE '(^docs/|\.md$|^LICENSE$)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust:
     name: Backend (src-tauri) (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # PRs run only the ubuntu leg for fast feedback; push-to-main and the weekly
-        # cron run the full 3-OS matrix. windows/macOS are not required PR checks
-        # (branch protection), so they validate post-merge.
-        os: ${{ (github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]')) || fromJSON('["ubuntu-latest", "windows-latest", "macos-latest"]') }}
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Match the pinned MSRV in rust-toolchain.toml (which rustup honors for the
@@ -59,20 +92,17 @@ jobs:
         run: |
           mkdir -p web-rs/dist
           printf '<!doctype html><title>stub</title>' > web-rs/dist/index.html
-      # fmt is deterministic and clippy is effectively OS-independent for this
-      # backend, so run them once (ubuntu) rather than on every matrix leg; `test`
-      # runs on each OS present.
       - name: fmt (both crates)
-        if: matrix.os == 'ubuntu-latest'
         run: just fmt-check
       - name: clippy
-        if: matrix.os == 'ubuntu-latest'
         run: just clippy
       - name: test
         run: just test
 
   web:
     name: Frontend (Leptos/WASM)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
