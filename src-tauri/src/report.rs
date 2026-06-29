@@ -7,8 +7,8 @@
 use std::fmt::Write;
 
 use crate::rows::{
-    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, OrgSeverity, QueryResult,
-    SeverityCounts,
+    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, OrgSeverity, OsCompliance,
+    QueryResult, SeverityCounts,
 };
 
 /// At most this many table rows are rendered per section; a fleet-scale failure or
@@ -114,6 +114,10 @@ pub fn render_report(result: &QueryResult) -> String {
     write_compliance_chart(&mut buf, &result.compliance);
     buf.push_str("</section>");
 
+    buf.push_str("<section><h2>Compliance by OS</h2>");
+    write_os_compliance(&mut buf, &result.compliance_by_os);
+    buf.push_str("</section>");
+
     buf.push_str("<section><h2>Pending patches by severity</h2>");
     write_severity_chart(&mut buf, &total_severity(&result.severity_by_org));
     buf.push_str("</section>");
@@ -137,38 +141,79 @@ pub fn render_report(result: &QueryResult) -> String {
     buf
 }
 
-fn write_compliance_chart(buf: &mut String, compliance: &[ComplianceBucket]) {
-    if compliance.is_empty() {
+/// Renders a horizontal compliance-bar SVG from `(label, pct)` rows — shared by the
+/// per-organization and per-OS compliance sections. Labels are HTML-escaped.
+fn write_compliance_bars(buf: &mut String, rows: &[(String, f64)]) {
+    if rows.is_empty() {
         buf.push_str("<p class=\"empty\">No compliance data for this query.</p>");
         return;
     }
     let track = 320.0_f64;
     let bar_x = 210_i32;
     let row_h = 30_i32;
-    let height = compliance.len() as i32 * row_h + 12;
+    let height = rows.len() as i32 * row_h + 12;
     let width = bar_x + track as i32 + 64;
     let _ = write!(
         buf,
         "<svg class=\"chart\" role=\"img\" viewBox=\"0 0 {width} {height}\" width=\"{width}\" height=\"{height}\">"
     );
-    for (i, b) in compliance.iter().enumerate() {
+    for (i, (label, pct)) in rows.iter().enumerate() {
         let cy = i as i32 * row_h + row_h / 2 + 6;
         let rect_y = cy - 8;
         let text_y = cy + 4;
-        let bar = bar_len(b.compliance_pct, 100.0, track);
-        let color = compliance_color(b.compliance_pct);
-        let org = escape_html(&b.organization);
+        let bar = bar_len(*pct, 100.0, track);
+        let color = compliance_color(*pct);
+        let label = escape_html(label);
         let val_x = bar_x as f64 + track + 8.0;
         let _ = write!(
             buf,
-            "<text x=\"0\" y=\"{text_y}\" class=\"lbl\">{org}</text>\
+            "<text x=\"0\" y=\"{text_y}\" class=\"lbl\">{label}</text>\
              <rect class=\"track\" x=\"{bar_x}\" y=\"{rect_y}\" width=\"{track:.0}\" height=\"16\" rx=\"3\"/>\
              <rect x=\"{bar_x}\" y=\"{rect_y}\" width=\"{bar:.1}\" height=\"16\" rx=\"3\" fill=\"{color}\"/>\
              <text x=\"{val_x:.0}\" y=\"{text_y}\" class=\"val\">{pct:.0}%</text>",
-            pct = b.compliance_pct
+            pct = *pct
         );
     }
     buf.push_str("</svg>");
+}
+
+fn write_compliance_chart(buf: &mut String, compliance: &[ComplianceBucket]) {
+    let rows: Vec<(String, f64)> = compliance
+        .iter()
+        .map(|b| (b.organization.clone(), b.compliance_pct))
+        .collect();
+    write_compliance_bars(buf, &rows);
+}
+
+/// The "Compliance by OS" section: the same bar chart as the per-org view, plus a
+/// detail table carrying the pending/aged counts.
+fn write_os_compliance(buf: &mut String, by_os: &[OsCompliance]) {
+    let rows: Vec<(String, f64)> = by_os
+        .iter()
+        .map(|b| (b.os.clone(), b.compliance_pct))
+        .collect();
+    write_compliance_bars(buf, &rows);
+    if by_os.is_empty() {
+        return;
+    }
+    buf.push_str(
+        "<table><thead><tr><th>OS</th><th>Devices</th><th>Compliant</th><th>Compliance</th>\
+         <th>Pending Critical/Important</th><th>Aged (past SLA)</th></tr></thead><tbody>",
+    );
+    for b in by_os.iter().take(MAX_TABLE_ROWS) {
+        let os = escape_html(&b.os);
+        let _ = write!(
+            buf,
+            "<tr><td>{os}</td><td>{dt}</td><td>{dc}</td><td>{pct:.0}%</td>\
+             <td>{pc}</td><td>{ac}</td></tr>",
+            dt = b.devices_total,
+            dc = b.devices_compliant,
+            pct = b.compliance_pct,
+            pc = b.pending_critical,
+            ac = b.aged_critical
+        );
+    }
+    buf.push_str("</tbody></table>");
 }
 
 fn write_severity_chart(buf: &mut String, total: &SeverityCounts) {
@@ -414,7 +459,14 @@ mod tests {
                 pending_critical: 1,
                 aged_critical: 0,
             }],
-            compliance_by_os: Vec::new(),
+            compliance_by_os: vec![OsCompliance {
+                os: "Windows Server 2022".into(),
+                devices_total: 10,
+                devices_compliant: 9,
+                compliance_pct: 90.0,
+                pending_critical: 1,
+                aged_critical: 0,
+            }],
             failures: vec![FailureGroup {
                 patch_type: "OS".into(),
                 kb: Some("KB1".into()),
@@ -466,6 +518,7 @@ mod tests {
         // All five sections are present.
         for heading in [
             "Compliance by organization",
+            "Compliance by OS",
             "Pending patches by severity",
             "Pending patch age",
             "Top patch failures",
