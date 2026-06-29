@@ -1,15 +1,17 @@
 name: CodeQL
 
 on:
+  # Runs on push-to-main and weekly, not on PRs: the analysis is the longest check
+  # and is not a required gate, so it validates merged code + re-scans on a schedule
+  # rather than slowing every PR.
   push:
-    branches: [main]
-  pull_request:
     branches: [main]
   schedule:
     # Weekly re-scan so new CodeQL query/extractor releases reach old code.
     # Wednesday, a distinct slot from ci.yml's Monday cron, so the two heavy
     # workflows don't pile onto the same scheduled tick.
     - cron: "0 6 * * 3"
+  workflow_dispatch:
 
 # A new push to the same branch/PR supersedes the in-flight run (mirrors ci.yml).
 concurrency:

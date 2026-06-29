@@ -27,7 +27,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # PRs run only the ubuntu leg for fast feedback; push-to-main and the weekly
+        # cron run the full 3-OS matrix. windows/macOS are not required PR checks
+        # (branch protection), so they validate post-merge.
+        os: ${{ (github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]')) || fromJSON('["ubuntu-latest", "windows-latest", "macos-latest"]') }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Match the pinned MSRV in rust-toolchain.toml (which rustup honors for the
@@ -56,9 +59,14 @@ jobs:
         run: |
           mkdir -p web-rs/dist
           printf '<!doctype html><title>stub</title>' > web-rs/dist/index.html
+      # fmt is deterministic and clippy is effectively OS-independent for this
+      # backend, so run them once (ubuntu) rather than on every matrix leg; `test`
+      # runs on each OS present.
       - name: fmt (both crates)
+        if: matrix.os == 'ubuntu-latest'
         run: just fmt-check
       - name: clippy
+        if: matrix.os == 'ubuntu-latest'
         run: just clippy
       - name: test
         run: just test
@@ -92,6 +100,9 @@ jobs:
 
   coverage:
     name: Coverage (backend)
+    # Measurement-only and not a required check — run on push-to-main, not on every
+    # PR (it re-compiles + re-runs the backend tests the `rust` job already covered).
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
