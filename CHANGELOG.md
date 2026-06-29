@@ -11,6 +11,17 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Clearer data scope across the result tabs.** The results area now groups the tabs
+  by scope tier — **Filtered results** (Patches, Failures), which honor every patch
+  filter, and **Fleet health** (Compliance, Needs Reboot), which reflect the whole
+  pending backlog for the selected device scope and ignore the patch filters. Each tab
+  leads with a banner spelling out exactly what it shows and which filters apply, and a
+  read-only chip row summarizes the filters behind the current result. On a Fleet-health
+  tab the patch-tier chips grey out (they're ignored there) and the patch-filter controls
+  hide entirely, so the view never implies a filter is shaping numbers it doesn't.
+
 ## [0.7.1] - 2026-06-27
 
 ### Fixed
