@@ -780,6 +780,17 @@ tbody tr:hover {
   letter-spacing: 0.04em;
 }
 
+/* "Compliance by OS" section — divided from the per-org compliance above it. */
+.compliance-os {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.compliance-os .chart-card {
+  margin-bottom: 12px;
+}
+
 .chart {
   max-width: 100%;
   height: auto;

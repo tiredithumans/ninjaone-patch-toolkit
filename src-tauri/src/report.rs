@@ -414,6 +414,7 @@ mod tests {
                 pending_critical: 1,
                 aged_critical: 0,
             }],
+            compliance_by_os: Vec::new(),
             failures: vec![FailureGroup {
                 patch_type: "OS".into(),
                 kb: Some("KB1".into()),
@@ -483,6 +484,7 @@ mod tests {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: Vec::new(),
+            compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),

@@ -11,7 +11,7 @@ mod settings;
 mod tables;
 mod util;
 
-use charts::ComplianceCharts;
+use charts::{ComplianceByOsBars, ComplianceCharts};
 use filters::Filters;
 use settings::SettingsPanel;
 use tables::Results;

@@ -20,7 +20,7 @@
 use crate::types::QueryResult;
 use crate::types::{
     AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams, Location, NodeClass,
-    OrgSeverity, Organization, PatchRow, Role, SeverityCounts,
+    OrgSeverity, Organization, OsCompliance, PatchRow, Role, SeverityCounts,
 };
 
 /// Wall-clock label shown in the results summary. Fixed (not "now") so the build
@@ -256,6 +256,48 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
     ]
 }
 
+/// Per-OS compliance for the "Compliance by OS" section. Totals match the fleet size
+/// in `sample_compliance` (42 devices). Like the other rollups it's a backend
+/// computation in a real deployment; the demo keeps it static (and, unlike the
+/// per-org rollups, does not narrow it by organization — the sample carries no
+/// per-org OS split).
+fn sample_compliance_by_os() -> Vec<OsCompliance> {
+    vec![
+        OsCompliance {
+            os: "Windows Server 2022".to_string(),
+            devices_total: 16,
+            devices_compliant: 12,
+            compliance_pct: 75.0,
+            pending_critical: 5,
+            aged_critical: 2,
+        },
+        OsCompliance {
+            os: "Windows 11 Pro".to_string(),
+            devices_total: 14,
+            devices_compliant: 11,
+            compliance_pct: 78.6,
+            pending_critical: 3,
+            aged_critical: 1,
+        },
+        OsCompliance {
+            os: "Windows 10 Pro".to_string(),
+            devices_total: 8,
+            devices_compliant: 6,
+            compliance_pct: 75.0,
+            pending_critical: 2,
+            aged_critical: 1,
+        },
+        OsCompliance {
+            os: "Ubuntu 22.04 LTS".to_string(),
+            devices_total: 4,
+            devices_compliant: 4,
+            compliance_pct: 100.0,
+            pending_critical: 0,
+            aged_critical: 0,
+        },
+    ]
+}
+
 fn sample_reboot() -> Vec<DeviceSummary> {
     vec![
         reboot(
@@ -453,6 +495,7 @@ fn assemble(rows: Vec<PatchRow>, org_filter: Option<i64>) -> QueryResult {
         rows,
         reboot_devices,
         compliance,
+        compliance_by_os: sample_compliance_by_os(),
         failures,
         severity_by_org,
         age_buckets: sample_age_buckets(),

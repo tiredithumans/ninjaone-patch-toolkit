@@ -100,6 +100,19 @@ pub struct ComplianceBucket {
     pub aged_critical: usize,
 }
 
+/// Per-OS compliance row for the Compliance tab's "Compliance by OS" section.
+/// Mirrors the backend `OsCompliance`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OsCompliance {
+    pub os: String,
+    pub devices_total: usize,
+    pub devices_compliant: usize,
+    pub compliance_pct: f64,
+    pub pending_critical: usize,
+    pub aged_critical: usize,
+}
+
 // Backend also sends patchType, severityRank and latestFailureTs; serde ignores
 // undeclared fields. Only what the failures table renders is mirrored here.
 #[derive(Clone, Debug, Deserialize)]
@@ -153,6 +166,8 @@ pub struct QueryResult {
     /// Only the devices flagged for reboot (all the reboot view needs).
     pub reboot_devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// Compliance grouped by OS name (the "Compliance by OS" section).
+    pub compliance_by_os: Vec<OsCompliance>,
     /// FAILED-install rollup (empty unless the FAILED status was queried).
     pub failures: Vec<FailureGroup>,
     /// Per-org pending-patch severity breakdown for the dashboard charts.

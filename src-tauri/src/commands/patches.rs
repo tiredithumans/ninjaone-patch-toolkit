@@ -13,7 +13,8 @@ use crate::filter::FilterParams;
 use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus, PatchType, Role};
 use crate::rows::{
     LookupMaps, PatchSource, QueryResult, QuerySummary, build_age_buckets, build_compliance,
-    build_device_summaries, build_failures, build_rows, build_severity_by_org, pending_counts,
+    build_compliance_by_os, build_device_summaries, build_failures, build_rows,
+    build_severity_by_org, pending_counts,
 };
 use crate::state::{AppState, CurrentPatches};
 
@@ -348,6 +349,8 @@ where
         sla_days,
         now,
     );
+    let compliance_by_os =
+        build_compliance_by_os(&summaries, &all_current, &devices_by_id, sla_days, now);
 
     // 6. Dashboard/failure rollups. Failures are derived from the FAILED rows already
     // joined (present only when the FAILED status was requested — no extra fetch);
@@ -360,6 +363,7 @@ where
         rows,
         devices: summaries,
         compliance,
+        compliance_by_os,
         failures,
         severity_by_org,
         age_buckets,

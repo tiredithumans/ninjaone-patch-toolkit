@@ -264,6 +264,7 @@ mod tests {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: Vec::new(),
+            compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),

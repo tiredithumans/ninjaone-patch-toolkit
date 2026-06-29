@@ -147,68 +147,99 @@ pub(crate) fn ComplianceCharts() -> impl IntoView {
     }
 }
 
+/// Renders the horizontal compliance-bar SVG from `(label, pct)` pairs — shared by the
+/// per-organization and per-OS compliance charts.
+fn compliance_bars(items: Vec<(String, f64)>) -> AnyView {
+    if items.is_empty() {
+        return view! { <p class="empty">"No compliance data."</p> }.into_any();
+    }
+    let h = items.len() as i32 * COMPLIANCE_ROW_H;
+    view! {
+        <svg
+            class="chart"
+            role="img"
+            width=COMPLIANCE_VW.to_string()
+            height=h.to_string()
+            viewBox=format!("0 0 {COMPLIANCE_VW:.0} {h}")
+        >
+            {items
+                .into_iter()
+                .enumerate()
+                .map(|(i, (label, pct))| {
+                    let y0 = i as i32 * COMPLIANCE_ROW_H;
+                    let label_y = (y0 + 14).to_string();
+                    let bar_y = (y0 + 20).to_string();
+                    let w = format!("{:.1}", bar_width_px(pct, 100.0, COMPLIANCE_VW));
+                    let fill = compliance_fill_class(pct);
+                    view! {
+                        <g>
+                            <text x="0" y=label_y.clone() class="chart-lbl">
+                                {label}
+                            </text>
+                            <text
+                                x=COMPLIANCE_VW.to_string()
+                                y=label_y
+                                text-anchor="end"
+                                class="chart-val"
+                            >
+                                {format!("{pct:.0}%")}
+                            </text>
+                            <rect
+                                class="chart-track"
+                                x="0"
+                                y=bar_y.clone()
+                                width=COMPLIANCE_VW.to_string()
+                                height="10"
+                                rx="5"
+                            ></rect>
+                            <rect class=fill x="0" y=bar_y width=w height="10" rx="5"></rect>
+                        </g>
+                    }
+                })
+                .collect_view()}
+        </svg>
+    }
+    .into_any()
+}
+
 #[component]
 fn ComplianceBars() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let buckets = move || {
-        state
-            .result
-            .with(|r| r.as_ref().map(|r| r.compliance.clone()).unwrap_or_default())
-    };
     view! {
         {move || {
-            let bks = buckets();
-            if bks.is_empty() {
-                return view! { <p class="empty">"No compliance data."</p> }.into_any();
-            }
-            let h = bks.len() as i32 * COMPLIANCE_ROW_H;
-            view! {
-                <svg
-                    class="chart"
-                    role="img"
-                    width=COMPLIANCE_VW.to_string()
-                    height=h.to_string()
-                    viewBox=format!("0 0 {COMPLIANCE_VW:.0} {h}")
-                >
-                    {bks
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, b)| {
-                            let y0 = i as i32 * COMPLIANCE_ROW_H;
-                            let label_y = (y0 + 14).to_string();
-                            let bar_y = (y0 + 20).to_string();
-                            let pct = b.compliance_pct;
-                            let w = format!("{:.1}", bar_width_px(pct, 100.0, COMPLIANCE_VW));
-                            let fill = compliance_fill_class(pct);
-                            view! {
-                                <g>
-                                    <text x="0" y=label_y.clone() class="chart-lbl">
-                                        {b.organization}
-                                    </text>
-                                    <text
-                                        x=COMPLIANCE_VW.to_string()
-                                        y=label_y
-                                        text-anchor="end"
-                                        class="chart-val"
-                                    >
-                                        {format!("{pct:.0}%")}
-                                    </text>
-                                    <rect
-                                        class="chart-track"
-                                        x="0"
-                                        y=bar_y.clone()
-                                        width=COMPLIANCE_VW.to_string()
-                                        height="10"
-                                        rx="5"
-                                    ></rect>
-                                    <rect class=fill x="0" y=bar_y width=w height="10" rx="5"></rect>
-                                </g>
-                            }
-                        })
-                        .collect_view()}
-                </svg>
-            }
-                .into_any()
+            let items = state.result.with(|r| {
+                r.as_ref()
+                    .map(|r| {
+                        r.compliance
+                            .iter()
+                            .map(|b| (b.organization.clone(), b.compliance_pct))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            });
+            compliance_bars(items)
+        }}
+    }
+}
+
+/// Per-OS compliance bars (the "Compliance by OS" section). Same shape as the per-org
+/// bars, reading the `compliance_by_os` rollup.
+#[component]
+pub(crate) fn ComplianceByOsBars() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    view! {
+        {move || {
+            let items = state.result.with(|r| {
+                r.as_ref()
+                    .map(|r| {
+                        r.compliance_by_os
+                            .iter()
+                            .map(|b| (b.os.clone(), b.compliance_pct))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            });
+            compliance_bars(items)
         }}
     }
 }
