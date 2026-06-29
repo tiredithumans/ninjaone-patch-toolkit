@@ -16,8 +16,9 @@ use filters::Filters;
 use settings::SettingsPanel;
 use tables::Results;
 use util::{
-    SummaryCounts, date_to_epoch, epoch_to_date, filter_chips, group_thousands, is_fleet_tab,
-    non_empty, parse_opt, sev_class, status_class, summary_line, tab_class,
+    MdBlock, MdSpan, SummaryCounts, date_to_epoch, epoch_to_date, filter_chips, group_thousands,
+    is_fleet_tab, non_empty, parse_changelog, parse_opt, sev_class, status_class, summary_line,
+    tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;
@@ -754,6 +755,17 @@ pub fn App() -> impl IntoView {
     }
 }
 
+/// Renders one changelog line's inline runs — plain text and `**bold**` — into views.
+fn render_spans(spans: Vec<MdSpan>) -> impl IntoView {
+    spans
+        .into_iter()
+        .map(|span| match span {
+            MdSpan::Text(t) => view! { {t} }.into_any(),
+            MdSpan::Strong(t) => view! { <strong>{t}</strong> }.into_any(),
+        })
+        .collect_view()
+}
+
 /// Modal shown when an update is available. Renders the new version + the
 /// release notes (changelog) and offers to install + relaunch.
 #[component]
@@ -778,11 +790,31 @@ fn UpdateSplash() -> impl IntoView {
             let changelog = if notes.trim().is_empty() {
                 None
             } else {
+                // The notes are the CHANGELOG.md section (markdown); render the
+                // headings / bullet lists / bold runs instead of dumping the source.
+                let body = parse_changelog(&notes)
+                    .into_iter()
+                    .map(|block| match block {
+                        MdBlock::Heading(h) => view! { <h4>{h}</h4> }.into_any(),
+                        MdBlock::List(items) => view! {
+                            <ul>
+                                {items
+                                    .into_iter()
+                                    .map(|spans| view! { <li>{render_spans(spans)}</li> })
+                                    .collect_view()}
+                            </ul>
+                        }
+                            .into_any(),
+                        MdBlock::Paragraph(spans) => {
+                            view! { <p>{render_spans(spans)}</p> }.into_any()
+                        }
+                    })
+                    .collect_view();
                 Some(
                     view! {
                         <div class="changelog">
                             <h3>"What's new"</h3>
-                            <div class="changelog-body">{notes}</div>
+                            <div class="changelog-body">{body}</div>
                         </div>
                     },
                 )

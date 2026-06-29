@@ -11,6 +11,12 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Update notes formatting.** The **Update available** window now renders the
+  changelog as formatted text — section headings, bullet lists, and bold leads —
+  instead of showing the raw Markdown source (`###`, `-`, `**…**`) verbatim.
+
 ## [0.8.0] - 2026-06-29
 
 ### Added
