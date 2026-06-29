@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-29
+
 ### Added
 
 - **Compliance by OS.** The Compliance tab now has a "Compliance by OS" section — a
@@ -31,8 +33,6 @@ version and start a fresh `[Unreleased]`.
   read-only chip row summarizes the filters behind the current result. On a Fleet-health
   tab the patch-tier chips grey out (they're ignored there) and the patch-filter controls
   hide entirely, so the view never implies a filter is shaping numbers it doesn't.
-
-## [0.7.1] - 2026-06-27
 
 ### Fixed
 
