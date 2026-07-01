@@ -26,37 +26,17 @@ pub(crate) fn Results() -> impl IntoView {
 
     view! {
         <section class="panel results">
-            <div class="tabs">
+            <div class="tabs" role="tablist">
                 <div class="tab-group">
                     <span class="tab-group-label">"Filtered results"</span>
-                    <button
-                        class=move || tab_class(tab.get(), Tab::Patches)
-                        on:click=move |_| tab.set(Tab::Patches)
-                    >
-                        "Patches"
-                    </button>
-                    <button
-                        class=move || tab_class(tab.get(), Tab::Failures)
-                        on:click=move |_| tab.set(Tab::Failures)
-                    >
-                        "Failures"
-                    </button>
+                    <TabButton this=Tab::Patches label="Patches"/>
+                    <TabButton this=Tab::Failures label="Failures"/>
                 </div>
                 <span class="tab-divider" aria-hidden="true"></span>
                 <div class="tab-group">
                     <span class="tab-group-label">"Fleet health"</span>
-                    <button
-                        class=move || tab_class(tab.get(), Tab::Compliance)
-                        on:click=move |_| tab.set(Tab::Compliance)
-                    >
-                        "Compliance"
-                    </button>
-                    <button
-                        class=move || tab_class(tab.get(), Tab::Reboot)
-                        on:click=move |_| tab.set(Tab::Reboot)
-                    >
-                        "Needs Reboot"
-                    </button>
+                    <TabButton this=Tab::Compliance label="Compliance"/>
+                    <TabButton this=Tab::Reboot label="Needs Reboot"/>
                 </div>
                 <span class="result-summary">{summary}</span>
             </div>
@@ -86,13 +66,44 @@ pub(crate) fn Results() -> impl IntoView {
                 </div>
             </Show>
             <AppliedFilterChips/>
-            {move || match tab.get() {
-                Tab::Patches => view! { <PatchesTable/> }.into_any(),
-                Tab::Compliance => view! { <ComplianceTab/> }.into_any(),
-                Tab::Reboot => view! { <RebootTable/> }.into_any(),
-                Tab::Failures => view! { <FailuresTable/> }.into_any(),
-            }}
+            <div role="tabpanel" aria-labelledby=move || tab_dom_id(tab.get())>
+                {move || match tab.get() {
+                    Tab::Patches => view! { <PatchesTable/> }.into_any(),
+                    Tab::Compliance => view! { <ComplianceTab/> }.into_any(),
+                    Tab::Reboot => view! { <RebootTable/> }.into_any(),
+                    Tab::Failures => view! { <FailuresTable/> }.into_any(),
+                }}
+            </div>
         </section>
+    }
+}
+
+/// Stable DOM ids linking each tab button to the tabpanel's `aria-labelledby`.
+fn tab_dom_id(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Patches => "tab-patches",
+        Tab::Compliance => "tab-compliance",
+        Tab::Reboot => "tab-reboot",
+        Tab::Failures => "tab-failures",
+    }
+}
+
+/// One results tab button with proper tab semantics. `aria-selected` is set as a
+/// string — Leptos drops boolean-ish ARIA attributes when they're false.
+#[component]
+fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let tab = state.active_tab;
+    view! {
+        <button
+            id=tab_dom_id(this)
+            role="tab"
+            class=move || tab_class(tab.get(), this)
+            aria-selected=move || (tab.get() == this).to_string()
+            on:click=move |_| tab.set(this)
+        >
+            {label}
+        </button>
     }
 }
 
