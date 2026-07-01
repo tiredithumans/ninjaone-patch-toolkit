@@ -195,5 +195,8 @@ jobs:
           releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: true
+          # tauri-action v1.0.0 renamed includeUpdaterJson → uploadUpdaterJson.
+          # Unknown `with:` inputs are silently ignored, so keeping the old name
+          # would drop latest.json from the release and break auto-update.
+          uploadUpdaterJson: true
           args: --config src-tauri/updater-build.json
