@@ -278,6 +278,20 @@ fn PatchesTable() -> impl IntoView {
 fn ComplianceTab() -> impl IntoView {
     let state = expect_context::<AppState>();
     let has_result = move || state.result.with(|r| r.is_some());
+    let org_rows: Signal<Vec<ComplianceRow>> = Signal::derive(move || {
+        state.result.with(|r| {
+            r.as_ref()
+                .map(|r| r.compliance.iter().map(ComplianceRow::from).collect())
+                .unwrap_or_default()
+        })
+    });
+    let os_rows: Signal<Vec<ComplianceRow>> = Signal::derive(move || {
+        state.result.with(|r| {
+            r.as_ref()
+                .map(|r| r.compliance_by_os.iter().map(ComplianceRow::from).collect())
+                .unwrap_or_default()
+        })
+    });
     view! {
         <Show
             when=has_result
@@ -290,115 +304,74 @@ fn ComplianceTab() -> impl IntoView {
                 filters="Device scope only (Org / Location / Role / OS Type / OS name). Status, Severity, Search, Released and Installed-within are ignored here."
             />
             <ComplianceCharts/>
-            <ComplianceTable/>
+            <ComplianceRollupTable first_col="Organization" rows=org_rows/>
             <section class="compliance-os">
                 <h3 class="chart-title">"Compliance by OS"</h3>
                 <div class="chart-card">
                     <ComplianceByOsBars/>
                 </div>
-                <ComplianceByOsTable/>
+                <ComplianceRollupTable first_col="OS" rows=os_rows/>
             </section>
         </Show>
     }
 }
 
-#[component]
-fn ComplianceTable() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    let buckets = move || {
-        state
-            .result
-            .with(|r| r.as_ref().map(|r| r.compliance.clone()).unwrap_or_default())
-    };
-    let has_buckets = move || {
-        state
-            .result
-            .with(|r| r.as_ref().is_some_and(|r| !r.compliance.is_empty()))
-    };
+/// One row of a compliance rollup table, independent of the grouping key. The two
+/// bucket types stay distinct hand-maintained IPC mirrors (`types.rs`); they
+/// converge here only for rendering.
+#[derive(Clone)]
+struct ComplianceRow {
+    label: String,
+    devices_total: usize,
+    devices_compliant: usize,
+    compliance_pct: f64,
+    pending_critical: usize,
+    aged_critical: usize,
+}
 
-    view! {
-        <Show
-            when=has_buckets
-            fallback=|| view! { <p class="empty">"No compliance data yet."</p> }
-        >
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th scope="col">"Organization"</th>
-                            <th scope="col">"Devices"</th>
-                            <th scope="col">"Compliant"</th>
-                            <th scope="col">"Compliance"</th>
-                            <th scope="col">"Pending Critical/Important Patches"</th>
-                            <th scope="col">"Aged (past SLA)"</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {move || {
-                            buckets()
-                                .into_iter()
-                                .map(|b| {
-                                    let pct = format!("{:.0}%", b.compliance_pct);
-                                    let aged = b.aged_critical;
-                                    let aged_class = if aged > 0 { "sev-critical" } else { "" };
-                                    // Prefix a warning glyph so the aged backlog is
-                                    // distinguishable without relying on color.
-                                    let aged_label = if aged > 0 {
-                                        format!("⚠ {aged}")
-                                    } else {
-                                        aged.to_string()
-                                    };
-                                    let aged_title = if aged > 0 { "Past SLA — needs attention" } else { "" };
-                                    view! {
-                                        <tr>
-                                            <td>{b.organization}</td>
-                                            <td>{b.devices_total}</td>
-                                            <td>{b.devices_compliant}</td>
-                                            <td>{pct}</td>
-                                            <td>{b.pending_critical}</td>
-                                            <td>
-                                                <span class=aged_class title=aged_title>
-                                                    {aged_label}
-                                                </span>
-                                            </td>
-                                        </tr>
-                                    }
-                                })
-                                .collect_view()
-                        }}
-                    </tbody>
-                </table>
-            </div>
-        </Show>
+impl From<&ComplianceBucket> for ComplianceRow {
+    fn from(b: &ComplianceBucket) -> Self {
+        Self {
+            label: b.organization.clone(),
+            devices_total: b.devices_total,
+            devices_compliant: b.devices_compliant,
+            compliance_pct: b.compliance_pct,
+            pending_critical: b.pending_critical,
+            aged_critical: b.aged_critical,
+        }
     }
 }
 
-#[component]
-fn ComplianceByOsTable() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    let buckets = move || {
-        state.result.with(|r| {
-            r.as_ref()
-                .map(|r| r.compliance_by_os.clone())
-                .unwrap_or_default()
-        })
-    };
-    let has_buckets = move || {
-        state
-            .result
-            .with(|r| r.as_ref().is_some_and(|r| !r.compliance_by_os.is_empty()))
-    };
+impl From<&OsCompliance> for ComplianceRow {
+    fn from(b: &OsCompliance) -> Self {
+        Self {
+            label: b.os.clone(),
+            devices_total: b.devices_total,
+            devices_compliant: b.devices_compliant,
+            compliance_pct: b.compliance_pct,
+            pending_critical: b.pending_critical,
+            aged_critical: b.aged_critical,
+        }
+    }
+}
 
+/// Shared table for the two compliance rollups (per-organization and per-OS):
+/// identical columns, differing only in the grouping column's header and values.
+#[component]
+fn ComplianceRollupTable(
+    first_col: &'static str,
+    #[prop(into)] rows: Signal<Vec<ComplianceRow>>,
+) -> impl IntoView {
     view! {
         <Show
-            when=has_buckets
+            when=move || rows.with(|r| !r.is_empty())
             fallback=|| view! { <p class="empty">"No compliance data yet."</p> }
         >
             <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
-                            <th scope="col">"OS"</th>
+                            <th scope="col">{first_col}</th>
                             <th scope="col">"Devices"</th>
                             <th scope="col">"Compliant"</th>
                             <th scope="col">"Compliance"</th>
@@ -408,21 +381,16 @@ fn ComplianceByOsTable() -> impl IntoView {
                     </thead>
                     <tbody>
                         {move || {
-                            buckets()
+                            rows.get()
                                 .into_iter()
                                 .map(|b| {
                                     let pct = format!("{:.0}%", b.compliance_pct);
-                                    let aged = b.aged_critical;
-                                    let aged_class = if aged > 0 { "sev-critical" } else { "" };
-                                    let aged_label = if aged > 0 {
-                                        format!("⚠ {aged}")
-                                    } else {
-                                        aged.to_string()
-                                    };
-                                    let aged_title = if aged > 0 { "Past SLA — needs attention" } else { "" };
+                                    let (aged_class, aged_label, aged_title) = aged_badge(
+                                        b.aged_critical,
+                                    );
                                     view! {
                                         <tr>
-                                            <td>{b.os}</td>
+                                            <td>{b.label}</td>
                                             <td>{b.devices_total}</td>
                                             <td>{b.devices_compliant}</td>
                                             <td>{pct}</td>

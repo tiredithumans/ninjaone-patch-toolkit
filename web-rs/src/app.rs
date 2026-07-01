@@ -16,9 +16,9 @@ use filters::Filters;
 use settings::SettingsPanel;
 use tables::Results;
 use util::{
-    MdBlock, MdSpan, SummaryCounts, date_to_epoch, epoch_to_date, filter_chips, group_thousands,
-    is_fleet_tab, non_empty, parse_changelog, parse_opt, sev_class, status_class, summary_line,
-    tab_class,
+    MdBlock, MdSpan, SummaryCounts, aged_badge, date_to_epoch, epoch_to_date, filter_chips,
+    group_thousands, is_fleet_tab, non_empty, parse_changelog, parse_opt, sev_class, status_class,
+    summary_line, tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;

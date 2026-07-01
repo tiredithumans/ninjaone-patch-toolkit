@@ -231,6 +231,20 @@ pub(crate) fn status_class(status: &str) -> &'static str {
     }
 }
 
+/// Presentation for an "Aged (past SLA)" table cell as (CSS class, label, title).
+/// An aged backlog gets a ⚠ prefix so it reads without relying on color.
+pub(crate) fn aged_badge(aged: usize) -> (&'static str, String, &'static str) {
+    if aged > 0 {
+        (
+            "sev-critical",
+            format!("⚠ {aged}"),
+            "Past SLA — needs attention",
+        )
+    } else {
+        ("", aged.to_string(), "")
+    }
+}
+
 /// One inline run within a changelog line: plain text or a `**bold**` span.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum MdSpan {
@@ -359,6 +373,19 @@ mod tests {
     fn non_empty_collapses_blank_to_none() {
         assert_eq!(non_empty("   ".to_string()), None);
         assert_eq!(non_empty(" hi ".to_string()), Some("hi".to_string()));
+    }
+
+    #[test]
+    fn aged_badge_flags_only_nonzero_backlogs() {
+        assert_eq!(aged_badge(0), ("", "0".to_string(), ""));
+        assert_eq!(
+            aged_badge(3),
+            (
+                "sev-critical",
+                "⚠ 3".to_string(),
+                "Past SLA — needs attention"
+            )
+        );
     }
 
     #[test]
