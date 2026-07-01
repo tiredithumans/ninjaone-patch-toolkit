@@ -135,7 +135,7 @@ jobs:
             src-tauri
             web-rs
 
-      - uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
         with:
           tool: trunk
 
@@ -182,7 +182,7 @@ jobs:
       # `just build` doesn't need signing keys). Updates go live only when the
       # release is PUBLISHED — a draft isn't "latest", so the floating
       # latest.json endpoint stays on the last published version until you ship.
-      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           # Required for tauri-action to upload to the GitHub release.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -195,5 +195,8 @@ jobs:
           releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: true
+          # tauri-action v1.0.0 renamed includeUpdaterJson → uploadUpdaterJson.
+          # Unknown `with:` inputs are silently ignored, so keeping the old name
+          # would drop latest.json from the release and break auto-update.
+          uploadUpdaterJson: true
           args: --config src-tauri/updater-build.json
