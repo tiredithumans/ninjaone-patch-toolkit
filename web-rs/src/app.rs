@@ -1214,6 +1214,10 @@ fn PresetRow() -> impl IntoView {
                         let label_name = p.name.clone();
                         let p2 = p.clone();
                         let del_name = p.name.clone();
+                        // Two-click confirm: first click arms, second deletes;
+                        // mouseleave/blur disarm. Component-local so the signal is
+                        // disposed with this chip when the preset list re-renders.
+                        let armed = RwSignal::new(false);
                         view! {
                             <span class="chip chip-preset">
                                 <button
@@ -1223,9 +1227,19 @@ fn PresetRow() -> impl IntoView {
                                     {name}
                                 </button>
                                 <button
-                                    class="x"
-                                    aria-label=format!("Delete preset {label_name}")
+                                    class=move || if armed.get() { "x x-armed" } else { "x" }
+                                    aria-label=move || {
+                                        if armed.get() {
+                                            format!("Confirm delete preset {label_name}")
+                                        } else {
+                                            format!("Delete preset {label_name}")
+                                        }
+                                    }
                                     on:click=move |_| {
+                                        if !armed.get_untracked() {
+                                            armed.set(true);
+                                            return;
+                                        }
                                         let n = del_name.clone();
                                         spawn_local(async move {
                                             if let Ok(p) = api::delete_preset(n).await {
@@ -1233,8 +1247,10 @@ fn PresetRow() -> impl IntoView {
                                             }
                                         });
                                     }
+                                    on:mouseleave=move |_| armed.set(false)
+                                    on:blur=move |_| armed.set(false)
                                 >
-                                    "×"
+                                    {move || if armed.get() { "Delete?" } else { "×" }}
                                 </button>
                             </span>
                         }

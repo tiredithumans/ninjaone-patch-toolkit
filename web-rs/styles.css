@@ -316,6 +316,21 @@ select:disabled {
   padding: 2px 6px;
 }
 
+/* Two-click confirm: the first click "arms" a destructive control, the second
+   fires it (mouseleave/blur disarm). Reuses the danger palette as a warning. */
+.x-armed {
+  background: rgba(248, 113, 113, 0.18);
+  border-radius: 6px;
+  color: #fca5a5;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.btn-armed {
+  border-color: var(--danger);
+  color: #fca5a5;
+}
+
 .seg {
   background: var(--panel-2);
   border: 1px solid var(--border);

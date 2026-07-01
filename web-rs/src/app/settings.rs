@@ -5,6 +5,9 @@ use super::*;
 #[component]
 pub(crate) fn SettingsPanel() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // Two-click confirm for "Clear stored secret": the first click arms the
+    // button, the second fires; leaving or blurring it disarms.
+    let clear_armed = RwSignal::new(false);
 
     let save = move |_| {
         let args = SaveSettingsArgs {
@@ -179,8 +182,28 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                     "Save settings"
                 </button>
                 <Show when=move || state.has_secret.get()>
-                    <button class="btn btn-ghost" on:click=clear_secret>
-                        "Clear stored secret"
+                    <button
+                        class=move || {
+                            if clear_armed.get() { "btn btn-ghost btn-armed" } else { "btn btn-ghost" }
+                        }
+                        on:click=move |ev| {
+                            if clear_armed.get_untracked() {
+                                clear_armed.set(false);
+                                clear_secret(ev);
+                            } else {
+                                clear_armed.set(true);
+                            }
+                        }
+                        on:mouseleave=move |_| clear_armed.set(false)
+                        on:blur=move |_| clear_armed.set(false)
+                    >
+                        {move || {
+                            if clear_armed.get() {
+                                "Really clear? Click again"
+                            } else {
+                                "Clear stored secret"
+                            }
+                        }}
                     </button>
                 </Show>
                 <button

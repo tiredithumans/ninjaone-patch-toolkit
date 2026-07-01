@@ -11,6 +11,13 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Destructive actions ask for confirmation.** Deleting a saved preset and
+  **Clear stored secret** now take two clicks: the first click arms the control
+  (it turns red and says so), the second fires it. Moving the pointer away or
+  tabbing off disarms.
+
 ### Fixed
 
 - **Update notes formatting.** The **Update available** window now renders the
