@@ -18,10 +18,11 @@
 // The demo detects the absence of `window.__TAURI__` and runs in browser/demo mode
 // with bundled sample data, so no backend or sign-in is involved.
 
-import { createServer } from "node:http";
+import { createServer } from "node:https";
 import { readFile } from "node:fs/promises";
-import { join, extname, normalize } from "node:path";
+import { join, extname, resolve, sep } from "node:path";
 import { chromium } from "playwright";
+import selfsigned from "selfsigned";
 
 const DIST = process.env.SCREENSHOT_DIST || "web-rs/dist";
 const OUT = process.env.SCREENSHOT_OUT || "docs/images/screenshot.png";
@@ -29,6 +30,9 @@ const REMOTE = process.env.SCREENSHOT_URL || "";
 const WIDTH = Number(process.env.SCREENSHOT_W || 1360);
 const HEIGHT = Number(process.env.SCREENSHOT_H || 1040);
 const DSF = Number(process.env.SCREENSHOT_DSF || 1);
+
+// Absolute DIST root — every served file must resolve inside it (traversal guard).
+const DIST_ROOT = resolve(DIST);
 
 // Minimal MIME map — enough for a Trunk dist (the WASM streaming compile needs the
 // exact application/wasm type, which a naive static server omits).
@@ -44,23 +48,40 @@ const MIME = {
   ".ico": "image/x-icon",
 };
 
-// Serves `DIST` on an ephemeral port for the duration of `fn`, falling back to
-// index.html so the single-page app resolves. Skipped when SCREENSHOT_URL is set.
+// Serves `DIST` over loopback HTTPS on an ephemeral port for the duration of `fn`,
+// falling back to index.html so the single-page app resolves. TLS uses a throwaway
+// self-signed cert (regenerated per run) so the transport is never cleartext, even
+// on 127.0.0.1; Chromium is told to accept the self-signed cert below. Skipped when
+// SCREENSHOT_URL is set.
 async function withServer(fn) {
   if (REMOTE) return fn(REMOTE);
-  const server = createServer(async (req, res) => {
+  const { private: key, cert } = selfsigned.generate(
+    [{ name: "commonName", value: "localhost" }],
+    { days: 1, keySize: 2048, altNames: [{ type: 7, ip: "127.0.0.1" }] },
+  );
+  const server = createServer({ key, cert }, async (req, res) => {
     const sendIndex = async () => {
       const body = await readFile(join(DIST, "index.html"));
-      res.writeHead(200, { "Content-Type": MIME[".html"] });
+      res.writeHead(200, {
+        "Content-Type": MIME[".html"],
+        "X-Content-Type-Options": "nosniff",
+      });
       res.end(body);
     };
     try {
-      let path = decodeURIComponent(new URL(req.url, "http://x").pathname);
+      const path = decodeURIComponent(new URL(req.url, "https://localhost").pathname);
       if (path === "/") return await sendIndex();
-      // Strip any leading `../` so a request can't escape DIST.
-      const file = join(DIST, normalize(path).replace(/^(\.\.[/\\])+/, ""));
+      // Resolve the request under DIST and confirm the result stays inside it, so a
+      // crafted path (`..`, absolute, percent-encoded) can't escape the directory
+      // and serve an arbitrary file as HTML — only our own trusted build output is
+      // ever returned.
+      const file = resolve(DIST_ROOT, `.${path}`);
+      if (!file.startsWith(DIST_ROOT + sep)) return await sendIndex();
       const body = await readFile(file);
-      res.writeHead(200, { "Content-Type": MIME[extname(file)] || "application/octet-stream" });
+      res.writeHead(200, {
+        "Content-Type": MIME[extname(file)] || "application/octet-stream",
+        "X-Content-Type-Options": "nosniff",
+      });
       res.end(body);
     } catch {
       try {
@@ -71,10 +92,10 @@ async function withServer(fn) {
       }
     }
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise((ready) => server.listen(0, "127.0.0.1", ready));
   const { port } = server.address();
   try {
-    return await fn(`http://127.0.0.1:${port}`);
+    return await fn(`https://127.0.0.1:${port}`);
   } finally {
     server.close();
   }
@@ -96,6 +117,8 @@ await withServer(async (url) => {
     const page = await browser.newPage({
       viewport: { width: WIDTH, height: HEIGHT },
       deviceScaleFactor: DSF,
+      // Accept the throwaway self-signed cert from the local HTTPS server above.
+      ignoreHTTPSErrors: true,
     });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     // The demo starts empty ("Run a query to list patches") until Run query, just
