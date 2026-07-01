@@ -231,6 +231,106 @@ pub(crate) fn status_class(status: &str) -> &'static str {
     }
 }
 
+/// One inline run within a changelog line: plain text or a `**bold**` span.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum MdSpan {
+    Text(String),
+    Strong(String),
+}
+
+/// One rendered block of the update changelog (a `CHANGELOG.md` version section).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum MdBlock {
+    /// A `#`/`##`/`###` section heading (e.g. "Added", "Fixed").
+    Heading(String),
+    /// A bullet list; each item is its sequence of inline spans.
+    List(Vec<Vec<MdSpan>>),
+    /// A free-text paragraph (the GitHub fallback note, or any non-list text).
+    Paragraph(Vec<MdSpan>),
+}
+
+/// Splits one line into `**bold**` and plain-text runs. An unterminated `**` is
+/// left as literal text so we never drop content.
+pub(crate) fn parse_inline(text: &str) -> Vec<MdSpan> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("**") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("**") else {
+            break; // no closing marker — the rest is plain text
+        };
+        if open > 0 {
+            spans.push(MdSpan::Text(rest[..open].to_string()));
+        }
+        let bold = &after[..close];
+        if !bold.is_empty() {
+            spans.push(MdSpan::Strong(bold.to_string()));
+        }
+        rest = &after[close + 2..];
+    }
+    if !rest.is_empty() {
+        spans.push(MdSpan::Text(rest.to_string()));
+    }
+    spans
+}
+
+/// Parses the changelog subset the updater notes use — `#` headings, `-`/`*` bullet
+/// lists (wrapped continuation lines fold into the bullet), `**bold**`, and plain
+/// paragraphs — into renderable blocks. Anything unrecognized falls through as text,
+/// so the GitHub fallback note ("See the release notes …") renders as a paragraph.
+pub(crate) fn parse_changelog(src: &str) -> Vec<MdBlock> {
+    let mut blocks = Vec::new();
+    let mut items: Vec<String> = Vec::new(); // raw text of the bullets in the open list
+    let mut para: Vec<String> = Vec::new(); // raw lines of the open paragraph
+
+    for raw in src.lines() {
+        let line = raw.trim_end();
+        let trimmed = line.trim_start();
+
+        if trimmed.is_empty() {
+            flush_para(&mut blocks, &mut para);
+            flush_list(&mut blocks, &mut items);
+        } else if trimmed.starts_with('#') {
+            flush_para(&mut blocks, &mut para);
+            flush_list(&mut blocks, &mut items);
+            let heading = trimmed.trim_start_matches('#').trim();
+            if !heading.is_empty() {
+                blocks.push(MdBlock::Heading(heading.to_string()));
+            }
+        } else if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            flush_para(&mut blocks, &mut para); // a list and paragraph never overlap
+            items.push(item.trim().to_string());
+        } else if let Some(last) = items.last_mut() {
+            // A non-blank, non-marker line under a bullet is a wrapped continuation.
+            last.push(' ');
+            last.push_str(trimmed);
+        } else {
+            para.push(trimmed.to_string());
+        }
+    }
+    flush_para(&mut blocks, &mut para);
+    flush_list(&mut blocks, &mut items);
+    blocks
+}
+
+fn flush_list(blocks: &mut Vec<MdBlock>, items: &mut Vec<String>) {
+    if !items.is_empty() {
+        let spans = items.drain(..).map(|i| parse_inline(&i)).collect();
+        blocks.push(MdBlock::List(spans));
+    }
+}
+
+fn flush_para(blocks: &mut Vec<MdBlock>, para: &mut Vec<String>) {
+    if !para.is_empty() {
+        let text = para.join(" ");
+        para.clear();
+        blocks.push(MdBlock::Paragraph(parse_inline(&text)));
+    }
+}
+
 // Host-target unit tests for the JS-free pure helpers. The wasm build excludes this
 // module (`cfg(test)` is never set there); the date helpers call `js_sys::Date`,
 // which only runs in the browser, so they're deliberately not covered here.
@@ -340,6 +440,65 @@ mod tests {
             Some("before 2026-02-01".to_string())
         );
         assert_eq!(release_label("custom", "", ""), None);
+    }
+
+    #[test]
+    fn parse_inline_splits_bold_runs() {
+        assert_eq!(parse_inline("plain"), vec![MdSpan::Text("plain".into())]);
+        assert_eq!(
+            parse_inline("**Lead.** then text"),
+            vec![
+                MdSpan::Strong("Lead.".into()),
+                MdSpan::Text(" then text".into()),
+            ]
+        );
+        assert_eq!(
+            parse_inline("a **b** c **d**"),
+            vec![
+                MdSpan::Text("a ".into()),
+                MdSpan::Strong("b".into()),
+                MdSpan::Text(" c ".into()),
+                MdSpan::Strong("d".into()),
+            ]
+        );
+        // An unterminated marker stays literal so no content is dropped.
+        assert_eq!(
+            parse_inline("trailing **oops"),
+            vec![MdSpan::Text("trailing **oops".into())]
+        );
+    }
+
+    #[test]
+    fn parse_changelog_handles_headings_lists_and_wrapped_bullets() {
+        let src = "### Added\n\n- **Compliance by OS.** A per-OS\n  bar chart and table.\n- Second item.\n\n### Fixed\n\n- A fix.";
+        assert_eq!(
+            parse_changelog(src),
+            vec![
+                MdBlock::Heading("Added".into()),
+                MdBlock::List(vec![
+                    vec![
+                        MdSpan::Strong("Compliance by OS.".into()),
+                        // The wrapped continuation line folds into the bullet.
+                        MdSpan::Text(" A per-OS bar chart and table.".into()),
+                    ],
+                    vec![MdSpan::Text("Second item.".into())],
+                ]),
+                MdBlock::Heading("Fixed".into()),
+                MdBlock::List(vec![vec![MdSpan::Text("A fix.".into())]]),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_changelog_treats_plain_text_as_a_paragraph() {
+        // The GitHub fallback note has no markdown markers.
+        assert_eq!(
+            parse_changelog("See the release notes on GitHub for what's new in v1.2.3."),
+            vec![MdBlock::Paragraph(vec![MdSpan::Text(
+                "See the release notes on GitHub for what's new in v1.2.3.".into()
+            )])]
+        );
+        assert!(parse_changelog("   \n\n  ").is_empty());
     }
 
     #[test]
