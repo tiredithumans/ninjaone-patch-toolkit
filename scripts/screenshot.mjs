@@ -94,6 +94,9 @@ async function withServer(fn) {
         "Content-Type": MIME[extname(file)] || "application/octet-stream",
         "X-Content-Type-Options": "nosniff",
       });
+      // deepcode ignore Xss: `file` is a pre-enumerated allowlist value (collectAssets),
+      // never request-derived — the request path only ever indexes the Map (a miss serves
+      // index.html), so request input never reaches the response body. Dev-only loopback tool.
       res.end(body);
     } catch {
       try {
