@@ -3,7 +3,10 @@
 //! they live here rather than bloating `app.rs`. Most are JS-free and unit-test on
 //! the host target; the two `js_sys::Date` helpers are the exception (browser only).
 
+use std::cmp::Ordering;
+
 use super::{AppliedFilters, Tab};
+use crate::types::{PatchRow, RowSort, RowSortKey};
 
 pub(crate) fn non_empty(s: String) -> Option<String> {
     let t = s.trim();
@@ -231,6 +234,118 @@ pub(crate) fn status_class(status: &str) -> &'static str {
     }
 }
 
+/// Next state when a sortable column header is clicked: none → asc → desc → none
+/// on the same key; clicking a different key starts it ascending.
+pub(crate) fn next_sort(current: Option<RowSort>, key: RowSortKey) -> Option<RowSort> {
+    match current {
+        Some(s) if s.key == key && !s.desc => Some(RowSort { key, desc: true }),
+        Some(s) if s.key == key => None,
+        _ => Some(RowSort { key, desc: false }),
+    }
+}
+
+/// `aria-sort` value for a column header under the current sort.
+pub(crate) fn aria_sort(sort: Option<RowSort>, key: RowSortKey) -> &'static str {
+    match sort {
+        Some(s) if s.key == key => {
+            if s.desc {
+                "descending"
+            } else {
+                "ascending"
+            }
+        }
+        _ => "none",
+    }
+}
+
+/// Direction glyph suffix for a sorted column header ("" when not sorted by it).
+pub(crate) fn sort_glyph(sort: Option<RowSort>, key: RowSortKey) -> &'static str {
+    match sort {
+        Some(s) if s.key == key => {
+            if s.desc {
+                " ▼"
+            } else {
+                " ▲"
+            }
+        }
+        _ => "",
+    }
+}
+
+/// Client-side counterpart of the backend row sort, for demo mode only (the demo
+/// holds its full sample locally; there is no backend cache to re-page from).
+/// Deliberately mirrors `src-tauri/src/rows.rs::compare_rows` — duplicating small
+/// logic across the crates is the sanctioned pattern (no shared crate over wasm).
+pub(crate) fn sort_patch_rows(rows: &mut [PatchRow], sort: RowSort) {
+    rows.sort_by(|a, b| compare_rows(a, b, sort));
+}
+
+fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
+    use RowSortKey::*;
+    let dir = |o: Ordering| if sort.desc { o.reverse() } else { o };
+    match sort.key {
+        Organization => dir(cmp_ci(&a.organization, &b.organization)),
+        Location => cmp_opt_last(a.location.as_deref(), b.location.as_deref(), sort.desc),
+        Role => cmp_opt_last(
+            a.device_role.as_deref(),
+            b.device_role.as_deref(),
+            sort.desc,
+        ),
+        Device => dir(cmp_ci(&a.device_name, &b.device_name)),
+        Os => cmp_opt_last(a.os_name.as_deref(), b.os_name.as_deref(), sort.desc),
+        PatchType => dir(a.patch_type.cmp(&b.patch_type)),
+        Kb => cmp_opt_last(a.kb.as_deref(), b.kb.as_deref(), sort.desc),
+        Name => dir(cmp_ci(&a.name, &b.name)),
+        // Most urgent first on ascending, like the backend's presentation ordinal.
+        Severity => dir(sev_ordinal(&a.severity).cmp(&sev_ordinal(&b.severity))),
+        Status => dir(a.status.cmp(&b.status)),
+        // The mirror carries dates as ISO `yyyy-mm-dd` strings — lexicographic
+        // order is chronological.
+        ReleaseDate => cmp_opt_last(
+            a.release_date.as_deref(),
+            b.release_date.as_deref(),
+            sort.desc,
+        ),
+        InstalledDate => cmp_opt_last(
+            a.installed_date.as_deref(),
+            b.installed_date.as_deref(),
+            sort.desc,
+        ),
+    }
+}
+
+/// Severity ordinal (0 = most urgent), matching the backend's rank order.
+fn sev_ordinal(sev: &str) -> u8 {
+    match sev {
+        "Critical" => 0,
+        "Important" => 1,
+        "Moderate" => 2,
+        "Low" => 3,
+        "Optional" => 4,
+        _ => 5,
+    }
+}
+
+/// Case-insensitive (ASCII) ordering without a per-comparison allocation.
+fn cmp_ci(a: &str, b: &str) -> Ordering {
+    a.bytes()
+        .map(|c| c.to_ascii_lowercase())
+        .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+}
+
+/// Missing values sort last regardless of direction (blanks never lead).
+fn cmp_opt_last(a: Option<&str>, b: Option<&str>, desc: bool) -> Ordering {
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            let o = cmp_ci(x, y);
+            if desc { o.reverse() } else { o }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
 /// Presentation for an "Aged (past SLA)" table cell as (CSS class, label, title).
 /// An aged backlog gets a ⚠ prefix so it reads without relying on color.
 pub(crate) fn aged_badge(aged: usize) -> (&'static str, String, &'static str) {
@@ -373,6 +488,88 @@ mod tests {
     fn non_empty_collapses_blank_to_none() {
         assert_eq!(non_empty("   ".to_string()), None);
         assert_eq!(non_empty(" hi ".to_string()), Some("hi".to_string()));
+    }
+
+    #[test]
+    fn next_sort_cycles_none_asc_desc_none() {
+        let key = RowSortKey::Device;
+        let asc = next_sort(None, key);
+        assert_eq!(asc, Some(RowSort { key, desc: false }));
+        let desc = next_sort(asc, key);
+        assert_eq!(desc, Some(RowSort { key, desc: true }));
+        assert_eq!(next_sort(desc, key), None);
+        // A different key restarts ascending.
+        assert_eq!(
+            next_sort(desc, RowSortKey::Kb),
+            Some(RowSort {
+                key: RowSortKey::Kb,
+                desc: false
+            })
+        );
+    }
+
+    #[test]
+    fn aria_sort_and_glyph_follow_the_active_key() {
+        let key = RowSortKey::Severity;
+        assert_eq!(aria_sort(None, key), "none");
+        let asc = Some(RowSort { key, desc: false });
+        assert_eq!(aria_sort(asc, key), "ascending");
+        assert_eq!(aria_sort(asc, RowSortKey::Kb), "none");
+        assert_eq!(sort_glyph(asc, key), " ▲");
+        assert_eq!(sort_glyph(Some(RowSort { key, desc: true }), key), " ▼");
+        assert_eq!(sort_glyph(asc, RowSortKey::Kb), "");
+    }
+
+    fn sortable(device: &str, sev: &str, installed: Option<&str>) -> PatchRow {
+        PatchRow {
+            device_name: device.into(),
+            organization: "Org".into(),
+            location: None,
+            device_role: None,
+            os_name: None,
+            patch_type: "OS".into(),
+            kb: None,
+            name: "Patch".into(),
+            severity: sev.into(),
+            status: "PENDING".into(),
+            release_date: None,
+            installed_date: installed.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn sort_patch_rows_matches_backend_semantics() {
+        // Severity ascending surfaces the most urgent first.
+        let mut rows = vec![
+            sortable("low", "Low", None),
+            sortable("crit", "Critical", None),
+            sortable("mod", "Moderate", None),
+        ];
+        sort_patch_rows(
+            &mut rows,
+            RowSort {
+                key: RowSortKey::Severity,
+                desc: false,
+            },
+        );
+        let names: Vec<_> = rows.iter().map(|r| r.device_name.as_str()).collect();
+        assert_eq!(names, ["crit", "mod", "low"]);
+
+        // Missing dates sort last even on a descending sort.
+        let mut rows = vec![
+            sortable("a", "Low", Some("2026-01-05")),
+            sortable("b", "Low", None),
+            sortable("c", "Low", Some("2026-03-01")),
+        ];
+        sort_patch_rows(
+            &mut rows,
+            RowSort {
+                key: RowSortKey::InstalledDate,
+                desc: true,
+            },
+        );
+        let names: Vec<_> = rows.iter().map(|r| r.device_name.as_str()).collect();
+        assert_eq!(names, ["c", "a", "b"]);
     }
 
     #[test]

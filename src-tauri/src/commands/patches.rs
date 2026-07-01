@@ -12,9 +12,9 @@ use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus, PatchType, Role};
 use crate::rows::{
-    LookupMaps, PatchSource, QueryResult, QuerySummary, build_age_buckets, build_compliance,
-    build_compliance_by_os, build_device_summaries, build_failures, build_rows,
-    build_severity_by_org, pending_counts,
+    LookupMaps, PatchSource, QueryResult, QuerySummary, RowSort, build_age_buckets,
+    build_compliance, build_compliance_by_os, build_device_summaries, build_failures, build_rows,
+    build_severity_by_org, page_rows, pending_counts,
 };
 use crate::state::{AppState, CurrentPatches};
 
@@ -377,21 +377,25 @@ where
 }
 
 /// Serves one page of detail rows from the cached query result so the frontend can
-/// page through a large fleet without receiving every row over IPC. Returns an
+/// page through a large fleet without receiving every row over IPC. `sort` re-orders
+/// the view per request (the cached rows keep their canonical order). Returns an
 /// empty page when there is no cached result or the offset is past the end.
 #[tauri::command]
 pub async fn get_patch_rows(
     state: State<'_, AppState>,
     offset: usize,
     limit: usize,
+    sort: Option<RowSort>,
 ) -> Result<Vec<PatchRow>, UiError> {
     let slot = state
         .last_result
         .lock()
         .map_err(|_| UiError::new("result cache poisoned"))?;
+    // The sort runs under the lock but is an in-memory, bounded ref-sort of the
+    // cached rows — still within the "locks are brief, never across await" rule.
     let rows = slot
         .as_ref()
-        .map(|r| r.rows.iter().skip(offset).take(limit).cloned().collect())
+        .map(|r| page_rows(&r.rows, offset, limit, sort))
         .unwrap_or_default();
     Ok(rows)
 }

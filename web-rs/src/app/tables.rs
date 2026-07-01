@@ -2,6 +2,22 @@ use leptos::prelude::*;
 
 use super::*;
 
+/// Patches-table columns as (header label, sort key), in display order.
+const PATCH_COLUMNS: [(&str, RowSortKey); 12] = [
+    ("Organization", RowSortKey::Organization),
+    ("Location", RowSortKey::Location),
+    ("Role", RowSortKey::Role),
+    ("Device", RowSortKey::Device),
+    ("OS", RowSortKey::Os),
+    ("Type", RowSortKey::PatchType),
+    ("KB", RowSortKey::Kb),
+    ("Patch", RowSortKey::Name),
+    ("Severity", RowSortKey::Severity),
+    ("Status", RowSortKey::Status),
+    ("Release", RowSortKey::ReleaseDate),
+    ("Installed", RowSortKey::InstalledDate),
+];
+
 #[component]
 pub(crate) fn Results() -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -258,18 +274,31 @@ fn PatchesTable() -> impl IntoView {
                 <table>
                     <thead>
                         <tr>
-                            <th scope="col">"Organization"</th>
-                            <th scope="col">"Location"</th>
-                            <th scope="col">"Role"</th>
-                            <th scope="col">"Device"</th>
-                            <th scope="col">"OS"</th>
-                            <th scope="col">"Type"</th>
-                            <th scope="col">"KB"</th>
-                            <th scope="col">"Patch"</th>
-                            <th scope="col">"Severity"</th>
-                            <th scope="col">"Status"</th>
-                            <th scope="col">"Release"</th>
-                            <th scope="col">"Installed"</th>
+                            {PATCH_COLUMNS
+                                .iter()
+                                .map(|&(label, key)| {
+                                    view! {
+                                        <th
+                                            scope="col"
+                                            aria-sort=move || {
+                                                aria_sort(state.patches_sort.get(), key)
+                                            }
+                                        >
+                                            <button
+                                                class="th-sort"
+                                                on:click=move |_| state.cycle_sort(key)
+                                            >
+                                                {label}
+                                                <span aria-hidden="true">
+                                                    {move || {
+                                                        sort_glyph(state.patches_sort.get(), key)
+                                                    }}
+                                                </span>
+                                            </button>
+                                        </th>
+                                    }
+                                })
+                                .collect_view()}
                         </tr>
                     </thead>
                     <tbody>

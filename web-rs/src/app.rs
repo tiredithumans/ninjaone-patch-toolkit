@@ -16,9 +16,9 @@ use filters::Filters;
 use settings::SettingsPanel;
 use tables::Results;
 use util::{
-    MdBlock, MdSpan, SummaryCounts, aged_badge, date_to_epoch, epoch_to_date, filter_chips,
-    group_thousands, is_fleet_tab, non_empty, parse_changelog, parse_opt, sev_class, status_class,
-    summary_line, tab_class,
+    MdBlock, MdSpan, SummaryCounts, aged_badge, aria_sort, date_to_epoch, epoch_to_date,
+    filter_chips, group_thousands, is_fleet_tab, next_sort, non_empty, parse_changelog, parse_opt,
+    sev_class, sort_glyph, sort_patch_rows, status_class, summary_line, tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;
@@ -161,6 +161,9 @@ pub struct AppState {
     /// results area after the announcing toast auto-dismisses. Cleared by the next
     /// successful run/page fetch or an explicit dismiss.
     query_error: RwSignal<Option<String>>,
+    /// Active sort for the Patches detail table; pages re-fetch with it. `None` is
+    /// the backend's canonical order. Reset by each manual run.
+    patches_sort: RwSignal<Option<RowSort>>,
     /// Collapses the Filters panel body to give the results more room. Expanded
     /// (false) by default.
     filters_collapsed: RwSignal<bool>,
@@ -232,6 +235,7 @@ impl AppState {
             patches_page: RwSignal::new(0),
             page_rows: RwSignal::new(Vec::new()),
             query_error: RwSignal::new(None),
+            patches_sort: RwSignal::new(None),
             filters_collapsed: RwSignal::new(false),
             presets: RwSignal::new(Vec::new()),
             preset_name: RwSignal::new(String::new()),
@@ -508,12 +512,15 @@ impl AppState {
                     let page = if silent {
                         self.patches_page.get_untracked().min(page_count - 1)
                     } else {
+                        // A manual run returns to page 1 in the canonical order.
+                        self.patches_sort.set(None);
                         0
                     };
                     self.patches_page.set(page);
-                    // Page 0 ships inline with the summary, so seed it directly; any
-                    // other page (only reachable via a silent refresh) is fetched.
-                    if page == 0 {
+                    // Page 0 ships inline with the summary (canonical order), so seed
+                    // it directly; a later page — or a silent refresh with an active
+                    // sort — is fetched instead.
+                    if page == 0 && self.patches_sort.get_untracked().is_none() {
                         self.page_rows.set(r.rows.clone());
                     } else {
                         self.fetch_page(page);
@@ -541,8 +548,9 @@ impl AppState {
     /// `page_rows`. Paging fetches just the visible window rather than holding the
     /// whole row set in the frontend.
     fn fetch_page(self, page: usize) {
+        let sort = self.patches_sort.get_untracked();
         spawn_local(async move {
-            match api::get_patch_rows(page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE).await {
+            match api::get_patch_rows(page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE, sort).await {
                 Ok(rows) => {
                     self.page_rows.set(rows);
                     self.query_error.set(None);
@@ -553,6 +561,28 @@ impl AppState {
                 }
             }
         });
+    }
+
+    /// Cycles a Patches-table column through none → ascending → descending and
+    /// re-fetches page 1 in the new order. Demo mode sorts its in-memory rows
+    /// instead — the sample ships whole, so there is no backend to re-page from.
+    fn cycle_sort(self, key: RowSortKey) {
+        let next = next_sort(self.patches_sort.get_untracked(), key);
+        self.patches_sort.set(next);
+        self.patches_page.set(0);
+        if self.demo.get_untracked() {
+            match next {
+                Some(s) => self.page_rows.update(|rows| sort_patch_rows(rows, s)),
+                // Unsorted = the sample's canonical order, kept on `result`.
+                None => self
+                    .page_rows
+                    .set(self.result.with_untracked(|r| {
+                        r.as_ref().map(|r| r.rows.clone()).unwrap_or_default()
+                    })),
+            }
+            return;
+        }
+        self.fetch_page(0);
     }
 
     /// Enters demo mode (browser/Pages) without populating results: seeds the facet

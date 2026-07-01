@@ -13,6 +13,13 @@ version and start a fresh `[Unreleased]`.
 
 ### Added
 
+- **Sortable Patches table.** Every column header in the Patches tab is now a
+  sort button cycling ascending → descending → off. Sorting covers the full
+  result (it happens backend-side over the cached rows, not just the visible
+  page); blank cells always sort last, Severity leads with the most urgent, and
+  a new manual run returns to the default severity-first order. The web demo
+  sorts its sample the same way.
+
 - **Persistent error banner.** When a query (or a page fetch) fails, the results
   area now keeps a dismissible red banner describing the failure — previously the
   only trace was a toast that auto-dismissed after a few seconds. The banner

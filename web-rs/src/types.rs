@@ -238,6 +238,32 @@ pub struct UpdateInfo {
 
 // --- Command argument payloads (frontend → backend) --------------------------
 
+/// Sort request for the paged Patches table (`get_patch_rows`). Mirrors the
+/// backend `rows::{RowSort, RowSortKey}`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RowSort {
+    pub key: RowSortKey,
+    pub desc: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RowSortKey {
+    Organization,
+    Location,
+    Role,
+    Device,
+    Os,
+    PatchType,
+    Kb,
+    Name,
+    Severity,
+    Status,
+    ReleaseDate,
+    InstalledDate,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchQueryArgs {

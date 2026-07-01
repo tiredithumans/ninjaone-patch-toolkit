@@ -169,6 +169,9 @@ secrets are **not** stored there — see below).
   which slices the same cache; `export_patches_xlsx` **and** `export_report_html` read it too. So the
   cache is the single source of truth for export, the HTML report, **and** row paging: any of them with
   no prior successful query = empty. Don't add a second source of truth for the rows.
+  `get_patch_rows` also takes an optional `sort` (`rows::RowSort`) and re-orders **per request** via a
+  ref-sort in `rows::page_rows` — the cached rows themselves are never reordered; their canonical
+  severity/org/device order feeds the export and the summary's inline first page.
   - **Compact aggregates ride in the summary, not the rows.** Fleet-wide distributions the frontend
     charts/failure tab need — `failures` (FAILED-install rollup, `build_failures`), `severity_by_org`
     (`build_severity_by_org`), `age_buckets` (`build_age_buckets`) — are computed backend-side in
