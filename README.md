@@ -106,6 +106,10 @@ just test         # backend unit + wiremock integration tests
 just coverage     # backend test coverage (cargo-llvm-cov) → summary + lcov report
 ```
 
+**Platform support:** released macOS builds are **Apple Silicon (arm64) only** — there is no
+Intel (x86_64) binary. Windows (.msi/.nsis) and Linux (AppImage) are x86_64. Building from
+source works on any platform Tauri supports, including Intel Macs.
+
 ## Security
 
 - Access tokens are kept in memory; the refresh token and optional client secret live in
