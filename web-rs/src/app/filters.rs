@@ -32,10 +32,13 @@ pub(crate) fn Filters() -> impl IntoView {
                 "Device scope"
                 <span class="subhead-note">"applies to every tab"</span>
             </div>
-            <div class="grid">
+            // While the lookups load, the scope selects are disabled (their options
+            // aren't there yet) and the grid reports busy to assistive tech.
+            <div class="grid" aria-busy=move || state.loading_lookups().to_string()>
                 <label>
                     "Organization"
                     <select
+                        prop:disabled=move || state.loading_lookups()
                         prop:value=move || {
                             state.org_id.get().map(|id| id.to_string()).unwrap_or_default()
                         }
@@ -59,7 +62,9 @@ pub(crate) fn Filters() -> impl IntoView {
                 <label>
                     "Location"
                     <select
-                        prop:disabled=move || state.locations.get().is_empty()
+                        prop:disabled=move || {
+                            state.loading_lookups() || state.locations.get().is_empty()
+                        }
                         prop:value=move || {
                             state.loc_id.get().map(|id| id.to_string()).unwrap_or_default()
                         }
@@ -81,6 +86,7 @@ pub(crate) fn Filters() -> impl IntoView {
                 <label>
                     "Device Role"
                     <select
+                        prop:disabled=move || state.loading_lookups()
                         prop:value=move || {
                             state.role_id.get().map(|id| id.to_string()).unwrap_or_default()
                         }
