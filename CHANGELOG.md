@@ -11,6 +11,13 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **Persistent error banner.** When a query (or a page fetch) fails, the results
+  area now keeps a dismissible red banner describing the failure — previously the
+  only trace was a toast that auto-dismissed after a few seconds. The banner
+  clears on the next successful run.
+
 ### Changed
 
 - **Destructive actions ask for confirmation.** Deleting a saved preset and

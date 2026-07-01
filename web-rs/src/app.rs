@@ -157,6 +157,10 @@ pub struct AppState {
     /// The detail rows for the currently displayed page, fetched from the backend
     /// cache via `get_patch_rows` (the full row set is never shipped over IPC).
     page_rows: RwSignal<Vec<PatchRow>>,
+    /// The last failed query/paging error, kept as a persistent banner in the
+    /// results area after the announcing toast auto-dismisses. Cleared by the next
+    /// successful run/page fetch or an explicit dismiss.
+    query_error: RwSignal<Option<String>>,
     /// Collapses the Filters panel body to give the results more room. Expanded
     /// (false) by default.
     filters_collapsed: RwSignal<bool>,
@@ -227,6 +231,7 @@ impl AppState {
             applied_filters: RwSignal::new(None),
             patches_page: RwSignal::new(0),
             page_rows: RwSignal::new(Vec::new()),
+            query_error: RwSignal::new(None),
             filters_collapsed: RwSignal::new(false),
             presets: RwSignal::new(Vec::new()),
             preset_name: RwSignal::new(String::new()),
@@ -515,8 +520,14 @@ impl AppState {
                     }
                     self.result.set(Some(r));
                     self.applied_filters.set(Some(snapshot));
+                    self.query_error.set(None);
                 }
-                Err(e) => self.notify(Toast::err(e)),
+                // The toast announces the failure (aria-live); the banner keeps it
+                // visible after the toast auto-dismisses.
+                Err(e) => {
+                    self.query_error.set(Some(e.clone()));
+                    self.notify(Toast::err(e));
+                }
             }
             // Record the round-trip so the next run can show "Last run took Ns"
             // and drive the estimated progress bar.
@@ -532,8 +543,14 @@ impl AppState {
     fn fetch_page(self, page: usize) {
         spawn_local(async move {
             match api::get_patch_rows(page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE).await {
-                Ok(rows) => self.page_rows.set(rows),
-                Err(e) => self.notify(Toast::err(e)),
+                Ok(rows) => {
+                    self.page_rows.set(rows);
+                    self.query_error.set(None);
+                }
+                Err(e) => {
+                    self.query_error.set(Some(e.clone()));
+                    self.notify(Toast::err(e));
+                }
             }
         });
     }
@@ -569,6 +586,7 @@ impl AppState {
         self.page_rows.set(r.rows.clone());
         self.result.set(Some(r));
         self.applied_filters.set(Some(self.snapshot_filters()));
+        self.query_error.set(None);
     }
 
     /// Seconds since the running query started (re-evaluated on each timer tick).

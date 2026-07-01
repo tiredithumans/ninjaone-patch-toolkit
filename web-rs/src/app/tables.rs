@@ -60,6 +60,31 @@ pub(crate) fn Results() -> impl IntoView {
                 </div>
                 <span class="result-summary">{summary}</span>
             </div>
+            // Persistent record of the last failed query — the announcing toast
+            // auto-dismisses; this stays until the next success or a dismiss.
+            <Show when=move || state.query_error.with(|e| e.is_some())>
+                <div class="error-banner" role="alert">
+                    <span>
+                        {move || {
+                            let e = state.query_error.get().unwrap_or_default();
+                            if state.result.with(|r| r.is_some()) {
+                                format!(
+                                    "Last query failed — the results below are from the previous run: {e}",
+                                )
+                            } else {
+                                format!("Last query failed: {e}")
+                            }
+                        }}
+                    </span>
+                    <button
+                        class="x"
+                        aria-label="Dismiss error"
+                        on:click=move |_| state.query_error.set(None)
+                    >
+                        "×"
+                    </button>
+                </div>
+            </Show>
             <AppliedFilterChips/>
             {move || match tab.get() {
                 Tab::Patches => view! { <PatchesTable/> }.into_any(),
