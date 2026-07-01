@@ -19,8 +19,8 @@
 // with bundled sample data, so no backend or sign-in is involved.
 
 import { createServer } from "node:https";
-import { readFile } from "node:fs/promises";
-import { join, extname, resolve, sep } from "node:path";
+import { readFile, readdir } from "node:fs/promises";
+import { join, extname, relative, resolve, sep } from "node:path";
 import { chromium } from "playwright";
 import selfsigned from "selfsigned";
 
@@ -31,7 +31,7 @@ const WIDTH = Number(process.env.SCREENSHOT_W || 1360);
 const HEIGHT = Number(process.env.SCREENSHOT_H || 1040);
 const DSF = Number(process.env.SCREENSHOT_DSF || 1);
 
-// Absolute DIST root — every served file must resolve inside it (traversal guard).
+// Absolute DIST root — the build output is enumerated under it into an allowlist.
 const DIST_ROOT = resolve(DIST);
 
 // Minimal MIME map — enough for a Trunk dist (the WASM streaming compile needs the
@@ -48,13 +48,27 @@ const MIME = {
   ".ico": "image/x-icon",
 };
 
+// Enumerate the build output once into an allowlist mapping each URL path to its
+// on-disk file. The request path then only ever indexes this map — it's never joined
+// into a filesystem path and never reaches the response body — so a crafted path can
+// neither escape DIST nor reflect request input back into the served HTML.
+async function collectAssets(dir, root = dir, out = new Map()) {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const abs = join(dir, entry.name);
+    if (entry.isDirectory()) await collectAssets(abs, root, out);
+    else out.set("/" + relative(root, abs).split(sep).join("/"), abs);
+  }
+  return out;
+}
+
 // Serves `DIST` over loopback HTTPS on an ephemeral port for the duration of `fn`,
-// falling back to index.html so the single-page app resolves. TLS uses a throwaway
-// self-signed cert (regenerated per run) so the transport is never cleartext, even
-// on 127.0.0.1; Chromium is told to accept the self-signed cert below. Skipped when
-// SCREENSHOT_URL is set.
+// falling back to index.html (the allowlist above resolves every other path) so the
+// single-page app loads. TLS uses a throwaway self-signed cert (regenerated per run)
+// so the transport is never cleartext, even on 127.0.0.1; Chromium is told to accept
+// the self-signed cert below. Skipped when SCREENSHOT_URL is set.
 async function withServer(fn) {
   if (REMOTE) return fn(REMOTE);
+  const assets = await collectAssets(DIST_ROOT);
   const { private: key, cert } = selfsigned.generate(
     [{ name: "commonName", value: "localhost" }],
     { days: 1, keySize: 2048, altNames: [{ type: 7, ip: "127.0.0.1" }] },
@@ -70,13 +84,11 @@ async function withServer(fn) {
     };
     try {
       const path = decodeURIComponent(new URL(req.url, "https://localhost").pathname);
-      if (path === "/") return await sendIndex();
-      // Resolve the request under DIST and confirm the result stays inside it, so a
-      // crafted path (`..`, absolute, percent-encoded) can't escape the directory
-      // and serve an arbitrary file as HTML — only our own trusted build output is
-      // ever returned.
-      const file = resolve(DIST_ROOT, `.${path}`);
-      if (!file.startsWith(DIST_ROOT + sep)) return await sendIndex();
+      // The request path only ever indexes the allowlist; a miss (including "/")
+      // serves index.html. `file` is always a trusted, pre-enumerated path — never
+      // derived from the request — so request input never reaches the response body.
+      const file = assets.get(path);
+      if (!file) return await sendIndex();
       const body = await readFile(file);
       res.writeHead(200, {
         "Content-Type": MIME[extname(file)] || "application/octet-stream",
