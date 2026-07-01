@@ -4,7 +4,20 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::error::UiError;
 use crate::export::write_workbook;
+use crate::rows::QueryResult;
 use crate::state::AppState;
+
+/// Clones the cached query result out of `state`, or errors if no query has run.
+/// The lock is taken and released synchronously — never held across the blocking
+/// save dialogs below.
+fn cached_result(state: &AppState) -> Result<QueryResult, UiError> {
+    state
+        .last_result
+        .lock()
+        .map_err(|_| UiError::new("result cache poisoned"))?
+        .clone()
+        .ok_or_else(|| UiError::new("Run a query before exporting."))
+}
 
 /// Opens a save dialog and writes the most recent query result to an `.xlsx`
 /// workbook (Patches + Compliance + Needs Reboot sheets). Returns the saved path,
@@ -17,14 +30,9 @@ pub async fn export_patches_xlsx(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, UiError> {
-    let result = state
-        .last_result
-        .lock()
-        .map_err(|_| UiError::new("result cache poisoned"))?
-        .clone();
-    let Some(result) = result else {
-        return Err(UiError::new("Run a query before exporting."));
-    };
+    // Cheap precondition before the dialog; the full clone waits until the
+    // operator has committed to a path (a cancelled dialog costs nothing).
+    cached_result(&state)?;
 
     let default_name = format!(
         "ninjaone-patches-{}.xlsx",
@@ -46,20 +54,24 @@ pub async fn export_patches_xlsx(
         .map_err(|e| UiError::new(format!("invalid save path: {e}")))?;
     let path_str = path.to_string_lossy().to_string();
 
-    let reboot: Vec<_> = result
-        .devices
-        .iter()
-        .filter(|d| d.needs_reboot)
-        .cloned()
-        .collect();
+    // The clone is owned, so the reboot subset is a move-filter, not a re-clone.
+    let QueryResult {
+        rows,
+        devices,
+        compliance,
+        compliance_by_os,
+        failures,
+        ..
+    } = cached_result(&state)?;
+    let reboot: Vec<_> = devices.into_iter().filter(|d| d.needs_reboot).collect();
 
     write_workbook(
         &path_str,
-        &result.rows,
-        &result.compliance,
-        &result.compliance_by_os,
+        &rows,
+        &compliance,
+        &compliance_by_os,
         &reboot,
-        &result.failures,
+        &failures,
     )
     .map_err(UiError::from)?;
     Ok(Some(path_str))
@@ -78,14 +90,8 @@ pub async fn export_report_html(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, UiError> {
-    let result = state
-        .last_result
-        .lock()
-        .map_err(|_| UiError::new("result cache poisoned"))?
-        .clone();
-    let Some(result) = result else {
-        return Err(UiError::new("Run a query before exporting."));
-    };
+    // Same clone-after-dialog flow as the Excel export above.
+    cached_result(&state)?;
 
     let default_name = format!(
         "ninjaone-report-{}.html",
@@ -107,6 +113,7 @@ pub async fn export_report_html(
         .map_err(|e| UiError::new(format!("invalid save path: {e}")))?;
     let path_str = path.to_string_lossy().to_string();
 
+    let result = cached_result(&state)?;
     std::fs::write(&path, crate::report::render_report(&result))
         .map_err(|e| UiError::new(format!("write report: {e}")))?;
     Ok(Some(path_str))
