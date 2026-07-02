@@ -1,0 +1,15 @@
+# cargo-audit policy (read by `just audit`, which runs from the repo root).
+# Only list advisories with a written justification AND a revisit condition.
+
+[advisories]
+ignore = [
+    # quick-xml 0.39.4 (two DoS advisories, fixed in >=0.41.0) is pinned
+    # transitively by the LATEST releases of both consumers: calamine 0.35
+    # (dev-dependency only — tests parse our own generated .xlsx, never
+    # untrusted input) and plist 1.9 via tauri (parses local/trusted plists).
+    # No upgrade path exists until they release against quick-xml >=0.41.
+    # REVISIT: drop these when `cargo update -p quick-xml` reaches 0.41+
+    # (i.e. calamine/plist ship new releases).
+    "RUSTSEC-2026-0194", # quick-xml: quadratic run time on duplicate attribute names
+    "RUSTSEC-2026-0195", # quick-xml: NsReader unbounded namespace allocation (memory DoS)
+]
