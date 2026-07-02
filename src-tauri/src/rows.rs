@@ -4,11 +4,11 @@
 //!
 //! Adapted from `ninjaone-patch-dashboard`'s `snapshot.rs` device↔patch join.
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::filter::FilterParams;
 use crate::model::{Device, Location, Organization, Patch, PatchRow, Role, Severity};
@@ -686,6 +686,116 @@ impl QuerySummary {
     }
 }
 
+/// Sort key for the paged detail rows (`get_patch_rows`). Deserialized from the
+/// frontend's camelCase IPC args; mirrored in `web-rs/src/types.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RowSortKey {
+    Organization,
+    Location,
+    Role,
+    Device,
+    Os,
+    PatchType,
+    Kb,
+    Name,
+    Severity,
+    Status,
+    ReleaseDate,
+    InstalledDate,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RowSort {
+    pub key: RowSortKey,
+    pub desc: bool,
+}
+
+/// Serves one page of the cached detail rows, optionally re-ordered by `sort`.
+///
+/// `None` reproduces the cache order exactly (the canonical severity/org/device
+/// sort stamped in `run_query`). A sort orders references over the full set and
+/// clones only the requested page — the cached rows themselves are never
+/// reordered; their order is load-bearing for the export and the summary's
+/// inline first page.
+pub fn page_rows(
+    rows: &[PatchRow],
+    offset: usize,
+    limit: usize,
+    sort: Option<RowSort>,
+) -> Vec<PatchRow> {
+    let Some(sort) = sort else {
+        return rows.iter().skip(offset).take(limit).cloned().collect();
+    };
+    let mut refs: Vec<&PatchRow> = rows.iter().collect();
+    // Stable sort: rows that tie keep the canonical cache order.
+    refs.sort_by(|a, b| compare_rows(a, b, sort));
+    refs.into_iter().skip(offset).take(limit).cloned().collect()
+}
+
+fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
+    use RowSortKey::*;
+    let dir = |o: Ordering| if sort.desc { o.reverse() } else { o };
+    match sort.key {
+        Organization => dir(cmp_ci(&a.organization, &b.organization)),
+        Location => cmp_opt_last(
+            a.location.as_deref(),
+            b.location.as_deref(),
+            sort.desc,
+            |x, y| cmp_ci(x, y),
+        ),
+        Role => cmp_opt_last(
+            a.device_role.as_deref(),
+            b.device_role.as_deref(),
+            sort.desc,
+            |x, y| cmp_ci(x, y),
+        ),
+        Device => dir(cmp_ci(&a.device_name, &b.device_name)),
+        Os => cmp_opt_last(
+            a.os_name.as_deref(),
+            b.os_name.as_deref(),
+            sort.desc,
+            |x, y| cmp_ci(x, y),
+        ),
+        PatchType => dir(a.patch_type.cmp(&b.patch_type)),
+        Kb => cmp_opt_last(a.kb.as_deref(), b.kb.as_deref(), sort.desc, |x, y| {
+            cmp_ci(x, y)
+        }),
+        Name => dir(cmp_ci(&a.name, &b.name)),
+        // The severity ordinal is presentation order (Critical → Unknown), so an
+        // ascending sort surfaces the most urgent first, like the default view.
+        Severity => dir(b.severity_rank.cmp(&a.severity_rank)),
+        Status => dir(a.status.cmp(&b.status)),
+        ReleaseDate => cmp_opt_last(a.release_ts, b.release_ts, sort.desc, |x, y| x.cmp(y)),
+        InstalledDate => cmp_opt_last(a.installed_ts, b.installed_ts, sort.desc, |x, y| x.cmp(y)),
+    }
+}
+
+/// Case-insensitive (ASCII) ordering without a per-comparison allocation.
+fn cmp_ci(a: &str, b: &str) -> Ordering {
+    a.bytes()
+        .map(|c| c.to_ascii_lowercase())
+        .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+}
+
+/// Missing values sort last regardless of direction, so a descending sort by
+/// e.g. installed date leads with real dates rather than blanks.
+fn cmp_opt_last<T, F>(a: Option<T>, b: Option<T>, desc: bool, cmp: F) -> Ordering
+where
+    F: Fn(&T, &T) -> Ordering,
+{
+    match (&a, &b) {
+        (Some(x), Some(y)) => {
+            let o = cmp(x, y);
+            if desc { o.reverse() } else { o }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1293,6 +1403,89 @@ mod tests {
             ],
             "QuerySummary",
         );
+    }
+
+    fn sortable_row(device: &str, sev_rank: u8, installed_ts: Option<i64>) -> PatchRow {
+        PatchRow {
+            severity_rank: sev_rank,
+            ..failed_row(1, device, "KB1", installed_ts)
+        }
+    }
+
+    #[test]
+    fn page_rows_without_sort_matches_cache_order() {
+        let rows: Vec<PatchRow> = (0..5)
+            .map(|i| failed_row(i, &format!("srv{i}"), "KB1", None))
+            .collect();
+        let page = page_rows(&rows, 1, 2, None);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].device_name, "srv1");
+        assert_eq!(page[1].device_name, "srv2");
+        assert!(page_rows(&rows, 10, 2, None).is_empty(), "offset past end");
+    }
+
+    #[test]
+    fn page_rows_sorts_case_insensitively_then_slices() {
+        let rows = vec![
+            sortable_row("bravo", 5, None),
+            sortable_row("Alpha", 5, None),
+            sortable_row("charlie", 5, None),
+        ];
+        let sort = Some(RowSort {
+            key: RowSortKey::Device,
+            desc: false,
+        });
+        let names: Vec<_> = page_rows(&rows, 0, 10, sort)
+            .into_iter()
+            .map(|r| r.device_name)
+            .collect();
+        assert_eq!(names, ["Alpha", "bravo", "charlie"]);
+        // The offset/limit slice applies after the sort.
+        assert_eq!(page_rows(&rows, 1, 1, sort)[0].device_name, "bravo");
+    }
+
+    #[test]
+    fn page_rows_desc_reverses_but_missing_values_stay_last() {
+        let rows = vec![
+            sortable_row("a", 5, Some(100)),
+            sortable_row("b", 5, None),
+            sortable_row("c", 5, Some(200)),
+        ];
+        let key = RowSortKey::InstalledDate;
+        let names = |desc: bool| -> Vec<String> {
+            page_rows(&rows, 0, 10, Some(RowSort { key, desc }))
+                .into_iter()
+                .map(|r| r.device_name)
+                .collect()
+        };
+        assert_eq!(names(false), ["a", "c", "b"]);
+        assert_eq!(
+            names(true),
+            ["c", "a", "b"],
+            "None still sorts last on desc"
+        );
+    }
+
+    #[test]
+    fn page_rows_severity_ascending_is_most_urgent_first() {
+        let rows = vec![
+            sortable_row("low", 2, None),
+            sortable_row("crit", 5, None),
+            sortable_row("mod", 3, None),
+        ];
+        let names: Vec<_> = page_rows(
+            &rows,
+            0,
+            10,
+            Some(RowSort {
+                key: RowSortKey::Severity,
+                desc: false,
+            }),
+        )
+        .into_iter()
+        .map(|r| r.device_name)
+        .collect();
+        assert_eq!(names, ["crit", "mod", "low"]);
     }
 
     fn failed_row(device_id: i64, device: &str, kb: &str, installed_ts: Option<i64>) -> PatchRow {

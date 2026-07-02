@@ -2,15 +2,31 @@ use leptos::prelude::*;
 
 use super::*;
 
+/// Patches-table columns as (header label, sort key), in display order.
+const PATCH_COLUMNS: [(&str, RowSortKey); 12] = [
+    ("Organization", RowSortKey::Organization),
+    ("Location", RowSortKey::Location),
+    ("Role", RowSortKey::Role),
+    ("Device", RowSortKey::Device),
+    ("OS", RowSortKey::Os),
+    ("Type", RowSortKey::PatchType),
+    ("KB", RowSortKey::Kb),
+    ("Patch", RowSortKey::Name),
+    ("Severity", RowSortKey::Severity),
+    ("Status", RowSortKey::Status),
+    ("Release", RowSortKey::ReleaseDate),
+    ("Installed", RowSortKey::InstalledDate),
+];
+
 #[component]
 pub(crate) fn Results() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let tab = state.active_tab;
+    let tab = state.ui.active_tab;
 
     let summary = move || {
         // Read the active tab so the line re-renders (and re-describes) on switch.
         let tab = tab.get();
-        state.result.with(|r| {
+        state.query.result.with(|r| {
             r.as_ref().map(|r| {
                 let c = SummaryCounts {
                     rows_total: r.rows_total,
@@ -26,48 +42,84 @@ pub(crate) fn Results() -> impl IntoView {
 
     view! {
         <section class="panel results">
-            <div class="tabs">
+            <div class="tabs" role="tablist">
                 <div class="tab-group">
                     <span class="tab-group-label">"Filtered results"</span>
-                    <button
-                        class=move || tab_class(tab.get(), Tab::Patches)
-                        on:click=move |_| tab.set(Tab::Patches)
-                    >
-                        "Patches"
-                    </button>
-                    <button
-                        class=move || tab_class(tab.get(), Tab::Failures)
-                        on:click=move |_| tab.set(Tab::Failures)
-                    >
-                        "Failures"
-                    </button>
+                    <TabButton this=Tab::Patches label="Patches"/>
+                    <TabButton this=Tab::Failures label="Failures"/>
                 </div>
                 <span class="tab-divider" aria-hidden="true"></span>
                 <div class="tab-group">
                     <span class="tab-group-label">"Fleet health"</span>
-                    <button
-                        class=move || tab_class(tab.get(), Tab::Compliance)
-                        on:click=move |_| tab.set(Tab::Compliance)
-                    >
-                        "Compliance"
-                    </button>
-                    <button
-                        class=move || tab_class(tab.get(), Tab::Reboot)
-                        on:click=move |_| tab.set(Tab::Reboot)
-                    >
-                        "Needs Reboot"
-                    </button>
+                    <TabButton this=Tab::Compliance label="Compliance"/>
+                    <TabButton this=Tab::Reboot label="Needs Reboot"/>
                 </div>
                 <span class="result-summary">{summary}</span>
             </div>
+            // Persistent record of the last failed query — the announcing toast
+            // auto-dismisses; this stays until the next success or a dismiss.
+            <Show when=move || state.query.query_error.with(|e| e.is_some())>
+                <div class="error-banner" role="alert">
+                    <span>
+                        {move || {
+                            let e = state.query.query_error.get().unwrap_or_default();
+                            if state.query.result.with(|r| r.is_some()) {
+                                format!(
+                                    "Last query failed — the results below are from the previous run: {e}",
+                                )
+                            } else {
+                                format!("Last query failed: {e}")
+                            }
+                        }}
+                    </span>
+                    <button
+                        class="x"
+                        aria-label="Dismiss error"
+                        on:click=move |_| state.query.query_error.set(None)
+                    >
+                        "×"
+                    </button>
+                </div>
+            </Show>
             <AppliedFilterChips/>
-            {move || match tab.get() {
-                Tab::Patches => view! { <PatchesTable/> }.into_any(),
-                Tab::Compliance => view! { <ComplianceTab/> }.into_any(),
-                Tab::Reboot => view! { <RebootTable/> }.into_any(),
-                Tab::Failures => view! { <FailuresTable/> }.into_any(),
-            }}
+            <div role="tabpanel" aria-labelledby=move || tab_dom_id(tab.get())>
+                {move || match tab.get() {
+                    Tab::Patches => view! { <PatchesTable/> }.into_any(),
+                    Tab::Compliance => view! { <ComplianceTab/> }.into_any(),
+                    Tab::Reboot => view! { <RebootTable/> }.into_any(),
+                    Tab::Failures => view! { <FailuresTable/> }.into_any(),
+                }}
+            </div>
         </section>
+    }
+}
+
+/// Stable DOM ids linking each tab button to the tabpanel's `aria-labelledby`.
+fn tab_dom_id(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Patches => "tab-patches",
+        Tab::Compliance => "tab-compliance",
+        Tab::Reboot => "tab-reboot",
+        Tab::Failures => "tab-failures",
+    }
+}
+
+/// One results tab button with proper tab semantics. `aria-selected` is set as a
+/// string — Leptos drops boolean-ish ARIA attributes when they're false.
+#[component]
+fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let tab = state.ui.active_tab;
+    view! {
+        <button
+            id=tab_dom_id(this)
+            role="tab"
+            class=move || tab_class(tab.get(), this)
+            aria-selected=move || (tab.get() == this).to_string()
+            on:click=move |_| tab.set(this)
+        >
+            {label}
+        </button>
     }
 }
 
@@ -78,17 +130,16 @@ pub(crate) fn Results() -> impl IntoView {
 fn AppliedFilterChips() -> impl IntoView {
     let state = expect_context::<AppState>();
     view! {
-        <Show when=move || state.applied_filters.with(|a| a.is_some())>
+        <Show when=move || state.query.applied_filters.with(|a| a.is_some())>
             <div
                 class="applied-filters"
                 role="group"
                 aria-label="Filters applied to the current results"
             >
                 {move || {
-                    let chips = state
-                        .applied_filters
+                    let chips = state.query.applied_filters
                         .with(|a| a.as_ref().map(filter_chips).unwrap_or_default());
-                    let fleet = is_fleet_tab(state.active_tab.get());
+                    let fleet = is_fleet_tab(state.ui.active_tab.get());
                     if chips.is_empty() {
                         return view! {
                             <span class="applied-chip applied-chip-none">
@@ -146,14 +197,15 @@ fn PatchesTable() -> impl IntoView {
     // `page_rows`, fetched from the backend cache rather than held in full here.
     let total = move || {
         state
+            .query
             .result
             .with(|r| r.as_ref().map_or(0, |r| r.rows_total))
     };
     let page_count = move || total().div_ceil(PATCHES_PAGE_SIZE).max(1);
     // Clamp the stored page so a shorter result (e.g. after an auto-refresh) can't
     // leave us past the last page.
-    let page = move || state.patches_page.get().min(page_count() - 1);
-    let rows = move || state.page_rows.get();
+    let page = move || state.query.patches_page.get().min(page_count() - 1);
+    let rows = move || state.query.page_rows.get();
     let pager_summary = move || {
         let t = total();
         let start = page() * PATCHES_PAGE_SIZE;
@@ -169,7 +221,7 @@ fn PatchesTable() -> impl IntoView {
     };
     // Page navigation updates the index and fetches that page's rows on demand.
     let go_to = move |target: usize| {
-        state.patches_page.set(target);
+        state.query.patches_page.set(target);
         state.fetch_page(target);
     };
     let go_prev = move |_| go_to(page().saturating_sub(1));
@@ -180,7 +232,7 @@ fn PatchesTable() -> impl IntoView {
 
     view! {
         <Show
-            when=move || state.result.with(|r| r.is_some())
+            when=move || state.query.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
             <ScopeBanner
@@ -222,18 +274,31 @@ fn PatchesTable() -> impl IntoView {
                 <table>
                     <thead>
                         <tr>
-                            <th scope="col">"Organization"</th>
-                            <th scope="col">"Location"</th>
-                            <th scope="col">"Role"</th>
-                            <th scope="col">"Device"</th>
-                            <th scope="col">"OS"</th>
-                            <th scope="col">"Type"</th>
-                            <th scope="col">"KB"</th>
-                            <th scope="col">"Patch"</th>
-                            <th scope="col">"Severity"</th>
-                            <th scope="col">"Status"</th>
-                            <th scope="col">"Release"</th>
-                            <th scope="col">"Installed"</th>
+                            {PATCH_COLUMNS
+                                .iter()
+                                .map(|&(label, key)| {
+                                    view! {
+                                        <th
+                                            scope="col"
+                                            aria-sort=move || {
+                                                aria_sort(state.query.patches_sort.get(), key)
+                                            }
+                                        >
+                                            <button
+                                                class="th-sort"
+                                                on:click=move |_| state.cycle_sort(key)
+                                            >
+                                                {label}
+                                                <span aria-hidden="true">
+                                                    {move || {
+                                                        sort_glyph(state.query.patches_sort.get(), key)
+                                                    }}
+                                                </span>
+                                            </button>
+                                        </th>
+                                    }
+                                })
+                                .collect_view()}
                         </tr>
                     </thead>
                     <tbody>
@@ -277,7 +342,21 @@ fn PatchesTable() -> impl IntoView {
 #[component]
 fn ComplianceTab() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let has_result = move || state.result.with(|r| r.is_some());
+    let has_result = move || state.query.result.with(|r| r.is_some());
+    let org_rows: Signal<Vec<ComplianceRow>> = Signal::derive(move || {
+        state.query.result.with(|r| {
+            r.as_ref()
+                .map(|r| r.compliance.iter().map(ComplianceRow::from).collect())
+                .unwrap_or_default()
+        })
+    });
+    let os_rows: Signal<Vec<ComplianceRow>> = Signal::derive(move || {
+        state.query.result.with(|r| {
+            r.as_ref()
+                .map(|r| r.compliance_by_os.iter().map(ComplianceRow::from).collect())
+                .unwrap_or_default()
+        })
+    });
     view! {
         <Show
             when=has_result
@@ -290,115 +369,74 @@ fn ComplianceTab() -> impl IntoView {
                 filters="Device scope only (Org / Location / Role / OS Type / OS name). Status, Severity, Search, Released and Installed-within are ignored here."
             />
             <ComplianceCharts/>
-            <ComplianceTable/>
+            <ComplianceRollupTable first_col="Organization" rows=org_rows/>
             <section class="compliance-os">
                 <h3 class="chart-title">"Compliance by OS"</h3>
                 <div class="chart-card">
                     <ComplianceByOsBars/>
                 </div>
-                <ComplianceByOsTable/>
+                <ComplianceRollupTable first_col="OS" rows=os_rows/>
             </section>
         </Show>
     }
 }
 
-#[component]
-fn ComplianceTable() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    let buckets = move || {
-        state
-            .result
-            .with(|r| r.as_ref().map(|r| r.compliance.clone()).unwrap_or_default())
-    };
-    let has_buckets = move || {
-        state
-            .result
-            .with(|r| r.as_ref().is_some_and(|r| !r.compliance.is_empty()))
-    };
+/// One row of a compliance rollup table, independent of the grouping key. The two
+/// bucket types stay distinct hand-maintained IPC mirrors (`types.rs`); they
+/// converge here only for rendering.
+#[derive(Clone)]
+struct ComplianceRow {
+    label: String,
+    devices_total: usize,
+    devices_compliant: usize,
+    compliance_pct: f64,
+    pending_critical: usize,
+    aged_critical: usize,
+}
 
-    view! {
-        <Show
-            when=has_buckets
-            fallback=|| view! { <p class="empty">"No compliance data yet."</p> }
-        >
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th scope="col">"Organization"</th>
-                            <th scope="col">"Devices"</th>
-                            <th scope="col">"Compliant"</th>
-                            <th scope="col">"Compliance"</th>
-                            <th scope="col">"Pending Critical/Important Patches"</th>
-                            <th scope="col">"Aged (past SLA)"</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {move || {
-                            buckets()
-                                .into_iter()
-                                .map(|b| {
-                                    let pct = format!("{:.0}%", b.compliance_pct);
-                                    let aged = b.aged_critical;
-                                    let aged_class = if aged > 0 { "sev-critical" } else { "" };
-                                    // Prefix a warning glyph so the aged backlog is
-                                    // distinguishable without relying on color.
-                                    let aged_label = if aged > 0 {
-                                        format!("⚠ {aged}")
-                                    } else {
-                                        aged.to_string()
-                                    };
-                                    let aged_title = if aged > 0 { "Past SLA — needs attention" } else { "" };
-                                    view! {
-                                        <tr>
-                                            <td>{b.organization}</td>
-                                            <td>{b.devices_total}</td>
-                                            <td>{b.devices_compliant}</td>
-                                            <td>{pct}</td>
-                                            <td>{b.pending_critical}</td>
-                                            <td>
-                                                <span class=aged_class title=aged_title>
-                                                    {aged_label}
-                                                </span>
-                                            </td>
-                                        </tr>
-                                    }
-                                })
-                                .collect_view()
-                        }}
-                    </tbody>
-                </table>
-            </div>
-        </Show>
+impl From<&ComplianceBucket> for ComplianceRow {
+    fn from(b: &ComplianceBucket) -> Self {
+        Self {
+            label: b.organization.clone(),
+            devices_total: b.devices_total,
+            devices_compliant: b.devices_compliant,
+            compliance_pct: b.compliance_pct,
+            pending_critical: b.pending_critical,
+            aged_critical: b.aged_critical,
+        }
     }
 }
 
-#[component]
-fn ComplianceByOsTable() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    let buckets = move || {
-        state.result.with(|r| {
-            r.as_ref()
-                .map(|r| r.compliance_by_os.clone())
-                .unwrap_or_default()
-        })
-    };
-    let has_buckets = move || {
-        state
-            .result
-            .with(|r| r.as_ref().is_some_and(|r| !r.compliance_by_os.is_empty()))
-    };
+impl From<&OsCompliance> for ComplianceRow {
+    fn from(b: &OsCompliance) -> Self {
+        Self {
+            label: b.os.clone(),
+            devices_total: b.devices_total,
+            devices_compliant: b.devices_compliant,
+            compliance_pct: b.compliance_pct,
+            pending_critical: b.pending_critical,
+            aged_critical: b.aged_critical,
+        }
+    }
+}
 
+/// Shared table for the two compliance rollups (per-organization and per-OS):
+/// identical columns, differing only in the grouping column's header and values.
+#[component]
+fn ComplianceRollupTable(
+    first_col: &'static str,
+    #[prop(into)] rows: Signal<Vec<ComplianceRow>>,
+) -> impl IntoView {
     view! {
         <Show
-            when=has_buckets
+            when=move || rows.with(|r| !r.is_empty())
             fallback=|| view! { <p class="empty">"No compliance data yet."</p> }
         >
             <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
-                            <th scope="col">"OS"</th>
+                            <th scope="col">{first_col}</th>
                             <th scope="col">"Devices"</th>
                             <th scope="col">"Compliant"</th>
                             <th scope="col">"Compliance"</th>
@@ -408,21 +446,16 @@ fn ComplianceByOsTable() -> impl IntoView {
                     </thead>
                     <tbody>
                         {move || {
-                            buckets()
+                            rows.get()
                                 .into_iter()
                                 .map(|b| {
                                     let pct = format!("{:.0}%", b.compliance_pct);
-                                    let aged = b.aged_critical;
-                                    let aged_class = if aged > 0 { "sev-critical" } else { "" };
-                                    let aged_label = if aged > 0 {
-                                        format!("⚠ {aged}")
-                                    } else {
-                                        aged.to_string()
-                                    };
-                                    let aged_title = if aged > 0 { "Past SLA — needs attention" } else { "" };
+                                    let (aged_class, aged_label, aged_title) = aged_badge(
+                                        b.aged_critical,
+                                    );
                                     view! {
                                         <tr>
-                                            <td>{b.os}</td>
+                                            <td>{b.label}</td>
                                             <td>{b.devices_total}</td>
                                             <td>{b.devices_compliant}</td>
                                             <td>{pct}</td>
@@ -451,11 +484,13 @@ fn FailuresTable() -> impl IntoView {
     // summary, already sorted by affected-device count — render it as-is.
     let failures = move || {
         state
+            .query
             .result
             .with(|r| r.as_ref().map(|r| r.failures.clone()).unwrap_or_default())
     };
     let has_failures = move || {
         state
+            .query
             .result
             .with(|r| r.as_ref().is_some_and(|r| !r.failures.is_empty()))
     };
@@ -523,7 +558,7 @@ fn RebootTable() -> impl IntoView {
     // The backend already trimmed the device list to the needs-reboot subset, so
     // clone that directly; the emptiness check clones nothing.
     let devices = move || {
-        state.result.with(|r| {
+        state.query.result.with(|r| {
             r.as_ref()
                 .map(|r| r.reboot_devices.clone())
                 .unwrap_or_default()
@@ -531,6 +566,7 @@ fn RebootTable() -> impl IntoView {
     };
     let has_devices = move || {
         state
+            .query
             .result
             .with(|r| r.as_ref().is_some_and(|r| !r.reboot_devices.is_empty()))
     };

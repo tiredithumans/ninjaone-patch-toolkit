@@ -71,13 +71,18 @@ src-tauri/                       # Tauri 2 backend (native target)
 
 web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 crate
 ├── src/main.rs                  # entry, theme, root mount
-├── src/app.rs                   # AppState + context, App/Header/RunControls/Toaster/UpdateSplash
-├── src/app/                     # view components split out as descendant modules of `app`
+├── src/app.rs                   # module decls, shared consts, App root + startup wiring
+├── src/app/                     # state + view components as descendant modules of `app`
+│   ├── state.rs                 # AppState wrapper (single context) + 8 Copy sub-structs grouped by concern (session/lookups/filters/query/run/settings/updates/ui) + Tab/AppliedFilters/Toast/Progress
+│   ├── header.rs                # Header (sign-in/out, settings toggle)
+│   ├── controls.rs              # RunControls + PresetRow (run/refresh cadence, exports, presets)
 │   ├── filters.rs               # Filters panel
 │   ├── settings.rs              # SettingsPanel
 │   ├── charts.rs                # Compliance-tab inline-SVG charts (compliance / severity / age) + host-tested geometry
 │   ├── tables.rs                # Results tabs: Patches / Compliance (charts + table) / Needs Reboot / Failures
-│   └── util.rs                  # JS-free pure helpers (format/parse/CSS-class) + their host tests
+│   ├── toaster.rs               # Toaster (aria-live toast region)
+│   ├── update.rs                # UpdateSplash modal + changelog-notes rendering
+│   └── util.rs                  # JS-free pure helpers (format/parse/CSS-class/sort) + their host tests
 ├── src/api.rs                   # typed invoke(...) wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder (QueryResult) for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
@@ -169,6 +174,9 @@ secrets are **not** stored there — see below).
   which slices the same cache; `export_patches_xlsx` **and** `export_report_html` read it too. So the
   cache is the single source of truth for export, the HTML report, **and** row paging: any of them with
   no prior successful query = empty. Don't add a second source of truth for the rows.
+  `get_patch_rows` also takes an optional `sort` (`rows::RowSort`) and re-orders **per request** via a
+  ref-sort in `rows::page_rows` — the cached rows themselves are never reordered; their canonical
+  severity/org/device order feeds the export and the summary's inline first page.
   - **Compact aggregates ride in the summary, not the rows.** Fleet-wide distributions the frontend
     charts/failure tab need — `failures` (FAILED-install rollup, `build_failures`), `severity_by_org`
     (`build_severity_by_org`), `age_buckets` (`build_age_buckets`) — are computed backend-side in

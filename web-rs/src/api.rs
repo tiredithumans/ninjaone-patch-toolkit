@@ -131,15 +131,29 @@ pub async fn query_patches(
 
 /// Fetches one page of detail rows from the backend's cached query result. The
 /// full row set lives in the backend cache (not shipped over IPC), so the table
-/// pages a large fleet by requesting just the visible window.
-pub async fn get_patch_rows(offset: usize, limit: usize) -> Result<Vec<PatchRow>, String> {
+/// pages a large fleet by requesting just the visible window. `sort` re-orders
+/// the paged view backend-side; `None` is the canonical cache order.
+pub async fn get_patch_rows(
+    offset: usize,
+    limit: usize,
+    sort: Option<RowSort>,
+) -> Result<Vec<PatchRow>, String> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Wrap {
         offset: usize,
         limit: usize,
+        sort: Option<RowSort>,
     }
-    invoke("get_patch_rows", args_of(&Wrap { offset, limit })).await
+    invoke(
+        "get_patch_rows",
+        args_of(&Wrap {
+            offset,
+            limit,
+            sort,
+        }),
+    )
+    .await
 }
 
 /// Subscribes to backend `query:progress` events for the lifetime of the app,

@@ -44,6 +44,26 @@ jobs:
           fi
           echo "all manifests match v$tag — ok"
 
+      # The notes-extraction steps below fall back to a generic line when the
+      # tagged version has no CHANGELOG.md section — fine for workflow_dispatch,
+      # but on a tag it means [Unreleased] was never rolled. Fail fast rather
+      # than shipping a release (and in-app update splash) with placeholder
+      # notes. Uses the exact awk the notes steps use, so the guard's pass/fail
+      # matches the fallback condition it protects against.
+      - name: Check CHANGELOG has notes for this version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes=$(awk -v ver="$version" '
+            /^## \[/ { if (c) exit; if (index($0, "## [" ver "]") == 1) c=1; next }
+            c { print }
+          ' CHANGELOG.md | sed '/./,$!d')
+          if [ -z "$(printf %s "$notes" | tr -d '[:space:]')" ]; then
+            echo "::error::CHANGELOG.md has no non-empty '## [$version]' section — the release body and in-app update notes would fall back to generic text. Roll [Unreleased] to [$version] before tagging."
+            exit 1
+          fi
+          echo "CHANGELOG.md has notes for v$version — ok"
+
   # Create the draft release ONCE, up front, so the per-OS build jobs all upload
   # into the same release instead of each running tauri-action's find-or-create
   # logic. With the matrix creating the release, parallel jobs raced: one job
@@ -118,9 +138,13 @@ jobs:
         # macos-latest builds natively (Apple Silicon / arm64) — the approach that
         # worked for v0.1.0. The *universal-binary* bundling was the failing step
         # (not signing, not the code — the backend compiles on macOS in CI), so we
-        # build native here. Intel (macos-13, x86_64) can be added as another entry
-        # later. Note: these macOS bundles aren't Apple-notarized, so first launch
-        # may need right-click → Open (Gatekeeper) until a Developer ID is set up.
+        # build native here. arm64-only is deliberate (documented in README):
+        # Intel Macs are past Apple's last macOS, GitHub retired the macos-13
+        # image in Dec 2025, and the one remaining Intel label (macos-15-intel)
+        # sunsets in Aug 2027 — adding it here is a one-line matrix change if a
+        # user ever needs it. Note: these macOS bundles aren't Apple-notarized,
+        # so first launch may need right-click → Open (Gatekeeper) until a
+        # Developer ID is set up.
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

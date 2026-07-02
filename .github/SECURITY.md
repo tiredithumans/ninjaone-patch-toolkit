@@ -36,3 +36,13 @@ The security model is described in the
 in memory only; the refresh token and the optional client secret live in the OS
 keyring (Keychain / Credential Manager / Secret Service); nothing sensitive is
 written to `settings.json`; and the app requests read-only (`monitoring`) scope.
+
+## Release integrity
+
+Auto-updates are signed with minisign and verified before they install: the
+public key and the update endpoint are baked into every shipped binary
+(`src-tauri/tauri.conf.json`), and each install verifies the update manifest and
+artifact against its own baked key. The private key exists only as GitHub
+Actions secrets plus an offline backup. Key generation, storage, and the
+rotation procedure are documented in
+[docs/RELEASING.md](../docs/RELEASING.md).

@@ -491,15 +491,14 @@ async fn wait_for_callback(listener: TcpListener) -> Result<CallbackResult> {
     let mut code = None;
     let mut state = None;
     let mut error = None;
-    for pair in query.split('&') {
-        let Some(eq) = pair.find('=') else { continue };
-        let (k, v) = pair.split_at(eq);
-        let v = &v[1..];
-        let decoded = urlencoding::decode(v).unwrap_or_default().into_owned();
-        match k {
-            "code" => code = Some(decoded),
-            "state" => state = Some(decoded),
-            "error" => error = Some(decoded),
+    // Spec-conformant application/x-www-form-urlencoded parsing (RFC 6749 §4.1.2
+    // redirect encoding): keys are percent-decoded too, and `+` means space.
+    // Last-wins on duplicate keys.
+    for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state = Some(v.into_owned()),
+            "error" => error = Some(v.into_owned()),
             _ => {}
         }
     }
@@ -655,5 +654,26 @@ mod tests {
         assert!(r.code.is_none());
         assert!(r.error.is_none());
         assert_eq!(r.state, "xyz");
+    }
+
+    #[tokio::test]
+    async fn callback_decodes_percent_encoded_keys() {
+        // A percent-encoded key must still match — form_urlencoded decodes both sides.
+        let r = drive_callback("/?%63ode=abc&state=xyz").await;
+        assert_eq!(r.code.as_deref(), Some("abc"));
+    }
+
+    #[tokio::test]
+    async fn callback_decodes_plus_as_space() {
+        // x-www-form-urlencoded semantics: `+` is a space (providers send `%2B`
+        // for a literal plus, so real flows are unaffected).
+        let r = drive_callback("/?code=a+b&state=xyz").await;
+        assert_eq!(r.code.as_deref(), Some("a b"));
+    }
+
+    #[tokio::test]
+    async fn callback_duplicate_keys_last_wins() {
+        let r = drive_callback("/?code=first&code=second&state=xyz").await;
+        assert_eq!(r.code.as_deref(), Some("second"));
     }
 }
