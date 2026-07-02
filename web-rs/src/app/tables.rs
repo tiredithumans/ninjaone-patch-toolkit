@@ -21,12 +21,12 @@ const PATCH_COLUMNS: [(&str, RowSortKey); 12] = [
 #[component]
 pub(crate) fn Results() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let tab = state.active_tab;
+    let tab = state.ui.active_tab;
 
     let summary = move || {
         // Read the active tab so the line re-renders (and re-describes) on switch.
         let tab = tab.get();
-        state.result.with(|r| {
+        state.query.result.with(|r| {
             r.as_ref().map(|r| {
                 let c = SummaryCounts {
                     rows_total: r.rows_total,
@@ -58,12 +58,12 @@ pub(crate) fn Results() -> impl IntoView {
             </div>
             // Persistent record of the last failed query — the announcing toast
             // auto-dismisses; this stays until the next success or a dismiss.
-            <Show when=move || state.query_error.with(|e| e.is_some())>
+            <Show when=move || state.query.query_error.with(|e| e.is_some())>
                 <div class="error-banner" role="alert">
                     <span>
                         {move || {
-                            let e = state.query_error.get().unwrap_or_default();
-                            if state.result.with(|r| r.is_some()) {
+                            let e = state.query.query_error.get().unwrap_or_default();
+                            if state.query.result.with(|r| r.is_some()) {
                                 format!(
                                     "Last query failed — the results below are from the previous run: {e}",
                                 )
@@ -75,7 +75,7 @@ pub(crate) fn Results() -> impl IntoView {
                     <button
                         class="x"
                         aria-label="Dismiss error"
-                        on:click=move |_| state.query_error.set(None)
+                        on:click=move |_| state.query.query_error.set(None)
                     >
                         "×"
                     </button>
@@ -109,7 +109,7 @@ fn tab_dom_id(tab: Tab) -> &'static str {
 #[component]
 fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
     let state = expect_context::<AppState>();
-    let tab = state.active_tab;
+    let tab = state.ui.active_tab;
     view! {
         <button
             id=tab_dom_id(this)
@@ -130,17 +130,16 @@ fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
 fn AppliedFilterChips() -> impl IntoView {
     let state = expect_context::<AppState>();
     view! {
-        <Show when=move || state.applied_filters.with(|a| a.is_some())>
+        <Show when=move || state.query.applied_filters.with(|a| a.is_some())>
             <div
                 class="applied-filters"
                 role="group"
                 aria-label="Filters applied to the current results"
             >
                 {move || {
-                    let chips = state
-                        .applied_filters
+                    let chips = state.query.applied_filters
                         .with(|a| a.as_ref().map(filter_chips).unwrap_or_default());
-                    let fleet = is_fleet_tab(state.active_tab.get());
+                    let fleet = is_fleet_tab(state.ui.active_tab.get());
                     if chips.is_empty() {
                         return view! {
                             <span class="applied-chip applied-chip-none">
@@ -198,14 +197,15 @@ fn PatchesTable() -> impl IntoView {
     // `page_rows`, fetched from the backend cache rather than held in full here.
     let total = move || {
         state
+            .query
             .result
             .with(|r| r.as_ref().map_or(0, |r| r.rows_total))
     };
     let page_count = move || total().div_ceil(PATCHES_PAGE_SIZE).max(1);
     // Clamp the stored page so a shorter result (e.g. after an auto-refresh) can't
     // leave us past the last page.
-    let page = move || state.patches_page.get().min(page_count() - 1);
-    let rows = move || state.page_rows.get();
+    let page = move || state.query.patches_page.get().min(page_count() - 1);
+    let rows = move || state.query.page_rows.get();
     let pager_summary = move || {
         let t = total();
         let start = page() * PATCHES_PAGE_SIZE;
@@ -221,7 +221,7 @@ fn PatchesTable() -> impl IntoView {
     };
     // Page navigation updates the index and fetches that page's rows on demand.
     let go_to = move |target: usize| {
-        state.patches_page.set(target);
+        state.query.patches_page.set(target);
         state.fetch_page(target);
     };
     let go_prev = move |_| go_to(page().saturating_sub(1));
@@ -232,7 +232,7 @@ fn PatchesTable() -> impl IntoView {
 
     view! {
         <Show
-            when=move || state.result.with(|r| r.is_some())
+            when=move || state.query.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
             <ScopeBanner
@@ -281,7 +281,7 @@ fn PatchesTable() -> impl IntoView {
                                         <th
                                             scope="col"
                                             aria-sort=move || {
-                                                aria_sort(state.patches_sort.get(), key)
+                                                aria_sort(state.query.patches_sort.get(), key)
                                             }
                                         >
                                             <button
@@ -291,7 +291,7 @@ fn PatchesTable() -> impl IntoView {
                                                 {label}
                                                 <span aria-hidden="true">
                                                     {move || {
-                                                        sort_glyph(state.patches_sort.get(), key)
+                                                        sort_glyph(state.query.patches_sort.get(), key)
                                                     }}
                                                 </span>
                                             </button>
@@ -342,16 +342,16 @@ fn PatchesTable() -> impl IntoView {
 #[component]
 fn ComplianceTab() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let has_result = move || state.result.with(|r| r.is_some());
+    let has_result = move || state.query.result.with(|r| r.is_some());
     let org_rows: Signal<Vec<ComplianceRow>> = Signal::derive(move || {
-        state.result.with(|r| {
+        state.query.result.with(|r| {
             r.as_ref()
                 .map(|r| r.compliance.iter().map(ComplianceRow::from).collect())
                 .unwrap_or_default()
         })
     });
     let os_rows: Signal<Vec<ComplianceRow>> = Signal::derive(move || {
-        state.result.with(|r| {
+        state.query.result.with(|r| {
             r.as_ref()
                 .map(|r| r.compliance_by_os.iter().map(ComplianceRow::from).collect())
                 .unwrap_or_default()
@@ -484,11 +484,13 @@ fn FailuresTable() -> impl IntoView {
     // summary, already sorted by affected-device count — render it as-is.
     let failures = move || {
         state
+            .query
             .result
             .with(|r| r.as_ref().map(|r| r.failures.clone()).unwrap_or_default())
     };
     let has_failures = move || {
         state
+            .query
             .result
             .with(|r| r.as_ref().is_some_and(|r| !r.failures.is_empty()))
     };
@@ -556,7 +558,7 @@ fn RebootTable() -> impl IntoView {
     // The backend already trimmed the device list to the needs-reboot subset, so
     // clone that directly; the emptiness check clones nothing.
     let devices = move || {
-        state.result.with(|r| {
+        state.query.result.with(|r| {
             r.as_ref()
                 .map(|r| r.reboot_devices.clone())
                 .unwrap_or_default()
@@ -564,6 +566,7 @@ fn RebootTable() -> impl IntoView {
     };
     let has_devices = move || {
         state
+            .query
             .result
             .with(|r| r.as_ref().is_some_and(|r| !r.reboot_devices.is_empty()))
     };

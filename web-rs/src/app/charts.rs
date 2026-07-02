@@ -207,7 +207,7 @@ fn ComplianceBars() -> impl IntoView {
     let state = expect_context::<AppState>();
     view! {
         {move || {
-            let items = state.result.with(|r| {
+            let items = state.query.result.with(|r| {
                 r.as_ref()
                     .map(|r| {
                         r.compliance
@@ -229,7 +229,7 @@ pub(crate) fn ComplianceByOsBars() -> impl IntoView {
     let state = expect_context::<AppState>();
     view! {
         {move || {
-            let items = state.result.with(|r| {
+            let items = state.query.result.with(|r| {
                 r.as_ref()
                     .map(|r| {
                         r.compliance_by_os
@@ -248,7 +248,7 @@ pub(crate) fn ComplianceByOsBars() -> impl IntoView {
 fn SeverityBreakdown() -> impl IntoView {
     let state = expect_context::<AppState>();
     let total = move || {
-        state.result.with(|r| {
+        state.query.result.with(|r| {
             r.as_ref()
                 .map(|r| sum_severity(&r.severity_by_org))
                 .unwrap_or_default()
@@ -310,7 +310,7 @@ fn SeverityBreakdown() -> impl IntoView {
 fn AgeHistogram() -> impl IntoView {
     let state = expect_context::<AppState>();
     let buckets = move || {
-        state.result.with(|r| {
+        state.query.result.with(|r| {
             r.as_ref()
                 .map(|r| r.age_buckets.clone())
                 .unwrap_or_default()

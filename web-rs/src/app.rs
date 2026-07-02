@@ -112,24 +112,76 @@ impl Progress {
     }
 }
 
-/// All reactive state, shared via context. `RwSignal` is `Copy`, so this whole
-/// struct is `Copy` and cheap to hand to every component.
+/// Auth + frontend-context state: who we're signed in as and which environment
+/// (desktop, browser demo) the frontend is running in.
 #[derive(Clone, Copy)]
-pub struct AppState {
-    toast: RwSignal<Option<Toast>>,
+pub(crate) struct SessionState {
     auth: RwSignal<Option<AuthStatus>>,
-    show_settings: RwSignal<bool>,
-    busy: RwSignal<bool>,
     signing_in: RwSignal<bool>,
-    active_tab: RwSignal<Tab>,
+    /// Sample data is loaded (drives the "sample data" banner). Set by `enter_demo`.
+    demo: RwSignal<bool>,
+    /// Running in a plain browser with no Tauri backend — the GitHub Pages demo.
+    /// Disables the backend-only actions (sign-in, live query, export).
+    web_mode: RwSignal<bool>,
+}
 
+impl SessionState {
+    fn new() -> Self {
+        Self {
+            auth: RwSignal::new(None),
+            signing_in: RwSignal::new(false),
+            demo: RwSignal::new(false),
+            web_mode: RwSignal::new(false),
+        }
+    }
+
+    fn is_authed(self) -> bool {
+        self.auth.get().map(|a| a.authenticated).unwrap_or(false)
+    }
+
+    fn refresh_auth(self) {
+        spawn_local(async move {
+            if let Ok(a) = api::auth_status().await {
+                self.auth.set(Some(a));
+            }
+        });
+    }
+}
+
+/// The org/location/role/OS-type reference lists that fill the scope dropdowns.
+#[derive(Clone, Copy)]
+pub(crate) struct LookupState {
     orgs: RwSignal<Vec<Organization>>,
     locations: RwSignal<Vec<Location>>,
     roles: RwSignal<Vec<Role>>,
     node_classes: RwSignal<Vec<NodeClass>>,
     /// Count of in-flight org/role/class lookup requests; > 0 means "loading".
     lookups_pending: RwSignal<u32>,
+}
 
+impl LookupState {
+    fn new() -> Self {
+        Self {
+            orgs: RwSignal::new(Vec::new()),
+            locations: RwSignal::new(Vec::new()),
+            roles: RwSignal::new(Vec::new()),
+            node_classes: RwSignal::new(Vec::new()),
+            lookups_pending: RwSignal::new(0),
+        }
+    }
+
+    fn loading_lookups(self) -> bool {
+        self.lookups_pending.get() > 0
+    }
+
+    fn lookup_done(self) {
+        self.lookups_pending.update(|n| *n = n.saturating_sub(1));
+    }
+}
+
+/// The live filter controls (device scope + patch facets) as the user edits them.
+#[derive(Clone, Copy)]
+pub(crate) struct FilterState {
     org_id: RwSignal<Option<i64>>,
     loc_id: RwSignal<Option<i64>>,
     role_id: RwSignal<Option<i64>>,
@@ -141,81 +193,14 @@ pub struct AppState {
     release_window: RwSignal<String>,
     release_after_date: RwSignal<String>,
     release_before_date: RwSignal<String>,
-
     patch_type: RwSignal<String>,
     statuses: RwSignal<Vec<String>>,
     install_days: RwSignal<i64>,
-    refresh_secs: RwSignal<u32>,
-
-    result: RwSignal<Option<QueryResult>>,
-    /// Filters that produced `result`, snapshotted on the last successful run. Drives
-    /// the read-only applied-filter chip row (kept in sync with the displayed result,
-    /// not the live controls).
-    applied_filters: RwSignal<Option<AppliedFilters>>,
-    /// Zero-based page index for the paginated Patches table.
-    patches_page: RwSignal<usize>,
-    /// The detail rows for the currently displayed page, fetched from the backend
-    /// cache via `get_patch_rows` (the full row set is never shipped over IPC).
-    page_rows: RwSignal<Vec<PatchRow>>,
-    /// The last failed query/paging error, kept as a persistent banner in the
-    /// results area after the announcing toast auto-dismisses. Cleared by the next
-    /// successful run/page fetch or an explicit dismiss.
-    query_error: RwSignal<Option<String>>,
-    /// Active sort for the Patches detail table; pages re-fetch with it. `None` is
-    /// the backend's canonical order. Reset by each manual run.
-    patches_sort: RwSignal<Option<RowSort>>,
-    /// Collapses the Filters panel body to give the results more room. Expanded
-    /// (false) by default.
-    filters_collapsed: RwSignal<bool>,
-    presets: RwSignal<Vec<Preset>>,
-    preset_name: RwSignal<String>,
-
-    f_instance: RwSignal<String>,
-    f_client_id: RwSignal<String>,
-    f_client_secret: RwSignal<String>,
-    f_port: RwSignal<u16>,
-    f_install_days: RwSignal<i64>,
-    f_sla: RwSignal<i64>,
-    has_secret: RwSignal<bool>,
-    f_auto_update: RwSignal<bool>,
-
-    update: RwSignal<Option<UpdateInfo>>,
-    update_busy: RwSignal<bool>,
-
-    refreshing: RwSignal<bool>,
-    toast_gen: RwSignal<u64>,
-
-    /// Wall-clock timing for the running-query progress bar / elapsed display.
-    /// `elapsed_tick` is bumped by a timer to re-evaluate the elapsed label.
-    query_started_ms: RwSignal<f64>,
-    elapsed_tick: RwSignal<u32>,
-    last_duration_ms: RwSignal<Option<f64>>,
-    /// Live record counts from backend `query:progress` events, plus a sequence
-    /// number stamped on each run so stale events from a superseded run are dropped.
-    progress: RwSignal<Progress>,
-    query_seq: RwSignal<u64>,
-
-    /// Sample data is loaded (drives the "sample data" banner). Set by `load_demo`.
-    demo: RwSignal<bool>,
-    /// Running in a plain browser with no Tauri backend — the GitHub Pages demo.
-    /// Disables the backend-only actions (sign-in, live query, export).
-    web_mode: RwSignal<bool>,
 }
 
-impl AppState {
+impl FilterState {
     fn new() -> Self {
         Self {
-            toast: RwSignal::new(None),
-            auth: RwSignal::new(None),
-            show_settings: RwSignal::new(false),
-            busy: RwSignal::new(false),
-            signing_in: RwSignal::new(false),
-            active_tab: RwSignal::new(Tab::Patches),
-            orgs: RwSignal::new(Vec::new()),
-            locations: RwSignal::new(Vec::new()),
-            roles: RwSignal::new(Vec::new()),
-            node_classes: RwSignal::new(Vec::new()),
-            lookups_pending: RwSignal::new(0),
             org_id: RwSignal::new(None),
             loc_id: RwSignal::new(None),
             role_id: RwSignal::new(None),
@@ -229,118 +214,6 @@ impl AppState {
             patch_type: RwSignal::new("ALL".to_string()),
             statuses: RwSignal::new(vec!["PENDING".to_string()]),
             install_days: RwSignal::new(30),
-            refresh_secs: RwSignal::new(0),
-            result: RwSignal::new(None),
-            applied_filters: RwSignal::new(None),
-            patches_page: RwSignal::new(0),
-            page_rows: RwSignal::new(Vec::new()),
-            query_error: RwSignal::new(None),
-            patches_sort: RwSignal::new(None),
-            filters_collapsed: RwSignal::new(false),
-            presets: RwSignal::new(Vec::new()),
-            preset_name: RwSignal::new(String::new()),
-            f_instance: RwSignal::new("https://us2.ninjarmm.com".to_string()),
-            f_client_id: RwSignal::new(String::new()),
-            f_client_secret: RwSignal::new(String::new()),
-            f_port: RwSignal::new(11434),
-            f_install_days: RwSignal::new(30),
-            f_sla: RwSignal::new(30),
-            has_secret: RwSignal::new(false),
-            f_auto_update: RwSignal::new(true),
-            update: RwSignal::new(None),
-            update_busy: RwSignal::new(false),
-            refreshing: RwSignal::new(false),
-            toast_gen: RwSignal::new(0),
-            query_started_ms: RwSignal::new(0.0),
-            elapsed_tick: RwSignal::new(0),
-            last_duration_ms: RwSignal::new(None),
-            progress: RwSignal::new(Progress::default()),
-            query_seq: RwSignal::new(0),
-            demo: RwSignal::new(false),
-            web_mode: RwSignal::new(false),
-        }
-    }
-
-    fn is_authed(self) -> bool {
-        self.auth.get().map(|a| a.authenticated).unwrap_or(false)
-    }
-
-    fn notify(self, t: Toast) {
-        // Auto-dismiss after a few seconds (errors linger a little longer); a
-        // newer toast supersedes this one via the generation guard.
-        let ms = if t.error { 7000 } else { 4000 };
-        let generation = self.toast_gen.get_untracked().wrapping_add(1);
-        self.toast_gen.set(generation);
-        self.toast.set(Some(t));
-        gloo_timers::callback::Timeout::new(ms, move || {
-            if self.toast_gen.get_untracked() == generation {
-                self.toast.set(None);
-            }
-        })
-        .forget();
-    }
-
-    fn refresh_auth(self) {
-        spawn_local(async move {
-            if let Ok(a) = api::auth_status().await {
-                self.auth.set(Some(a));
-            }
-        });
-    }
-
-    fn loading_lookups(self) -> bool {
-        self.lookups_pending.get() > 0
-    }
-
-    fn load_lookups(self) {
-        self.lookups_pending.set(2);
-        spawn_local(async move {
-            match api::list_orgs().await {
-                Ok(o) => self.orgs.set(o),
-                Err(e) => self.notify(Toast::err(format!("Couldn't load organizations: {e}"))),
-            }
-            self.lookup_done();
-        });
-        spawn_local(async move {
-            match api::list_roles().await {
-                Ok(r) => self.roles.set(r),
-                Err(e) => self.notify(Toast::err(format!("Couldn't load roles: {e}"))),
-            }
-            self.lookup_done();
-        });
-    }
-
-    /// Loads the static OS-type list. It needs no auth or API call, so it runs at
-    /// startup rather than waiting for sign-in like the org/role/location lookups.
-    fn load_node_classes(self) {
-        spawn_local(async move {
-            match api::list_node_classes().await {
-                Ok(n) => self.node_classes.set(n),
-                Err(e) => self.notify(Toast::err(format!("Couldn't load OS types: {e}"))),
-            }
-        });
-    }
-
-    fn lookup_done(self) {
-        self.lookups_pending.update(|n| *n = n.saturating_sub(1));
-    }
-
-    fn select_org(self, org: Option<i64>) {
-        self.org_id.set(org);
-        self.loc_id.set(None);
-        self.locations.set(Vec::new());
-        if let Some(id) = org {
-            // Demo mode resolves locations from the sample, not the backend.
-            if self.demo.get_untracked() {
-                self.locations.set(demo::sample_locations(id));
-                return;
-            }
-            spawn_local(async move {
-                match api::list_locations(id).await {
-                    Ok(locs) => self.locations.set(locs),
-                    Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
-                }
-            });
         }
     }
 
@@ -379,244 +252,74 @@ impl AppState {
             release_before,
         }
     }
+}
 
-    /// Snapshots the active filters for the applied-filter chips, resolving org/loc/role
-    /// ids to display names and severity raw values to labels. All reads are untracked
-    /// (this runs imperatively at Run time, not inside a reactive scope).
-    fn snapshot_filters(self) -> AppliedFilters {
-        let statuses = self.statuses.get_untracked();
-        let install_days = statuses
-            .iter()
-            .any(|s| s == "INSTALLED")
-            .then(|| self.install_days.get_untracked());
+/// The displayed query result and the Patches-table view over it (paging, sort,
+/// the persistent error record).
+#[derive(Clone, Copy)]
+pub(crate) struct QueryState {
+    result: RwSignal<Option<QueryResult>>,
+    /// Filters that produced `result`, snapshotted on the last successful run. Drives
+    /// the read-only applied-filter chip row (kept in sync with the displayed result,
+    /// not the live controls).
+    applied_filters: RwSignal<Option<AppliedFilters>>,
+    /// Zero-based page index for the paginated Patches table.
+    patches_page: RwSignal<usize>,
+    /// The detail rows for the currently displayed page, fetched from the backend
+    /// cache via `get_patch_rows` (the full row set is never shipped over IPC).
+    page_rows: RwSignal<Vec<PatchRow>>,
+    /// The last failed query/paging error, kept as a persistent banner in the
+    /// results area after the announcing toast auto-dismisses. Cleared by the next
+    /// successful run/page fetch or an explicit dismiss.
+    query_error: RwSignal<Option<String>>,
+    /// Active sort for the Patches detail table; pages re-fetch with it. `None` is
+    /// the backend's canonical order. Reset by each manual run.
+    patches_sort: RwSignal<Option<RowSort>>,
+}
 
-        let organization = self.org_id.get_untracked().and_then(|id| {
-            self.orgs
-                .get_untracked()
-                .into_iter()
-                .find(|o| o.id == id)
-                .map(|o| o.name)
-        });
-        let location = self.loc_id.get_untracked().and_then(|id| {
-            self.locations
-                .get_untracked()
-                .into_iter()
-                .find(|l| l.id == id)
-                .map(|l| l.name)
-        });
-        let role = self.role_id.get_untracked().and_then(|id| {
-            self.roles
-                .get_untracked()
-                .into_iter()
-                .find(|r| r.id == id)
-                .map(|r| r.name)
-        });
-        let selected = self.selected_classes.get_untracked();
-        let os_types = self
-            .node_classes
-            .get_untracked()
-            .into_iter()
-            .filter(|nc| selected.contains(&nc.value))
-            .map(|nc| nc.label)
-            .collect();
-        let sev_raw = self.selected_severities.get_untracked();
-        let severities = SEVERITY_OPTIONS
-            .iter()
-            .filter(|(v, _)| sev_raw.iter().any(|s| s == v))
-            .map(|(_, label)| label.to_string())
-            .collect();
-
-        AppliedFilters {
-            organization,
-            location,
-            role,
-            os_types,
-            os_name: non_empty(self.os_name.get_untracked()),
-            patch_type: self.patch_type.get_untracked(),
-            statuses,
-            severities,
-            search: non_empty(self.search.get_untracked()),
-            release_window: self.release_window.get_untracked(),
-            release_after: self.release_after_date.get_untracked(),
-            release_before: self.release_before_date.get_untracked(),
-            install_days,
+impl QueryState {
+    fn new() -> Self {
+        Self {
+            result: RwSignal::new(None),
+            applied_filters: RwSignal::new(None),
+            patches_page: RwSignal::new(0),
+            page_rows: RwSignal::new(Vec::new()),
+            query_error: RwSignal::new(None),
+            patches_sort: RwSignal::new(None),
         }
     }
+}
 
-    /// Manual **Run query** / filter change: re-scopes the cached whole-fleet data
-    /// client-side (no refetch unless the cache is cold or past its staleness bound).
-    fn run_query(self) {
-        self.run_query_inner(false, false);
-    }
+/// The in-flight-query machinery: busy flags, progress events, timing, and the
+/// auto-refresh cadence.
+#[derive(Clone, Copy)]
+pub(crate) struct RunState {
+    busy: RwSignal<bool>,
+    refreshing: RwSignal<bool>,
+    /// Wall-clock timing for the running-query progress bar / elapsed display.
+    /// `elapsed_tick` is bumped by a timer to re-evaluate the elapsed label.
+    query_started_ms: RwSignal<f64>,
+    elapsed_tick: RwSignal<u32>,
+    last_duration_ms: RwSignal<Option<f64>>,
+    /// Live record counts from backend `query:progress` events, plus a sequence
+    /// number stamped on each run so stale events from a superseded run are dropped.
+    progress: RwSignal<Progress>,
+    query_seq: RwSignal<u64>,
+    refresh_secs: RwSignal<u32>,
+}
 
-    /// Auto-refresh variant: flags a subtle `refreshing` state instead of the main
-    /// `busy` one (so the Run-query button doesn't flicker each tick) and stays
-    /// quiet about precondition failures. Forces a refetch of the live patch data —
-    /// the point of the cadence is fresh patch state during a patching operation.
-    fn run_query_auto(self) {
-        self.run_query_inner(true, true);
-    }
-
-    /// Manual ↻ **Refresh**: user-initiated refetch of the live patch data for the
-    /// current filter (shows the main busy/progress, unlike the silent auto tick).
-    fn refresh_now(self) {
-        self.run_query_inner(false, true);
-    }
-
-    fn run_query_inner(self, silent: bool, force: bool) {
-        if self.busy.get_untracked() || self.refreshing.get_untracked() {
-            return;
+impl RunState {
+    fn new() -> Self {
+        Self {
+            busy: RwSignal::new(false),
+            refreshing: RwSignal::new(false),
+            query_started_ms: RwSignal::new(0.0),
+            elapsed_tick: RwSignal::new(0),
+            last_duration_ms: RwSignal::new(None),
+            progress: RwSignal::new(Progress::default()),
+            query_seq: RwSignal::new(0),
+            refresh_secs: RwSignal::new(0),
         }
-        // In demo mode there is no backend to query — filter the sample locally.
-        if self.demo.get_untracked() {
-            self.run_demo_query(silent);
-            return;
-        }
-        if !self.is_authed() {
-            if !silent {
-                self.notify(Toast::err("Sign in first"));
-            }
-            return;
-        }
-        let statuses = self.statuses.get_untracked();
-        if statuses.is_empty() {
-            if !silent {
-                self.notify(Toast::err("Select at least one status"));
-            }
-            return;
-        }
-        let args = PatchQueryArgs {
-            filter: self.current_filter(),
-            patch_type: self.patch_type.get_untracked(),
-            statuses,
-            install_after_days: Some(self.install_days.get_untracked()),
-        };
-        // Snapshot the filters driving this run; applied only if the query succeeds, so
-        // a failed run leaves the chips matching the still-displayed prior result.
-        let snapshot = self.snapshot_filters();
-        // Stamp this run so progress events from a superseded run are ignored, and
-        // clear the previous run's counts.
-        let seq = self.query_seq.get_untracked().wrapping_add(1);
-        self.query_seq.set(seq);
-        self.progress.set(Progress::default());
-        let flag = if silent { self.refreshing } else { self.busy };
-        let started = js_sys::Date::now();
-        self.query_started_ms.set(started);
-        flag.set(true);
-        spawn_local(async move {
-            match api::query_patches(args, seq, force).await {
-                Ok(r) => {
-                    // Jump back to page 1 on a manual run; an auto-refresh keeps the
-                    // current page, clamped in case the new result is shorter.
-                    let page_count = r.rows_total.div_ceil(PATCHES_PAGE_SIZE).max(1);
-                    let page = if silent {
-                        self.patches_page.get_untracked().min(page_count - 1)
-                    } else {
-                        // A manual run returns to page 1 in the canonical order.
-                        self.patches_sort.set(None);
-                        0
-                    };
-                    self.patches_page.set(page);
-                    // Page 0 ships inline with the summary (canonical order), so seed
-                    // it directly; a later page — or a silent refresh with an active
-                    // sort — is fetched instead.
-                    if page == 0 && self.patches_sort.get_untracked().is_none() {
-                        self.page_rows.set(r.rows.clone());
-                    } else {
-                        self.fetch_page(page);
-                    }
-                    self.result.set(Some(r));
-                    self.applied_filters.set(Some(snapshot));
-                    self.query_error.set(None);
-                }
-                // The toast announces the failure (aria-live); the banner keeps it
-                // visible after the toast auto-dismisses.
-                Err(e) => {
-                    self.query_error.set(Some(e.clone()));
-                    self.notify(Toast::err(e));
-                }
-            }
-            // Record the round-trip so the next run can show "Last run took Ns"
-            // and drive the estimated progress bar.
-            self.last_duration_ms
-                .set(Some(js_sys::Date::now() - started));
-            flag.set(false);
-        });
-    }
-
-    /// Loads the detail rows for `page` from the backend's cached result into
-    /// `page_rows`. Paging fetches just the visible window rather than holding the
-    /// whole row set in the frontend.
-    fn fetch_page(self, page: usize) {
-        let sort = self.patches_sort.get_untracked();
-        spawn_local(async move {
-            match api::get_patch_rows(page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE, sort).await {
-                Ok(rows) => {
-                    self.page_rows.set(rows);
-                    self.query_error.set(None);
-                }
-                Err(e) => {
-                    self.query_error.set(Some(e.clone()));
-                    self.notify(Toast::err(e));
-                }
-            }
-        });
-    }
-
-    /// Cycles a Patches-table column through none → ascending → descending and
-    /// re-fetches page 1 in the new order. Demo mode sorts its in-memory rows
-    /// instead — the sample ships whole, so there is no backend to re-page from.
-    fn cycle_sort(self, key: RowSortKey) {
-        let next = next_sort(self.patches_sort.get_untracked(), key);
-        self.patches_sort.set(next);
-        self.patches_page.set(0);
-        if self.demo.get_untracked() {
-            match next {
-                Some(s) => self.page_rows.update(|rows| sort_patch_rows(rows, s)),
-                // Unsorted = the sample's canonical order, kept on `result`.
-                None => self
-                    .page_rows
-                    .set(self.result.with_untracked(|r| {
-                        r.as_ref().map(|r| r.rows.clone()).unwrap_or_default()
-                    })),
-            }
-            return;
-        }
-        self.fetch_page(0);
-    }
-
-    /// Enters demo mode (browser/Pages) without populating results: seeds the facet
-    /// dropdowns from the sample and flags `demo` so **Run query** filters the sample
-    /// locally. The results stay empty ("Run a query to list patches") until the user
-    /// runs a query — exactly like the real app, which lists nothing until queried.
-    fn enter_demo(self) {
-        self.orgs.set(demo::sample_orgs());
-        self.roles.set(demo::sample_roles());
-        self.node_classes.set(demo::sample_node_classes());
-        self.demo.set(true);
-    }
-
-    /// Demo-mode counterpart to `run_query`: filters the in-memory sample with the
-    /// current facets (no backend, no auth) and recomputes the row count.
-    fn run_demo_query(self, silent: bool) {
-        let statuses = self.statuses.get_untracked();
-        if statuses.is_empty() {
-            if !silent {
-                self.notify(Toast::err("Select at least one status"));
-            }
-            return;
-        }
-        let r = demo::filtered_result(
-            &self.current_filter(),
-            &self.patch_type.get_untracked(),
-            &statuses,
-            Some(self.install_days.get_untracked()),
-        );
-        self.patches_page.set(0);
-        self.page_rows.set(r.rows.clone());
-        self.result.set(Some(r));
-        self.applied_filters.set(Some(self.snapshot_filters()));
-        self.query_error.set(None);
     }
 
     /// Seconds since the running query started (re-evaluated on each timer tick).
@@ -642,17 +345,449 @@ impl AppState {
         let elapsed = js_sys::Date::now() - self.query_started_ms.get_untracked();
         Some((elapsed / last).clamp(0.0, 0.95))
     }
+}
+
+/// The Settings form fields (`f_*`), plus the persisted presets.
+#[derive(Clone, Copy)]
+pub(crate) struct SettingsState {
+    f_instance: RwSignal<String>,
+    f_client_id: RwSignal<String>,
+    f_client_secret: RwSignal<String>,
+    f_port: RwSignal<u16>,
+    f_install_days: RwSignal<i64>,
+    f_sla: RwSignal<i64>,
+    has_secret: RwSignal<bool>,
+    f_auto_update: RwSignal<bool>,
+    presets: RwSignal<Vec<Preset>>,
+    preset_name: RwSignal<String>,
+}
+
+impl SettingsState {
+    fn new() -> Self {
+        Self {
+            f_instance: RwSignal::new("https://us2.ninjarmm.com".to_string()),
+            f_client_id: RwSignal::new(String::new()),
+            f_client_secret: RwSignal::new(String::new()),
+            f_port: RwSignal::new(11434),
+            f_install_days: RwSignal::new(30),
+            f_sla: RwSignal::new(30),
+            has_secret: RwSignal::new(false),
+            f_auto_update: RwSignal::new(true),
+            presets: RwSignal::new(Vec::new()),
+            preset_name: RwSignal::new(String::new()),
+        }
+    }
+}
+
+/// Auto-update state: the available-update info (drives `UpdateSplash`) and the
+/// install-in-flight flag.
+#[derive(Clone, Copy)]
+pub(crate) struct UpdateState {
+    update: RwSignal<Option<UpdateInfo>>,
+    update_busy: RwSignal<bool>,
+}
+
+impl UpdateState {
+    fn new() -> Self {
+        Self {
+            update: RwSignal::new(None),
+            update_busy: RwSignal::new(false),
+        }
+    }
+}
+
+/// App-chrome state: the toast, panel visibility, and the active results tab.
+#[derive(Clone, Copy)]
+pub(crate) struct UiState {
+    toast: RwSignal<Option<Toast>>,
+    toast_gen: RwSignal<u64>,
+    show_settings: RwSignal<bool>,
+    /// Collapses the Filters panel body to give the results more room. Expanded
+    /// (false) by default.
+    filters_collapsed: RwSignal<bool>,
+    active_tab: RwSignal<Tab>,
+}
+
+impl UiState {
+    fn new() -> Self {
+        Self {
+            toast: RwSignal::new(None),
+            toast_gen: RwSignal::new(0),
+            show_settings: RwSignal::new(false),
+            filters_collapsed: RwSignal::new(false),
+            active_tab: RwSignal::new(Tab::Patches),
+        }
+    }
+
+    fn notify(self, t: Toast) {
+        // Auto-dismiss after a few seconds (errors linger a little longer); a
+        // newer toast supersedes this one via the generation guard.
+        let ms = if t.error { 7000 } else { 4000 };
+        let generation = self.toast_gen.get_untracked().wrapping_add(1);
+        self.toast_gen.set(generation);
+        self.toast.set(Some(t));
+        gloo_timers::callback::Timeout::new(ms, move || {
+            if self.toast_gen.get_untracked() == generation {
+                self.toast.set(None);
+            }
+        })
+        .forget();
+    }
+}
+
+/// All reactive state, shared via context as one `Copy` value (`RwSignal` handles
+/// are `Copy`, so the wrapper and every group above are too). Fields are grouped
+/// by concern; methods that orchestrate across groups stay on this wrapper.
+#[derive(Clone, Copy)]
+pub struct AppState {
+    session: SessionState,
+    lookups: LookupState,
+    filters: FilterState,
+    query: QueryState,
+    run: RunState,
+    settings: SettingsState,
+    updates: UpdateState,
+    ui: UiState,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            session: SessionState::new(),
+            lookups: LookupState::new(),
+            filters: FilterState::new(),
+            query: QueryState::new(),
+            run: RunState::new(),
+            settings: SettingsState::new(),
+            updates: UpdateState::new(),
+            ui: UiState::new(),
+        }
+    }
+
+    // Thin delegators for the hottest cross-module calls, so their many existing
+    // call sites read the same after the sub-struct split.
+    fn is_authed(self) -> bool {
+        self.session.is_authed()
+    }
+
+    fn notify(self, t: Toast) {
+        self.ui.notify(t)
+    }
+
+    fn current_filter(self) -> FilterParams {
+        self.filters.current_filter()
+    }
+
+    fn load_lookups(self) {
+        self.lookups.lookups_pending.set(2);
+        spawn_local(async move {
+            match api::list_orgs().await {
+                Ok(o) => self.lookups.orgs.set(o),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load organizations: {e}"))),
+            }
+            self.lookups.lookup_done();
+        });
+        spawn_local(async move {
+            match api::list_roles().await {
+                Ok(r) => self.lookups.roles.set(r),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load roles: {e}"))),
+            }
+            self.lookups.lookup_done();
+        });
+    }
+
+    /// Loads the static OS-type list. It needs no auth or API call, so it runs at
+    /// startup rather than waiting for sign-in like the org/role/location lookups.
+    fn load_node_classes(self) {
+        spawn_local(async move {
+            match api::list_node_classes().await {
+                Ok(n) => self.lookups.node_classes.set(n),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load OS types: {e}"))),
+            }
+        });
+    }
+
+    fn select_org(self, org: Option<i64>) {
+        self.filters.org_id.set(org);
+        self.filters.loc_id.set(None);
+        self.lookups.locations.set(Vec::new());
+        if let Some(id) = org {
+            // Demo mode resolves locations from the sample, not the backend.
+            if self.session.demo.get_untracked() {
+                self.lookups.locations.set(demo::sample_locations(id));
+                return;
+            }
+            spawn_local(async move {
+                match api::list_locations(id).await {
+                    Ok(locs) => self.lookups.locations.set(locs),
+                    Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
+                }
+            });
+        }
+    }
+
+    /// Snapshots the active filters for the applied-filter chips, resolving org/loc/role
+    /// ids to display names and severity raw values to labels. All reads are untracked
+    /// (this runs imperatively at Run time, not inside a reactive scope).
+    fn snapshot_filters(self) -> AppliedFilters {
+        let statuses = self.filters.statuses.get_untracked();
+        let install_days = statuses
+            .iter()
+            .any(|s| s == "INSTALLED")
+            .then(|| self.filters.install_days.get_untracked());
+
+        let organization = self.filters.org_id.get_untracked().and_then(|id| {
+            self.lookups
+                .orgs
+                .get_untracked()
+                .into_iter()
+                .find(|o| o.id == id)
+                .map(|o| o.name)
+        });
+        let location = self.filters.loc_id.get_untracked().and_then(|id| {
+            self.lookups
+                .locations
+                .get_untracked()
+                .into_iter()
+                .find(|l| l.id == id)
+                .map(|l| l.name)
+        });
+        let role = self.filters.role_id.get_untracked().and_then(|id| {
+            self.lookups
+                .roles
+                .get_untracked()
+                .into_iter()
+                .find(|r| r.id == id)
+                .map(|r| r.name)
+        });
+        let selected = self.filters.selected_classes.get_untracked();
+        let os_types = self
+            .lookups
+            .node_classes
+            .get_untracked()
+            .into_iter()
+            .filter(|nc| selected.contains(&nc.value))
+            .map(|nc| nc.label)
+            .collect();
+        let sev_raw = self.filters.selected_severities.get_untracked();
+        let severities = SEVERITY_OPTIONS
+            .iter()
+            .filter(|(v, _)| sev_raw.iter().any(|s| s == v))
+            .map(|(_, label)| label.to_string())
+            .collect();
+
+        AppliedFilters {
+            organization,
+            location,
+            role,
+            os_types,
+            os_name: non_empty(self.filters.os_name.get_untracked()),
+            patch_type: self.filters.patch_type.get_untracked(),
+            statuses,
+            severities,
+            search: non_empty(self.filters.search.get_untracked()),
+            release_window: self.filters.release_window.get_untracked(),
+            release_after: self.filters.release_after_date.get_untracked(),
+            release_before: self.filters.release_before_date.get_untracked(),
+            install_days,
+        }
+    }
+
+    /// Manual **Run query** / filter change: re-scopes the cached whole-fleet data
+    /// client-side (no refetch unless the cache is cold or past its staleness bound).
+    fn run_query(self) {
+        self.run_query_inner(false, false);
+    }
+
+    /// Auto-refresh variant: flags a subtle `refreshing` state instead of the main
+    /// `busy` one (so the Run-query button doesn't flicker each tick) and stays
+    /// quiet about precondition failures. Forces a refetch of the live patch data —
+    /// the point of the cadence is fresh patch state during a patching operation.
+    fn run_query_auto(self) {
+        self.run_query_inner(true, true);
+    }
+
+    /// Manual ↻ **Refresh**: user-initiated refetch of the live patch data for the
+    /// current filter (shows the main busy/progress, unlike the silent auto tick).
+    fn refresh_now(self) {
+        self.run_query_inner(false, true);
+    }
+
+    fn run_query_inner(self, silent: bool, force: bool) {
+        if self.run.busy.get_untracked() || self.run.refreshing.get_untracked() {
+            return;
+        }
+        // In demo mode there is no backend to query — filter the sample locally.
+        if self.session.demo.get_untracked() {
+            self.run_demo_query(silent);
+            return;
+        }
+        if !self.is_authed() {
+            if !silent {
+                self.notify(Toast::err("Sign in first"));
+            }
+            return;
+        }
+        let statuses = self.filters.statuses.get_untracked();
+        if statuses.is_empty() {
+            if !silent {
+                self.notify(Toast::err("Select at least one status"));
+            }
+            return;
+        }
+        let args = PatchQueryArgs {
+            filter: self.current_filter(),
+            patch_type: self.filters.patch_type.get_untracked(),
+            statuses,
+            install_after_days: Some(self.filters.install_days.get_untracked()),
+        };
+        // Snapshot the filters driving this run; applied only if the query succeeds, so
+        // a failed run leaves the chips matching the still-displayed prior result.
+        let snapshot = self.snapshot_filters();
+        // Stamp this run so progress events from a superseded run are ignored, and
+        // clear the previous run's counts.
+        let seq = self.run.query_seq.get_untracked().wrapping_add(1);
+        self.run.query_seq.set(seq);
+        self.run.progress.set(Progress::default());
+        let flag = if silent {
+            self.run.refreshing
+        } else {
+            self.run.busy
+        };
+        let started = js_sys::Date::now();
+        self.run.query_started_ms.set(started);
+        flag.set(true);
+        spawn_local(async move {
+            match api::query_patches(args, seq, force).await {
+                Ok(r) => {
+                    // Jump back to page 1 on a manual run; an auto-refresh keeps the
+                    // current page, clamped in case the new result is shorter.
+                    let page_count = r.rows_total.div_ceil(PATCHES_PAGE_SIZE).max(1);
+                    let page = if silent {
+                        self.query.patches_page.get_untracked().min(page_count - 1)
+                    } else {
+                        // A manual run returns to page 1 in the canonical order.
+                        self.query.patches_sort.set(None);
+                        0
+                    };
+                    self.query.patches_page.set(page);
+                    // Page 0 ships inline with the summary (canonical order), so seed
+                    // it directly; a later page — or a silent refresh with an active
+                    // sort — is fetched instead.
+                    if page == 0 && self.query.patches_sort.get_untracked().is_none() {
+                        self.query.page_rows.set(r.rows.clone());
+                    } else {
+                        self.fetch_page(page);
+                    }
+                    self.query.result.set(Some(r));
+                    self.query.applied_filters.set(Some(snapshot));
+                    self.query.query_error.set(None);
+                }
+                // The toast announces the failure (aria-live); the banner keeps it
+                // visible after the toast auto-dismisses.
+                Err(e) => {
+                    self.query.query_error.set(Some(e.clone()));
+                    self.notify(Toast::err(e));
+                }
+            }
+            // Record the round-trip so the next run can show "Last run took Ns"
+            // and drive the estimated progress bar.
+            self.run
+                .last_duration_ms
+                .set(Some(js_sys::Date::now() - started));
+            flag.set(false);
+        });
+    }
+
+    /// Loads the detail rows for `page` from the backend's cached result into
+    /// `page_rows`. Paging fetches just the visible window rather than holding the
+    /// whole row set in the frontend.
+    fn fetch_page(self, page: usize) {
+        let sort = self.query.patches_sort.get_untracked();
+        spawn_local(async move {
+            match api::get_patch_rows(page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE, sort).await {
+                Ok(rows) => {
+                    self.query.page_rows.set(rows);
+                    self.query.query_error.set(None);
+                }
+                Err(e) => {
+                    self.query.query_error.set(Some(e.clone()));
+                    self.notify(Toast::err(e));
+                }
+            }
+        });
+    }
+
+    /// Cycles a Patches-table column through none → ascending → descending and
+    /// re-fetches page 1 in the new order. Demo mode sorts its in-memory rows
+    /// instead — the sample ships whole, so there is no backend to re-page from.
+    fn cycle_sort(self, key: RowSortKey) {
+        let next = next_sort(self.query.patches_sort.get_untracked(), key);
+        self.query.patches_sort.set(next);
+        self.query.patches_page.set(0);
+        if self.session.demo.get_untracked() {
+            match next {
+                Some(s) => self.query.page_rows.update(|rows| sort_patch_rows(rows, s)),
+                // Unsorted = the sample's canonical order, kept on `result`.
+                None => self.query.page_rows.set(
+                    self.query
+                        .result
+                        .with_untracked(|r| r.as_ref().map(|r| r.rows.clone()).unwrap_or_default()),
+                ),
+            }
+            return;
+        }
+        self.fetch_page(0);
+    }
+
+    /// Enters demo mode (browser/Pages) without populating results: seeds the facet
+    /// dropdowns from the sample and flags `demo` so **Run query** filters the sample
+    /// locally. The results stay empty ("Run a query to list patches") until the user
+    /// runs a query — exactly like the real app, which lists nothing until queried.
+    fn enter_demo(self) {
+        self.lookups.orgs.set(demo::sample_orgs());
+        self.lookups.roles.set(demo::sample_roles());
+        self.lookups.node_classes.set(demo::sample_node_classes());
+        self.session.demo.set(true);
+    }
+
+    /// Demo-mode counterpart to `run_query`: filters the in-memory sample with the
+    /// current facets (no backend, no auth) and recomputes the row count.
+    fn run_demo_query(self, silent: bool) {
+        let statuses = self.filters.statuses.get_untracked();
+        if statuses.is_empty() {
+            if !silent {
+                self.notify(Toast::err("Select at least one status"));
+            }
+            return;
+        }
+        let r = demo::filtered_result(
+            &self.current_filter(),
+            &self.filters.patch_type.get_untracked(),
+            &statuses,
+            Some(self.filters.install_days.get_untracked()),
+        );
+        self.query.patches_page.set(0);
+        self.query.page_rows.set(r.rows.clone());
+        self.query.result.set(Some(r));
+        self.query
+            .applied_filters
+            .set(Some(self.snapshot_filters()));
+        self.query.query_error.set(None);
+    }
 
     fn apply_settings_view(self, v: SettingsView) {
-        self.f_instance.set(v.instance_base_url);
-        self.f_client_id.set(v.client_id.unwrap_or_default());
-        self.f_port.set(v.callback_port);
-        self.f_install_days.set(v.install_window_days);
-        self.f_sla.set(v.sla_days);
-        self.has_secret.set(v.has_client_secret);
-        self.f_auto_update.set(v.auto_check_updates);
-        self.install_days.set(v.install_window_days);
-        self.presets.set(v.presets);
+        self.settings.f_instance.set(v.instance_base_url);
+        self.settings
+            .f_client_id
+            .set(v.client_id.unwrap_or_default());
+        self.settings.f_port.set(v.callback_port);
+        self.settings.f_install_days.set(v.install_window_days);
+        self.settings.f_sla.set(v.sla_days);
+        self.settings.has_secret.set(v.has_client_secret);
+        self.settings.f_auto_update.set(v.auto_check_updates);
+        self.filters.install_days.set(v.install_window_days);
+        self.settings.presets.set(v.presets);
     }
 
     fn apply_preset(self, p: Preset) {
@@ -660,48 +795,50 @@ impl AppState {
         // Restore the patch-query selectors only when the preset captured them, so a
         // legacy preset leaves the current Type/Status/install-window untouched.
         if let Some(pt) = p.patch_type {
-            self.patch_type.set(pt);
+            self.filters.patch_type.set(pt);
         }
         if let Some(st) = p.statuses {
-            self.statuses.set(st);
+            self.filters.statuses.set(st);
         }
         if let Some(d) = p.install_days {
-            self.install_days.set(d);
+            self.filters.install_days.set(d);
         }
-        self.role_id.set(f.role_id);
-        self.selected_classes.set(f.node_classes);
-        self.selected_severities.set(f.severities);
-        self.os_name.set(f.os_name_contains.unwrap_or_default());
-        self.search.set(f.search.unwrap_or_default());
+        self.filters.role_id.set(f.role_id);
+        self.filters.selected_classes.set(f.node_classes);
+        self.filters.selected_severities.set(f.severities);
+        self.filters
+            .os_name
+            .set(f.os_name_contains.unwrap_or_default());
+        self.filters.search.set(f.search.unwrap_or_default());
         // Restore the release-date filter UI from the stored bounds.
         match (f.release_within_days, f.release_after, f.release_before) {
             (Some(d), _, _) => {
-                self.release_window.set(d.to_string());
-                self.release_after_date.set(String::new());
-                self.release_before_date.set(String::new());
+                self.filters.release_window.set(d.to_string());
+                self.filters.release_after_date.set(String::new());
+                self.filters.release_before_date.set(String::new());
             }
             (None, after, before) if after.is_some() || before.is_some() => {
-                self.release_window.set("custom".to_string());
-                self.release_after_date.set(epoch_to_date(after));
-                self.release_before_date.set(epoch_to_date(before));
+                self.filters.release_window.set("custom".to_string());
+                self.filters.release_after_date.set(epoch_to_date(after));
+                self.filters.release_before_date.set(epoch_to_date(before));
             }
             _ => {
-                self.release_window.set(String::new());
-                self.release_after_date.set(String::new());
-                self.release_before_date.set(String::new());
+                self.filters.release_window.set(String::new());
+                self.filters.release_after_date.set(String::new());
+                self.filters.release_before_date.set(String::new());
             }
         }
         // Load the org's locations, then restore the saved location.
-        self.org_id.set(f.organization_id);
-        self.loc_id.set(None);
-        self.locations.set(Vec::new());
+        self.filters.org_id.set(f.organization_id);
+        self.filters.loc_id.set(None);
+        self.lookups.locations.set(Vec::new());
         if let Some(org) = f.organization_id {
             let want_loc = f.location_id;
             spawn_local(async move {
                 match api::list_locations(org).await {
                     Ok(locs) => {
-                        self.locations.set(locs);
-                        self.loc_id.set(want_loc);
+                        self.lookups.locations.set(locs);
+                        self.filters.loc_id.set(want_loc);
                     }
                     Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
                 }
@@ -722,7 +859,7 @@ pub fn App() -> impl IntoView {
         spawn_local(async move {
             if let Ok(a) = api::auth_status().await {
                 let authed = a.authenticated;
-                state.auth.set(Some(a));
+                state.session.auth.set(Some(a));
                 if authed {
                     state.load_lookups();
                 }
@@ -733,7 +870,7 @@ pub fn App() -> impl IntoView {
                 let auto = s.auto_check_updates;
                 state.apply_settings_view(s);
                 if auto && let Ok(Some(info)) = api::check_for_update().await {
-                    state.update.set(Some(info));
+                    state.updates.update.set(Some(info));
                 }
             }
         });
@@ -741,17 +878,17 @@ pub fn App() -> impl IntoView {
         // Browser/Pages demo: there is no backend, so every IPC call would fail.
         // Enter demo mode (facets seeded from the sample) but leave the results
         // empty until the user presses Run query, just like the real app.
-        state.web_mode.set(true);
+        state.session.web_mode.set(true);
         state.enter_demo();
     }
 
     // Stream live record counts from the backend into `progress`, ignoring events
     // from a run the user has already superseded.
     api::on_query_progress(move |ev| {
-        if ev.query_id != state.query_seq.get_untracked() {
+        if ev.query_id != state.run.query_seq.get_untracked() {
             return;
         }
-        state.progress.update(|p| match ev.stage.as_str() {
+        state.run.progress.update(|p| match ev.stage.as_str() {
             "devices" => p.devices = ev.loaded,
             "osPatches" => p.os_patches = ev.loaded,
             "swPatches" => p.sw_patches = ev.loaded,
@@ -764,8 +901,8 @@ pub fn App() -> impl IntoView {
 
     // Tick the elapsed-time display roughly twice a second while a query runs.
     gloo_timers::callback::Interval::new(500, move || {
-        if state.busy.get_untracked() || state.refreshing.get_untracked() {
-            state.elapsed_tick.update(|t| *t = t.wrapping_add(1));
+        if state.run.busy.get_untracked() || state.run.refreshing.get_untracked() {
+            state.run.elapsed_tick.update(|t| *t = t.wrapping_add(1));
         }
     })
     .forget();
@@ -773,7 +910,7 @@ pub fn App() -> impl IntoView {
     // Auto-refresh: rebuild the interval whenever the cadence or auth changes.
     let interval = StoredValue::new_local(None::<gloo_timers::callback::Interval>);
     Effect::new(move |_| {
-        let secs = state.refresh_secs.get();
+        let secs = state.run.refresh_secs.get();
         let authed = state.is_authed();
         interval.set_value(None);
         if secs > 0 && authed {
@@ -786,12 +923,12 @@ pub fn App() -> impl IntoView {
     view! {
         <main>
             <Header/>
-            <Show when=move || state.demo.get()>
+            <Show when=move || state.session.demo.get()>
                 <p class="demo-banner" role="note">
                     "Demo mode — press Run query to list sample patches (not a live fleet)."
                 </p>
             </Show>
-            <Show when=move || state.show_settings.get()>
+            <Show when=move || state.ui.show_settings.get()>
                 <SettingsPanel/>
             </Show>
             <Filters/>
@@ -823,15 +960,15 @@ fn UpdateSplash() -> impl IntoView {
     // already running.
     window_event_listener(leptos::ev::keydown, move |ev| {
         if ev.key() == "Escape"
-            && state.update.get_untracked().is_some()
-            && !state.update_busy.get_untracked()
+            && state.updates.update.get_untracked().is_some()
+            && !state.updates.update_busy.get_untracked()
         {
-            state.update.set(None);
+            state.updates.update.set(None);
         }
     });
     view! {
         {move || {
-            let Some(info) = state.update.get() else {
+            let Some(info) = state.updates.update.get() else {
                 return ().into_any();
             };
             let notes = info.notes.unwrap_or_default();
@@ -868,17 +1005,17 @@ fn UpdateSplash() -> impl IntoView {
                 )
             };
             let install = move |_| {
-                state.update_busy.set(true);
+                state.updates.update_busy.set(true);
                 spawn_local(async move {
                     // On success the backend installs and relaunches the app, so
                     // this never returns Ok; an Err means the install failed.
                     if let Err(e) = api::install_update().await {
-                        state.update_busy.set(false);
+                        state.updates.update_busy.set(false);
                         state.notify(Toast::err(format!("Update failed: {e}")));
                     }
                 });
             };
-            let dismiss = move |_| state.update.set(None);
+            let dismiss = move |_| state.updates.update.set(None);
             view! {
                 <div class="modal-overlay">
                     <div
@@ -900,11 +1037,11 @@ fn UpdateSplash() -> impl IntoView {
                         <div class="row modal-actions">
                             <button
                                 class="btn btn-primary"
-                                prop:disabled=move || state.update_busy.get()
+                                prop:disabled=move || state.updates.update_busy.get()
                                 on:click=install
                             >
                                 {move || {
-                                    if state.update_busy.get() {
+                                    if state.updates.update_busy.get() {
                                         "Updating…"
                                     } else {
                                         "Update & restart"
@@ -913,7 +1050,7 @@ fn UpdateSplash() -> impl IntoView {
                             </button>
                             <button
                                 class="btn btn-ghost"
-                                prop:disabled=move || state.update_busy.get()
+                                prop:disabled=move || state.updates.update_busy.get()
                                 on:click=dismiss
                             >
                                 "Later"
@@ -933,6 +1070,7 @@ fn Header() -> impl IntoView {
     let authed = move || state.is_authed();
     let instance = move || {
         state
+            .session
             .auth
             .get()
             .map(|a| a.instance_base_url)
@@ -949,7 +1087,7 @@ fn Header() -> impl IntoView {
                 </div>
             </div>
             <div class="actions">
-                <Show when=move || state.web_mode.get()>
+                <Show when=move || state.session.web_mode.get()>
                     <span class="pill pill-demo">"Demo"</span>
                     <a
                         class="btn btn-primary"
@@ -960,11 +1098,11 @@ fn Header() -> impl IntoView {
                         "Get the app ↗"
                     </a>
                 </Show>
-                <Show when=move || !state.web_mode.get()>
+                <Show when=move || !state.session.web_mode.get()>
                 <span class=move || if authed() { "pill pill-on" } else { "pill pill-off" }>
                     {move || if authed() { "Connected" } else { "Not signed in" }}
                 </span>
-                <button class="btn" on:click=move |_| state.show_settings.update(|s| *s = !*s)>
+                <button class="btn" on:click=move |_| state.ui.show_settings.update(|s| *s = !*s)>
                     "Settings"
                 </button>
                 <Show
@@ -973,29 +1111,29 @@ fn Header() -> impl IntoView {
                         view! {
                             <button
                                 class="btn btn-primary"
-                                prop:disabled=move || state.signing_in.get()
+                                prop:disabled=move || state.session.signing_in.get()
                                 on:click=move |_| {
-                                    if state.signing_in.get_untracked() {
+                                    if state.session.signing_in.get_untracked() {
                                         return;
                                     }
-                                    state.signing_in.set(true);
+                                    state.session.signing_in.set(true);
                                     state
                                         .notify(Toast::ok("Complete the sign-in in your browser…"));
                                     spawn_local(async move {
                                         match api::sign_in().await {
                                             Ok(()) => {
-                                                state.refresh_auth();
+                                                state.session.refresh_auth();
                                                 state.load_lookups();
                                                 state.notify(Toast::ok("Signed in"));
                                             }
                                             Err(e) => state.notify(Toast::err(e)),
                                         }
-                                        state.signing_in.set(false);
+                                        state.session.signing_in.set(false);
                                     });
                                 }
                             >
                                 {move || {
-                                    if state.signing_in.get() { "Signing in…" } else { "Sign in" }
+                                    if state.session.signing_in.get() { "Signing in…" } else { "Sign in" }
                                 }}
                             </button>
                         }
@@ -1007,7 +1145,7 @@ fn Header() -> impl IntoView {
                             spawn_local(async move {
                                 match api::sign_out().await {
                                     Ok(()) => {
-                                        state.refresh_auth();
+                                        state.session.refresh_auth();
                                         state.notify(Toast::ok("Signed out"));
                                     }
                                     Err(e) => state.notify(Toast::err(e)),
@@ -1033,18 +1171,18 @@ fn RunControls() -> impl IntoView {
             <div class="controls">
                 <button
                     class="btn btn-primary"
-                    prop:disabled=move || state.busy.get()
+                    prop:disabled=move || state.run.busy.get()
                     on:click=move |_| state.run_query()
                 >
-                    {move || if state.busy.get() { "Running…" } else { "Run query" }}
+                    {move || if state.run.busy.get() { "Running…" } else { "Run query" }}
                 </button>
                 <button
                     class="btn"
                     prop:disabled=move || {
-                        state.result.get().is_none() || state.web_mode.get() || state.demo.get()
+                        state.query.result.get().is_none() || state.session.web_mode.get() || state.session.demo.get()
                     }
                     title=move || {
-                        if state.web_mode.get() || state.demo.get() {
+                        if state.session.web_mode.get() || state.session.demo.get() {
                             "Excel export needs a live query in the desktop app"
                         } else {
                             ""
@@ -1065,10 +1203,10 @@ fn RunControls() -> impl IntoView {
                 <button
                     class="btn"
                     prop:disabled=move || {
-                        state.result.get().is_none() || state.web_mode.get() || state.demo.get()
+                        state.query.result.get().is_none() || state.session.web_mode.get() || state.session.demo.get()
                     }
                     title=move || {
-                        if state.web_mode.get() || state.demo.get() {
+                        if state.session.web_mode.get() || state.session.demo.get() {
                             "The HTML report needs a live query in the desktop app"
                         } else {
                             ""
@@ -1088,18 +1226,18 @@ fn RunControls() -> impl IntoView {
                 >
                     "Export report"
                 </button>
-                <Show when=move || state.refreshing.get()>
+                <Show when=move || state.run.refreshing.get()>
                     <span class="chips-label">"↻ refreshing…"</span>
                 </Show>
                 <label class="inline">
                     "Auto-refresh"
                     <select on:change=move |ev| {
-                        state.refresh_secs.set(event_target_value(&ev).parse().unwrap_or(0))
+                        state.run.refresh_secs.set(event_target_value(&ev).parse().unwrap_or(0))
                     }>
                         {[("0", "Off"), ("30", "30s"), ("60", "1m"), ("300", "5m"), ("900", "15m")]
                             .into_iter()
                             .map(|(val, label)| {
-                                let sel = move || state.refresh_secs.get().to_string() == val;
+                                let sel = move || state.run.refresh_secs.get().to_string() == val;
                                 view! {
                                     <option value=val selected=sel>
                                         {label}
@@ -1112,19 +1250,18 @@ fn RunControls() -> impl IntoView {
                 <button
                     class="btn"
                     prop:disabled=move || {
-                        state.busy.get() || state.refreshing.get() || state.web_mode.get()
-                            || state.demo.get() || state.result.get().is_none()
+                        state.run.busy.get() || state.run.refreshing.get() || state.session.web_mode.get()
+                            || state.session.demo.get() || state.query.result.get().is_none()
                     }
                     title="Refetch live patch data from NinjaOne for the current filter"
                     on:click=move |_| state.refresh_now()
                 >
                     "↻ Refresh"
                 </button>
-                <Show when=move || state.result.get().is_some()>
+                <Show when=move || state.query.result.get().is_some()>
                     <span class="chips-label">
                         {move || {
-                            state
-                                .result
+                            state.query.result
                                 .get()
                                 .map(|r| format!("patch data as of {}", r.data_fetched_at))
                                 .unwrap_or_default()
@@ -1133,10 +1270,10 @@ fn RunControls() -> impl IntoView {
                 </Show>
                 <PresetRow/>
             </div>
-            <Show when=move || state.busy.get()>
+            <Show when=move || state.run.busy.get()>
                 <div class="query-progress">
                     <div class="progress">
-                        {move || match state.progress_estimate() {
+                        {move || match state.run.progress_estimate() {
                             Some(p) => {
                                 view! {
                                     <div
@@ -1154,8 +1291,8 @@ fn RunControls() -> impl IntoView {
                     </div>
                     <span class="progress-label">
                         {move || {
-                            let p = state.progress.get();
-                            let secs = state.elapsed_secs();
+                            let p = state.run.progress.get();
+                            let secs = state.run.elapsed_secs();
                             if p.joining {
                                 format!("Running… {secs:.0}s · computing rollups…")
                             } else {
@@ -1174,13 +1311,13 @@ fn RunControls() -> impl IntoView {
                 </div>
             </Show>
             <Show when=move || {
-                !state.busy.get() && state.last_duration_ms.get().is_some()
+                !state.run.busy.get() && state.run.last_duration_ms.get().is_some()
             }>
                 <p class="query-hint">
                     {move || {
                         format!(
                             "Last run took {:.0}s",
-                            state.last_duration_ms.get().unwrap_or(0.0) / 1000.0,
+                            state.run.last_duration_ms.get().unwrap_or(0.0) / 1000.0,
                         )
                     }}
                 </p>
@@ -1198,8 +1335,7 @@ fn Toaster() -> impl IntoView {
         // is not reliably announced, so the wrapper stays mounted.
         <div class="toaster" role="status" aria-live="assertive" aria-atomic="true">
             {move || {
-                state
-                    .toast
+                state.ui.toast
                     .get()
                     .map(|t| {
                         let cls = if t.error { "toast toast-err" } else { "toast toast-ok" };
@@ -1209,7 +1345,7 @@ fn Toaster() -> impl IntoView {
                                 <button
                                     class="x"
                                     aria-label="Dismiss notification"
-                                    on:click=move |_| state.toast.set(None)
+                                    on:click=move |_| state.ui.toast.set(None)
                                 >
                                     "×"
                                 </button>
@@ -1225,7 +1361,7 @@ fn PresetRow() -> impl IntoView {
     let state = expect_context::<AppState>();
 
     let save_preset = move |_| {
-        let name = state.preset_name.get_untracked();
+        let name = state.settings.preset_name.get_untracked();
         if name.trim().is_empty() {
             state.notify(Toast::err("Name the preset first"));
             return;
@@ -1233,15 +1369,15 @@ fn PresetRow() -> impl IntoView {
         let preset = Preset {
             name: name.trim().to_string(),
             filter: state.current_filter(),
-            patch_type: Some(state.patch_type.get_untracked()),
-            statuses: Some(state.statuses.get_untracked()),
-            install_days: Some(state.install_days.get_untracked()),
+            patch_type: Some(state.filters.patch_type.get_untracked()),
+            statuses: Some(state.filters.statuses.get_untracked()),
+            install_days: Some(state.filters.install_days.get_untracked()),
         };
         spawn_local(async move {
             match api::save_preset(preset).await {
                 Ok(p) => {
-                    state.presets.set(p);
-                    state.preset_name.set(String::new());
+                    state.settings.presets.set(p);
+                    state.settings.preset_name.set(String::new());
                     state.notify(Toast::ok("Preset saved"));
                 }
                 Err(e) => state.notify(Toast::err(e)),
@@ -1253,8 +1389,7 @@ fn PresetRow() -> impl IntoView {
         <div class="row presets">
             <span class="chips-label">"Presets:"</span>
             {move || {
-                state
-                    .presets
+                state.settings.presets
                     .get()
                     .into_iter()
                     .map(|p| {
@@ -1291,7 +1426,7 @@ fn PresetRow() -> impl IntoView {
                                         let n = del_name.clone();
                                         spawn_local(async move {
                                             if let Ok(p) = api::delete_preset(n).await {
-                                                state.presets.set(p);
+                                                state.settings.presets.set(p);
                                             }
                                         });
                                     }
@@ -1308,8 +1443,8 @@ fn PresetRow() -> impl IntoView {
             <input
                 class="preset-name"
                 placeholder="Preset name"
-                prop:value=move || state.preset_name.get()
-                on:input=move |ev| state.preset_name.set(event_target_value(&ev))
+                prop:value=move || state.settings.preset_name.get()
+                on:input=move |ev| state.settings.preset_name.set(event_target_value(&ev))
             />
             <button class="btn btn-ghost" on:click=save_preset>
                 "Save preset"

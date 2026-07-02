@@ -11,21 +11,21 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
 
     let save = move |_| {
         let args = SaveSettingsArgs {
-            instance_base_url: state.f_instance.get_untracked(),
-            client_id: non_empty(state.f_client_id.get_untracked()),
-            callback_port: state.f_port.get_untracked(),
-            install_window_days: state.f_install_days.get_untracked(),
-            sla_days: state.f_sla.get_untracked(),
-            client_secret: non_empty(state.f_client_secret.get_untracked()),
+            instance_base_url: state.settings.f_instance.get_untracked(),
+            client_id: non_empty(state.settings.f_client_id.get_untracked()),
+            callback_port: state.settings.f_port.get_untracked(),
+            install_window_days: state.settings.f_install_days.get_untracked(),
+            sla_days: state.settings.f_sla.get_untracked(),
+            client_secret: non_empty(state.settings.f_client_secret.get_untracked()),
             clear_secret: false,
-            auto_check_updates: state.f_auto_update.get_untracked(),
+            auto_check_updates: state.settings.f_auto_update.get_untracked(),
         };
         spawn_local(async move {
             match api::save_settings(args).await {
                 Ok(v) => {
                     state.apply_settings_view(v);
-                    state.f_client_secret.set(String::new());
-                    state.refresh_auth();
+                    state.settings.f_client_secret.set(String::new());
+                    state.session.refresh_auth();
                     state.notify(Toast::ok("Settings saved"));
                 }
                 Err(e) => state.notify(Toast::err(e)),
@@ -36,14 +36,14 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
     let clear_secret = move |_| {
         spawn_local(async move {
             let args = SaveSettingsArgs {
-                instance_base_url: state.f_instance.get_untracked(),
-                client_id: non_empty(state.f_client_id.get_untracked()),
-                callback_port: state.f_port.get_untracked(),
-                install_window_days: state.f_install_days.get_untracked(),
-                sla_days: state.f_sla.get_untracked(),
+                instance_base_url: state.settings.f_instance.get_untracked(),
+                client_id: non_empty(state.settings.f_client_id.get_untracked()),
+                callback_port: state.settings.f_port.get_untracked(),
+                install_window_days: state.settings.f_install_days.get_untracked(),
+                sla_days: state.settings.f_sla.get_untracked(),
                 client_secret: None,
                 clear_secret: true,
-                auto_check_updates: state.f_auto_update.get_untracked(),
+                auto_check_updates: state.settings.f_auto_update.get_untracked(),
             };
             match api::save_settings(args).await {
                 Ok(v) => {
@@ -56,17 +56,17 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
     };
 
     let check_now = move |_| {
-        if state.update_busy.get_untracked() {
+        if state.updates.update_busy.get_untracked() {
             return;
         }
-        state.update_busy.set(true);
+        state.updates.update_busy.set(true);
         spawn_local(async move {
             match api::check_for_update().await {
-                Ok(Some(info)) => state.update.set(Some(info)),
+                Ok(Some(info)) => state.updates.update.set(Some(info)),
                 Ok(None) => state.notify(Toast::ok("You're on the latest version")),
                 Err(e) => state.notify(Toast::err(e)),
             }
-            state.update_busy.set(false);
+            state.updates.update_busy.set(false);
         });
     };
 
@@ -76,14 +76,14 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
             <div class="grid">
                 <label>
                     "Region / Instance"
-                    <select on:change=move |ev| state.f_instance.set(event_target_value(&ev))>
+                    <select on:change=move |ev| state.settings.f_instance.set(event_target_value(&ev))>
                         {REGIONS
                             .iter()
                             .map(|(url, label)| {
                                 let url = url.to_string();
                                 let sel = {
                                     let url = url.clone();
-                                    move || state.f_instance.get() == url
+                                    move || state.settings.f_instance.get() == url
                                 };
                                 view! {
                                     <option value=url.clone() selected=sel>
@@ -98,20 +98,20 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                 <label>
                     "Instance URL"
                     <input
-                        prop:value=move || state.f_instance.get()
-                        on:input=move |ev| state.f_instance.set(event_target_value(&ev))
+                        prop:value=move || state.settings.f_instance.get()
+                        on:input=move |ev| state.settings.f_instance.set(event_target_value(&ev))
                     />
                 </label>
                 <label>
                     "Client ID"
                     <input
-                        prop:value=move || state.f_client_id.get()
-                        on:input=move |ev| state.f_client_id.set(event_target_value(&ev))
+                        prop:value=move || state.settings.f_client_id.get()
+                        on:input=move |ev| state.settings.f_client_id.set(event_target_value(&ev))
                     />
                 </label>
                 <label>
                     {move || {
-                        if state.has_secret.get() {
+                        if state.settings.has_secret.get() {
                             "Client secret (leave blank to keep)"
                         } else {
                             "Client secret (Native apps have none)"
@@ -119,8 +119,8 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                     }}
                     <input
                         type="password"
-                        prop:value=move || state.f_client_secret.get()
-                        on:input=move |ev| state.f_client_secret.set(event_target_value(&ev))
+                        prop:value=move || state.settings.f_client_secret.get()
+                        on:input=move |ev| state.settings.f_client_secret.set(event_target_value(&ev))
                     />
                 </label>
                 <label>
@@ -129,12 +129,12 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                         type="number"
                         min="1024"
                         max="65535"
-                        prop:value=move || state.f_port.get().to_string()
+                        prop:value=move || state.settings.f_port.get().to_string()
                         on:change=move |ev| {
                             let v = event_target_value(&ev)
                                 .parse::<u16>()
-                                .unwrap_or_else(|_| state.f_port.get_untracked());
-                            state.f_port.set(v.clamp(1024, 65535));
+                                .unwrap_or_else(|_| state.settings.f_port.get_untracked());
+                            state.settings.f_port.set(v.clamp(1024, 65535));
                         }
                     />
                 </label>
@@ -144,12 +144,12 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                         type="number"
                         min="1"
                         max="3650"
-                        prop:value=move || state.f_install_days.get().to_string()
+                        prop:value=move || state.settings.f_install_days.get().to_string()
                         on:change=move |ev| {
                             let v = event_target_value(&ev)
                                 .parse::<i64>()
-                                .unwrap_or_else(|_| state.f_install_days.get_untracked());
-                            state.f_install_days.set(v.clamp(1, 3650));
+                                .unwrap_or_else(|_| state.settings.f_install_days.get_untracked());
+                            state.settings.f_install_days.set(v.clamp(1, 3650));
                         }
                     />
                 </label>
@@ -159,20 +159,20 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                         type="number"
                         min="1"
                         max="3650"
-                        prop:value=move || state.f_sla.get().to_string()
+                        prop:value=move || state.settings.f_sla.get().to_string()
                         on:change=move |ev| {
                             let v = event_target_value(&ev)
                                 .parse::<i64>()
-                                .unwrap_or_else(|_| state.f_sla.get_untracked());
-                            state.f_sla.set(v.clamp(1, 3650));
+                                .unwrap_or_else(|_| state.settings.f_sla.get_untracked());
+                            state.settings.f_sla.set(v.clamp(1, 3650));
                         }
                     />
                 </label>
                 <label class="inline">
                     <input
                         type="checkbox"
-                        prop:checked=move || state.f_auto_update.get()
-                        on:change=move |ev| state.f_auto_update.set(event_target_checked(&ev))
+                        prop:checked=move || state.settings.f_auto_update.get()
+                        on:change=move |ev| state.settings.f_auto_update.set(event_target_checked(&ev))
                     />
                     "Automatically check for updates on launch"
                 </label>
@@ -181,7 +181,7 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                 <button class="btn btn-primary" on:click=save>
                     "Save settings"
                 </button>
-                <Show when=move || state.has_secret.get()>
+                <Show when=move || state.settings.has_secret.get()>
                     <button
                         class=move || {
                             if clear_armed.get() { "btn btn-ghost btn-armed" } else { "btn btn-ghost" }
@@ -208,11 +208,11 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                 </Show>
                 <button
                     class="btn btn-ghost"
-                    prop:disabled=move || state.update_busy.get()
+                    prop:disabled=move || state.updates.update_busy.get()
                     on:click=check_now
                 >
                     {move || {
-                        if state.update_busy.get() { "Checking…" } else { "Check for updates" }
+                        if state.updates.update_busy.get() { "Checking…" } else { "Check for updates" }
                     }}
                 </button>
             </div>
