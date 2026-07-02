@@ -11,6 +11,13 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Results tab bar no longer overflows on narrow screens.** On a phone-width
+  viewport the tab groups and the results summary ran past the panel's right
+  edge (and widened the page); the row now wraps, and the summary takes its own
+  line under the tabs.
+
 ## [0.9.0] - 2026-07-02
 
 ### Added
