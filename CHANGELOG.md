@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-02
+
 ### Fixed
 
 - **Results tab bar no longer overflows on narrow screens.** On a phone-width
