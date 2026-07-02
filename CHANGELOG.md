@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-02
+
 ### Added
 
 - **Sortable Patches table.** Every column header in the Patches tab is now a
