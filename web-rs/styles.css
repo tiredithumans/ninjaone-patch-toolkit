@@ -371,6 +371,9 @@ select:disabled {
 
 .tabs {
   display: flex;
+  /* The row's min content width (two labelled tab groups + summary) exceeds a
+     phone viewport; without wrapping it overflows the panel's right edge. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   border-bottom: 1px solid var(--border);
@@ -1008,5 +1011,12 @@ tbody tr:hover {
   .stacked-filters > .control-group > input,
   .stacked-filters > .control-group > select {
     width: 100%;
+  }
+
+  /* The results summary takes its own full line under the wrapped tab groups
+     instead of squeezing beside them (margin-left:auto only suits one row). */
+  .result-summary {
+    flex-basis: 100%;
+    margin-left: 0;
   }
 }

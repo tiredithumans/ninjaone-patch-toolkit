@@ -133,7 +133,7 @@ just web-build       # trunk build → web-rs/dist (debug)
 just web-build-pages # release build with the Pages subpath base href (used by pages.yml)
 
 # Dependency policy:
-just audit           # RustSec advisories — scans BOTH lockfiles (src-tauri + web-rs)
+just audit           # RustSec advisories — scans BOTH lockfiles (src-tauri + web-rs); accepted advisories live in .cargo/audit.toml (justification + revisit note required)
 just deny            # license + supply-chain (sources) + bans policy (deny.toml), backend tree
 just web-deny        # same policy for the web-rs tree
 
