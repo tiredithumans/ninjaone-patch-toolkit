@@ -7,16 +7,20 @@ use crate::types::*;
 
 mod charts;
 mod filters;
+mod header;
 mod settings;
 mod state;
 mod tables;
+mod toaster;
 mod util;
 
 use charts::{ComplianceByOsBars, ComplianceCharts};
 use filters::Filters;
+use header::Header;
 use settings::SettingsPanel;
 use state::*;
 use tables::Results;
+use toaster::Toaster;
 use util::{
     MdBlock, MdSpan, SummaryCounts, aged_badge, aria_sort, date_to_epoch, epoch_to_date,
     filter_chips, group_thousands, is_fleet_tab, next_sort, non_empty, parse_changelog, parse_opt,
@@ -265,104 +269,6 @@ fn UpdateSplash() -> impl IntoView {
 }
 
 #[component]
-fn Header() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    let authed = move || state.is_authed();
-    let instance = move || {
-        state
-            .session
-            .auth
-            .get()
-            .map(|a| a.instance_base_url)
-            .unwrap_or_default()
-    };
-
-    view! {
-        <header class="topbar">
-            <div class="brand">
-                <span class="logo">"◆"</span>
-                <div>
-                    <h1>"NinjaOne Patch Toolkit"</h1>
-                    <p class="subtitle">{instance}</p>
-                </div>
-            </div>
-            <div class="actions">
-                <Show when=move || state.session.web_mode.get()>
-                    <span class="pill pill-demo">"Demo"</span>
-                    <a
-                        class="btn btn-primary"
-                        href=RELEASES_URL
-                        target="_blank"
-                        rel="noreferrer"
-                    >
-                        "Get the app ↗"
-                    </a>
-                </Show>
-                <Show when=move || !state.session.web_mode.get()>
-                <span class=move || if authed() { "pill pill-on" } else { "pill pill-off" }>
-                    {move || if authed() { "Connected" } else { "Not signed in" }}
-                </span>
-                <button class="btn" on:click=move |_| state.ui.show_settings.update(|s| *s = !*s)>
-                    "Settings"
-                </button>
-                <Show
-                    when=move || authed()
-                    fallback=move || {
-                        view! {
-                            <button
-                                class="btn btn-primary"
-                                prop:disabled=move || state.session.signing_in.get()
-                                on:click=move |_| {
-                                    if state.session.signing_in.get_untracked() {
-                                        return;
-                                    }
-                                    state.session.signing_in.set(true);
-                                    state
-                                        .notify(Toast::ok("Complete the sign-in in your browser…"));
-                                    spawn_local(async move {
-                                        match api::sign_in().await {
-                                            Ok(()) => {
-                                                state.session.refresh_auth();
-                                                state.load_lookups();
-                                                state.notify(Toast::ok("Signed in"));
-                                            }
-                                            Err(e) => state.notify(Toast::err(e)),
-                                        }
-                                        state.session.signing_in.set(false);
-                                    });
-                                }
-                            >
-                                {move || {
-                                    if state.session.signing_in.get() { "Signing in…" } else { "Sign in" }
-                                }}
-                            </button>
-                        }
-                    }
-                >
-                    <button
-                        class="btn"
-                        on:click=move |_| {
-                            spawn_local(async move {
-                                match api::sign_out().await {
-                                    Ok(()) => {
-                                        state.session.refresh_auth();
-                                        state.notify(Toast::ok("Signed out"));
-                                    }
-                                    Err(e) => state.notify(Toast::err(e)),
-                                }
-                            });
-                        }
-                    >
-                        "Sign out"
-                    </button>
-                </Show>
-                </Show>
-            </div>
-        </header>
-    }
-}
-
-#[component]
 fn RunControls() -> impl IntoView {
     let state = expect_context::<AppState>();
 
@@ -526,36 +432,6 @@ fn RunControls() -> impl IntoView {
     }
 }
 
-#[component]
-fn Toaster() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    view! {
-        // Always-present live region: a screen reader announces the toast as it
-        // appears. An aria-live region created at the same moment as its content
-        // is not reliably announced, so the wrapper stays mounted.
-        <div class="toaster" role="status" aria-live="assertive" aria-atomic="true">
-            {move || {
-                state.ui.toast
-                    .get()
-                    .map(|t| {
-                        let cls = if t.error { "toast toast-err" } else { "toast toast-ok" };
-                        view! {
-                            <div class=cls>
-                                <span>{t.msg}</span>
-                                <button
-                                    class="x"
-                                    aria-label="Dismiss notification"
-                                    on:click=move |_| state.ui.toast.set(None)
-                                >
-                                    "×"
-                                </button>
-                            </div>
-                        }
-                    })
-            }}
-        </div>
-    }
-}
 #[component]
 fn PresetRow() -> impl IntoView {
     let state = expect_context::<AppState>();
