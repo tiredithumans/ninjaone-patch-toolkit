@@ -174,6 +174,14 @@ secrets are **not** stored there — see below).
   which slices the same cache; `export_patches_xlsx` **and** `export_report_html` read it too. So the
   cache is the single source of truth for export, the HTML report, **and** row paging: any of them with
   no prior successful query = empty. Don't add a second source of truth for the rows.
+  - **Tenant-keyed, method-gated access.** `last_result` is **private** and stamped with the tenant
+    (`Mutex<Option<(TenantKey, QueryResult)>>`, `TenantKey` = instance URL + client id). Never touch it
+    directly — write via `state.store_last_result(result)` and read via
+    `state.with_current_result(|r| …)`, which compare the stamp at read time, so a result from a
+    different tenant reads as a miss. The whole-fleet input caches (devices/current/lookups) carry the
+    same stamp. This makes the `clear_lookups_cache` / `clear_last_result` calls (sign-out, instance
+    change) belt-and-suspenders for correctness — a forgotten one can't leak a prior tenant's rows; they
+    remain only to reclaim memory promptly and to wipe rows on an explicit same-tenant sign-out.
   `get_patch_rows` also takes an optional `sort` (`rows::RowSort`) and re-orders **per request** via a
   ref-sort in `rows::page_rows` — the cached rows themselves are never reordered; their canonical
   severity/org/device order feeds the export and the summary's inline first page.

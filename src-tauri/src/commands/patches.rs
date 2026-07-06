@@ -5,7 +5,6 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
-use tracing::warn;
 
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::error::UiError;
@@ -114,15 +113,10 @@ pub async fn query_patches(
     .map_err(UiError::from)?;
 
     // Hand the frontend a lightweight summary (first page + rollups) and keep the
-    // full result in the cache for paging (`get_patch_rows`) and export — moving it
-    // in rather than cloning every row.
+    // full result in the tenant-stamped cache for paging (`get_patch_rows`) and
+    // export — moving it in rather than cloning every row.
     let summary = QuerySummary::from_result(&result, FIRST_PAGE_ROWS);
-    match state.last_result.lock() {
-        Ok(mut slot) => *slot = Some(result),
-        // A poisoned cache means export/paging would read the previous run — warn
-        // rather than silently dropping the write so the staleness is observable.
-        Err(_) => warn!("result cache poisoned; export and paging will use the prior query"),
-    }
+    state.store_last_result(result);
     Ok(summary)
 }
 
@@ -387,15 +381,13 @@ pub async fn get_patch_rows(
     limit: usize,
     sort: Option<RowSort>,
 ) -> Result<Vec<PatchRow>, UiError> {
-    let slot = state
-        .last_result
-        .lock()
-        .map_err(|_| UiError::new("result cache poisoned"))?;
-    // The sort runs under the lock but is an in-memory, bounded ref-sort of the
-    // cached rows — still within the "locks are brief, never across await" rule.
-    let rows = slot
-        .as_ref()
-        .map(|r| page_rows(&r.rows, offset, limit, sort))
+    // `with_current_result` runs the page-slice under the lock and only against a
+    // result belonging to the current tenant (a tenant switch reads as empty). The
+    // sort is an in-memory, bounded ref-sort — still "locks are brief, never across
+    // await".
+    let rows = state
+        .with_current_result(|r| page_rows(&r.rows, offset, limit, sort))
+        .map_err(|_| UiError::new("result cache poisoned"))?
         .unwrap_or_default();
     Ok(rows)
 }
