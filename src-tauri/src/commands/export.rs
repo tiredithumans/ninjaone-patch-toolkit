@@ -7,15 +7,14 @@ use crate::export::write_workbook;
 use crate::rows::QueryResult;
 use crate::state::AppState;
 
-/// Clones the cached query result out of `state`, or errors if no query has run.
-/// The lock is taken and released synchronously — never held across the blocking
-/// save dialogs below.
+/// Clones the cached query result for the current tenant, or errors if no query has
+/// run for it (a tenant switch invalidates the previous one). The lock is taken and
+/// released synchronously inside `with_current_result` — never held across the
+/// blocking save dialogs below.
 fn cached_result(state: &AppState) -> Result<QueryResult, UiError> {
     state
-        .last_result
-        .lock()
+        .with_current_result(|r| r.clone())
         .map_err(|_| UiError::new("result cache poisoned"))?
-        .clone()
         .ok_or_else(|| UiError::new("Run a query before exporting."))
 }
 

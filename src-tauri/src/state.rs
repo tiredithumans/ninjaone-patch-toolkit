@@ -29,8 +29,25 @@ const DEVICE_TTL: Duration = Duration::from_secs(15 * 60);
 /// for fresh data.
 const CURRENT_PATCHES_TTL: Duration = Duration::from_secs(120);
 
+/// Identifies the tenant a cache entry belongs to. Every whole-fleet/result cache
+/// stamps its entries with this and re-checks it at *read* time, so switching the
+/// instance or client id invalidates them structurally — a caller that forgets to
+/// `clear_*` after a tenant switch can't serve or export the prior tenant's data
+/// (the read misses instead).
+#[derive(Clone, PartialEq, Eq)]
+struct TenantKey {
+    instance_base_url: String,
+    client_id: Option<String>,
+}
+
+/// Returned when the result-cache lock was poisoned by a panic while held, so a
+/// caller can report it instead of silently serving an empty read.
+#[derive(Debug)]
+pub struct CachePoisoned;
+
 struct LookupCache {
     at: Instant,
+    tenant: TenantKey,
     // Held behind `Arc` so a cache hit (and every auto-refresh tick) hands out a
     // cheap refcount bump instead of deep-cloning three Vecs.
     orgs: Arc<Vec<Organization>>,
@@ -40,11 +57,13 @@ struct LookupCache {
 
 struct DeviceCache {
     at: Instant,
+    tenant: TenantKey,
     devices: Arc<Vec<Device>>,
 }
 
 struct CurrentPatchesCache {
     at: Instant,
+    tenant: TenantKey,
     fetched_at: DateTime<Utc>,
     os: Arc<Vec<Patch>>,
     sw: Arc<Vec<Patch>>,
@@ -66,9 +85,12 @@ pub struct AppState {
     pub api: NinjaApiClient,
     /// Locked only for brief read/clone/replace — never held across `.await`.
     pub settings: Mutex<Settings>,
-    /// Last query result, cached so the export command can write it without the
-    /// frontend round-tripping all rows back over IPC.
-    pub last_result: Mutex<Option<QueryResult>>,
+    /// Last query result, stamped with the tenant it belongs to and cached so export
+    /// and row paging read it without the frontend round-tripping all rows over IPC.
+    /// Private on purpose: all access goes through `store_last_result` /
+    /// `with_current_result`, which enforce the tenant check — a tenant switch reads
+    /// as a miss, so a forgotten clear can't serve the previous tenant's rows.
+    last_result: Mutex<Option<(TenantKey, QueryResult)>>,
     /// Near-static lookups (orgs/locations/roles) cached with a short TTL.
     lookups_cache: Mutex<Option<LookupCache>>,
     /// Whole-fleet device inventory cached with a long TTL ([`DEVICE_TTL`]).
@@ -121,14 +143,37 @@ impl AppState {
         })
     }
 
+    /// The tenant (instance + client id) that owns freshly cached data. Cheap — a
+    /// brief settings lock cloning two fields, never held across `.await`. Compared
+    /// at every cache read so switching tenant invalidates the caches structurally.
+    fn tenant_key(&self) -> TenantKey {
+        match self.settings.lock() {
+            Ok(g) => TenantKey {
+                instance_base_url: g.instance_base_url.clone(),
+                client_id: g.client_id.clone(),
+            },
+            // A poisoned lock still holds the real settings — recover the identity
+            // rather than defaulting, which would mis-scope every cache.
+            Err(p) => {
+                let g = p.into_inner();
+                TenantKey {
+                    instance_base_url: g.instance_base_url.clone(),
+                    client_id: g.client_id.clone(),
+                }
+            }
+        }
+    }
+
     /// Orgs/locations/roles used to label patch rows, served from a short-TTL
     /// cache. Fetches the three concurrently on a miss. The lock is never held
     /// across the `.await`.
     pub async fn lookups(
         &self,
     ) -> Result<(Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>)> {
+        let key = self.tenant_key();
         if let Ok(guard) = self.lookups_cache.lock()
             && let Some(c) = guard.as_ref()
+            && c.tenant == key
             && c.at.elapsed() < LOOKUP_TTL
         {
             return Ok((c.orgs.clone(), c.locations.clone(), c.roles.clone()));
@@ -153,6 +198,7 @@ impl AppState {
         if let Ok(mut guard) = self.lookups_cache.lock() {
             *guard = Some(LookupCache {
                 at: Instant::now(),
+                tenant: key,
                 orgs: orgs.clone(),
                 locations: locations.clone(),
                 roles: roles.clone(),
@@ -169,8 +215,10 @@ impl AppState {
         &self,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Arc<Vec<Device>>> {
+        let key = self.tenant_key();
         if let Ok(guard) = self.fleet_devices_cache.lock()
             && let Some(c) = guard.as_ref()
+            && c.tenant == key
             && c.at.elapsed() < DEVICE_TTL
         {
             return Ok(c.devices.clone());
@@ -179,6 +227,7 @@ impl AppState {
         if let Ok(mut guard) = self.fleet_devices_cache.lock() {
             *guard = Some(DeviceCache {
                 at: Instant::now(),
+                tenant: key,
                 devices: devices.clone(),
             });
         }
@@ -196,9 +245,11 @@ impl AppState {
         on_os: Option<&ProgressFn<'_>>,
         on_sw: Option<&ProgressFn<'_>>,
     ) -> Result<CurrentPatches> {
+        let key = self.tenant_key();
         if !force
             && let Ok(guard) = self.fleet_current_cache.lock()
             && let Some(c) = guard.as_ref()
+            && c.tenant == key
             && c.at.elapsed() < CURRENT_PATCHES_TTL
         {
             return Ok(CurrentPatches {
@@ -216,6 +267,7 @@ impl AppState {
         if let Ok(mut guard) = self.fleet_current_cache.lock() {
             *guard = Some(CurrentPatchesCache {
                 at: Instant::now(),
+                tenant: key,
                 fetched_at,
                 os: os.clone(),
                 sw: sw.clone(),
@@ -239,8 +291,39 @@ impl AppState {
         }
     }
 
-    /// Drops the cached query result so a later export can't write a previous
-    /// tenant's rows after sign-out or an instance change.
+    /// Stores a query result stamped with the current tenant so paging and export can
+    /// read it. A poisoned cache is warned (not panicked) so the staleness is
+    /// observable but the app survives.
+    pub fn store_last_result(&self, result: QueryResult) {
+        let key = self.tenant_key();
+        match self.last_result.lock() {
+            Ok(mut slot) => *slot = Some((key, result)),
+            // A poisoned cache means export/paging would read the previous run — warn
+            // rather than silently dropping the write so the staleness is observable.
+            Err(_) => warn!("result cache poisoned; export and paging will use the prior query"),
+        }
+    }
+
+    /// Runs `f` against the cached result **iff** it belongs to the current tenant,
+    /// under the lock (keep `f` cheap — no `.await`). `Ok(None)` = nothing cached for
+    /// this tenant (never queried, or a tenant switch invalidated it); `Err` = a
+    /// poisoned lock. The sole read path, so the tenant check can't be bypassed.
+    pub fn with_current_result<T>(
+        &self,
+        f: impl FnOnce(&QueryResult) -> T,
+    ) -> Result<Option<T>, CachePoisoned> {
+        let key = self.tenant_key();
+        let guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
+        Ok(match guard.as_ref() {
+            Some((t, r)) if *t == key => Some(f(r)),
+            _ => None,
+        })
+    }
+
+    /// Drops the cached query result after sign-out or an instance change. The tenant
+    /// stamp already makes a stale read impossible (a switch reads as a miss); this
+    /// reclaims the memory promptly and wipes rows on an explicit sign-out of the same
+    /// tenant, which the stamp alone would not.
     pub fn clear_last_result(&self) {
         if let Ok(mut slot) = self.last_result.lock() {
             *slot = None;
@@ -253,14 +336,8 @@ mod tests {
     use super::*;
     use crate::rows::QueryResult;
 
-    #[test]
-    fn last_result_cache_starts_empty_and_clears() {
-        let state = AppState::new().expect("build state");
-        // A fresh state has no cached result, so export_patches_xlsx errors with
-        // "Run a query before exporting" rather than writing a stale workbook.
-        assert!(state.last_result.lock().unwrap().is_none());
-
-        *state.last_result.lock().unwrap() = Some(QueryResult {
+    fn sample_result() -> QueryResult {
+        QueryResult {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: Vec::new(),
@@ -271,12 +348,50 @@ mod tests {
             devices_total: 0,
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
-        });
-        assert!(state.last_result.lock().unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn last_result_cache_starts_empty_and_clears() {
+        let state = AppState::new().expect("build state");
+        // A fresh state has no cached result, so export errors with "Run a query
+        // before exporting" rather than writing a stale workbook.
+        assert!(state.with_current_result(|_| ()).unwrap().is_none());
+
+        state.store_last_result(sample_result());
+        assert!(state.with_current_result(|_| ()).unwrap().is_some());
 
         // Sign-out / instance change drops the cache so a later export can't leak a
         // previous tenant's rows.
         state.clear_last_result();
-        assert!(state.last_result.lock().unwrap().is_none());
+        assert!(state.with_current_result(|_| ()).unwrap().is_none());
+    }
+
+    #[test]
+    fn last_result_invisible_after_instance_switch() {
+        let state = AppState::new().expect("build state");
+        state.store_last_result(sample_result());
+        assert!(state.with_current_result(|_| ()).unwrap().is_some());
+
+        // Switch the instance WITHOUT calling clear_* — the read must still miss, so a
+        // forgotten invalidation can't serve the previous tenant's rows.
+        state.settings.lock().unwrap().instance_base_url = "https://other.example.com".into();
+        assert!(
+            state.with_current_result(|_| ()).unwrap().is_none(),
+            "a tenant switch must invalidate the cached result at read time"
+        );
+    }
+
+    #[test]
+    fn last_result_invisible_after_client_id_switch() {
+        // Pre-refactor, only an instance-URL change invalidated the result, so
+        // switching to a different client id (app registration) left the prior rows
+        // exportable. Tenant-keyed reads close that gap.
+        let state = AppState::new().expect("build state");
+        state.store_last_result(sample_result());
+        assert!(state.with_current_result(|_| ()).unwrap().is_some());
+
+        state.settings.lock().unwrap().client_id = Some("different-client".into());
+        assert!(state.with_current_result(|_| ()).unwrap().is_none());
     }
 }
