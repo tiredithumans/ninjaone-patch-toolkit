@@ -309,13 +309,9 @@ secrets are **not** stored there — see below).
 
 ## Coding fundamentals
 
-- Match the style, structure, and idioms of the file you're editing.
-- Solve the task at hand; don't refactor unrelated code or expand scope.
 - No abstraction, configuration, or generality for hypothetical futures (YAGNI).
 - Comments explain *why*, not *what*.
 - Dependencies are a cost; prefer std lib and existing crate deps.
-- Security first: no secrets to disk or logs; tokens stay in keyring/memory.
-- Test what you change; keep the suite green.
 
 ## Git & version control
 
