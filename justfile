@@ -90,12 +90,14 @@ audit:
     cargo audit --file web-rs/Cargo.lock
 
 # License + supply-chain + bans policy (deny.toml; requires `cargo install cargo-deny`).
+# `--config` sits before `check`: cargo-deny 0.20 moved it from the subcommand to
+# the root, and the two spellings are mutually exclusive — this needs >= 0.20.
 deny:
-    cargo deny --manifest-path src-tauri/Cargo.toml check --config deny.toml licenses bans sources
+    cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check licenses bans sources
 
 # Same license/supply-chain policy for the frontend tree.
 web-deny:
-    cargo deny --manifest-path web-rs/Cargo.toml check --config deny.toml licenses bans sources
+    cargo deny --manifest-path web-rs/Cargo.toml --config deny.toml check licenses bans sources
 
 # --- Release / packaging -----------------------------------------------------
 
