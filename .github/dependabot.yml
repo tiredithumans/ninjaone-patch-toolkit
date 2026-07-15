@@ -21,6 +21,16 @@ updates:
       actions:
         patterns:
           - "*"
+    ignore:
+      # dtolnay/rust-toolchain encodes the *toolchain* in the ref: upstream ships
+      # one rolling `v1` tag and publishes toolchain versions as branches, so our
+      # `@<sha> # 1.96.0` pin is a commit on the 1.96.0 branch with no semver tag
+      # containing it. Dependabot can't map that SHA back to a version and errors
+      # the whole github-actions job (`unknown_error`), which reports the weekly
+      # run as failed even though the other action bumps land fine. Bumping this
+      # pin is an MSRV decision that belongs with rust-toolchain.toml, not a
+      # routine dependency bump — so exclude it rather than let it break the job.
+      - dependency-name: dtolnay/rust-toolchain
 
   # Backend crate (src-tauri). Registry crates are pinned by exact version +
   # checksum in src-tauri/Cargo.lock; Dependabot proposes the upgrades.
