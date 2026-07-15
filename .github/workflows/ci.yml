@@ -75,7 +75,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: src-tauri
-      - uses: taiki-e/install-action@5ebac0d9522d786674368e47e92963ba13f2c376 # v2.82.11
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: just
       - name: Install system deps (Linux)
@@ -140,7 +140,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: web-rs
-      - uses: taiki-e/install-action@5ebac0d9522d786674368e47e92963ba13f2c376 # v2.82.11
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: just,trunk
       # web-rs is a separate wasm32 crate the backend `rust` job's clippy never
@@ -170,7 +170,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: src-tauri
-      - uses: taiki-e/install-action@5ebac0d9522d786674368e47e92963ba13f2c376 # v2.82.11
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: just,cargo-llvm-cov
       - name: Install system deps (Linux)
@@ -240,7 +240,7 @@ jobs:
       # RustSec advisory scan via the same `just` recipe run locally. The recipe
       # covers BOTH lockfiles: src-tauri/Cargo.lock and the frontend's own
       # web-rs/Cargo.lock (the two crates carry independent lockfiles).
-      - uses: taiki-e/install-action@5ebac0d9522d786674368e47e92963ba13f2c376 # v2.82.11
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: just,cargo-audit
       - name: audit (both lockfiles)
@@ -255,7 +255,7 @@ jobs:
       # crates' trees, via the same `just` recipes used locally. RustSec
       # advisories are NOT re-checked here — the `audit` job (cargo-audit) owns
       # those, so the two gates don't overlap.
-      - uses: taiki-e/install-action@5ebac0d9522d786674368e47e92963ba13f2c376 # v2.82.11
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: just,cargo-deny
       - name: deny (backend)
