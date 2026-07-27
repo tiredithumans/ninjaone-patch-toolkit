@@ -20,7 +20,7 @@ jobs:
     name: Guard tag matches manifests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Fail fast (before the long builds) if a tag was pushed without bumping the
       # version. The bundle/updater take their version from tauri.conf.json; the
       # release name comes from the tag — a mismatch ships a confusingly-versioned
@@ -79,7 +79,7 @@ jobs:
     outputs:
       release_id: ${{ steps.create.outputs.result }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Same CHANGELOG.md extraction the build jobs use — sets the release body
       # here (the build jobs reuse it for latest.json's `notes`). Kept in sync by
@@ -147,7 +147,7 @@ jobs:
         # Developer ID is set up.
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
@@ -159,7 +159,7 @@ jobs:
             src-tauri
             web-rs
 
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+      - uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
           tool: trunk
 
