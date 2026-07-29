@@ -17,7 +17,7 @@ const DETAIL_HEADERS: [&str; 14] = [
     "Severity",
     "Status",
     "Needs Reboot",
-    "Release Date",
+    "First Seen",
     "Installed Date",
 ];
 
@@ -125,7 +125,7 @@ fn write_detail_sheet(workbook: &mut Workbook, header: &Format, rows: &[PatchRow
             &r.severity,
             &r.status,
             if r.needs_reboot { "Yes" } else { "No" },
-            r.release_date.as_deref().unwrap_or_default(),
+            r.first_seen_date.as_deref().unwrap_or_default(),
             r.installed_date.as_deref().unwrap_or_default(),
         ];
         for (col, value) in cells.iter().enumerate() {
@@ -302,9 +302,9 @@ mod tests {
             severity: "Critical".into(),
             severity_rank: 5,
             status: "PENDING".into(),
-            release_date: Some("2026-05-01 00:00 UTC".into()),
+            first_seen_date: Some("2026-05-01 00:00 UTC".into()),
             installed_date: None,
-            release_ts: Some(1_777_000_000),
+            first_seen_ts: Some(1_777_000_000),
             installed_ts: None,
         }
     }

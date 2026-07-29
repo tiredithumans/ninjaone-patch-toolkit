@@ -153,7 +153,7 @@ pub(crate) fn ComplianceCharts() -> impl IntoView {
                 <SeverityBreakdown/>
             </div>
             <div class="chart-card">
-                <h3 class="chart-title">"Pending patch age"</h3>
+                <h3 class="chart-title">"Pending patch age (since first seen)"</h3>
                 <AgeHistogram/>
             </div>
         </div>

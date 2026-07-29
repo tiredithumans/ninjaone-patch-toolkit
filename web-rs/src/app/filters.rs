@@ -249,10 +249,10 @@ pub(crate) fn Filters() -> impl IntoView {
                     />
                 </div>
                 <div class="control-group">
-                    <span class="chips-label">"Released:"</span>
+                    <span class="chips-label">"First seen:"</span>
                     <select
-                        prop:value=move || state.filters.release_window.get()
-                        on:change=move |ev| state.filters.release_window.set(event_target_value(&ev))
+                        prop:value=move || state.filters.detected_window.get()
+                        on:change=move |ev| state.filters.detected_window.set(event_target_value(&ev))
                     >
                         <option value="">"Any time"</option>
                         <option value="1">"Last 24 hours"</option>
@@ -261,14 +261,14 @@ pub(crate) fn Filters() -> impl IntoView {
                         <option value="90">"Last 90 days"</option>
                         <option value="custom">"Custom range…"</option>
                     </select>
-                    <Show when=move || state.filters.release_window.get() == "custom">
+                    <Show when=move || state.filters.detected_window.get() == "custom">
                         <label class="inline">
                             "After"
                             <input
                                 type="date"
-                                prop:value=move || state.filters.release_after_date.get()
+                                prop:value=move || state.filters.detected_after_date.get()
                                 on:change=move |ev| {
-                                    state.filters.release_after_date.set(event_target_value(&ev))
+                                    state.filters.detected_after_date.set(event_target_value(&ev))
                                 }
                             />
                         </label>
@@ -276,9 +276,9 @@ pub(crate) fn Filters() -> impl IntoView {
                             "Before"
                             <input
                                 type="date"
-                                prop:value=move || state.filters.release_before_date.get()
+                                prop:value=move || state.filters.detected_before_date.get()
                                 on:change=move |ev| {
-                                    state.filters.release_before_date.set(event_target_value(&ev))
+                                    state.filters.detected_before_date.set(event_target_value(&ev))
                                 }
                             />
                         </label>

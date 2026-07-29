@@ -151,10 +151,10 @@ where
     C: std::future::Future<Output = anyhow::Result<CurrentPatches>>,
 {
     let mut filter = args.filter;
-    // Resolve the relative release-date window into an absolute lower bound; the
+    // Resolve the relative first-seen window into an absolute lower bound; the
     // filter is applied client-side in build_rows, which has no clock.
-    if let Some(days) = filter.release_within_days {
-        filter.release_after = Some((now - Duration::days(days.max(0))).timestamp());
+    if let Some(days) = filter.detected_within_days {
+        filter.detected_after = Some((now - Duration::days(days.max(0))).timestamp());
     }
     // Install-history queries are fetched fresh per query and narrowed server-side by
     // identity (org/location/role) via the patch `df`; the node-class facet and the
@@ -521,7 +521,7 @@ mod tests {
             severity: Some(severity.into()),
             status: Some(status.into()),
             patch_type: None,
-            release_timestamp: Some(fixed_now().timestamp() as f64),
+            collected_timestamp: Some(fixed_now().timestamp() as f64),
             installed_timestamp: None,
         }
     }
@@ -554,9 +554,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "results": [
                     { "deviceId": 10, "kbNumber": "KB1", "status": "MANUAL",
-                      "severity": "CRITICAL", "releaseDate": aged },
+                      "severity": "CRITICAL", "timestamp": aged },
                     { "deviceId": 20, "kbNumber": "KB2", "status": "APPROVED",
-                      "severity": "LOW", "releaseDate": aged }
+                      "severity": "LOW", "timestamp": aged }
                 ],
                 "cursor": ""
             })))

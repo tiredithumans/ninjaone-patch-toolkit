@@ -176,8 +176,22 @@ pub struct Patch {
     pub status: Option<String>,
     #[serde(default, rename = "type")]
     pub patch_type: Option<String>,
-    #[serde(default, alias = "releaseDate", alias = "timestamp")]
-    pub release_timestamp: Option<f64>,
+    /// When NinjaOne last collected/updated this patch record — **not** a patch
+    /// release date.
+    ///
+    /// The API exposes no release date at all: per the official spec, `DeviceOSPatch`
+    /// and `DeviceSoftwarePatch` carry only `installedAt` ("Installation attempt
+    /// timestamp") and `timestamp` ("Date/Time when data was collected/updated"),
+    /// and `releaseDate` appears nowhere in it. This field used to alias
+    /// `releaseDate` too and was named `release_timestamp`, so every consumer read a
+    /// collection time as though it were a publication date — which made the SLA
+    /// rollup compare *now* against a timestamp that is always recent and therefore
+    /// report ~0 breaches on any fleet.
+    ///
+    /// For a *pending* patch this is the closest thing available to "how long have we
+    /// known about this", which is what the SLA and age rollups now say they measure.
+    #[serde(default, alias = "timestamp")]
+    pub collected_timestamp: Option<f64>,
     #[serde(default, alias = "installedAt")]
     pub installed_timestamp: Option<f64>,
 }
@@ -190,8 +204,10 @@ impl Patch {
             .unwrap_or(Severity::Unknown)
     }
 
-    pub fn released_at(&self) -> Option<DateTime<Utc>> {
-        self.release_timestamp.and_then(unix_to_datetime)
+    /// When NinjaOne first reported this patch record. Named for what it is — see
+    /// [`Patch::collected_timestamp`]; this is not a release date.
+    pub fn first_seen_at(&self) -> Option<DateTime<Utc>> {
+        self.collected_timestamp.and_then(unix_to_datetime)
     }
 
     pub fn installed_at(&self) -> Option<DateTime<Utc>> {
@@ -318,9 +334,11 @@ pub struct PatchRow {
     pub severity: String,
     pub severity_rank: u8,
     pub status: String,
-    pub release_date: Option<String>,
+    /// Formatted [`Patch::collected_timestamp`] — when NinjaOne first reported the
+    /// patch, not when it was published. See that field for why.
+    pub first_seen_date: Option<String>,
     pub installed_date: Option<String>,
-    pub release_ts: Option<i64>,
+    pub first_seen_ts: Option<i64>,
     pub installed_ts: Option<i64>,
 }
 
@@ -529,7 +547,7 @@ mod tests {
         );
     }
 
-    fn patch_with_release(ts: f64) -> Patch {
+    fn patch_collected_at(ts: f64) -> Patch {
         Patch {
             device_id: None,
             kb_number: None,
@@ -539,16 +557,16 @@ mod tests {
             severity: None,
             status: None,
             patch_type: None,
-            release_timestamp: Some(ts),
+            collected_timestamp: Some(ts),
             installed_timestamp: None,
         }
     }
 
     #[test]
-    fn millisecond_release_timestamp_normalizes_to_seconds() {
+    fn millisecond_collected_timestamp_normalizes_to_seconds() {
         let secs = 1_700_000_000.0; // 2023-11-14, comfortably in Unix-seconds range
-        let from_secs = patch_with_release(secs).released_at();
-        let from_millis = patch_with_release(secs * 1000.0).released_at();
+        let from_secs = patch_collected_at(secs).first_seen_at();
+        let from_millis = patch_collected_at(secs * 1000.0).first_seen_at();
         assert!(from_secs.is_some());
         assert_eq!(
             from_secs, from_millis,

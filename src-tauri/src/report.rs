@@ -130,7 +130,7 @@ pub fn render_report(result: &QueryResult) -> String {
     write_severity_chart(&mut buf, &total_severity(&result.severity_by_org));
     buf.push_str("</section>");
 
-    buf.push_str("<section><h2>Pending patch age</h2>");
+    buf.push_str("<section><h2>Pending patch age (since first seen)</h2>");
     write_age_chart(&mut buf, &result.age_buckets);
     buf.push_str("</section>");
 
@@ -528,7 +528,7 @@ mod tests {
             "Compliance by organization",
             "Compliance by OS",
             "Pending patches by severity",
-            "Pending patch age",
+            "Pending patch age (since first seen)",
             "Top patch failures",
             "Devices needing reboot",
         ] {
