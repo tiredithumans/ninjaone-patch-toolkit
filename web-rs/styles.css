@@ -512,6 +512,20 @@ tbody tr:hover {
   color: #93c5fd;
 }
 
+/* Optional is a real NinjaOne severity and Unknown is one it sent that we couldn't
+   map — both used to fall through to `.sev-none`, rendering "low priority" and
+   "unidentified" identically in the Patches table. */
+.sev-optional {
+  background: rgba(148, 163, 184, 0.16);
+  color: #cbd5e1;
+}
+
+.sev-unknown {
+  background: rgba(107, 114, 128, 0.2);
+  color: #9ca3af;
+  font-style: italic;
+}
+
 .sev-none {
   background: var(--panel-2);
   color: var(--muted);
@@ -990,8 +1004,21 @@ tbody tr:hover {
   background: #fb923c;
 }
 
+/* Security and Recommended need swatches like every other band. The bar fills for
+   both exist as `.chart .seg-*` rules, but those are scoped to `.chart` and set
+   `fill`, which does nothing to a legend `<span>` — so these two legend rows painted
+   a transparent 12px hole next to their counts, leaving the magenta and cyan
+   segments with no key at all. On third-party patches these are the *common* bands. */
+.chart-swatch.seg-security {
+  background: #e879f9;
+}
+
 .chart-swatch.seg-moderate {
   background: #fbbf24;
+}
+
+.chart-swatch.seg-recommended {
+  background: #22d3ee;
 }
 
 .chart-swatch.seg-low {

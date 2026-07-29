@@ -300,6 +300,12 @@ pub(crate) fn sev_class(sev: &str) -> &'static str {
         "Moderate" => "sev sev-moderate",
         "Recommended" => "sev sev-recommended",
         "Low" => "sev sev-low",
+        "Optional" => "sev sev-optional",
+        "Unknown" => "sev sev-unknown",
+        // Anything the backend's `Severity::label()` doesn't produce. Distinct from
+        // `sev-unknown`, which is a severity NinjaOne *did* send and `from_raw`
+        // couldn't map — that distinction is the difference between "low priority"
+        // and "we don't know what this is", and both used to render identically.
         _ => "sev sev-none",
     }
 }
@@ -395,15 +401,24 @@ fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
     }
 }
 
-/// Severity ordinal (0 = most urgent), matching the backend's rank order.
+/// Severity ordinal (0 = most urgent) — the exact inverse of the backend's
+/// `Severity::rank()` (`src-tauri/src/model.rs`), which runs Critical 7 → Unknown 0.
+///
+/// `Security` and `Recommended` were missing, so both fell through to the catch-all
+/// and tied with `Unknown` *below* `Optional` — the opposite of the documented order,
+/// on the two bands NinjaOne uses most for third-party patches. This only drives the
+/// browser demo (the desktop app sorts backend-side via `RowSort`), which is also the
+/// README screenshot source.
 fn sev_ordinal(sev: &str) -> u8 {
     match sev {
         "Critical" => 0,
         "Important" => 1,
-        "Moderate" => 2,
-        "Low" => 3,
-        "Optional" => 4,
-        _ => 5,
+        "Security" => 2,
+        "Moderate" => 3,
+        "Recommended" => 4,
+        "Low" => 5,
+        "Optional" => 6,
+        _ => 7,
     }
 }
 
@@ -619,6 +634,49 @@ mod tests {
             first_seen_date: None,
             installed_date: installed.map(Into::into),
         }
+    }
+
+    #[test]
+    fn sev_ordinal_inverts_the_backend_rank_for_every_band() {
+        // The backend's `Severity::rank()` is Critical 7, Important 6, Security 5,
+        // Moderate 4, Recommended 3, Low 2, Optional 1, Unknown 0. This ordinal must
+        // be its exact inverse. Security and Recommended were absent and tied with
+        // Unknown below Optional, so a demo sort put ungraded security updates last.
+        let ordered = [
+            "Critical",
+            "Important",
+            "Security",
+            "Moderate",
+            "Recommended",
+            "Low",
+            "Optional",
+            "Unknown",
+        ];
+        let ordinals: Vec<u8> = ordered.iter().map(|s| sev_ordinal(s)).collect();
+        assert_eq!(
+            ordinals,
+            (0..8).collect::<Vec<u8>>(),
+            "every band needs a distinct ordinal in backend rank order"
+        );
+        assert!(
+            sev_ordinal("Security") < sev_ordinal("Optional"),
+            "Security must outrank Optional"
+        );
+        assert!(
+            sev_ordinal("Recommended") < sev_ordinal("Unknown"),
+            "Recommended must outrank Unknown"
+        );
+    }
+
+    #[test]
+    fn sev_class_distinguishes_optional_from_unknown() {
+        // Both used to collapse into `sev-none`, rendering "low priority" and
+        // "NinjaOne sent a value we couldn't map" identically.
+        assert_eq!(sev_class("Optional"), "sev sev-optional");
+        assert_eq!(sev_class("Unknown"), "sev sev-unknown");
+        assert_eq!(sev_class("Security"), "sev sev-security");
+        assert_eq!(sev_class("Recommended"), "sev sev-recommended");
+        assert_eq!(sev_class("something-else"), "sev sev-none");
     }
 
     #[test]
