@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-29
+
 ### Added
 
 - **Click a rollup number to see the rows behind it.** The Compliance and Failures tabs were
