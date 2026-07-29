@@ -5,6 +5,7 @@ use crate::api;
 use crate::demo;
 use crate::types::*;
 
+mod actions;
 mod charts;
 mod controls;
 mod filters;
@@ -16,6 +17,7 @@ mod toaster;
 mod update;
 mod util;
 
+use actions::{ActionBar, ConfirmActionModal, JobsTable};
 use charts::{ComplianceByOsBars, ComplianceCharts};
 use controls::RunControls;
 use filters::Filters;
@@ -27,8 +29,9 @@ use toaster::Toaster;
 use update::UpdateSplash;
 use util::{
     MdBlock, MdSpan, SummaryCounts, aged_badge, aria_sort, date_to_epoch, epoch_to_date,
-    filter_chips, group_thousands, is_fleet_tab, next_sort, non_empty, parse_changelog, parse_opt,
-    sev_class, sort_glyph, sort_patch_rows, status_class, summary_line, tab_class,
+    filter_chips, format_duration, group_thousands, is_fleet_tab, job_mode_label, next_sort,
+    non_empty, parse_changelog, parse_opt, sev_class, sort_glyph, sort_patch_rows, status_class,
+    summary_line, tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;
@@ -67,9 +70,15 @@ pub fn App() -> impl IntoView {
         spawn_local(async move {
             if let Ok(a) = api::auth_status().await {
                 let authed = a.authenticated;
+                state.refresh_action_availability(&a);
+                let can_act = authed && a.actions_enabled && a.write_enabled;
                 state.session.auth.set(Some(a));
                 if authed {
                     state.load_lookups();
+                }
+                if can_act {
+                    state.load_scripts();
+                    state.refresh_jobs();
                 }
             }
         });
@@ -88,6 +97,12 @@ pub fn App() -> impl IntoView {
         // empty until the user presses Run query, just like the real app.
         state.session.web_mode.set(true);
         state.enter_demo();
+        // The action surface still renders in the demo — hiding it would make the
+        // hosted page a dishonest advertisement — but every control is disabled and
+        // says why.
+        state.actions.blocked_reason.set(Some(
+            "Patch actions run only in the desktop app.".to_string(),
+        ));
     }
 
     // Stream live record counts from the backend into `progress`, ignoring events
@@ -104,6 +119,29 @@ pub fn App() -> impl IntoView {
             "swInstalls" => p.sw_installs = ev.loaded,
             "joining" => p.joining = true,
             _ => {}
+        });
+    });
+
+    // Live job status from the backend poller. Rows arrive already advanced, so
+    // this merges them in by job id rather than refetching the whole list.
+    api::on_action_progress(move |ev| {
+        state
+            .actions
+            .dispatch_progress
+            .set(match ev.stage.as_str() {
+                "dispatching" => Some((ev.dispatched, ev.total)),
+                _ => None,
+            });
+        if ev.jobs.is_empty() {
+            return;
+        }
+        state.actions.jobs.update(|jobs| {
+            for incoming in ev.jobs {
+                match jobs.iter_mut().find(|j| j.id == incoming.id) {
+                    Some(slot) => *slot = incoming,
+                    None => jobs.push(incoming),
+                }
+            }
         });
     });
 
@@ -144,6 +182,7 @@ pub fn App() -> impl IntoView {
             <Results/>
             <Toaster/>
             <UpdateSplash/>
+            <ConfirmActionModal/>
         </main>
     }
 }

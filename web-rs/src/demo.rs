@@ -97,6 +97,21 @@ fn org_name(id: i64) -> Option<&'static str> {
     ORGS.iter().find(|(i, _)| *i == id).map(|(_, n)| *n)
 }
 
+/// Stable synthetic device id derived from the device name (FNV-1a, 32-bit).
+///
+/// Selection is device-keyed, so every sample row for a given host must resolve to
+/// the same id — otherwise the demo's checkboxes would treat each row as its own
+/// device, and "3 devices selected" would really mean three rows on one machine.
+fn device_id_of(name: &str) -> i64 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in name.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    // Keep it positive and small enough to read in a debugger.
+    i64::from(hash & 0x7fff_ffff)
+}
+
 /// One sample row. Arg order mirrors the Patches table columns, then the node class.
 /// org/location/role IDs are resolved from the names so the data table stays readable.
 #[allow(clippy::too_many_arguments)]
@@ -122,11 +137,15 @@ fn row(
         role_id: role_id_of(role),
         node_class,
         row: PatchRow {
+            device_id: device_id_of(device),
             device_name: device.to_string(),
             organization: org.to_string(),
             location: opt(location),
             device_role: opt(role),
             os_name: opt(os),
+            // The sample fleet is all online; the demo's action controls are
+            // disabled anyway, so this never changes what it shows.
+            offline: false,
             patch_type: patch_type.to_string(),
             kb: opt(kb),
             name: name.to_string(),

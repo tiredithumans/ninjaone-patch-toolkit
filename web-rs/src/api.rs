@@ -187,6 +187,77 @@ pub async fn export_report() -> Result<Option<String>, String> {
     invoke("export_report_html", no_args()).await
 }
 
+// --- Device actions ----------------------------------------------------------
+
+/// Forces a fresh OAuth consent so the grant can pick up the `management` scope.
+/// The refresh grant never re-sends `scope`, so an install that signed in before
+/// patch actions were enabled keeps its read-only grant until this runs.
+pub async fn reauthorize() -> Result<(), String> {
+    invoke("reauthorize", no_args()).await
+}
+
+/// Reports what an action would do — eligible/skipped devices, warnings, hard
+/// blockers, the literal parameter string — and issues a confirmation token bound
+/// to exactly this request.
+pub async fn plan_action(request: ActionRequest) -> Result<ActionPlan, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args {
+        request: ActionRequest,
+    }
+    invoke("plan_action", args_of(&Args { request })).await
+}
+
+/// Dispatches the action. The backend re-plans and re-checks every guardrail, so a
+/// request that skipped `plan_action` (or whose selection changed since) is
+/// refused rather than trusted.
+pub async fn run_action(request: ActionRequest) -> Result<ActionBatch, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args {
+        request: ActionRequest,
+    }
+    invoke("run_action", args_of(&Args { request })).await
+}
+
+pub async fn list_jobs() -> Result<Vec<JobReport>, String> {
+    invoke("list_jobs", no_args()).await
+}
+
+pub async fn clear_jobs() -> Result<Vec<JobReport>, String> {
+    invoke("clear_jobs", no_args()).await
+}
+
+pub async fn list_scripts() -> Result<Vec<ScriptSummary>, String> {
+    invoke("list_scripts", no_args()).await
+}
+
+pub async fn list_run_as_options(device_id: i64) -> Result<RunAsOptions, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args {
+        device_id: i64,
+    }
+    invoke("list_run_as_options", args_of(&Args { device_id })).await
+}
+
+/// Subscribes to backend `action:progress` events. Same lifetime and browser-mode
+/// handling as [`on_query_progress`].
+pub fn on_action_progress(mut handler: impl FnMut(ActionProgressEvent) + 'static) {
+    if !is_tauri() {
+        return;
+    }
+    let cb = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+        if let Ok(payload) = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
+            && let Ok(ev) = serde_wasm_bindgen::from_value::<ActionProgressEvent>(payload)
+        {
+            handler(ev);
+        }
+    });
+    let _ = tauri_listen("action:progress", cb.as_ref());
+    cb.forget();
+}
+
 // --- Updates -----------------------------------------------------------------
 
 pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
