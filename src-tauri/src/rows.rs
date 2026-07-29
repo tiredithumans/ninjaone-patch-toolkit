@@ -47,7 +47,7 @@ impl LookupMaps {
 /// One slice of fetched patches tagged with its family and (for installs) a status
 /// to apply when the record omits one.
 pub struct PatchSource<'a> {
-    pub patches: &'a [Patch],
+    pub patches: &'a [&'a Patch],
     pub type_label: &'static str,
     pub status_override: Option<&'static str>,
     /// When set, only patches whose raw status (or, if absent, `status_override`)
@@ -217,7 +217,7 @@ pub struct ComplianceBucket {
 /// approved) patches. `sla_days` flags aged Critical/Important backlog.
 pub fn build_compliance(
     summaries: &[DeviceSummary],
-    current_patches: &[Patch],
+    current_patches: &[&Patch],
     devices_by_id: &HashMap<i64, &Device>,
     maps: &LookupMaps,
     sla_days: i64,
@@ -317,7 +317,7 @@ pub struct OsCompliance {
 /// no reported OS fall under "(unknown)".
 pub fn build_compliance_by_os(
     summaries: &[DeviceSummary],
-    current_patches: &[Patch],
+    current_patches: &[&Patch],
     devices_by_id: &HashMap<i64, &Device>,
     sla_days: i64,
     now: DateTime<Utc>,
@@ -391,7 +391,7 @@ pub fn build_compliance_by_os(
 
 /// Counts current pending/approved patches per device for compliance and the
 /// reboot/summary views. NinjaOne uses `MANUAL` for pending-approval patches.
-pub fn pending_counts(current_patches: &[Patch]) -> HashMap<i64, usize> {
+pub fn pending_counts(current_patches: &[&Patch]) -> HashMap<i64, usize> {
     let mut counts: HashMap<i64, usize> = HashMap::new();
     for p in current_patches {
         if matches!(p.status.as_deref(), Some("MANUAL") | Some("APPROVED"))
@@ -530,7 +530,7 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
 /// Buckets pending (MANUAL/APPROVED) current patches by org and MSRC severity for
 /// the dashboard's severity breakdown. Sorted by organization name.
 pub fn build_severity_by_org(
-    current_patches: &[Patch],
+    current_patches: &[&Patch],
     devices_by_id: &HashMap<i64, &Device>,
     maps: &LookupMaps,
 ) -> Vec<OrgSeverity> {
@@ -579,7 +579,7 @@ const AGE_BUCKET_LABELS: [&str; 5] = [
 /// Builds the pending-patch age histogram from release age. A pending patch with no
 /// known release date can't be proven fresh, so it falls into the oldest bucket —
 /// the same "can't prove fresh → aged" convention `build_compliance` uses.
-pub fn build_age_buckets(current_patches: &[Patch], now: DateTime<Utc>) -> Vec<AgeBucket> {
+pub fn build_age_buckets(current_patches: &[&Patch], now: DateTime<Utc>) -> Vec<AgeBucket> {
     let mut counts = [0usize; 5];
     for p in current_patches {
         if !is_pending(p.status.as_deref()) {
@@ -982,6 +982,12 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    /// Borrows an owned patch fixture into the `&[&Patch]` shape the rollups take.
+    /// Production builds these by filtering the `Arc` cache; the tests own theirs.
+    fn refs(patches: &[Patch]) -> Vec<&Patch> {
+        patches.iter().collect()
+    }
     use super::*;
     use crate::model::OsInfo;
 
@@ -1044,7 +1050,7 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: None,
                 status_filter: None,
@@ -1076,7 +1082,7 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: None,
                 status_filter: None,
@@ -1105,7 +1111,7 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: None,
                 status_filter: None,
@@ -1128,7 +1134,7 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: Some("INSTALLED"),
                 status_filter: None,
@@ -1152,7 +1158,7 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: None,
                 status_filter: Some(&pending_set),
@@ -1183,7 +1189,7 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: Some("INSTALLED"),
                 status_filter: Some(&failed_set),
@@ -1211,7 +1217,7 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: Some("INSTALLED"),
                 status_filter: Some(&installed_set),
@@ -1232,9 +1238,9 @@ mod tests {
             patch(1, "MANUAL", "CRITICAL", Some(45)), // pending (MANUAL), aged
             patch(1, "APPROVED", "IMPORTANT", Some(2)), // approved, fresh
         ];
-        let counts = pending_counts(&current);
+        let counts = pending_counts(&refs(&current));
         let summaries = build_device_summaries(&[&d1, &d2], &counts, &maps);
-        let buckets = build_compliance(&summaries, &current, &by_id, &maps, 30, Utc::now());
+        let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, 30, Utc::now());
         assert_eq!(buckets.len(), 1);
         let b = &buckets[0];
         assert_eq!(b.devices_total, 2);
@@ -1252,9 +1258,9 @@ mod tests {
         let by_id = HashMap::from([(1, &online), (2, &offline)]);
         let maps = maps();
         let current = vec![patch(1, "MANUAL", "CRITICAL", Some(1))];
-        let counts = pending_counts(&current);
+        let counts = pending_counts(&refs(&current));
         let summaries = build_device_summaries(&[&online, &offline], &counts, &maps);
-        let buckets = build_compliance(&summaries, &current, &by_id, &maps, 30, Utc::now());
+        let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, 30, Utc::now());
         assert_eq!(buckets.len(), 1);
         let b = &buckets[0];
         assert_eq!(
@@ -1274,9 +1280,9 @@ mod tests {
         let by_id = HashMap::from([(1, &d1), (2, &d2)]);
         let maps = maps();
         let current = vec![patch(1, "MANUAL", "CRITICAL", Some(45))]; // aged, on d1
-        let counts = pending_counts(&current);
+        let counts = pending_counts(&refs(&current));
         let summaries = build_device_summaries(&[&d1, &d2], &counts, &maps);
-        let buckets = build_compliance_by_os(&summaries, &current, &by_id, 30, Utc::now());
+        let buckets = build_compliance_by_os(&summaries, &refs(&current), &by_id, 30, Utc::now());
         assert_eq!(buckets.len(), 2, "one bucket per distinct OS");
         // Sorted by OS name (case-insensitive): "Windows 11 Pro" before "Windows Server 2022".
         let win11 = &buckets[0];
@@ -1312,16 +1318,16 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: None,
                 status_filter: None,
             }],
             &FilterParams::default(),
         );
-        let counts = pending_counts(&patches);
+        let counts = pending_counts(&refs(&patches));
         let devices = build_device_summaries(&[&d], &counts, &maps);
-        let compliance = build_compliance(&devices, &patches, &by_id, &maps, 30, Utc::now());
+        let compliance = build_compliance(&devices, &refs(&patches), &by_id, &maps, 30, Utc::now());
         let result = QueryResult {
             rows,
             devices,
@@ -1368,16 +1374,16 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: None,
                 status_filter: None,
             }],
             &FilterParams::default(),
         );
-        let counts = pending_counts(&patches);
+        let counts = pending_counts(&refs(&patches));
         let devices = build_device_summaries(&[&d1, &d2], &counts, &maps);
-        let compliance = build_compliance(&devices, &patches, &by_id, &maps, 30, Utc::now());
+        let compliance = build_compliance(&devices, &refs(&patches), &by_id, &maps, 30, Utc::now());
         let result = QueryResult {
             rows,
             devices,
@@ -1429,7 +1435,7 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: None,
                 status_filter: None,
@@ -1490,7 +1496,7 @@ mod tests {
             &by_id,
             &maps,
             &[PatchSource {
-                patches: &patches,
+                patches: &refs(&patches),
                 type_label: "OS",
                 status_override: None,
                 status_filter: None,
@@ -1520,7 +1526,7 @@ mod tests {
             "PatchRow",
         );
 
-        let summaries = build_device_summaries(&[&d], &pending_counts(&patches), &maps);
+        let summaries = build_device_summaries(&[&d], &pending_counts(&refs(&patches)), &maps);
         assert_keys_present(
             &serde_json::to_value(&summaries[0]).unwrap(),
             &[
@@ -1534,7 +1540,8 @@ mod tests {
             "DeviceSummary",
         );
 
-        let compliance = build_compliance(&summaries, &patches, &by_id, &maps, 30, Utc::now());
+        let compliance =
+            build_compliance(&summaries, &refs(&patches), &by_id, &maps, 30, Utc::now());
         assert_keys_present(
             &serde_json::to_value(&compliance[0]).unwrap(),
             &[
@@ -1548,7 +1555,7 @@ mod tests {
             "ComplianceBucket",
         );
 
-        let by_os = build_compliance_by_os(&summaries, &patches, &by_id, 30, Utc::now());
+        let by_os = build_compliance_by_os(&summaries, &refs(&patches), &by_id, 30, Utc::now());
         assert_keys_present(
             &serde_json::to_value(&by_os[0]).unwrap(),
             &[
@@ -1839,7 +1846,7 @@ mod tests {
             patch(1, "APPROVED", "IMPORTANT", Some(1)),
             patch(1, "REJECTED", "CRITICAL", Some(1)), // not pending → ignored
         ];
-        let sev = build_severity_by_org(&current, &by_id, &maps);
+        let sev = build_severity_by_org(&refs(&current), &by_id, &maps);
         assert_eq!(sev.len(), 1);
         assert_eq!(sev[0].organization, "Contoso");
         assert_eq!(sev[0].counts.critical, 1);
@@ -1857,7 +1864,7 @@ mod tests {
             unknown,
             patch(1, "INSTALLED", "CRITICAL", Some(5)), // not pending → ignored
         ];
-        let buckets = build_age_buckets(&current, Utc::now());
+        let buckets = build_age_buckets(&refs(&current), Utc::now());
         assert_eq!(buckets.len(), 5, "fixed five-bucket layout");
         assert_eq!(buckets[0].count, 1, "0-30 bucket");
         assert_eq!(
@@ -1888,7 +1895,7 @@ mod tests {
         let d1 = device(1, 10, "Windows Server 2022");
         let by_id = HashMap::from([(1, &d1)]);
         let sev =
-            build_severity_by_org(&[patch(1, "MANUAL", "CRITICAL", Some(1))], &by_id, &maps());
+            build_severity_by_org(&[&patch(1, "MANUAL", "CRITICAL", Some(1))], &by_id, &maps());
         let sev_json = serde_json::to_value(&sev[0]).unwrap();
         assert_keys_present(&sev_json, &["organization", "counts"], "OrgSeverity");
         assert_keys_present(
@@ -1904,7 +1911,7 @@ mod tests {
             "SeverityCounts",
         );
 
-        let buckets = build_age_buckets(&[patch(1, "MANUAL", "CRITICAL", Some(1))], Utc::now());
+        let buckets = build_age_buckets(&[&patch(1, "MANUAL", "CRITICAL", Some(1))], Utc::now());
         assert_keys_present(
             &serde_json::to_value(&buckets[0]).unwrap(),
             &["label", "count"],
