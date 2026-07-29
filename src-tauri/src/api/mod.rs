@@ -99,7 +99,7 @@ impl NinjaApiClient {
                 {
                     attempt += 1;
                     warn!(?e, attempt, "request timed out, retrying");
-                    tokio::time::sleep(Duration::from_secs(2u64.pow(attempt as u32))).await;
+                    tokio::time::sleep(backoff(attempt)).await;
                     continue;
                 }
                 // The body was already on the wire when the clock ran out, so the
@@ -112,6 +112,20 @@ impl NinjaApiClient {
                          be queued in NinjaOne. It was NOT retried; check the device's activity \
                          feed before trying again",
                     );
+                }
+                // A connect failure means the request never reached the server, so
+                // replaying it can't double-execute — but only reads take this arm,
+                // because `is_connect()` can be reported for a connection that died
+                // mid-flight and we won't re-dispatch an action on a maybe.
+                Err(e)
+                    if e.is_connect()
+                        && attempt < MAX_RETRIES
+                        && replay == ReplaySafety::Idempotent =>
+                {
+                    attempt += 1;
+                    warn!(?e, attempt, "connect failed, retrying");
+                    tokio::time::sleep(backoff(attempt)).await;
+                    continue;
                 }
                 Err(e) => return Err(e).context("http send"),
             };
@@ -135,6 +149,27 @@ impl NinjaApiClient {
                 // on the next attempt instead of resending the same dead token.
                 self.auth.invalidate_access_token();
                 attempt += 1;
+                continue;
+            }
+            // A 5xx is the gateway or the reporting backend failing to produce this
+            // page, not a rejection of what we asked for — and it is the *most*
+            // common transient failure on the long reporting pulls, where a
+            // six-figure feed gives dozens of sequential chances to hit one.
+            // Without this arm a single 502 on page 63 of 80 discards every page
+            // already accumulated by `get_paginated_reporting` and the operator
+            // re-runs the whole fetch from scratch.
+            //
+            // Reads only: a 5xx on an acting POST is exactly the ambiguous case
+            // `ReplaySafety::ActOnce` exists for — the gateway may have failed
+            // *after* handing the job to the device queue, so the dispatch stays
+            // `JobState::Unknown` and is polled rather than replayed.
+            if status.is_server_error()
+                && attempt < MAX_RETRIES
+                && replay == ReplaySafety::Idempotent
+            {
+                attempt += 1;
+                warn!(%method, %url, %status, attempt, "server error, retrying");
+                tokio::time::sleep(backoff(attempt)).await;
                 continue;
             }
             if !status.is_success() {
@@ -318,6 +353,15 @@ impl NinjaApiClient {
             }
         }
     }
+}
+
+/// Exponential backoff for a retryable *transport* or 5xx failure: 2s, 4s, 8s.
+///
+/// Deliberately not used for 429 — there the server tells us how long to wait via
+/// `Retry-After`, and second-guessing it is how a client turns a soft rate limit
+/// into a hard one.
+fn backoff(attempt: u8) -> Duration {
+    Duration::from_secs(2u64.pow(attempt as u32))
 }
 
 /// Extracts the next-page token from a `cursor` field that may be a string or an
@@ -702,6 +746,77 @@ mod tests {
             attempts > 1,
             "an idempotent GET must still retry; saw {attempts} attempt(s)"
         );
+    }
+
+    #[tokio::test]
+    async fn get_5xx_is_retried_and_keeps_the_accumulated_pages() {
+        use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Page 1 succeeds and hands back a live cursor.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{ "id": 1, "kbNumber": "KB1" }],
+                "cursor": "tok-2"
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2 fails once with a 502 — the shape of a gateway hiccup partway
+        // through a long reporting pull. Before the 5xx arm existed this discarded
+        // page 1 as well and the operator re-ran the whole fetch.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .and(query_param("cursor", "tok-2"))
+            .respond_with(ResponseTemplate::new(502))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .and(query_param("cursor", "tok-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{ "id": 2, "kbNumber": "KB2" }],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        let patches = NinjaApiClient::new(http, auth)
+            .fleet_os_patches(None, None, None)
+            .await
+            .expect("a transient 502 must be retried, not fail the whole fetch");
+        assert_eq!(patches.len(), 2, "both pages must survive the retry");
+    }
+
+    #[tokio::test]
+    async fn post_5xx_is_not_retried() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A 5xx on an acting POST is ambiguous — the gateway may have failed after
+        // the job reached the device queue — so it must stay `ActOnce`. Exactly one
+        // attempt may reach the server.
+        Mock::given(method("POST"))
+            .and(path("/api/v2/device/3/patch/os/apply"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        NinjaApiClient::new(http, auth)
+            .device_patch_apply(3, crate::model::PatchType::Os)
+            .await
+            .expect_err("a 5xx on an acting POST must not be replayed");
     }
 
     #[tokio::test]
