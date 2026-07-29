@@ -52,12 +52,12 @@ Key files to read before editing:
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
 ├── src/main.rs                  # binary entry → lib::run()
-├── src/state.rs                 # AppState: auth, api client, settings (Mutex), last_result + whole-fleet device/current-patch caches + tenant-stamped job store & confirm-token slot
+├── src/state.rs                 # AppState: auth, api client, settings (Mutex), last_result + whole-fleet device + per-family current-patch caches + tenant-stamped job store & confirm-token slot
 ├── src/auth.rs                  # OAuth2 PKCE (S256, loopback redirect), keyring, token refresh, conditional scope + management-grant detection
 ├── src/actions.rs               # device-action domain: ActionKind/JobState/JobReport, pure `plan()` guardrails, build_parameters, activity correlation
 ├── src/actions/audit.rs         # append-only action-audit.jsonl (parameters redacted)
 ├── src/api/                     # NinjaOne Public API client
-│   ├── mod.rs                   # NinjaApiClient: /api/v2, bearer, retry (timeout/429/401 + ReplaySafety), cursor paging
+│   ├── mod.rs                   # NinjaApiClient: /api/v2, bearer, retry (timeout/connect/5xx/429/401 + ReplaySafety), cursor paging
 │   ├── devices.rs               # device inventory (df filter)
 │   ├── patches.rs               # current patches + install-history endpoints
 │   ├── actions.rs               # WRITE path: patch scan/apply, reboot, script/run, automation-script library
@@ -223,14 +223,28 @@ secrets are **not** stored there — see below).
 
 - **Whole-fleet prefetch + client-side scoping (load-bearing).** The device inventory and current
   patches (OS + 3rd-party) are fetched **whole-fleet** (no `df`) and cached in `AppState`
-  (`fleet_devices_cache`, `DEVICE_TTL` ~15 min since devices change rarely; `fleet_current_cache`,
-  refreshed on `force_refresh` or past `CURRENT_PATCHES_TTL`). `run_query` then scopes them to the
+  (`fleet_devices_cache`, `DEVICE_TTL` ~15 min since devices change rarely; the current patches in
+  `fleet_current_os` / `fleet_current_sw`, refreshed on `force_refresh` or past
+  `CURRENT_PATCHES_TTL`). `run_query` then scopes them to the
   selected identity facets (org/location/role/class) **client-side** via `FilterParams::device_allowed`
   — so changing org/location/role/type/severity re-filters the cache with **no** round trip. This is
   why `query_patches` takes the cached devices/current as *futures* (concurrent cold fetch) and why
-  `device_filter` no longer exists. **`force_refresh`** (camelCase `forceRefresh`, the auto-refresh tick
-  / manual ↻) bypasses the current-patch TTL to pull fresh patch state mid-patching; a normal Run query
-  leaves it false. Install history is **not** prefetched — it's fetched fresh per query, scoped
+  `device_filter` no longer exists.
+  - **The two current-patch families are cached separately, and only the requested one is fetched.**
+    `fleet_current_patches` takes `include_os` / `include_sw` straight from the query's `PatchType`; a
+    family that wasn't asked for is neither fetched nor returned (`run_query` discards it anyway). They
+    are separate slots because the families are wildly asymmetric — a whole-fleet third-party feed runs
+    to six figures and is usually the largest fetch in the query, so fetching it for an `Os` query cost
+    ~80 serial cursor pages of data that was then dropped, *and* made it the critical path (an OS-only
+    query took about as long as an ALL query). Widening `Os` → `All` still reuses whatever is warm.
+    Don't merge them back into one pair.
+  - **`force_refresh`** (camelCase `forceRefresh`, the auto-refresh tick / manual ↻) trades
+    `CURRENT_PATCHES_TTL` for `FORCE_MIN_INTERVAL` to pull fresh patch state mid-patching; a normal Run
+    query leaves it false. The floor is enforced **backend-side on purpose**: the frontend cadence is a
+    hint, and unbounded `force` made the whole cache decorative on the one path that runs unattended for
+    hours. The frontend also skips a tick while `document.hidden` (`api::document_hidden`).
+
+  Install history is **not** prefetched — it's fetched fresh per query, scoped
   server-side by `patch_filter` + status-pushed-down (too large to cache). The summary carries
   `data_fetched_at` (when the patch data was last fetched, distinct from `generated_at`) for the UI's
   "patch data as of …" label. The whole-fleet caches are tenant-scoped, so `clear_lookups_cache` drops
@@ -304,11 +318,23 @@ secrets are **not** stored there — see below).
     surface the exit code plus the activity/series correlator.
 
 - **NinjaOne API client — reuse the shared retry + pagination.** Every call goes through
-  `NinjaApiClient` (`api/mod.rs`): `{base}/api/v2{path}`, bearer auth, retry on timeout / 429
-  (honors `Retry-After`) / 401 (forces a token refresh). `get_paginated` handles **both** a bare
+  `NinjaApiClient` (`api/mod.rs`): `{base}/api/v2{path}`, bearer auth, retry on timeout / connect
+  failure / **5xx** / 429 (honors `Retry-After`) / 401 (forces a token refresh). `get_paginated`
+  handles **both** a bare
   JSON array **and** the `{ results, cursor }` envelope, where `cursor` may be a string or a
   `{ name, offset, … }` object; it stops when a page returns 0 rows even if the server echoes a
   stale token. Don't hand-roll a second reqwest/cursor loop.
+  - **The 5xx and connect arms are `Idempotent`-only.** A reporting pull is dozens of *sequential*
+    cursor pages, so a gateway 502 on a late page used to discard every page already accumulated —
+    5xx is the most common transient failure on that path, far more so than 429. But a 5xx on an
+    acting POST is exactly the ambiguity `ReplaySafety::ActOnce` exists for (the gateway may have
+    failed *after* the job reached the device queue), so writes still fail through to
+    `JobState::Unknown` and are polled, never replayed. 429/401 stay replayable for both.
+  - **reqwest's default features are off, so every one it drops must be re-added explicitly**
+    (`src-tauri/Cargo.toml`). `default-features = false` is there to pin TLS to rustls, but it also
+    drops `charset`, `http2`, and `system-proxy` — and `gzip` was never on. Uncompressed six-figure
+    JSON feeds and a fresh TLS handshake per concurrent fetch were both silent consequences of that
+    one line. If you touch the feature list, keep `gzip`, `http2`, `system-proxy`, `charset`.
 
 - **Filter — client-side identity scope vs server-side install `df` vs client-side facets.** Because
   devices/current patches are prefetched whole-fleet (above), **all** identity facets
@@ -320,6 +346,22 @@ secrets are **not** stored there — see below).
   and free-text KB/name search (`search_allowed`, which accepts a `KB` prefix on either side) are
   applied **client-side** against rows after fetch. Keep the split: an identity/scope facet extends
   `device_allowed`; a substring/text facet is a client-side `*_allowed()`.
+
+- **There is no patch release date in the NinjaOne API (load-bearing).** Grep the spec: `releaseDate`
+  appears **zero** times. `DeviceOSPatch` / `DeviceSoftwarePatch` carry only `installedAt`
+  ("Installation attempt timestamp") and `timestamp` ("Date/Time when data was collected/updated");
+  the non-`Device` `OSPatch`/`SoftwarePatch` variants carry neither. `Patch::collected_timestamp`
+  (alias `timestamp`, read via `first_seen_at()`) is therefore **detection time, not publication
+  time**, and everything derived from it — `PatchRow.first_seen_ts`/`first_seen_date`, the SLA
+  `aged_critical` rollup, `build_age_buckets`, and the `detected_within_days`/`detected_after`/
+  `detected_before` filter window — measures *how long we have known about the patch*. The UI says so
+  ("First seen", "Pending past SLA", "Pending patch age (since first seen)"); keep the naming honest
+  if you touch these. This used to be a field named `release_timestamp` aliasing a `releaseDate` that
+  never binds, so the SLA rollup compared *now* against an always-recent timestamp and reported ~0
+  breaches on any fleet — and the wiremock fixtures fed `releaseDate`, so CI proved only that the
+  aliasing worked. **Fixtures must emit `timestamp`.** Undated pending patches get their own
+  `Unknown` age bucket rather than inflating `180+ days`; they still count as aged in the SLA rollup
+  (`unwrap_or(true)` — can't prove recent).
 
 - **Severity: NinjaOne sends two vocabularies on one field (load-bearing).** The feeds mix
   uppercase MSRC values (`CRITICAL`/`IMPORTANT`/`OPTIONAL`/`NONE`) with lowercase engine values

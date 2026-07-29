@@ -11,7 +11,42 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Aged (past SLA)" reported almost nothing, on any fleet.** The app read a field it believed was
+  the patch's release date. NinjaOne's API has no such field — it exposes only the timestamp of when
+  the patch data was *collected*, which is always recent — so the SLA comparison was effectively
+  never true and the aged-patch count sat near zero however long a critical patch had been
+  outstanding. The patch-age chart was skewed the same way. The app now measures and labels this
+  honestly, as **how long NinjaOne has been reporting the patch**: the Patches column is **First
+  seen**, the compliance column is **Pending past SLA**, the chart is **Pending patch age (since
+  first seen)**, and the date filter reads **First seen**. Expect these numbers to be much higher
+  than before — that is the backlog that was previously invisible. Patches NinjaOne has never
+  timestamped now appear in their own **Unknown** age bucket instead of inflating **180+ days**.
+
+- **A single gateway hiccup no longer discards a whole query.** Large fleets are fetched as dozens of
+  sequential pages; a transient 502/503 on any one of them used to fail the entire run and throw away
+  every page already downloaded. Server errors and dropped connections are now retried with backoff.
+  Patch-apply, reboot and script actions are deliberately **not** retried this way — a failure there
+  stays ambiguous and is reported for you to check, never silently re-run.
+
 ### Changed
+
+- **Much less data over the wire.** Responses are now compressed (typically 8–12× smaller on the
+  large patch feeds), the concurrent fetches at the start of a query share one connection instead of
+  opening several, and the app now honours the proxy configured in macOS System Settings / Windows —
+  which previously prevented some managed desktops from reaching NinjaOne at all.
+
+- **Querying only OS patches no longer downloads the third-party catalogue.** The two patch families
+  are fetched and cached independently, so a **Patch type: OS** query skips the third-party feed
+  entirely — usually the largest download in a run. Widening back to **All** reuses whatever was
+  already loaded.
+
+- **Auto-refresh is no longer able to run continuously.** A refresh tick re-downloads live patch
+  state, which on a large fleet can take longer than the interval itself. Ticks are now skipped while
+  the window is hidden, a minimum interval is enforced regardless of what the UI requests, and the
+  30-second cadence — which could never complete on a large tenant — has been removed. The remaining
+  options are 1m / 5m / 15m.
 
 - **Queries over large fleets do far less work per run.** Scoping the cached patch data to your
   selected organization/location/role used to copy every matching patch record twice — once to
