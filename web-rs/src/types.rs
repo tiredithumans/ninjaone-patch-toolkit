@@ -138,7 +138,9 @@ pub struct FailureGroup {
 pub struct SeverityCounts {
     pub critical: usize,
     pub important: usize,
+    pub security: usize,
     pub moderate: usize,
+    pub recommended: usize,
     pub low: usize,
     pub optional: usize,
     pub unknown: usize,

@@ -492,9 +492,19 @@ tbody tr:hover {
   color: #fdba74;
 }
 
+.sev-security {
+  background: rgba(232, 121, 249, 0.16);
+  color: #f0abfc;
+}
+
 .sev-moderate {
   background: rgba(251, 191, 36, 0.16);
   color: #fcd34d;
+}
+
+.sev-recommended {
+  background: rgba(34, 211, 238, 0.16);
+  color: #67e8f9;
 }
 
 .sev-low {
@@ -924,8 +934,16 @@ tbody tr:hover {
   fill: #fb923c;
 }
 
+.chart .seg-security {
+  fill: #e879f9;
+}
+
 .chart .seg-moderate {
   fill: #fbbf24;
+}
+
+.chart .seg-recommended {
+  fill: #22d3ee;
 }
 
 .chart .seg-low {

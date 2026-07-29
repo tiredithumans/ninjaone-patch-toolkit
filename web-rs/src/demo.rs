@@ -424,7 +424,9 @@ fn sample_severity_by_org() -> Vec<OrgSeverity> {
             counts: SeverityCounts {
                 critical: c,
                 important: i,
+                security: 0,
                 moderate: m,
+                recommended: 0,
                 low: l,
                 optional: 0,
                 unknown: 0,

@@ -16,10 +16,14 @@ use crate::rows::{
 const MAX_TABLE_ROWS: usize = 100;
 
 /// Severity bands in most-to-least-urgent order, paired with their bar color.
-const SEVERITY_BANDS: [(&str, &str); 6] = [
+/// Mirrors `Severity::rank()` ordering, including NinjaOne's two non-MSRC
+/// classifications (`Security`, `Recommended`).
+const SEVERITY_BANDS: [(&str, &str); 8] = [
     ("Critical", "#dc2626"),
     ("Important", "#ea580c"),
+    ("Security", "#c026d3"),
     ("Moderate", "#d97706"),
+    ("Recommended", "#0891b2"),
     ("Low", "#2563eb"),
     ("Optional", "#6b7280"),
     ("Unknown", "#9ca3af"),
@@ -69,7 +73,9 @@ fn total_severity(by_org: &[OrgSeverity]) -> SeverityCounts {
     for o in by_org {
         t.critical += o.counts.critical;
         t.important += o.counts.important;
+        t.security += o.counts.security;
         t.moderate += o.counts.moderate;
+        t.recommended += o.counts.recommended;
         t.low += o.counts.low;
         t.optional += o.counts.optional;
         t.unknown += o.counts.unknown;
@@ -83,7 +89,9 @@ fn severity_value(counts: &SeverityCounts, label: &str) -> usize {
     match label {
         "Critical" => counts.critical,
         "Important" => counts.important,
+        "Security" => counts.security,
         "Moderate" => counts.moderate,
+        "Recommended" => counts.recommended,
         "Low" => counts.low,
         "Optional" => counts.optional,
         _ => counts.unknown,

@@ -242,7 +242,9 @@ pub(crate) fn sev_class(sev: &str) -> &'static str {
     match sev {
         "Critical" => "sev sev-critical",
         "Important" => "sev sev-important",
+        "Security" => "sev sev-security",
         "Moderate" => "sev sev-moderate",
+        "Recommended" => "sev sev-recommended",
         "Low" => "sev sev-low",
         _ => "sev sev-none",
     }

@@ -364,6 +364,33 @@ mod tests {
     }
 
     #[test]
+    fn severity_facet_reaches_ninjaones_own_classifications() {
+        use crate::model::Severity;
+        // The reported bug: selecting any severity made every third-party patch
+        // disappear. NinjaOne grades them `security` / `recommended` / `unknown`,
+        // none of which `from_raw` mapped, so all three collapsed onto Unknown and
+        // no facet selection could ever match them.
+        let p = FilterParams {
+            severities: vec!["SECURITY".into(), "RECOMMENDED".into()],
+            ..Default::default()
+        }
+        .prepare();
+        assert!(p.severity_allowed(Severity::from_raw("security")));
+        assert!(p.severity_allowed(Severity::from_raw("recommended")));
+        assert!(!p.severity_allowed(Severity::from_raw("critical")));
+        // An unrated patch is now reachable too, instead of being excluded by every
+        // possible selection.
+        let unrated = FilterParams {
+            severities: vec!["UNKNOWN".into()],
+            ..Default::default()
+        }
+        .prepare();
+        assert!(unrated.severity_allowed(Severity::from_raw("unknown")));
+        assert!(unrated.severity_allowed(Severity::from_raw("no-such-grade")));
+        assert!(!unrated.severity_allowed(Severity::from_raw("security")));
+    }
+
+    #[test]
     fn severity_filter_keeps_only_selected() {
         use crate::model::Severity;
         let p = FilterParams {
