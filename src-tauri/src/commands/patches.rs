@@ -262,28 +262,34 @@ where
 
     // Narrow the cached current patches to the same scope and the requested families.
     // With no identity scope every patch is kept (orphans included, as before); with
-    // a scope, only patches whose device is in the scoped set survive. The scoped
-    // subset is cloned out of the `Arc` cache — bounded by the selected scope — so
-    // the existing rollups consume owned `&[Patch]` slices unchanged. (When the whole
-    // fleet is in view the clone is larger but one-off; the win is that subsequent
-    // scoped re-filters hit the cache instead of the network.)
+    // a scope, only patches whose device is in the scoped set survive.
+    //
+    // These **borrow** from the `Arc` cache rather than cloning out of it. A whole-fleet
+    // third-party feed runs to six figures, and each `Patch` owns six `Option<String>`s,
+    // so cloning the scoped subset — and then cloning it again into `all_current` — cost
+    // millions of allocations per query for data the cache already owns and outlives.
+    // The rollups take `&[&Patch]`, so scoping is now a pointer copy.
     let in_scope = |p: &Patch| {
         !has_scope
             || p.device_id
                 .is_some_and(|id| devices_by_id.contains_key(&id))
     };
-    let scoped_os_current: Vec<Patch> = if include_os {
-        current.os.iter().filter(|p| in_scope(p)).cloned().collect()
+    let scoped_os_current: Vec<&Patch> = if include_os {
+        current.os.iter().filter(|p| in_scope(p)).collect()
     } else {
         Vec::new()
     };
-    let scoped_sw_current: Vec<Patch> = if include_sw {
-        current.sw.iter().filter(|p| in_scope(p)).cloned().collect()
+    let scoped_sw_current: Vec<&Patch> = if include_sw {
+        current.sw.iter().filter(|p| in_scope(p)).collect()
     } else {
         Vec::new()
     };
 
     // 4. Build detail rows from the scoped current families plus the install history.
+    // The install sets are owned by this call, so they're borrowed into the same
+    // `&[&Patch]` shape the scoped current families use.
+    let os_install_refs: Vec<&Patch> = os_installs.iter().collect();
+    let sw_install_refs: Vec<&Patch> = sw_installs.iter().collect();
     let mut rows = {
         let mut sources = vec![
             PatchSource {
@@ -304,13 +310,13 @@ where
             // narrow each to the requested install statuses; the override labels a
             // record that omits its own status (defaulting it to INSTALLED).
             sources.push(PatchSource {
-                patches: &os_installs,
+                patches: &os_install_refs,
                 type_label: "OS",
                 status_override: Some("INSTALLED"),
                 status_filter: Some(&install_status_set),
             });
             sources.push(PatchSource {
-                patches: &sw_installs,
+                patches: &sw_install_refs,
                 type_label: "SOFTWARE",
                 status_override: Some("INSTALLED"),
                 status_filter: Some(&install_status_set),
@@ -328,11 +334,12 @@ where
         )
     });
 
-    // 5. Compliance + reboot rollups from the scoped current set.
-    let all_current: Vec<Patch> = scoped_os_current
+    // 5. Compliance + reboot rollups from the scoped current set. Concatenating the
+    // two families copies pointers, not patches.
+    let all_current: Vec<&Patch> = scoped_os_current
         .iter()
         .chain(&scoped_sw_current)
-        .cloned()
+        .copied()
         .collect();
     let counts = pending_counts(&all_current);
     let summaries = build_device_summaries(&scoped_devices, &counts, &maps);

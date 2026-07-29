@@ -234,9 +234,13 @@ secrets are **not** stored there — see below).
   server-side by `patch_filter` + status-pushed-down (too large to cache). The summary carries
   `data_fetched_at` (when the patch data was last fetched, distinct from `generated_at`) for the UI's
   "patch data as of …" label. The whole-fleet caches are tenant-scoped, so `clear_lookups_cache` drops
-  them too. Trade-off: the scoped current-patch subset is cloned out of the `Arc` cache per query
-  (bounded by scope; a one-off larger clone only in the whole-fleet view) so the rollups keep consuming
-  owned `&[Patch]` slices unchanged.
+  them too. **Scoping borrows, never clones.** `run_query` filters the cached `Arc`s into
+  `Vec<&Patch>`, and the rollups (`pending_counts`, `build_compliance`, `build_compliance_by_os`,
+  `build_severity_by_org`, `build_age_buckets`) plus `PatchSource.patches` all take `&[&Patch]`.
+  A whole-fleet third-party feed runs to six figures and each `Patch` owns **seven**
+  `Option<String>`s, so cloning the scoped subset — and again into `all_current` — cost millions of
+  allocations per query for data the cache already owns and outlives. Keep new rollups on
+  `&[&Patch]`; don't reintroduce an owned `Vec<Patch>` to make a signature more convenient.
 
 - **`AppState` locks are brief — never held across `.await`.** `settings`/`last_result` are
   `std::sync::Mutex`. Take a `settings_snapshot()` (clone) before any `.await`; don't hold a guard

@@ -11,6 +11,14 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Queries over large fleets do far less work per run.** Scoping the cached patch data to your
+  selected organization/location/role used to copy every matching patch record twice — once to
+  narrow it, once more to feed the compliance and severity rollups. On a fleet with six figures
+  of third-party patches that was hundreds of thousands of redundant copies on every Run, refresh
+  tick and filter change. The data is now read in place. No change to any number the app reports.
+
 ### Added
 
 - **Group the Patches tab by device or by patch.** A new **View** switch above the table
