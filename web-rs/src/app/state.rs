@@ -757,6 +757,17 @@ impl AppState {
                     } else {
                         self.fetch_page(page);
                     }
+                    // A grouped view is built from group headers and per-group member
+                    // pages, none of which ride along with the summary — so without
+                    // this the previous query's headers and cached members stayed on
+                    // screen against the new result's counts, and re-ticking a
+                    // checkbox could select a device/patch pair that isn't in the
+                    // current result at all.
+                    if self.query.group_by.get_untracked().is_some() {
+                        self.query.expanded.update(|e| e.clear());
+                        self.query.members.update(|m| m.clear());
+                        self.fetch_groups(page);
+                    }
                     self.query.result.set(Some(r));
                     self.query.applied_filters.set(Some(snapshot));
                     self.query.query_error.set(None);
@@ -1009,6 +1020,15 @@ impl AppState {
         self.query.patches_page.set(0);
         self.query.page_rows.set(r.rows.clone());
         self.query.result.set(Some(r));
+        // Same reason as the live path: a grouped view's headers and members don't
+        // ride along with the result, so they'd otherwise describe the last query.
+        // `fetch_groups` re-derives them from `demo_rows()`, which reads the result
+        // just set above.
+        if self.query.group_by.get_untracked().is_some() {
+            self.query.expanded.update(|e| e.clear());
+            self.query.members.update(|m| m.clear());
+            self.fetch_groups(0);
+        }
         self.query
             .applied_filters
             .set(Some(self.snapshot_filters()));

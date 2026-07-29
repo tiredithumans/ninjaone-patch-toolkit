@@ -215,13 +215,29 @@ fn ScopeBanner(
 #[component]
 fn PatchesTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // The total row count comes from the summary; the visible page lives in
-    // `page_rows`, fetched from the backend cache rather than held in full here.
-    let total = move || {
+    let grouped = move || state.query.group_by.get().is_some();
+    // Whether the query matched anything at all. Keyed on `rows_total` in both view
+    // modes: it's the query-level truth, and it's already populated when the result
+    // arrives, whereas `groups_total` is only filled once a header page lands — so
+    // gating the empty state on the grouped total would flash "no patches matched"
+    // over every grouped refetch.
+    let rows_total = move || {
         state
             .query
             .result
             .with(|r| r.as_ref().map_or(0, |r| r.rows_total))
+    };
+    // The pager, by contrast, paginates whichever unit the active view mode shows:
+    // flat rows or group headers. Sizing it from `rows_total` while grouped is what
+    // left ~98% of groups unreachable — it read "Page 1 of 400" off 40,000 rows
+    // while the grouped view only ever rendered the first 100 groups, and every
+    // Next click fetched rows that were rendered nowhere.
+    let total = move || {
+        if grouped() {
+            state.query.groups_total.get()
+        } else {
+            rows_total()
+        }
     };
     let page_count = move || total().div_ceil(PATCHES_PAGE_SIZE).max(1);
     // Clamp the stored page so a shorter result (e.g. after an auto-refresh) can't
@@ -233,7 +249,8 @@ fn PatchesTable() -> impl IntoView {
         let start = page() * PATCHES_PAGE_SIZE;
         let end = (start + PATCHES_PAGE_SIZE).min(t);
         format!(
-            "Rows {}\u{2013}{} of {} \u{00b7} Page {} of {}",
+            "{} {}\u{2013}{} of {} \u{00b7} Page {} of {}",
+            if grouped() { "Groups" } else { "Rows" },
             start + 1,
             end,
             group_thousands(t),
@@ -241,10 +258,15 @@ fn PatchesTable() -> impl IntoView {
             page_count(),
         )
     };
-    // Page navigation updates the index and fetches that page's rows on demand.
+    // Page navigation updates the index and fetches that page on demand — of
+    // headers or of rows, matching what the view is actually showing.
     let go_to = move |target: usize| {
         state.query.patches_page.set(target);
-        state.fetch_page(target);
+        if grouped() {
+            state.fetch_groups(target);
+        } else {
+            state.fetch_page(target);
+        }
     };
     let go_prev = move |_| go_to(page().saturating_sub(1));
     let go_next = move |_| {
@@ -264,7 +286,7 @@ fn PatchesTable() -> impl IntoView {
                 filters="Device scope + Type, Status, Severity, Search, First-seen and Installed-within are all applied."
             />
             <Show
-                when=move || { total() > 0 }
+                when=move || { rows_total() > 0 }
                 fallback=|| {
                     view! {
                         <p class="empty">
