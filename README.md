@@ -19,8 +19,9 @@ lists individual patches per server, and exports to Excel.
 ## Features
 
 - **PKCE OAuth 2.0** against `/ws/oauth/authorize` + `/ws/oauth/token` (S256, loopback
-  redirect). Read‑only scope `monitoring offline_access`. Refresh token stored in the OS
-  keyring; the client secret is optional (Native app registrations have none).
+  redirect). Read‑only scope `monitoring offline_access` by default; `management` is added
+  only when you switch on **Patch actions**. Refresh token stored in the OS keyring; the
+  client secret is optional (Native app registrations have none).
 - **Advanced filtering** — Organization, Location, Device Role, and OS Type. OS Type is
   both the coarse NinjaOne node‑class facet (pushed into the `df` query) and a granular,
   client‑side OS‑name substring filter.
@@ -34,6 +35,9 @@ lists individual patches per server, and exports to Excel.
   - Reboot & failure views (devices pending reboot; `FAILED` patches).
   - Compliance & SLA aging — per‑org compliance % and aged Critical/Important backlog.
   - Saved filter presets and optional auto‑refresh.
+- **Patch actions** *(opt‑in — see [Patch actions](#patch-actions))* — select patch rows and
+  scan, apply, reboot, or run any script from the tenant's automation library, then watch
+  each dispatch to a terminal state in the **Jobs** tab.
 
 ## Architecture
 
@@ -60,7 +64,8 @@ Create an API client in NinjaOne: **Administration → Apps → API → Client A
   re‑authenticating every hour. (Don't pick a client‑credentials / machine‑to‑machine app — it has
   no authorization‑code flow, and the sign‑in page will 404.)
 - **Scopes:** **`Monitoring`** (read‑only). The app additionally requests `offline_access` at
-  sign‑in to obtain the refresh token.
+  sign‑in to obtain the refresh token. Add **`Management`** only if you intend to use
+  [Patch actions](#patch-actions) — the app requests it solely when that feature is enabled.
 - **Redirect URI:**
   - *Native:* not configurable — NinjaOne registers it as **`http://127.0.0.1`** and accepts any
     port (the app listens on `http://127.0.0.1:<callback port>`, default `11434`).
@@ -110,12 +115,64 @@ just coverage     # backend test coverage (cargo-llvm-cov) → summary + lcov re
 Intel (x86_64) binary. Windows (.msi/.nsis) and Linux (AppImage) are x86_64. Building from
 source works on any platform Tauri supports, including Intel Macs.
 
+## Patch actions
+
+Off by default. The toolkit is a read‑only reporting tool until you enable this in
+**Settings → Patch actions**, and an install that never opens that panel keeps requesting
+the read‑only scope.
+
+**Enabling it:**
+
+1. Add the **`Management`** scope to your API app in NinjaOne (**Administration → Apps →
+   API**). Without it the write endpoints return 403.
+2. Switch on **Patch actions** in Settings and save.
+3. Choose **Re‑authorize**. This step is not optional: the OAuth refresh grant never
+   re‑sends `scope`, so an existing sign‑in keeps its read‑only grant until you consent
+   again.
+
+**What you can do.** Tick patch rows in the **Patches** tab, then use the action bar. Note
+that ticking a row selects that row's **device** — NinjaOne's API has no per‑patch apply
+endpoint, so `Apply OS patches` installs everything approved for the device.
+
+| Action | Endpoint | Notes |
+|---|---|---|
+| Scan OS / software | `POST /device/{id}/patch/*/scan` | Read‑only on the device; no confirmation needed. |
+| Apply OS / software patches | `POST /device/{id}/patch/*/apply` | Installs every approved patch on the device. |
+| Reboot | `POST /device/{id}/reboot/{mode}` | Requires a reason, recorded in NinjaOne's activity feed. `FORCED` needs a typed confirmation. |
+| Run script | `POST /device/{id}/script/run` | Any script in the tenant's automation library. |
+
+**Targeting specific KBs** needs a library script that accepts a `kbAllowList` variable —
+the toolkit detects this from `/automation/scripts` and only offers per‑KB targeting for
+scripts that declare it. NinjaOne has **no script‑upload API**, so add the script by hand
+under **Administration → Library → Automation**, give it String/Overridable `kbAllowList`,
+`rebootBehavior` and `dryRun` variables, and paste the numeric ID from its URL into
+Settings.
+
+**Guardrails**, all enforced in the Rust backend rather than the UI:
+
+- Dry run is the default for scripts. The native endpoints have no preview mode, so a
+  "dry run" of them is refused outright instead of pretending.
+- Every mutating action needs a confirmation token bound to that exact device set and
+  parameter string, single‑use and valid for five minutes.
+- Blast‑radius cap (default 25 devices) and org‑span cap (default 1) are hard blockers.
+- Offline devices are skipped by default — NinjaOne *queues* work for them, so an action
+  sent now can restart a machine hours later.
+- An optional maintenance window gates every change.
+- A dispatch whose POST times out is recorded as **Unknown** and never retried: it may
+  already be running on the device.
+
+There is no script‑output endpoint in the NinjaOne v2 API, so the Jobs tab reports the exit
+code and links you to the activity/job ID to look the run up in the NinjaOne console.
+
 ## Security
 
 - Access tokens are kept in memory; the refresh token and optional client secret live in
   the OS keyring (Keychain / Credential Manager / Secret Service). Nothing sensitive is
   written to `settings.json`.
-- The app requests read‑only (`monitoring`) scope only.
+- The app requests read‑only (`monitoring`) scope unless **Patch actions** is enabled, which
+  adds `management`. Turning the feature off returns it to read‑only at the next sign‑in.
+- Every dispatched action is appended to `action-audit.jsonl` beside `settings.json`, with
+  credential‑shaped script parameters redacted. Tokens are never written there.
 
 ## Updates
 

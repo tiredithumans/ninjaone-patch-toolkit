@@ -295,6 +295,7 @@ mod tests {
             os_name: Some("Windows Server 2022".into()),
             node_class: Some("WINDOWS_SERVER".into()),
             needs_reboot: true,
+            offline: false,
             patch_type: "OS".into(),
             kb: Some("KB5040434".into()),
             name: "Cumulative Update".into(),

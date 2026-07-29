@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 
 use super::{AppliedFilters, Tab};
-use crate::types::{PatchRow, RowSort, RowSortKey};
+use crate::types::{JobReport, PatchRow, RowSort, RowSortKey};
 
 pub(crate) fn non_empty(s: String) -> Option<String> {
     let t = s.trim();
@@ -100,14 +100,39 @@ pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts, generated_at: &str) -> S
             group_thousands(c.reboot),
             group_thousands(c.devices_total),
         ),
+        // Jobs describes dispatched actions, not the query result, so the query's
+        // counts and generation time would be actively misleading here.
+        Tab::Jobs => return "Dispatched actions".to_string(),
     };
     format!("{head} \u{00b7} generated {generated_at}")
 }
 
 /// Fleet-health tabs (Compliance, Needs Reboot) reflect the device scope only and
 /// ignore the patch filters; Filtered-results tabs (Patches, Failures) honor them.
+/// Jobs is neither — it shows dispatch history, not query output.
 pub(crate) fn is_fleet_tab(tab: Tab) -> bool {
     matches!(tab, Tab::Compliance | Tab::Reboot)
+}
+
+/// Short mode label for a dispatched job. A dry run applies — and reboots —
+/// nothing, so it wins over the reboot indication.
+pub(crate) fn job_mode_label(job: &JobReport) -> &'static str {
+    if job.dry_run {
+        "Dry run"
+    } else if job.kind.can_reboot() {
+        "Live + reboot"
+    } else {
+        "Live"
+    }
+}
+
+/// Renders an elapsed-seconds count as `1m 20s` / `45s`, or blank while running.
+pub(crate) fn format_duration(seconds: Option<i64>) -> String {
+    match seconds {
+        None => String::new(),
+        Some(s) if s < 60 => format!("{s}s"),
+        Some(s) => format!("{}m {}s", s / 60, s % 60),
+    }
 }
 
 /// One applied-filter chip. `patch` marks a patch-tier facet so the view can grey it
@@ -466,6 +491,7 @@ fn flush_para(blocks: &mut Vec<MdBlock>, para: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{ActionKind, JobState};
 
     #[test]
     fn group_thousands_inserts_separators() {
@@ -522,11 +548,13 @@ mod tests {
 
     fn sortable(device: &str, sev: &str, installed: Option<&str>) -> PatchRow {
         PatchRow {
+            device_id: 1,
             device_name: device.into(),
             organization: "Org".into(),
             location: None,
             device_role: None,
             os_name: None,
+            offline: false,
             patch_type: "OS".into(),
             kb: None,
             name: "Patch".into(),
@@ -621,6 +649,12 @@ mod tests {
             summary_line(Tab::Compliance, &c, "2026-06-28"),
             "3 organizations \u{00b7} 540 devices \u{00b7} generated 2026-06-28"
         );
+        // Jobs shows dispatch history, not query output, so the query's counts and
+        // generation time would be actively misleading there.
+        assert_eq!(
+            summary_line(Tab::Jobs, &c, "2026-06-28"),
+            "Dispatched actions"
+        );
         assert_eq!(
             summary_line(Tab::Reboot, &c, "2026-06-28"),
             "12 of 540 devices need reboot \u{00b7} generated 2026-06-28"
@@ -633,6 +667,65 @@ mod tests {
         assert!(is_fleet_tab(Tab::Reboot));
         assert!(!is_fleet_tab(Tab::Patches));
         assert!(!is_fleet_tab(Tab::Failures));
+        // Jobs is neither tier — it doesn't reflect the query at all.
+        assert!(!is_fleet_tab(Tab::Jobs));
+    }
+
+    fn job(kind: ActionKind, dry_run: bool) -> JobReport {
+        JobReport {
+            id: 1,
+            device_name: "srv-1".into(),
+            organization: "Contoso".into(),
+            kind,
+            detail: "Apply OS patches".into(),
+            dry_run,
+            state: JobState::Running,
+            dispatched_at: "2026-06-28 10:00:00 UTC".into(),
+            duration_seconds: None,
+            activity_id: None,
+            series_uid: None,
+            exit_code: None,
+        }
+    }
+
+    #[test]
+    fn job_mode_label_distinguishes_dispatch_kinds() {
+        assert_eq!(job_mode_label(&job(ActionKind::OsPatchScan, false)), "Live");
+        assert_eq!(
+            job_mode_label(&job(ActionKind::Reboot, false)),
+            "Live + reboot"
+        );
+        assert_eq!(
+            job_mode_label(&job(ActionKind::OsPatchApply, false)),
+            "Live + reboot"
+        );
+        // A preview applies — and reboots — nothing, so it wins over the reboot
+        // indication rather than reading "Live + reboot" for a run that does neither.
+        assert_eq!(job_mode_label(&job(ActionKind::Reboot, true)), "Dry run");
+    }
+
+    #[test]
+    fn format_duration_is_blank_while_running() {
+        assert_eq!(format_duration(None), "");
+        assert_eq!(format_duration(Some(0)), "0s");
+        assert_eq!(format_duration(Some(45)), "45s");
+        assert_eq!(format_duration(Some(60)), "1m 0s");
+        assert_eq!(format_duration(Some(3_725)), "62m 5s");
+    }
+
+    #[test]
+    fn correlator_names_where_to_find_the_run_in_ninjaone() {
+        // With no script-output endpoint in v2, this tooltip is how an operator
+        // gets from a job row to the run in the NinjaOne console.
+        let mut j = job(ActionKind::Script, false);
+        assert_eq!(j.correlator(), "");
+
+        j.series_uid = Some("uid-9".into());
+        assert_eq!(j.correlator(), "NinjaOne job uid-9");
+
+        // A numeric activity id is more precise, so it wins.
+        j.activity_id = Some(4242);
+        assert_eq!(j.correlator(), "NinjaOne activity 4242");
     }
 
     #[test]

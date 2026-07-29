@@ -56,16 +56,22 @@ pub struct NodeClass {
     pub label: String,
 }
 
-// Backend also sends device_id, node_class, severity_rank and raw timestamps;
-// serde ignores fields not declared here. Only what the table renders is kept.
+// Backend also sends node_class, severity_rank and raw timestamps; serde ignores
+// fields not declared here. `device_id` IS mirrored — it is the row's identity for
+// action selection, since NinjaOne has no per-patch apply endpoint and checking a
+// row therefore selects that row's *device*.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchRow {
+    pub device_id: i64,
     pub device_name: String,
     pub organization: String,
     pub location: Option<String>,
     pub device_role: Option<String>,
     pub os_name: Option<String>,
+    /// NinjaOne queues an action for an offline device rather than rejecting it, so
+    /// the selection surfaces this to explain why a target may be skipped.
+    pub offline: bool,
     pub patch_type: String,
     pub kb: Option<String>,
     pub name: String,
@@ -186,6 +192,17 @@ pub struct QueryResult {
 pub struct AuthStatus {
     pub authenticated: bool,
     pub instance_base_url: String,
+    /// Patch actions switched on in Settings.
+    #[serde(default)]
+    pub actions_enabled: bool,
+    /// The current grant carries `management`, so the write endpoints will accept
+    /// us. False while `actions_enabled` is true means re-authorization is needed.
+    #[serde(default)]
+    pub write_enabled: bool,
+    /// Whether the grant's scope could be read at all. False here makes
+    /// `write_enabled == false` mean "unknown" rather than "denied".
+    #[serde(default)]
+    pub scope_known: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -199,6 +216,49 @@ pub struct SettingsView {
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
+    #[serde(default)]
+    pub actions: ActionSettings,
+}
+
+/// Mirror of the backend `settings::ActionSettings`. Round-trips unchanged through
+/// the settings panel, so a field the UI doesn't expose is preserved rather than
+/// reset to its default on save.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ActionSettings {
+    pub enabled: bool,
+    pub os_patch_script_id: Option<i64>,
+    pub software_patch_script_id: Option<i64>,
+    pub run_as: String,
+    pub concurrency: usize,
+    pub max_devices_per_action: usize,
+    pub max_orgs_per_action: usize,
+    pub allow_offline_targets: bool,
+    pub require_maintenance_window: bool,
+    pub window_days: Vec<u8>,
+    pub window_start_minute: u16,
+    pub window_end_minute: u16,
+    pub allow_window_override: bool,
+}
+
+impl Default for ActionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            os_patch_script_id: None,
+            software_patch_script_id: None,
+            run_as: "system".into(),
+            concurrency: 8,
+            max_devices_per_action: 25,
+            max_orgs_per_action: 1,
+            allow_offline_targets: false,
+            require_maintenance_window: false,
+            window_days: vec![1, 2, 3, 4, 5],
+            window_start_minute: 120,
+            window_end_minute: 300,
+            allow_window_override: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -286,4 +346,255 @@ pub struct SaveSettingsArgs {
     pub client_secret: Option<String>,
     pub clear_secret: bool,
     pub auto_check_updates: bool,
+    pub actions: ActionSettings,
+}
+
+// --- Device actions ----------------------------------------------------------
+
+/// Mirror of the backend `actions::ActionKind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ActionKind {
+    OsPatchScan,
+    SoftwarePatchScan,
+    OsPatchApply,
+    SoftwarePatchApply,
+    Reboot,
+    Script,
+}
+
+impl ActionKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OsPatchScan => "Scan for OS patches",
+            Self::SoftwarePatchScan => "Scan for software patches",
+            Self::OsPatchApply => "Apply OS patches",
+            Self::SoftwarePatchApply => "Apply software patches",
+            Self::Reboot => "Reboot",
+            Self::Script => "Run script",
+        }
+    }
+
+    /// Mirrors the backend rule: scans don't change the device, so they need no
+    /// confirmation. Display-only here — the backend enforces it for real.
+    pub fn is_mutating(self) -> bool {
+        !matches!(self, Self::OsPatchScan | Self::SoftwarePatchScan)
+    }
+
+    /// Whether this action can restart the device as a side effect.
+    pub fn can_reboot(self) -> bool {
+        matches!(
+            self,
+            Self::Reboot | Self::OsPatchApply | Self::SoftwarePatchApply | Self::Script
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum RebootMode {
+    Normal,
+    Forced,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RebootChoice {
+    #[default]
+    Never,
+    Auto,
+}
+
+/// Mirror of the backend `actions::JobState`, which serializes as an internally
+/// tagged `{ state, detail }`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "state", content = "detail")]
+pub enum JobState {
+    Queued,
+    Running,
+    Completed,
+    Failed(String),
+    TimedOut,
+    Unknown(String),
+    Skipped(String),
+}
+
+impl JobState {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Queued => "Queued".into(),
+            Self::Running => "Running".into(),
+            Self::Completed => "Completed".into(),
+            Self::Failed(msg) => format!("Failed: {msg}"),
+            Self::TimedOut => "Timed out".into(),
+            Self::Unknown(msg) => format!("Unknown: {msg}"),
+            Self::Skipped(why) => format!("Skipped: {why}"),
+        }
+    }
+
+    /// CSS modifier for the status pill.
+    pub fn css_class(&self) -> &'static str {
+        match self {
+            Self::Completed => "job-state job-state-ok",
+            Self::Failed(_) | Self::TimedOut => "job-state job-state-bad",
+            Self::Unknown(_) => "job-state job-state-warn",
+            Self::Skipped(_) => "job-state job-state-muted",
+            Self::Queued | Self::Running => "job-state job-state-running",
+        }
+    }
+}
+
+// The backend also sends batchId, deviceId, dispatchedTs and finishedAt; serde
+// ignores fields not declared here. The correlators (`activityId`/`seriesUid`) ARE
+// kept: NinjaOne v2 has no script-output endpoint, so they are how an operator
+// finds the run in the NinjaOne console.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobReport {
+    pub id: u64,
+    pub device_name: String,
+    pub organization: String,
+    pub kind: ActionKind,
+    pub detail: String,
+    pub dry_run: bool,
+    pub state: JobState,
+    pub dispatched_at: String,
+    pub duration_seconds: Option<i64>,
+    pub activity_id: Option<i64>,
+    pub series_uid: Option<String>,
+    pub exit_code: Option<i32>,
+}
+
+impl JobReport {
+    /// Where to look this run up in NinjaOne, shown as a tooltip on the status
+    /// cell. Empty when the tenant's dispatch response carried no correlator.
+    pub fn correlator(&self) -> String {
+        match (self.activity_id, self.series_uid.as_deref()) {
+            (Some(id), _) => format!("NinjaOne activity {id}"),
+            (None, Some(uid)) => format!("NinjaOne job {uid}"),
+            _ => String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedTarget {
+    pub device_name: String,
+    pub organization: String,
+    pub offline: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedTarget {
+    pub device_name: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionPlan {
+    pub summary: String,
+    pub eligible: Vec<PlannedTarget>,
+    pub skipped: Vec<SkippedTarget>,
+    pub organizations: Vec<String>,
+    pub warnings: Vec<String>,
+    pub blockers: Vec<String>,
+    pub reboot_expected: bool,
+    pub dry_run: bool,
+    pub parameters_preview: Option<String>,
+    /// Absent when the plan is blocked — there is nothing to confirm.
+    pub confirm_token: Option<String>,
+}
+
+impl ActionPlan {
+    pub fn is_blocked(&self) -> bool {
+        !self.blockers.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionBatch {
+    pub dispatched: usize,
+    pub skipped: usize,
+    /// The rows just created, used to seed the Jobs tab without a second round
+    /// trip. The backend poller then advances them over `action:progress`.
+    pub jobs: Vec<JobReport>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptSummary {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub language: Option<String>,
+    pub operating_systems: Vec<String>,
+    /// Whether the library entry declares a `kbAllowList` variable. Only such a
+    /// script may be offered per-KB targeting — anything else installs whatever the
+    /// device needs, and offering it would misrepresent what runs.
+    pub accepts_kb_allow_list: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAsOptions {
+    pub roles: Vec<String>,
+}
+
+/// Mirror of the backend `commands::actions::ActionRequest`.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionRequest {
+    pub kind: ActionKind,
+    pub device_ids: Vec<i64>,
+    pub targets: Vec<String>,
+    pub script_id: Option<i64>,
+    pub script_uid: Option<String>,
+    pub script_name: Option<String>,
+    pub parameters: Option<String>,
+    pub run_as: Option<String>,
+    pub reboot: RebootChoice,
+    pub reboot_mode: Option<RebootMode>,
+    pub reason: Option<String>,
+    pub include_offline: bool,
+    pub override_window: bool,
+    pub dry_run: bool,
+    pub confirm_token: Option<String>,
+}
+
+impl ActionRequest {
+    pub fn new(kind: ActionKind, device_ids: Vec<i64>) -> Self {
+        Self {
+            kind,
+            device_ids,
+            targets: Vec::new(),
+            script_id: None,
+            script_uid: None,
+            script_name: None,
+            parameters: None,
+            run_as: None,
+            reboot: RebootChoice::Never,
+            reboot_mode: None,
+            reason: None,
+            include_offline: false,
+            override_window: false,
+            dry_run: false,
+            confirm_token: None,
+        }
+    }
+}
+
+/// Payload of the `action:progress` event.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionProgressEvent {
+    /// `dispatching` | `dispatched` | `polling` | `settled`
+    pub stage: String,
+    pub dispatched: usize,
+    pub total: usize,
+    #[serde(default)]
+    pub jobs: Vec<JobReport>,
 }

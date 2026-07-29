@@ -1020,3 +1020,284 @@ tbody tr:hover {
     margin-left: 0;
   }
 }
+
+/* --- Device actions ------------------------------------------------------- */
+
+/* Sticky so the running selection total and the action buttons stay reachable
+   while scrolling a 100-row page. */
+.action-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.action-bar-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 220px;
+  font-size: 13px;
+}
+
+.action-bar-hint {
+  color: var(--muted);
+}
+
+.action-bar-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.action-bar-reboot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  flex: 1 1 100%;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.action-bar-reboot label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.action-bar-reason {
+  flex: 1 1 240px;
+}
+
+.action-bar-blocked {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--warn);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent-2);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.btn-sm {
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
+/* Row-selection column: narrow, unsortable, and outside PATCH_COLUMNS. */
+.col-select {
+  width: 32px;
+  text-align: center;
+}
+
+/* A dispatch that will restart machines gets a visible accent, not just prose. */
+.modal-danger {
+  border-color: var(--danger);
+}
+
+.modal-blockers,
+.modal-warnings {
+  margin: 10px 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.modal-blockers {
+  color: var(--danger);
+}
+
+.modal-warnings {
+  color: var(--warn);
+}
+
+.modal-label {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* The exact string sent to the script — shown verbatim, wrapped rather than
+   truncated so nothing is hidden from the operator approving it. */
+.modal-params {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.modal-targets,
+.modal-skipped {
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.modal-targets ul,
+.modal-skipped ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.modal-typed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 12px 0;
+  font-size: 13px;
+  color: var(--danger);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.script-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.script-picker legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.script-picker label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.script-picker-params {
+  flex: 1 1 100%;
+}
+
+.script-picker-meta {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.script-picker-tags {
+  margin-left: 8px;
+  opacity: 0.8;
+}
+
+.checkbox {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px;
+}
+
+.jobs-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.job-state {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid transparent;
+}
+
+.job-state-ok {
+  color: var(--accent-2);
+  border-color: var(--accent);
+}
+
+.job-state-bad {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.job-state-warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.job-state-running {
+  color: var(--muted);
+  border-color: var(--border);
+}
+
+.job-state-muted {
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+/* The displayed results predate a dispatched action. */
+.stale-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  background: var(--panel-2);
+  font-size: 13px;
+  color: var(--warn);
+}
+
+.settings-actions {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.settings-actions legend {
+  padding: 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-hint {
+  margin: 4px 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-disabled {
+  opacity: 0.5;
+}

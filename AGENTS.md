@@ -37,7 +37,10 @@ Key files to read before editing:
   and field/status enums against the official spec — never infer them from endpoint names or memory:**
   the rendered docs are <https://app.ninjarmm.com/apidocs/?links.active=core> and the raw OpenAPI is
   <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> (grep it; the SPA can't be scraped).
-- **Auth / PKCE / keyring?** `src-tauri/src/auth.rs` + `src-tauri/src/state.rs` (`AppState`).
+- **Auth / PKCE / keyring / scope?** `src-tauri/src/auth.rs` + `src-tauri/src/state.rs` (`AppState`).
+- **Device action (apply / reboot / run script)?** `src-tauri/src/actions.rs` (guardrails +
+  job model) → `src-tauri/src/api/actions.rs` (the POSTs) → `src-tauri/src/commands/actions.rs`
+  (plan/confirm/dispatch/poll) → `web-rs/src/app/actions.rs` (UI).
 - **Fleet filter (`df` DSL) / OS-name facet?** `src-tauri/src/filter.rs`.
 - **Device↔patch join, compliance, SLA, reboot rollups?** `src-tauri/src/rows.rs`.
 - **Excel export?** `src-tauri/src/export.rs` (reads `state.last_result`).
@@ -49,12 +52,16 @@ Key files to read before editing:
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
 ├── src/main.rs                  # binary entry → lib::run()
-├── src/state.rs                 # AppState: auth, api client, settings (Mutex), last_result + whole-fleet device/current-patch caches
-├── src/auth.rs                  # OAuth2 PKCE (S256, loopback redirect), keyring, token refresh
+├── src/state.rs                 # AppState: auth, api client, settings (Mutex), last_result + whole-fleet device/current-patch caches + tenant-stamped job store & confirm-token slot
+├── src/auth.rs                  # OAuth2 PKCE (S256, loopback redirect), keyring, token refresh, conditional scope + management-grant detection
+├── src/actions.rs               # device-action domain: ActionKind/JobState/JobReport, pure `plan()` guardrails, build_parameters, activity correlation
+├── src/actions/audit.rs         # append-only action-audit.jsonl (parameters redacted)
 ├── src/api/                     # NinjaOne Public API client
-│   ├── mod.rs                   # NinjaApiClient: /api/v2, bearer, retry (timeout/429/401), cursor paging
+│   ├── mod.rs                   # NinjaApiClient: /api/v2, bearer, retry (timeout/429/401 + ReplaySafety), cursor paging
 │   ├── devices.rs               # device inventory (df filter)
 │   ├── patches.rs               # current patches + install-history endpoints
+│   ├── actions.rs               # WRITE path: patch scan/apply, reboot, script/run, automation-script library
+│   ├── activities.rs            # /activities feed used to resolve dispatched jobs
 │   └── lookups.rs               # orgs / locations / roles / node classes
 ├── src/filter.rs                # FilterParams → install-query df DSL + client-side device_allowed (identity scope) / OS-name / KB-search facets
 ├── src/model.rs                 # domain types (Device, Patch, PatchType, PatchStatus, …)
@@ -63,7 +70,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/report.rs                # standalone HTML executive report (inline SVG charts) from the cached QueryResult
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets)
 ├── src/error.rs                 # UiError { message } — the IPC error shape
-├── src/commands/                # #[tauri::command] handlers (auth, lookups, patches, export, settings, update)
+├── src/commands/                # #[tauri::command] handlers (actions, auth, lookups, patches, export, settings, update)
 ├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command (Trunk), updater (pubkey/endpoint)
 ├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
 ├── build.rs                     # tauri-build
@@ -73,7 +80,8 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ├── src/main.rs                  # entry, theme, root mount
 ├── src/app.rs                   # module decls, shared consts, App root + startup wiring
 ├── src/app/                     # state + view components as descendant modules of `app`
-│   ├── state.rs                 # AppState wrapper (single context) + 8 Copy sub-structs grouped by concern (session/lookups/filters/query/run/settings/updates/ui) + Tab/AppliedFilters/Toast/Progress
+│   ├── state.rs                 # AppState wrapper (single context) + 9 Copy sub-structs grouped by concern (session/lookups/filters/query/run/settings/updates/ui/actions) + Tab/AppliedFilters/Toast/Progress/DeviceSelection
+│   ├── actions.rs               # ActionBar (device selection), ConfirmActionModal, ScriptPicker, JobsTable
 │   ├── header.rs                # Header (sign-in/out, settings toggle)
 │   ├── controls.rs              # RunControls + PresetRow (run/refresh cadence, exports, presets)
 │   ├── filters.rs               # Filters panel
@@ -106,6 +114,15 @@ scripts/                         # dev/CI tooling (not shipped)
 
 - **New NinjaOne endpoint** — add a method on `NinjaApiClient` (`api/<domain>.rs`); reuse
   `get_paginated` / `request_raw` rather than hand-rolling reqwest + retry + cursor logic.
+
+- **New device action** — 4 steps, and the middle two are what keep it safe:
+  1. Add the POST to `api/actions.rs` via `post_action` / `post_json` (both pass
+     `ReplaySafety::ActOnce` — never call `request_raw` with `Idempotent` for a write).
+  2. Add a variant to `actions::ActionKind` and make `is_mutating()` / `supports_dry_run()`
+     answer correctly — those two decide whether the confirm gate, the blast-radius cap, the
+     org-span cap and the maintenance window apply.
+  3. Dispatch it from the `match kind` in `commands::actions::run_action`.
+  4. Add the button to `web-rs/src/app/actions.rs::ACTION_BUTTONS`.
 
 - **New filter facet** — an identity/scope facet (matched against a cached device) extends
   `FilterParams::device_allowed` (+ `has_identity_scope`) and, if the install-history `df` honors it,
@@ -224,8 +241,46 @@ secrets are **not** stored there — see below).
 - **Auth: PKCE, lazy token, Native-or-Web client.** `AuthState::access_token()` refreshes lazily
   before each call. Sign-in is the interactive S256 PKCE flow with a **loopback** redirect on the
   configured `callback_port` (default `11434`); a hung sign-in usually means the callback never
-  arrived. Scope is read-only `monitoring offline_access`. **Native** (public) clients have **no**
-  secret; **Web** (confidential) clients do — the app supports both, so don't hardcode either.
+  arrived. **Native** (public) clients have **no** secret; **Web** (confidential) clients do —
+  the app supports both, so don't hardcode either.
+  - **Scope is conditional, and the refresh grant never re-sends it (load-bearing).**
+    `scope_for(actions_enabled)` picks `monitoring offline_access` or
+    `monitoring management offline_access`; `settings.actions.enabled` (default **false**) is
+    what flips it, which is why adding the write path didn't break existing installs. The
+    refresh grant does **not** send `scope`, so an install that signed in before actions were
+    enabled keeps its read-only grant silently and every write 403s. `AuthState::management_grant()`
+    detects this from the token response's `scope` (RFC 6749 §5.1, self-healing on each refresh)
+    with a JWT-claim fallback; `None` means *unknowable*, not *denied*, and the UI words the two
+    differently. `commands::auth::reauthorize` drops the keyring refresh token **first** so the
+    browser flow must issue a fresh grant.
+
+- **Write path (patch actions) — load-bearing rules.** The feature is opt-in
+  (`settings.actions.enabled`, default false) and every command re-checks
+  `require_actions_enabled` — a stale frontend must not be able to widen the blast radius.
+  - **There is no per-KB apply endpoint.** `/device/{id}/patch/{os,software}/apply` installs
+    everything approved on the device. Targeting specific KBs is possible **only** via a
+    library script declaring a `kbAllowList` variable (`AutomationScript::accepts_kb_allow_list`
+    gates whether the UI may offer it). This is why **checking a patch row selects that row's
+    *device***, and why the UI says so.
+  - **`ReplaySafety::ActOnce` on every POST.** `request_raw`'s timeout arm would otherwise
+    replay the body and re-run the action; 429/401 still replay (the gateway rejected before
+    the device queue). A timed-out dispatch becomes `JobState::Unknown` — polled, never
+    auto-retried.
+  - **Confirm tokens are payload-bound and single-use.** `plan_action` hashes
+    (kind ‖ sorted device ids ‖ script ref ‖ parameters ‖ reboot mode ‖ dry_run) into a
+    5-minute token; `run_action` re-plans from scratch and re-checks the hash. Editing the
+    selection after the dialog opened invalidates the approval rather than widening it.
+  - **Guardrails live in `actions::plan`**, which is pure with an injected clock. Adding one
+    means extending `blockers`/`warnings` there, not adding a dialog.
+  - **After a mutating action, call `invalidate_current_patches()`** (and
+    `invalidate_fleet_devices()` after a reboot) — `clear_lookups_cache()` is too blunt, and
+    the 120 s current-patch TTL would otherwise serve pre-action data. `last_result` is
+    deliberately *not* dropped; the frontend raises a stale-results banner instead.
+  - **Job state is tenant-stamped** in `AppState.jobs`, mirroring `last_result` — a tenant
+    switch reads as a miss. The poller is single-claim (`try_claim_job_poller`) and emits
+    `action:progress` (no capability change needed; `core:event:default` already covers it).
+  - **NinjaOne v2 has no script-output endpoint.** A job resolves from `/activities` only, so
+    surface the exit code plus the activity/series correlator.
 
 - **NinjaOne API client — reuse the shared retry + pagination.** Every call goes through
   `NinjaApiClient` (`api/mod.rs`): `{base}/api/v2{path}`, bearer auth, retry on timeout / 429

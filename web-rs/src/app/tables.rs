@@ -54,8 +54,23 @@ pub(crate) fn Results() -> impl IntoView {
                     <TabButton this=Tab::Compliance label="Compliance"/>
                     <TabButton this=Tab::Reboot label="Needs Reboot"/>
                 </div>
+                <span class="tab-divider" aria-hidden="true"></span>
+                <div class="tab-group">
+                    <span class="tab-group-label">"Activity"</span>
+                    <TabButton this=Tab::Jobs label="Jobs"/>
+                </div>
                 <span class="result-summary">{summary}</span>
             </div>
+            // A dispatched action changed the fleet after these results were
+            // computed, so the backlog on screen is already out of date.
+            <Show when=move || state.actions.results_stale.get()>
+                <div class="stale-banner" role="status">
+                    <span>"An action was dispatched — these results predate it."</span>
+                    <button class="link-btn" on:click=move |_| state.refresh_now()>
+                        "Refresh"
+                    </button>
+                </div>
+            </Show>
             // Persistent record of the last failed query — the announcing toast
             // auto-dismisses; this stays until the next success or a dismiss.
             <Show when=move || state.query.query_error.with(|e| e.is_some())>
@@ -88,6 +103,7 @@ pub(crate) fn Results() -> impl IntoView {
                     Tab::Compliance => view! { <ComplianceTab/> }.into_any(),
                     Tab::Reboot => view! { <RebootTable/> }.into_any(),
                     Tab::Failures => view! { <FailuresTable/> }.into_any(),
+                    Tab::Jobs => view! { <JobsTable/> }.into_any(),
                 }}
             </div>
         </section>
@@ -101,6 +117,7 @@ fn tab_dom_id(tab: Tab) -> &'static str {
         Tab::Compliance => "tab-compliance",
         Tab::Reboot => "tab-reboot",
         Tab::Failures => "tab-failures",
+        Tab::Jobs => "tab-jobs",
     }
 }
 
@@ -130,7 +147,12 @@ fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
 fn AppliedFilterChips() -> impl IntoView {
     let state = expect_context::<AppState>();
     view! {
-        <Show when=move || state.query.applied_filters.with(|a| a.is_some())>
+        // Hidden on Jobs: dispatch history isn't produced by the query, so chips
+        // describing that query would claim a scope the tab doesn't have.
+        <Show when=move || {
+            state.query.applied_filters.with(|a| a.is_some())
+                && state.ui.active_tab.get() != Tab::Jobs
+        }>
             <div
                 class="applied-filters"
                 role="group"
@@ -270,10 +292,24 @@ fn PatchesTable() -> impl IntoView {
                         </button>
                     </div>
                 </Show>
+                <ActionBar/>
                 <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
+                            // Deliberately outside PATCH_COLUMNS: the select column
+                            // is not sortable, so it has no sort key.
+                            <th scope="col" class="col-select">
+                                <input
+                                    type="checkbox"
+                                    aria-label="Select every device on this page"
+                                    prop:checked=move || state.page_selection_state().0
+                                    prop:indeterminate=move || state.page_selection_state().1
+                                    on:change=move |ev| {
+                                        state.toggle_page_selection(event_target_checked(&ev))
+                                    }
+                                />
+                            </th>
                             {PATCH_COLUMNS
                                 .iter()
                                 .map(|&(label, key)| {
@@ -308,8 +344,32 @@ fn PatchesTable() -> impl IntoView {
                                 .map(|r| {
                                     let sev = sev_class(&r.severity);
                                     let stat = status_class(&r.status);
+                                    // Checking a row selects its *device* — there is
+                                    // no per-patch apply endpoint in the NinjaOne API.
+                                    let device_id = r.device_id;
+                                    let row = r.clone();
+                                    let label = format!("Select {}", r.device_name);
                                     view! {
                                         <tr>
+                                            <td class="col-select">
+                                                <input
+                                                    type="checkbox"
+                                                    aria-label=label
+                                                    prop:checked=move || {
+                                                        state
+                                                            .actions
+                                                            .selected
+                                                            .with(|s| s.contains_key(&device_id))
+                                                    }
+                                                    on:change=move |ev| {
+                                                        state
+                                                            .toggle_row_selection(
+                                                                &row,
+                                                                event_target_checked(&ev),
+                                                            )
+                                                    }
+                                                />
+                                            </td>
                                             <td>{r.organization}</td>
                                             <td>{r.location.unwrap_or_default()}</td>
                                             <td>{r.device_role.unwrap_or_default()}</td>

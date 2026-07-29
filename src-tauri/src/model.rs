@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Organization {
@@ -282,6 +283,9 @@ pub struct PatchRow {
     pub os_name: Option<String>,
     pub node_class: Option<String>,
     pub needs_reboot: bool,
+    /// Mirrors `Device::is_offline()`. Carried on the row so the frontend can show
+    /// which selected devices an action would be *queued* for rather than run now.
+    pub offline: bool,
     pub patch_type: String,
     pub kb: Option<String>,
     pub name: String,
@@ -292,6 +296,135 @@ pub struct PatchRow {
     pub installed_date: Option<String>,
     pub release_ts: Option<i64>,
     pub installed_ts: Option<i64>,
+}
+
+/// How `POST /v2/device/{id}/reboot/{mode}` is addressed. `Forced` skips the
+/// graceful-shutdown path, so it discards unsaved work — the UI gates it behind an
+/// extra confirmation tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum RebootMode {
+    Normal,
+    Forced,
+}
+
+impl RebootMode {
+    /// The path segment NinjaOne expects.
+    pub fn api_value(self) -> &'static str {
+        match self {
+            Self::Normal => "NORMAL",
+            Self::Forced => "FORCED",
+        }
+    }
+}
+
+/// One entry from `GET /v2/activities`. Only the fields needed to resolve a
+/// dispatched job are modelled; the feed carries far more.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Activity {
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default, rename = "activityType")]
+    pub activity_type: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default, rename = "activityTime")]
+    pub activity_time: Option<f64>,
+    /// Activity series uid — the correlator shared with `Job.uid` and, on some
+    /// tenants, the `script/run` response.
+    #[serde(default, rename = "seriesUid")]
+    pub series_uid: Option<String>,
+    /// Exit-code fields vary by activity kind, so this stays untyped.
+    #[serde(default)]
+    pub result: Option<Value>,
+}
+
+impl Activity {
+    /// Whether the activity has reached a state that will not change again.
+    /// NinjaOne spells cancellation both ways across tenants.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status.as_deref(),
+            Some("COMPLETED" | "FAILED" | "TIMED_OUT" | "CANCELED" | "CANCELLED")
+        )
+    }
+
+    pub fn exit_code(&self) -> Option<i32> {
+        let v = self.result.as_ref()?;
+        for key in ["exitCode", "resultCode"] {
+            if let Some(n) = v.get(key).and_then(Value::as_i64) {
+                return Some(n as i32);
+            }
+        }
+        None
+    }
+}
+
+/// A script variable declared on a library entry. The `name` is what NinjaOne
+/// injects as an environment variable on the device.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScriptVariable {
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// One entry from `GET /v2/automation/scripts`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationScript {
+    pub id: i64,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub active: Option<bool>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub operating_systems: Vec<String>,
+    #[serde(default)]
+    pub script_parameters: Vec<String>,
+    #[serde(default)]
+    pub script_variables: Vec<ScriptVariable>,
+}
+
+/// The script-variable / parameter name that lets a library script be told *which*
+/// KBs to install. NinjaOne has no per-KB apply endpoint, so a script declaring
+/// this is the only way to target specific patches.
+const KB_ALLOW_LIST_VAR: &str = "kballowlist";
+
+impl AutomationScript {
+    /// Whether this script can be told which KBs to install — i.e. it declares a
+    /// `kbAllowList` script variable or parameter. Only such a script may be
+    /// offered per-KB targeting in the UI; anything else installs whatever the
+    /// device needs, and pretending otherwise would misrepresent what runs.
+    pub fn accepts_kb_allow_list(&self) -> bool {
+        let matches = |s: &str| s.trim().to_ascii_lowercase().contains(KB_ALLOW_LIST_VAR);
+        self.script_variables
+            .iter()
+            .filter_map(|v| v.name.as_deref())
+            .any(matches)
+            || self.script_parameters.iter().any(|p| matches(p))
+    }
+}
+
+/// Credential choices available for `runAs` on a given device.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DeviceCredentialOptions {
+    #[serde(default)]
+    pub roles: Vec<String>,
+}
+
+/// Response of `GET /v2/device/{id}/scripting/options`.
+///
+/// Only the credential roles are modelled. The `scripts` array duplicates
+/// `/automation/scripts` (which the picker already reads, and which is the only
+/// source carrying `scriptVariables`), so deserializing it twice would buy nothing.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DeviceScriptingOptions {
+    #[serde(default)]
+    pub credentials: DeviceCredentialOptions,
 }
 
 #[cfg(test)]

@@ -14,18 +14,79 @@ use tracing::{debug, warn};
 
 use crate::error::truncate_body;
 
-/// Read-only scope for a patching-operations toolkit. `offline_access` is required
-/// to receive a refresh token so the operator does not re-authenticate hourly.
-const SCOPE: &str = "monitoring offline_access";
+/// Read-only scope, and the default. `offline_access` is required to receive a
+/// refresh token so the operator does not re-authenticate hourly.
+const SCOPE_READ_ONLY: &str = "monitoring offline_access";
+/// `management` is what the device *action* endpoints require (patch scan/apply,
+/// reboot, script run). Requested only once the operator enables patch actions in
+/// Settings, so a reporting-only install never widens its grant.
+const SCOPE_WITH_ACTIONS: &str = "monitoring management offline_access";
+/// The scope token that distinguishes a write-capable grant.
+const MANAGEMENT_SCOPE: &str = "management";
+
 const KEYRING_SERVICE: &str = "NinjaOnePatchToolkit";
 const KEYRING_USER_SECRET: &str = "client_secret";
 const KEYRING_USER_REFRESH: &str = "refresh_token";
 
+/// The scope to request at sign-in. Split out so the choice is testable without
+/// standing up an authorize flow.
+fn scope_for(actions_enabled: bool) -> &'static str {
+    if actions_enabled {
+        SCOPE_WITH_ACTIONS
+    } else {
+        SCOPE_READ_ONLY
+    }
+}
+
+/// Whether a granted-scope string carries `management`. Matched on whitespace-
+/// separated tokens so a scope like `management_readonly` can't false-positive.
+fn scope_grants_management(scope: &str) -> bool {
+    scope
+        .split_whitespace()
+        .any(|s| s.eq_ignore_ascii_case(MANAGEMENT_SCOPE))
+}
+
+/// Best-effort read of the `scope`/`scp` claim from a JWT access token.
+///
+/// The refresh grant does **not** echo `scope` on every tenant, so when the token
+/// response omits it this recovers the granted scope from the token itself. The
+/// signature is deliberately not verified — this is a UI affordance for deciding
+/// whether to prompt for re-consent, never an authorization decision (the server
+/// is the authority, and a missing scope surfaces as a 403 regardless). An opaque
+/// (non-JWT) token simply yields `None`.
+fn scope_claim_from_jwt(access_token: &str) -> Option<String> {
+    let payload = access_token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    for key in ["scope", "scp"] {
+        match claims.get(key) {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => return Some(s.clone()),
+            // Some issuers emit scopes as an array.
+            Some(serde_json::Value::Array(items)) => {
+                let joined = items
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !joined.is_empty() {
+                    return Some(joined);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
 #[derive(Debug, Clone)]
 pub struct TokenSet {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_at: DateTime<Utc>,
+    /// Scope the authorization server actually granted, from the token response's
+    /// `scope` field (RFC 6749 §5.1) or, failing that, the access token's own
+    /// claim. `None` means "unknowable from this token" — which is not the same as
+    /// "read-only", and the UI words the two differently.
+    pub granted_scope: Option<String>,
 }
 
 impl TokenSet {
@@ -41,6 +102,11 @@ struct TokenResponse {
     #[serde(default)]
     refresh_token: Option<String>,
     expires_in: i64,
+    /// RFC 6749 §5.1. Present on most refresh responses, which is what lets a
+    /// stale read-only grant heal itself into a correct `write_enabled` readout
+    /// without an interactive round trip.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// Shared auth state used by the API client and the Tauri commands.
@@ -58,6 +124,9 @@ struct Inner {
     /// secret (pure PKCE). A *Web* app registration is confidential and supplies one.
     client_secret: Option<String>,
     tokens: Option<TokenSet>,
+    /// Whether the next interactive sign-in should ask for `management`. Mirrors
+    /// `settings.actions.enabled`; it does not describe the *current* grant.
+    request_management: bool,
 }
 
 impl AuthState {
@@ -66,6 +135,7 @@ impl AuthState {
         base_url: String,
         callback_port: u16,
         client_id: Option<String>,
+        request_management: bool,
     ) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Inner {
@@ -74,6 +144,7 @@ impl AuthState {
                 client_id,
                 client_secret: load_keyring(KEYRING_USER_SECRET).ok(),
                 tokens: None,
+                request_management,
             })),
             http,
         }
@@ -102,13 +173,41 @@ impl AuthState {
     }
 
     /// Applies non-secret connection settings (instance URL, client ID, callback
-    /// port). Persisting these to `settings.json` is the caller's responsibility.
-    pub fn apply_settings(&self, base_url: String, client_id: Option<String>, callback_port: u16) {
+    /// port, and whether to request `management`). Persisting these to
+    /// `settings.json` is the caller's responsibility.
+    pub fn apply_settings(
+        &self,
+        base_url: String,
+        client_id: Option<String>,
+        callback_port: u16,
+        request_management: bool,
+    ) {
         if let Ok(mut inner) = self.inner.write() {
             inner.base_url = base_url;
             inner.client_id = client_id;
             inner.callback_port = callback_port;
+            inner.request_management = request_management;
         }
+    }
+
+    /// Whether the *current* grant carries the `management` scope.
+    ///
+    /// `Some(true)` — writes are permitted. `Some(false)` — the grant demonstrably
+    /// lacks it, so re-consent is required (the common case for an install that
+    /// signed in before actions existed: the refresh grant never re-sends `scope`,
+    /// so the old narrow grant persists silently). `None` — the token carries no
+    /// readable scope, treated as not-granted for gating but worded differently so
+    /// the operator isn't told their consent was wrong when we simply can't tell.
+    pub fn management_grant(&self) -> Option<bool> {
+        let scope = self
+            .inner
+            .read()
+            .ok()?
+            .tokens
+            .as_ref()?
+            .granted_scope
+            .clone()?;
+        Some(scope_grants_management(&scope))
     }
 
     pub fn set_client_secret(&self, secret: Option<String>) -> Result<()> {
@@ -194,10 +293,17 @@ impl AuthState {
 
     fn store_tokens(&self, parsed: TokenResponse) -> Result<TokenSet> {
         let expires_at = Utc::now() + Duration::seconds(parsed.expires_in);
+        // Prefer what the server said it granted; fall back to the token's own
+        // claim when the response omits `scope`.
+        let granted_scope = parsed
+            .scope
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| scope_claim_from_jwt(&parsed.access_token));
         let token_set = TokenSet {
             access_token: parsed.access_token,
             refresh_token: parsed.refresh_token.clone(),
             expires_at,
+            granted_scope,
         };
         if let Some(ref rt) = parsed.refresh_token {
             save_keyring(KEYRING_USER_REFRESH, rt)?;
@@ -237,7 +343,7 @@ impl AuthState {
     /// Interactive PKCE login: opens the browser and waits up to 3 minutes for the
     /// callback, then exchanges the code for tokens.
     pub async fn login_pkce(&self) -> Result<()> {
-        let (client_id, base_url, port) = {
+        let (client_id, base_url, port, request_management) = {
             let inner = self
                 .inner
                 .read()
@@ -249,8 +355,10 @@ impl AuthState {
                     .ok_or_else(|| anyhow!("client ID not configured"))?,
                 inner.base_url.clone(),
                 inner.callback_port,
+                inner.request_management,
             )
         };
+        let scope = scope_for(request_management);
         let client_secret = self.client_secret();
 
         let pkce = PkceChallenge::new();
@@ -268,6 +376,7 @@ impl AuthState {
             &redirect_uri,
             &pkce.challenge,
             &state,
+            scope,
         );
 
         // Pre-flight: NinjaOne's /ws/oauth/authorize returns 404 when it doesn't
@@ -289,7 +398,8 @@ impl AuthState {
                 "NinjaOne did not recognize this Client ID at {base_url} (HTTP 404). \
                  Check that Region/Instance matches the host you sign in to NinjaOne at, \
                  that the Client ID is copied correctly, and that the API app is a Native \
-                 app with the Authorization Code grant and the Monitoring scope."
+                 app with the Authorization Code grant and the Monitoring scope \
+                 (plus Management, if you have enabled patch actions)."
             );
         }
 
@@ -318,6 +428,16 @@ impl AuthState {
             bail!("state mismatch — possible CSRF");
         }
         if let Some(err) = callback.error {
+            // The one authorization error with a specific, actionable fix: the app
+            // registration doesn't carry a scope we asked for.
+            if err.contains("invalid_scope") && request_management {
+                bail!(
+                    "NinjaOne rejected the requested scope ({scope}). Enable the \
+                     Management scope on this API app in NinjaOne → Administration → \
+                     Apps → API, then sign in again. To keep the app read-only instead, \
+                     turn off Patch actions in Settings."
+                );
+            }
             bail!("authorization error: {err}");
         }
         let code = callback
@@ -369,7 +489,10 @@ impl AuthState {
                 access_token: access_token.to_string(),
                 refresh_token: None,
                 expires_at: Utc::now() + Duration::seconds(3600),
+                // Tests that drive the action endpoints need a write-capable grant.
+                granted_scope: Some(SCOPE_WITH_ACTIONS.to_string()),
             }),
+            request_management: false,
         };
         Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -395,7 +518,9 @@ impl AuthState {
                 access_token: access_token.to_string(),
                 refresh_token: Some(refresh_token.to_string()),
                 expires_at: Utc::now() + Duration::seconds(3600),
+                granted_scope: Some(SCOPE_WITH_ACTIONS.to_string()),
             }),
+            request_management: false,
         };
         Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -410,12 +535,13 @@ fn build_auth_url(
     redirect_uri: &str,
     challenge: &str,
     state: &str,
+    scope: &str,
 ) -> String {
     let q = [
         ("response_type", "code"),
         ("client_id", client_id),
         ("redirect_uri", redirect_uri),
-        ("scope", SCOPE),
+        ("scope", scope),
         ("code_challenge", challenge),
         ("code_challenge_method", "S256"),
         ("state", state),
@@ -576,6 +702,7 @@ mod tests {
             access_token: "a".into(),
             refresh_token: None,
             expires_at: Utc::now() + Duration::seconds(3600),
+            granted_scope: None,
         };
         assert!(!fresh.is_stale());
 
@@ -583,25 +710,123 @@ mod tests {
             access_token: "a".into(),
             refresh_token: None,
             expires_at: Utc::now() + Duration::seconds(60),
+            granted_scope: None,
         };
         assert!(expiring.is_stale());
     }
 
-    #[test]
-    fn auth_url_includes_pkce_and_scope() {
-        let url = build_auth_url(
+    fn auth_url_with(scope: &str) -> String {
+        build_auth_url(
             "https://us2.ninjarmm.com",
             "client123",
             "http://127.0.0.1:11434",
             "challengeABC",
             "stateXYZ",
-        );
+            scope,
+        )
+    }
+
+    #[test]
+    fn auth_url_requests_read_only_scope_by_default() {
+        let url = auth_url_with(scope_for(false));
         assert!(url.starts_with("https://us2.ninjarmm.com/ws/oauth/authorize?"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("code_challenge=challengeABC"));
         assert!(url.contains("response_type=code"));
         // monitoring + offline_access, URL-encoded space.
         assert!(url.contains("scope=monitoring%20offline_access"));
+        assert!(
+            !url.contains("management"),
+            "an install with actions off must never ask for write access"
+        );
+    }
+
+    #[test]
+    fn auth_url_requests_management_when_actions_enabled() {
+        let url = auth_url_with(scope_for(true));
+        assert!(url.contains("scope=monitoring%20management%20offline_access"));
+    }
+
+    #[test]
+    fn management_is_matched_as_a_whole_scope_token() {
+        assert!(scope_grants_management(
+            "monitoring management offline_access"
+        ));
+        assert!(scope_grants_management("MANAGEMENT"));
+        assert!(!scope_grants_management("monitoring offline_access"));
+        // A different scope that merely contains the word must not count.
+        assert!(!scope_grants_management("management_readonly"));
+        assert!(!scope_grants_management(""));
+    }
+
+    /// Builds an unsigned JWT-shaped token whose payload carries `claims`. The
+    /// signature is irrelevant — `scope_claim_from_jwt` never verifies it.
+    fn jwt_with(claims: serde_json::Value) -> String {
+        let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
+        format!("header.{payload}.signature")
+    }
+
+    #[test]
+    fn granted_scope_falls_back_to_the_jwt_claim() {
+        let token = jwt_with(serde_json::json!({ "scope": "monitoring management" }));
+        assert_eq!(
+            scope_claim_from_jwt(&token).as_deref(),
+            Some("monitoring management")
+        );
+
+        // `scp`, and the array spelling, are both in the wild.
+        let scp = jwt_with(serde_json::json!({ "scp": ["monitoring", "management"] }));
+        assert_eq!(
+            scope_claim_from_jwt(&scp).as_deref(),
+            Some("monitoring management")
+        );
+    }
+
+    #[test]
+    fn opaque_token_yields_unknown_not_false() {
+        // An opaque token carries no readable scope. The distinction matters: the
+        // UI must not tell the operator their consent was wrong when it simply
+        // cannot tell.
+        assert_eq!(scope_claim_from_jwt("opaque-token-value"), None);
+        assert_eq!(scope_claim_from_jwt(""), None);
+        // Well-formed shape, but no scope claim at all.
+        assert_eq!(scope_claim_from_jwt(&jwt_with(serde_json::json!({}))), None);
+    }
+
+    #[test]
+    fn granted_scope_prefers_the_token_response_over_the_claim() {
+        let http = reqwest::Client::new();
+        let auth = AuthState::new(http, "https://x".into(), 0, None, false);
+        // Response says read-only; the token claims management. RFC 6749 §5.1 makes
+        // the response authoritative for what was actually granted.
+        auth.store_tokens(TokenResponse {
+            access_token: jwt_with(serde_json::json!({ "scope": "monitoring management" })),
+            refresh_token: None,
+            expires_in: 3600,
+            scope: Some("monitoring offline_access".into()),
+        })
+        .expect("store");
+        assert_eq!(auth.management_grant(), Some(false));
+    }
+
+    #[test]
+    fn granted_scope_from_token_response_marks_write_enabled() {
+        let http = reqwest::Client::new();
+        let auth = AuthState::new(http, "https://x".into(), 0, None, true);
+        assert_eq!(
+            auth.management_grant(),
+            None,
+            "no token yet means the grant is unknown, not denied"
+        );
+
+        auth.store_tokens(TokenResponse {
+            access_token: "opaque".into(),
+            refresh_token: None,
+            expires_in: 3600,
+            scope: Some("monitoring management offline_access".into()),
+        })
+        .expect("store");
+        assert_eq!(auth.management_grant(), Some(true));
     }
 
     /// Drives `wait_for_callback` end-to-end: binds a loopback listener, connects a

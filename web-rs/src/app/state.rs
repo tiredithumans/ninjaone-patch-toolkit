@@ -1,6 +1,8 @@
-//! All reactive state shared via context: the `AppState` wrapper, its eight
+//! All reactive state shared via context: the `AppState` wrapper, its nine
 //! `Copy` sub-structs (grouped by concern), and the frontend-only value types
-//! they carry (`Tab`, `AppliedFilters`, `Toast`, `Progress`).
+//! they carry (`Tab`, `AppliedFilters`, `Toast`, `Progress`, `DeviceSelection`).
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -13,6 +15,7 @@ pub(crate) enum Tab {
     Compliance,
     Reboot,
     Failures,
+    Jobs,
 }
 
 /// A snapshot of the filters that produced the currently displayed result, captured
@@ -320,6 +323,9 @@ pub(crate) struct SettingsState {
     pub(super) f_sla: RwSignal<i64>,
     pub(super) has_secret: RwSignal<bool>,
     pub(super) f_auto_update: RwSignal<bool>,
+    /// Whole write-path block, held as one value so a field the panel doesn't
+    /// expose round-trips unchanged instead of resetting to its default on save.
+    pub(super) f_actions: RwSignal<ActionSettings>,
     pub(super) presets: RwSignal<Vec<Preset>>,
     pub(super) preset_name: RwSignal<String>,
 }
@@ -335,6 +341,7 @@ impl SettingsState {
             f_sla: RwSignal::new(30),
             has_secret: RwSignal::new(false),
             f_auto_update: RwSignal::new(true),
+            f_actions: RwSignal::new(ActionSettings::default()),
             presets: RwSignal::new(Vec::new()),
             preset_name: RwSignal::new(String::new()),
         }
@@ -397,6 +404,92 @@ impl UiState {
     }
 }
 
+/// What was checked for a device, carried alongside the selection.
+///
+/// Selection is **device-keyed**, not row-keyed: NinjaOne has no per-patch apply
+/// endpoint, so checking a patch row selects that row's *device*. The KBs ride
+/// along and are used only when the chosen script declares a `kbAllowList`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeviceSelection {
+    pub name: String,
+    pub organization: String,
+    pub offline: bool,
+    pub kbs: BTreeSet<String>,
+    /// How many patch rows on this device are checked, for the running total.
+    pub rows: usize,
+}
+
+/// Selection and dispatch state for the actions surface. Everything stays empty in
+/// web/demo mode — there is no backend to dispatch to.
+#[derive(Clone, Copy)]
+pub(crate) struct ActionState {
+    /// device id → what was checked. Survives page changes; cleared by every
+    /// successful query, because the underlying rows changed.
+    pub(super) selected: RwSignal<BTreeMap<i64, DeviceSelection>>,
+    pub(super) scripts: RwSignal<Vec<ScriptSummary>>,
+    pub(super) scripts_loading: RwSignal<bool>,
+    pub(super) script_id: RwSignal<Option<i64>>,
+    pub(super) script_params: RwSignal<String>,
+    pub(super) use_kb_targeting: RwSignal<bool>,
+    /// `rebootBehavior` handed to a dispatched script. Distinct from
+    /// `reboot_mode`, which addresses the reboot endpoint directly.
+    pub(super) script_reboot: RwSignal<RebootChoice>,
+    pub(super) run_as: RwSignal<String>,
+    pub(super) reboot_mode: RwSignal<String>,
+    pub(super) reason: RwSignal<String>,
+    pub(super) include_offline: RwSignal<bool>,
+    pub(super) override_window: RwSignal<bool>,
+    /// Defaults **true**: the operator opts *out* of preview, never into it.
+    pub(super) dry_run: RwSignal<bool>,
+    /// The action awaiting confirmation, plus the plan describing it.
+    pub(super) pending: RwSignal<Option<PendingAction>>,
+    /// Type-to-confirm text for the forced-reboot tier.
+    pub(super) confirm_input: RwSignal<String>,
+    pub(super) dispatching: RwSignal<bool>,
+    /// `(sent, total)` while a batch is going out, so a 25-device dispatch shows
+    /// movement instead of a frozen "Dispatching…".
+    pub(super) dispatch_progress: RwSignal<Option<(usize, usize)>>,
+    pub(super) jobs: RwSignal<Vec<JobReport>>,
+    /// A mutating action landed since the displayed result was computed.
+    pub(super) results_stale: RwSignal<bool>,
+    /// Why actions are unavailable, if they are.
+    pub(super) blocked_reason: RwSignal<Option<String>>,
+}
+
+/// A planned action held open in the confirmation modal.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingAction {
+    pub request: ActionRequest,
+    pub plan: ActionPlan,
+}
+
+impl ActionState {
+    pub(super) fn new() -> Self {
+        Self {
+            selected: RwSignal::new(BTreeMap::new()),
+            scripts: RwSignal::new(Vec::new()),
+            scripts_loading: RwSignal::new(false),
+            script_id: RwSignal::new(None),
+            script_params: RwSignal::new(String::new()),
+            use_kb_targeting: RwSignal::new(true),
+            script_reboot: RwSignal::new(RebootChoice::Never),
+            run_as: RwSignal::new(String::new()),
+            reboot_mode: RwSignal::new("NORMAL".to_string()),
+            reason: RwSignal::new(String::new()),
+            include_offline: RwSignal::new(false),
+            override_window: RwSignal::new(false),
+            dry_run: RwSignal::new(true),
+            pending: RwSignal::new(None),
+            confirm_input: RwSignal::new(String::new()),
+            dispatching: RwSignal::new(false),
+            dispatch_progress: RwSignal::new(None),
+            jobs: RwSignal::new(Vec::new()),
+            results_stale: RwSignal::new(false),
+            blocked_reason: RwSignal::new(None),
+        }
+    }
+}
+
 /// All reactive state, shared via context as one `Copy` value (`RwSignal` handles
 /// are `Copy`, so the wrapper and every group above are too). Fields are grouped
 /// by concern; methods that orchestrate across groups stay on this wrapper.
@@ -410,6 +503,7 @@ pub struct AppState {
     pub(super) settings: SettingsState,
     pub(super) updates: UpdateState,
     pub(super) ui: UiState,
+    pub(super) actions: ActionState,
 }
 
 impl AppState {
@@ -423,6 +517,7 @@ impl AppState {
             settings: SettingsState::new(),
             updates: UpdateState::new(),
             ui: UiState::new(),
+            actions: ActionState::new(),
         }
     }
 
@@ -644,6 +739,10 @@ impl AppState {
                     self.query.result.set(Some(r));
                     self.query.applied_filters.set(Some(snapshot));
                     self.query.query_error.set(None);
+                    // The underlying rows just changed, so a selection made against
+                    // the previous result no longer describes what is on screen.
+                    self.clear_selection();
+                    self.actions.results_stale.set(false);
                 }
                 // The toast announces the failure (aria-live); the banner keeps it
                 // visible after the toast auto-dismisses.
@@ -748,6 +847,7 @@ impl AppState {
         self.settings.f_sla.set(v.sla_days);
         self.settings.has_secret.set(v.has_client_secret);
         self.settings.f_auto_update.set(v.auto_check_updates);
+        self.settings.f_actions.set(v.actions);
         self.filters.install_days.set(v.install_window_days);
         self.settings.presets.set(v.presets);
     }
@@ -806,5 +906,283 @@ impl AppState {
                 }
             });
         }
+    }
+
+    // --- Device actions ------------------------------------------------------
+
+    /// Toggles a patch row's device in the selection.
+    ///
+    /// Selection is device-keyed, so the checkbox on *every* row for a device
+    /// reflects the same state — and toggling any one of them toggles the device.
+    /// Checking therefore takes every KB visible for that device on this page
+    /// rather than just the clicked row's, so the count shown and the KBs sent
+    /// match what the operator sees ticked.
+    pub(super) fn toggle_row_selection(self, row: &PatchRow, checked: bool) {
+        let device_id = row.device_id;
+        if !checked {
+            self.actions.selected.update(|sel| {
+                sel.remove(&device_id);
+            });
+            return;
+        }
+        let (kbs, rows) = self.query.page_rows.with_untracked(|page| {
+            let mut kbs = BTreeSet::new();
+            let mut rows = 0usize;
+            for r in page.iter().filter(|r| r.device_id == device_id) {
+                rows += 1;
+                if let Some(kb) = r.kb.as_ref().filter(|k| !k.is_empty()) {
+                    kbs.insert(kb.clone());
+                }
+            }
+            (kbs, rows)
+        });
+        self.actions.selected.update(|sel| {
+            sel.insert(
+                device_id,
+                DeviceSelection {
+                    name: row.device_name.clone(),
+                    organization: row.organization.clone(),
+                    offline: row.offline,
+                    kbs,
+                    // The clicked row always counts, even if the page moved under us.
+                    rows: rows.max(1),
+                },
+            );
+        });
+    }
+
+    /// Whether every row on the current page is selected. Used for the header
+    /// checkbox's checked/indeterminate state.
+    pub(super) fn page_selection_state(self) -> (bool, bool) {
+        let rows = self.query.page_rows.get();
+        if rows.is_empty() {
+            return (false, false);
+        }
+        let sel = self.actions.selected.get();
+        let selected = rows
+            .iter()
+            .filter(|r| sel.contains_key(&r.device_id))
+            .count();
+        (
+            selected == rows.len(),
+            selected > 0 && selected < rows.len(),
+        )
+    }
+
+    /// Selects or clears every device represented on the current page. Selection is
+    /// per-device and idempotent, so repeating it for a device's other rows is a
+    /// no-op rather than double-counting.
+    pub(super) fn toggle_page_selection(self, checked: bool) {
+        let rows = self.query.page_rows.get_untracked();
+        for row in &rows {
+            self.toggle_row_selection(row, checked);
+        }
+    }
+
+    pub(super) fn clear_selection(self) {
+        self.actions.selected.update(|s| s.clear());
+    }
+
+    /// `(devices, patch rows, offline devices)` for the action bar's running total.
+    /// Cross-page selection is invisible unless it is surfaced somewhere.
+    pub(super) fn selection_counts(self) -> (usize, usize, usize) {
+        self.actions.selected.with(|sel| {
+            (
+                sel.len(),
+                sel.values().map(|d| d.rows).sum(),
+                sel.values().filter(|d| d.offline).count(),
+            )
+        })
+    }
+
+    /// KBs checked across the selection, for a script that accepts an allow list.
+    fn selected_kbs(self) -> Vec<String> {
+        self.actions.selected.with_untracked(|sel| {
+            sel.values()
+                .flat_map(|d| d.kbs.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        })
+    }
+
+    pub(super) fn load_scripts(self) {
+        if !self.can_act() {
+            return;
+        }
+        self.actions.scripts_loading.set(true);
+        spawn_local(async move {
+            match api::list_scripts().await {
+                Ok(list) => self.actions.scripts.set(list),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load scripts: {e}"))),
+            }
+            self.actions.scripts_loading.set(false);
+        });
+    }
+
+    /// Whether the action affordances should be live. The backend re-checks all of
+    /// this — this only decides what the UI offers.
+    pub(super) fn can_act(self) -> bool {
+        !self.session.web_mode.get_untracked()
+            && !self.session.demo.get_untracked()
+            && self.is_authed()
+            && self.actions.blocked_reason.with_untracked(|r| r.is_none())
+    }
+
+    /// Recomputes why actions are unavailable, if they are, from the auth status.
+    pub(super) fn refresh_action_availability(self, status: &AuthStatus) {
+        let reason = if self.session.web_mode.get_untracked() || self.session.demo.get_untracked() {
+            Some("Patch actions run only in the desktop app.".to_string())
+        } else if !status.authenticated {
+            Some("Sign in to run patch actions.".to_string())
+        } else if !status.actions_enabled {
+            Some("Patch actions are disabled — enable them in Settings.".to_string())
+        } else if !status.write_enabled {
+            // Distinguish "we know it's read-only" from "we can't tell", so the
+            // operator isn't told their consent was wrong when it may be fine.
+            Some(if status.scope_known {
+                "Your NinjaOne sign-in is read-only. Re-authorize to enable actions.".to_string()
+            } else {
+                "Couldn't confirm your sign-in grants the Management scope. Re-authorize to be sure."
+                    .to_string()
+            })
+        } else {
+            None
+        };
+        self.actions.blocked_reason.set(reason);
+    }
+
+    /// Builds the request for `kind` from the current selection and form state.
+    pub(super) fn build_request(self, kind: ActionKind) -> ActionRequest {
+        let device_ids: Vec<i64> = self
+            .actions
+            .selected
+            .with_untracked(|s| s.keys().copied().collect());
+        let mut req = ActionRequest::new(kind, device_ids);
+        req.include_offline = self.actions.include_offline.get_untracked();
+        req.override_window = self.actions.override_window.get_untracked();
+        // Only a script has a real preview; for everything else the backend rejects
+        // a dry run outright rather than pretending.
+        req.dry_run = kind == ActionKind::Script && self.actions.dry_run.get_untracked();
+
+        if kind == ActionKind::Reboot {
+            req.reboot_mode = Some(if self.actions.reboot_mode.get_untracked() == "FORCED" {
+                RebootMode::Forced
+            } else {
+                RebootMode::Normal
+            });
+            req.reason = Some(self.actions.reason.get_untracked());
+        }
+        if kind == ActionKind::Script {
+            req.reboot = self.actions.script_reboot.get_untracked();
+            let id = self.actions.script_id.get_untracked();
+            req.script_id = id;
+            req.script_name = self
+                .actions
+                .scripts
+                .with_untracked(|s| s.iter().find(|s| Some(s.id) == id).map(|s| s.name.clone()));
+            let run_as = self.actions.run_as.get_untracked();
+            req.run_as = (!run_as.trim().is_empty()).then_some(run_as);
+            let params = self.actions.script_params.get_untracked();
+            req.parameters = (!params.trim().is_empty()).then_some(params);
+            if self.actions.use_kb_targeting.get_untracked() {
+                req.targets = self.selected_kbs();
+            }
+        }
+        req
+    }
+
+    /// Asks the backend what `kind` would do and opens the confirmation modal.
+    pub(super) fn open_plan(self, kind: ActionKind) {
+        if !self.can_act() {
+            if let Some(reason) = self.actions.blocked_reason.get_untracked() {
+                self.notify(Toast::err(reason));
+            }
+            return;
+        }
+        let request = self.build_request(kind);
+        if request.device_ids.is_empty() {
+            self.notify(Toast::err("Select at least one device first"));
+            return;
+        }
+        self.actions.confirm_input.set(String::new());
+        self.actions.dispatching.set(true);
+        spawn_local(async move {
+            match api::plan_action(request.clone()).await {
+                Ok(plan) => self
+                    .actions
+                    .pending
+                    .set(Some(PendingAction { request, plan })),
+                Err(e) => self.notify(Toast::err(e)),
+            }
+            self.actions.dispatching.set(false);
+        });
+    }
+
+    pub(super) fn cancel_plan(self) {
+        self.actions.pending.set(None);
+        self.actions.confirm_input.set(String::new());
+    }
+
+    /// Dispatches the plan currently held in the modal.
+    pub(super) fn confirm_plan(self) {
+        let Some(pending) = self.actions.pending.get_untracked() else {
+            return;
+        };
+        let mut request = pending.request;
+        request.confirm_token = pending.plan.confirm_token.clone();
+        let mutating = request.kind.is_mutating();
+
+        self.actions.dispatching.set(true);
+        spawn_local(async move {
+            match api::run_action(request).await {
+                Ok(batch) => {
+                    self.actions.pending.set(None);
+                    self.actions.confirm_input.set(String::new());
+                    // Seed from the response rather than re-fetching; the backend
+                    // poller advances these rows over `action:progress`.
+                    self.actions
+                        .jobs
+                        .update(|jobs| jobs.extend(batch.jobs.clone()));
+                    self.ui.active_tab.set(Tab::Jobs);
+                    if mutating && batch.dispatched > 0 {
+                        // The on-screen result predates the change we just made.
+                        self.actions.results_stale.set(true);
+                    }
+                    let msg = if batch.skipped > 0 {
+                        format!(
+                            "Dispatched to {} device(s); {} skipped",
+                            batch.dispatched, batch.skipped
+                        )
+                    } else {
+                        format!("Dispatched to {} device(s)", batch.dispatched)
+                    };
+                    self.notify(Toast::ok(msg));
+                }
+                Err(e) => self.notify(Toast::err(e)),
+            }
+            self.actions.dispatching.set(false);
+            self.actions.dispatch_progress.set(None);
+        });
+    }
+
+    pub(super) fn refresh_jobs(self) {
+        if self.session.web_mode.get_untracked() || self.session.demo.get_untracked() {
+            return;
+        }
+        spawn_local(async move {
+            if let Ok(jobs) = api::list_jobs().await {
+                self.actions.jobs.set(jobs);
+            }
+        });
+    }
+
+    pub(super) fn clear_job_history(self) {
+        spawn_local(async move {
+            match api::clear_jobs().await {
+                Ok(jobs) => self.actions.jobs.set(jobs),
+                Err(e) => self.notify(Toast::err(e)),
+            }
+        });
     }
 }

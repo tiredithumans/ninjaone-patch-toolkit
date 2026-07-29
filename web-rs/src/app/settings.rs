@@ -19,6 +19,7 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
             client_secret: non_empty(state.settings.f_client_secret.get_untracked()),
             clear_secret: false,
             auto_check_updates: state.settings.f_auto_update.get_untracked(),
+            actions: state.settings.f_actions.get_untracked(),
         };
         spawn_local(async move {
             match api::save_settings(args).await {
@@ -44,6 +45,7 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                 client_secret: None,
                 clear_secret: true,
                 auto_check_updates: state.settings.f_auto_update.get_untracked(),
+                actions: state.settings.f_actions.get_untracked(),
             };
             match api::save_settings(args).await {
                 Ok(v) => {
@@ -177,6 +179,7 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                     "Automatically check for updates on launch"
                 </label>
             </div>
+            <ActionSettingsFields/>
             <div class="row">
                 <button class="btn btn-primary" on:click=save>
                     "Save settings"
@@ -220,5 +223,181 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                 {concat!("NinjaOne Patch Toolkit v", env!("CARGO_PKG_VERSION"))}
             </p>
         </section>
+    }
+}
+
+/// The write-path guardrail knobs.
+///
+/// Every value here is re-validated and re-enforced by the backend; the panel only
+/// decides what the operator is offered. Enabling actions also changes the OAuth
+/// scope requested at the *next* sign-in, which is why the hint below points at
+/// re-authorization rather than implying the toggle alone is enough.
+#[component]
+fn ActionSettingsFields() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let a = state.settings.f_actions;
+
+    // Each control edits one field of the block, leaving the rest untouched, so a
+    // setting the panel doesn't surface survives a save.
+    let enabled = move || a.with(|s| s.enabled);
+
+    view! {
+        <fieldset class="settings-actions">
+            <legend>"Patch actions"</legend>
+            <p class="settings-hint">
+                "Off by default. Turning this on makes the next sign-in request the "
+                <strong>"Management"</strong>
+                " scope, which the patch/reboot/script endpoints require — enable that scope on the API app in NinjaOne, then Re-authorize."
+            </p>
+
+            <label class="inline">
+                <input
+                    type="checkbox"
+                    prop:checked=enabled
+                    on:change=move |ev| {
+                        let on = event_target_checked(&ev);
+                        a.update(|s| s.enabled = on);
+                    }
+                />
+                "Enable patch actions (apply, reboot, run scripts)"
+            </label>
+
+            <div class="row" class:settings-disabled=move || !enabled()>
+                <label>
+                    "Max devices per action"
+                    <input
+                        type="number"
+                        min="1"
+                        max="500"
+                        prop:disabled=move || !enabled()
+                        prop:value=move || a.with(|s| s.max_devices_per_action).to_string()
+                        on:change=move |ev| {
+                            if let Ok(v) = event_target_value(&ev).parse::<usize>() {
+                                a.update(|s| s.max_devices_per_action = v.clamp(1, 500));
+                            }
+                        }
+                    />
+                </label>
+                <label>
+                    "Max organizations per action"
+                    <input
+                        type="number"
+                        min="1"
+                        max="50"
+                        prop:disabled=move || !enabled()
+                        prop:value=move || a.with(|s| s.max_orgs_per_action).to_string()
+                        on:change=move |ev| {
+                            if let Ok(v) = event_target_value(&ev).parse::<usize>() {
+                                a.update(|s| s.max_orgs_per_action = v.max(1));
+                            }
+                        }
+                    />
+                </label>
+                <label>
+                    "Dispatch concurrency"
+                    <input
+                        type="number"
+                        min="1"
+                        max="16"
+                        prop:disabled=move || !enabled()
+                        prop:value=move || a.with(|s| s.concurrency).to_string()
+                        on:change=move |ev| {
+                            if let Ok(v) = event_target_value(&ev).parse::<usize>() {
+                                a.update(|s| s.concurrency = v.clamp(1, 16));
+                            }
+                        }
+                    />
+                </label>
+                <label>
+                    "Run as"
+                    <input
+                        type="text"
+                        placeholder="system"
+                        prop:disabled=move || !enabled()
+                        prop:value=move || a.with(|s| s.run_as.clone())
+                        on:input=move |ev| {
+                            let v = event_target_value(&ev);
+                            a.update(|s| s.run_as = v);
+                        }
+                    />
+                </label>
+            </div>
+
+            <div class="row" class:settings-disabled=move || !enabled()>
+                <label>
+                    "OS remediation script ID"
+                    <input
+                        type="number"
+                        min="1"
+                        placeholder="from the library URL"
+                        prop:disabled=move || !enabled()
+                        prop:value=move || {
+                            a.with(|s| s.os_patch_script_id).map(|v| v.to_string()).unwrap_or_default()
+                        }
+                        on:change=move |ev| {
+                            let v = event_target_value(&ev).parse::<i64>().ok();
+                            a.update(|s| s.os_patch_script_id = v);
+                        }
+                    />
+                </label>
+                <label>
+                    "Software remediation script ID"
+                    <input
+                        type="number"
+                        min="1"
+                        prop:disabled=move || !enabled()
+                        prop:value=move || {
+                            a.with(|s| s.software_patch_script_id)
+                                .map(|v| v.to_string())
+                                .unwrap_or_default()
+                        }
+                        on:change=move |ev| {
+                            let v = event_target_value(&ev).parse::<i64>().ok();
+                            a.update(|s| s.software_patch_script_id = v);
+                        }
+                    />
+                </label>
+            </div>
+            <p class="settings-hint">
+                "NinjaOne has no script-upload API, so add the script by hand under Administration → Library → Automation and copy the numeric ID out of its URL."
+            </p>
+
+            <label class="inline" class:settings-disabled=move || !enabled()>
+                <input
+                    type="checkbox"
+                    prop:disabled=move || !enabled()
+                    prop:checked=move || a.with(|s| s.allow_offline_targets)
+                    on:change=move |ev| {
+                        let on = event_target_checked(&ev);
+                        a.update(|s| s.allow_offline_targets = on);
+                    }
+                />
+                "Allow offline devices as targets (NinjaOne queues the action until they reconnect)"
+            </label>
+            <label class="inline" class:settings-disabled=move || !enabled()>
+                <input
+                    type="checkbox"
+                    prop:disabled=move || !enabled()
+                    prop:checked=move || a.with(|s| s.require_maintenance_window)
+                    on:change=move |ev| {
+                        let on = event_target_checked(&ev);
+                        a.update(|s| s.require_maintenance_window = on);
+                    }
+                />
+                "Only allow changes inside a maintenance window"
+            </label>
+            <label class="inline" class:settings-disabled=move || !enabled()>
+                <input
+                    type="checkbox"
+                    prop:disabled=move || !enabled()
+                    prop:checked=move || a.with(|s| s.allow_window_override)
+                    on:change=move |ev| {
+                        let on = event_target_checked(&ev);
+                        a.update(|s| s.allow_window_override = on);
+                    }
+                />
+                "Allow overriding the maintenance window"
+            </label>
+        </fieldset>
     }
 }
