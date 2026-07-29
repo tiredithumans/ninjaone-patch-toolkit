@@ -11,24 +11,21 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- **"Aged (past SLA)" reported almost nothing, on any fleet.** The app read a field it believed was
-  the patch's release date. NinjaOne's API has no such field — it exposes only the timestamp of when
-  the patch data was *collected*, which is always recent — so the SLA comparison was effectively
-  never true and the aged-patch count sat near zero however long a critical patch had been
-  outstanding. The patch-age chart was skewed the same way. The app now measures and labels this
-  honestly, as **how long NinjaOne has been reporting the patch**: the Patches column is **First
-  seen**, the compliance column is **Pending past SLA**, the chart is **Pending patch age (since
-  first seen)**, and the date filter reads **First seen**. Expect these numbers to be much higher
-  than before — that is the backlog that was previously invisible. Patches NinjaOne has never
-  timestamped now appear in their own **Unknown** age bucket instead of inflating **180+ days**.
+- **Click a rollup number to see the rows behind it.** The Compliance and Failures tabs were
+  read-only dead ends: seeing "Contoso · 63% · 41 pending Critical/Important" left you to scroll back
+  to Filters, re-pick the organization by hand, tick a severity, press Run and switch tabs. Now the
+  organization name in the compliance table, the KB in the failures table, and each band in the
+  severity chart's legend are clickable — each one narrows the filters accordingly and drops you on
+  the Patches tab showing exactly those rows. Because the fleet is already cached, this costs no
+  extra requests to NinjaOne.
 
-- **A single gateway hiccup no longer discards a whole query.** Large fleets are fetched as dozens of
-  sequential pages; a transient 502/503 on any one of them used to fail the entire run and throw away
-  every page already downloaded. Server errors and dropped connections are now retried with backoff.
-  Patch-apply, reboot and script actions are deliberately **not** retried this way — a failure there
-  stays ambiguous and is reported for you to check, never silently re-run.
+- **Group the Patches tab by device or by patch.** A new **View** switch above the table
+  offers **Flat** (as before), **By device** — each device with its patches nested
+  underneath — and **By patch** — each patch with the devices it's missing on, ordered by
+  how many machines it affects. Groups expand on demand, and you can tick a whole group or
+  open it and tick individual rows.
 
 ### Changed
 
@@ -54,15 +51,45 @@ version and start a fresh `[Unreleased]`.
   of third-party patches that was hundreds of thousands of redundant copies on every Run, refresh
   tick and filter change. The data is now read in place. No change to any number the app reports.
 
-### Added
-
-- **Group the Patches tab by device or by patch.** A new **View** switch above the table
-  offers **Flat** (as before), **By device** — each device with its patches nested
-  underneath — and **By patch** — each patch with the devices it's missing on, ordered by
-  how many machines it affects. Groups expand on demand, and you can tick a whole group or
-  open it and tick individual rows.
-
 ### Fixed
+
+- **Grouped views were stuck on their first page.** In **By device** / **By patch**, the pager above
+  the table was counting patch *rows* rather than groups, so it advertised far more pages than the
+  view had and **Next** fetched rows that were never displayed — the screen simply didn't change,
+  and every group past the first pageful was unreachable. The pager now counts groups ("Groups 1–100
+  of 3,214") and **Next** loads the next set of group headers. Re-running a query or letting
+  auto-refresh tick while grouped also used to leave the *previous* query's group headers on screen
+  against the new result's totals; those are now refreshed with everything else.
+
+- **The exported HTML report could show an empty or distorted severity chart.** Its pending-patch
+  breakdown left `Security` and `Recommended` out of the total it divided by, while still drawing
+  them. A backlog made up mostly of those two — the norm for third-party patches, which is where
+  NinjaOne puts most of its `Security` grades — printed "No pending patches" even though the in-app
+  chart showed thousands; a mixed backlog drew segments past the edge of the chart, hiding the
+  lower-severity bands and overstating the widths of the rest. The chart and its total are now
+  derived from the same list of bands, so they cannot disagree.
+
+- **Legend swatches for Security and Recommended were invisible**, and **Optional and Unknown
+  severities were styled identically** in the Patches table, so a patch NinjaOne graded as low
+  priority looked the same as one it didn't grade at all. In the browser demo, sorting by severity
+  also ranked Security and Recommended below Optional instead of above it.
+
+- **"Aged (past SLA)" reported almost nothing, on any fleet.** The app read a field it believed was
+  the patch's release date. NinjaOne's API has no such field — it exposes only the timestamp of when
+  the patch data was *collected*, which is always recent — so the SLA comparison was effectively
+  never true and the aged-patch count sat near zero however long a critical patch had been
+  outstanding. The patch-age chart was skewed the same way. The app now measures and labels this
+  honestly, as **how long NinjaOne has been reporting the patch**: the Patches column is **First
+  seen**, the compliance column is **Pending past SLA**, the chart is **Pending patch age (since
+  first seen)**, and the date filter reads **First seen**. Expect these numbers to be much higher
+  than before — that is the backlog that was previously invisible. Patches NinjaOne has never
+  timestamped now appear in their own **Unknown** age bucket instead of inflating **180+ days**.
+
+- **A single gateway hiccup no longer discards a whole query.** Large fleets are fetched as dozens of
+  sequential pages; a transient 502/503 on any one of them used to fail the entire run and throw away
+  every page already downloaded. Server errors and dropped connections are now retried with backoff.
+  Patch-apply, reboot and script actions are deliberately **not** retried this way — a failure there
+  stays ambiguous and is reported for you to check, never silently re-run.
 
 - **Ticking one patch no longer ticks every other patch on that device.** Selection was
   keyed on the device, so checking a single row visibly checked all of its siblings. It now
