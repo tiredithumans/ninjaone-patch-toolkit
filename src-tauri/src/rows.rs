@@ -146,6 +146,7 @@ pub fn build_rows(
                 os_name,
                 node_class: device.and_then(|d| d.node_class.clone()),
                 needs_reboot: device.map(|d| d.needs_reboot()).unwrap_or(false),
+                offline: device.map(|d| d.is_offline()).unwrap_or(false),
                 patch_type: source.type_label.to_string(),
                 kb: patch.kb_number.clone(),
                 name: patch.display_name(),
@@ -1316,11 +1317,15 @@ mod tests {
         assert_keys_present(
             &serde_json::to_value(&rows[0]).unwrap(),
             &[
+                // The row's identity for action selection — the frontend keys its
+                // checkboxes on this, so dropping it silently breaks selection.
+                "deviceId",
                 "deviceName",
                 "organization",
                 "location",
                 "deviceRole",
                 "osName",
+                "offline",
                 "patchType",
                 "kb",
                 "name",
@@ -1498,6 +1503,7 @@ mod tests {
             os_name: None,
             node_class: None,
             needs_reboot: false,
+            offline: false,
             patch_type: "OS".into(),
             kb: Some(kb.into()),
             name: "Cumulative Update".into(),

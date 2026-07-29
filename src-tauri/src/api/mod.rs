@@ -1,3 +1,5 @@
+pub mod actions;
+pub mod activities;
 pub mod devices;
 pub mod lookups;
 pub mod patches;
@@ -28,6 +30,22 @@ const DEFAULT_PAGE_SIZE: u32 = 500;
 const REPORTING_PAGE_SIZE: u32 = 5000;
 const MAX_RETRIES: u8 = 3;
 
+/// Whether a request may be replayed after a *transport* failure whose outcome is
+/// unknown (a client-side timeout: the body was sent, but no response came back).
+///
+/// Reads are naturally idempotent. A POST that *acts* — reboot, script run, patch
+/// apply — is not, and NinjaOne v2 offers no idempotency-key header, so a replayed
+/// dispatch runs the script a second time on the device.
+///
+/// This only governs the timeout arm. Server *rejections* (429, 401) are replayed
+/// regardless of the policy: the gateway refused the request before it ever reached
+/// the device queue, so re-sending cannot double-execute anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplaySafety {
+    Idempotent,
+    ActOnce,
+}
+
 /// Sink for incremental pagination progress: invoked with the cumulative row
 /// count after each page is accumulated. Callers that don't stream progress to
 /// the UI pass `None`.
@@ -44,12 +62,15 @@ impl NinjaApiClient {
         Self { http, auth }
     }
 
+    /// Issues a request against `{base}/api/v2{path}`, refreshing the bearer token
+    /// and retrying per `replay` (see [`ReplaySafety`]).
     async fn request_raw(
         &self,
         method: Method,
         path: &str,
         query: &[(&str, String)],
         body: Option<Value>,
+        replay: ReplaySafety,
     ) -> Result<Value> {
         let base = self.auth.base_url();
         let url = format!("{base}/api/v2{path}");
@@ -71,11 +92,26 @@ impl NinjaApiClient {
 
             let resp = match req.send().await {
                 Ok(r) => r,
-                Err(e) if e.is_timeout() && attempt < MAX_RETRIES => {
+                Err(e)
+                    if e.is_timeout()
+                        && attempt < MAX_RETRIES
+                        && replay == ReplaySafety::Idempotent =>
+                {
                     attempt += 1;
                     warn!(?e, attempt, "request timed out, retrying");
                     tokio::time::sleep(Duration::from_secs(2u64.pow(attempt as u32))).await;
                     continue;
+                }
+                // The body was already on the wire when the clock ran out, so the
+                // action may have been queued even though we never saw the response.
+                // Replaying would risk a second reboot / script run.
+                Err(e) if e.is_timeout() && replay == ReplaySafety::ActOnce => {
+                    warn!(%method, %url, "acting request timed out; not retried");
+                    return Err(e).context(
+                        "the request timed out after the body was sent — the action may already \
+                         be queued in NinjaOne. It was NOT retried; check the device's activity \
+                         feed before trying again",
+                    );
                 }
                 Err(e) => return Err(e).context("http send"),
             };
@@ -130,6 +166,34 @@ impl NinjaApiClient {
         }
     }
 
+    /// Single-shot GET for the endpoints that return one object rather than a
+    /// paginated collection (`/device/{id}/scripting/options`, `/automation/scripts`).
+    async fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<T> {
+        let raw = self
+            .request_raw(Method::GET, path, query, None, ReplaySafety::Idempotent)
+            .await?;
+        serde_json::from_value(raw).context("deserialize response body")
+    }
+
+    /// POST to an endpoint whose success is a bare `204 No Content` — the patch
+    /// scan/apply family. Never replayed on timeout ([`ReplaySafety::ActOnce`]).
+    async fn post_action(&self, path: &str, body: Option<Value>) -> Result<()> {
+        self.request_raw(Method::POST, path, &[], body, ReplaySafety::ActOnce)
+            .await
+            .map(|_| ())
+    }
+
+    /// POST that returns a body worth reading (`/device/{id}/script/run`). Never
+    /// replayed on timeout ([`ReplaySafety::ActOnce`]).
+    async fn post_json(&self, path: &str, body: Value) -> Result<Value> {
+        self.request_raw(Method::POST, path, &[], Some(body), ReplaySafety::ActOnce)
+            .await
+    }
+
     /// Cursor-paginated GET covering NinjaOne's two pagination styles. The
     /// `/queries/*` endpoints return a `{ results, cursor }` envelope (cursor is a
     /// bare string or a `{ name, offset, ... }` object, fed back as `cursor`); the
@@ -178,7 +242,9 @@ impl NinjaApiClient {
                 query.push(("after", a.to_string()));
             }
 
-            let raw: Value = self.request_raw(Method::GET, path, &query, None).await?;
+            let raw: Value = self
+                .request_raw(Method::GET, path, &query, None, ReplaySafety::Idempotent)
+                .await?;
 
             match raw {
                 Value::Array(items) => {
@@ -579,5 +645,90 @@ mod tests {
         let n500 = devices.iter().filter(|d| d.id == 500).count();
         assert_eq!(n500, 1, "id 500 must appear exactly once");
         assert!(devices.iter().any(|d| d.id == 502));
+    }
+
+    /// A client with a timeout short enough that a delayed mock always trips it.
+    fn timing_out_client(server: &wiremock::MockServer) -> NinjaApiClient {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(150))
+            .build()
+            .expect("build client");
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        NinjaApiClient::new(http, auth)
+    }
+
+    #[tokio::test]
+    async fn post_timeout_is_not_replayed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/device/1/reboot/NORMAL"))
+            .respond_with(ResponseTemplate::new(204).set_delay(Duration::from_secs(30)))
+            // The whole point: exactly one attempt reaches the server. A replay
+            // could reboot the device twice.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = timing_out_client(&server)
+            .device_reboot(1, crate::model::RebootMode::Normal, "patching")
+            .await
+            .expect_err("a timed-out reboot must surface as an error");
+        assert!(
+            err.to_string().contains("may already"),
+            "the operator must be told the action may have landed, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_timeout_is_replayed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+            .mount(&server)
+            .await;
+
+        // Reads stay retried; only the acting POSTs changed. This guards against
+        // the idempotency fix accidentally disabling retries everywhere.
+        let _ = timing_out_client(&server).devices(None, None).await;
+        let attempts = server.received_requests().await.unwrap_or_default().len();
+        assert!(
+            attempts > 1,
+            "an idempotent GET must still retry; saw {attempts} attempt(s)"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_429_is_still_replayed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A 429 is a gateway rejection — the request never reached the device
+        // queue, so replaying it cannot double-execute anything.
+        Mock::given(method("POST"))
+            .and(path("/api/v2/device/2/patch/os/scan"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/device/2/patch/os/scan"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        NinjaApiClient::new(http, auth)
+            .device_patch_scan(2, crate::model::PatchType::Os)
+            .await
+            .expect("a 429 must be retried through to success");
     }
 }
