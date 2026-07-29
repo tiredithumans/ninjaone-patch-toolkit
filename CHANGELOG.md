@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-29
+
 ### Added
 
 - **Patch actions — remediate from the same place you find the problem.** Tick patch rows
