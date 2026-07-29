@@ -11,9 +11,10 @@ use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus, PatchType, Role};
 use crate::rows::{
-    LookupMaps, PatchSource, QueryResult, QuerySummary, RowSort, build_age_buckets,
-    build_compliance, build_compliance_by_os, build_device_summaries, build_failures, build_rows,
-    build_severity_by_org, page_rows, pending_counts,
+    GroupBy, GroupPage, LookupMaps, PatchSource, QueryResult, QuerySummary, RowSort,
+    build_age_buckets, build_compliance, build_compliance_by_os, build_device_summaries,
+    build_failures, build_rows, build_severity_by_org, group_member_page, group_page, page_rows,
+    pending_counts,
 };
 use crate::state::{AppState, CurrentPatches};
 
@@ -387,6 +388,43 @@ pub async fn get_patch_rows(
     // await".
     let rows = state
         .with_current_result(|r| page_rows(&r.rows, offset, limit, sort))
+        .map_err(|_| UiError::new("result cache poisoned"))?
+        .unwrap_or_default();
+    Ok(rows)
+}
+
+/// Serves one page of **group headers** over the same cached rows `get_patch_rows`
+/// pages. Grouping happens backend-side for the same reason sorting does: the
+/// frontend only ever holds one page, so it cannot group a fleet it hasn't seen.
+///
+/// Returns headers only. A patch group can span the whole fleet (one Chrome update
+/// covers every device), so its members stay off the wire until expanded.
+#[tauri::command]
+pub async fn get_patch_groups(
+    state: State<'_, AppState>,
+    group_by: GroupBy,
+    offset: usize,
+    limit: usize,
+) -> Result<GroupPage, UiError> {
+    state
+        .with_current_result(|r| group_page(&r.rows, group_by, offset, limit))
+        .map_err(|_| UiError::new("result cache poisoned"))?
+        .ok_or_else(|| UiError::new("Run a query before grouping"))
+}
+
+/// Serves one page of a single group's member rows. `key` is the opaque
+/// `PatchGroup.key` the frontend was handed, so no per-request state is kept
+/// backend-side and a stale key simply matches nothing.
+#[tauri::command]
+pub async fn get_patch_group_members(
+    state: State<'_, AppState>,
+    group_by: GroupBy,
+    key: String,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<PatchRow>, UiError> {
+    let rows = state
+        .with_current_result(|r| group_member_page(&r.rows, group_by, &key, offset, limit))
         .map_err(|_| UiError::new("result cache poisoned"))?
         .unwrap_or_default();
     Ok(rows)

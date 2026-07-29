@@ -11,6 +11,25 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **Group the Patches tab by device or by patch.** A new **View** switch above the table
+  offers **Flat** (as before), **By device** — each device with its patches nested
+  underneath — and **By patch** — each patch with the devices it's missing on, ordered by
+  how many machines it affects. Groups expand on demand, and you can tick a whole group or
+  open it and tick individual rows.
+
+### Fixed
+
+- **Ticking one patch no longer ticks every other patch on that device.** Selection was
+  keyed on the device, so checking a single row visibly checked all of its siblings. It now
+  tracks the exact rows you tick. This also fixes what was sent to a `kbAllowList` script:
+  it previously received *every* KB on the device the moment one row was checked, so the
+  one path NinjaOne offers for targeting specific patches could never actually be given a
+  subset. Note that **Apply** itself is unchanged and still installs everything approved on
+  the selected devices — NinjaOne has no per-patch apply endpoint — and third-party patches
+  carry no KB at all, so they can't be targeted individually either way.
+
 ## [0.10.1] - 2026-07-29
 
 ### Fixed

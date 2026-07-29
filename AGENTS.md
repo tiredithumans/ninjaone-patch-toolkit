@@ -202,6 +202,15 @@ secrets are **not** stored there — see below).
   `get_patch_rows` also takes an optional `sort` (`rows::RowSort`) and re-orders **per request** via a
   ref-sort in `rows::page_rows` — the cached rows themselves are never reordered; their canonical
   severity/org/device order feeds the export and the summary's inline first page.
+  - **Grouping is backend-side too, for the same reason.** The Patches tab's *By device* / *By patch*
+    modes go through `get_patch_groups` (headers + total, `rows::group_page`) and
+    `get_patch_group_members` (one group's rows, `rows::group_member_page`). The frontend only ever
+    holds one page, so it cannot group a fleet it has never seen — never regroup `page_rows`
+    client-side. Group headers carry **no** members: a by-patch group can span the whole fleet, so
+    members load on expand, capped at `GROUP_MEMBER_LIMIT`. `rows::group_key` is the identity the
+    frontend echoes back, so no per-request state is kept backend-side and a stale key matches
+    nothing. `demo.rs` mirrors `group_key`/`build_groups` by hand for the browser demo — keep the
+    two in step.
   - **Compact aggregates ride in the summary, not the rows.** Fleet-wide distributions the frontend
     charts/failure tab need — `failures` (FAILED-install rollup, `build_failures`), `severity_by_org`
     (`build_severity_by_org`), `age_buckets` (`build_age_buckets`) — are computed backend-side in
@@ -260,8 +269,16 @@ secrets are **not** stored there — see below).
   - **There is no per-KB apply endpoint.** `/device/{id}/patch/{os,software}/apply` installs
     everything approved on the device. Targeting specific KBs is possible **only** via a
     library script declaring a `kbAllowList` variable (`AutomationScript::accepts_kb_allow_list`
-    gates whether the UI may offer it). This is why **checking a patch row selects that row's
-    *device***, and why the UI says so.
+    gates whether the UI may offer it).
+  - **Selection is per patch row; dispatch is per device (load-bearing).**
+    `DeviceSelection.patches` maps each ticked row's `patch_key` → its KB, and a device
+    enters the selection with its first ticked row and leaves with its last. Ticking a row
+    must **not** tick the device's other rows: it once did, which swept every KB on the
+    device into `kbAllowList` and made the one path capable of per-patch targeting unable to
+    receive a subset. What Apply then does on those devices is still all-or-nothing — that's
+    the endpoint, not the selection model — so don't "fix" the gap by widening selection
+    again. Third-party patches carry no KB (the software feed has no `kbNumber`), so they can
+    never be targeted individually on either path.
   - **`ReplaySafety::ActOnce` on every POST.** `request_raw`'s timeout arm would otherwise
     replay the body and re-run the action; 429/401 still replay (the gateway rejected before
     the device queue). A timed-out dispatch becomes `JobState::Unknown` — polled, never

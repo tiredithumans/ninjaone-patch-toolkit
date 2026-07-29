@@ -30,11 +30,18 @@ use update::UpdateSplash;
 use util::{
     MdBlock, MdSpan, SummaryCounts, action_blocked_reason, aged_badge, aria_sort, date_to_epoch,
     epoch_to_date, filter_chips, format_duration, group_thousands, is_fleet_tab, job_mode_label,
-    next_sort, non_empty, parse_changelog, parse_opt, sev_class, sort_glyph, sort_patch_rows,
-    status_class, summary_line, tab_class,
+    next_sort, non_empty, parse_changelog, parse_opt, patch_key, sev_class, sort_glyph,
+    sort_patch_rows, status_class, summary_line, tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;
+
+/// How many member rows an expanded group loads. A by-patch group can span the
+/// whole fleet (one Chrome update covers every device), so the expand is capped —
+/// and because the group checkbox only ever ticks *loaded* members, the cap also
+/// stops a single click selecting thousands of rows the operator never saw. Well
+/// above the 25-device blast-radius cap the backend enforces on dispatch.
+const GROUP_MEMBER_LIMIT: usize = 500;
 
 const REGIONS: [(&str, &str); 5] = [
     ("https://app.ninjarmm.com", "North America (app)"),

@@ -17,10 +17,12 @@
 //! It is pure data — no `js_sys`, no IPC — so it compiles and unit-tests on the host
 //! target via `just web-test`, like the helpers in [`crate::app::util`].
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::types::QueryResult;
 use crate::types::{
-    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams, Location, NodeClass,
-    OrgSeverity, Organization, OsCompliance, PatchRow, Role, SeverityCounts,
+    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams, GroupBy, Location,
+    NodeClass, OrgSeverity, Organization, OsCompliance, PatchGroup, PatchRow, Role, SeverityCounts,
 };
 
 /// Wall-clock label shown in the results summary. Fixed (not "now") so the build
@@ -634,6 +636,107 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Identity of a group a row belongs to. Mirrors the backend's `rows::group_key`
+/// exactly — the demo has no backend, so this is the one place the two must be
+/// kept in step by hand.
+pub fn group_key(row: &PatchRow, group_by: GroupBy) -> String {
+    match group_by {
+        GroupBy::Device => row.device_id.to_string(),
+        GroupBy::Patch => format!(
+            "{}\u{1f}{}\u{1f}{}",
+            row.patch_type,
+            row.kb.as_deref().unwrap_or(""),
+            row.name
+        ),
+    }
+}
+
+/// Groups the sample rows the way `rows::build_groups` groups the real ones:
+/// device groups ordered by worst severity then org/device, patch groups by blast
+/// radius then severity.
+pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
+    let mut order: Vec<String> = Vec::new();
+    let mut acc: BTreeMap<String, PatchGroup> = BTreeMap::new();
+    let mut devices: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
+    for r in rows {
+        let key = group_key(r, group_by);
+        let rank = severity_rank(&r.severity);
+        let entry = acc.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            PatchGroup {
+                key: key.clone(),
+                label: match group_by {
+                    GroupBy::Device => r.device_name.clone(),
+                    GroupBy::Patch => r.name.clone(),
+                },
+                sublabel: match group_by {
+                    GroupBy::Device => Some(r.organization.clone()),
+                    GroupBy::Patch => r.kb.clone().filter(|k| !k.is_empty()),
+                },
+                rows: 0,
+                devices: 0,
+                severity: r.severity.clone(),
+                severity_rank: rank,
+                offline: false,
+                needs_reboot: false,
+            }
+        });
+        entry.rows += 1;
+        if rank > entry.severity_rank {
+            entry.severity_rank = rank;
+            entry.severity = r.severity.clone();
+        }
+        devices.entry(key).or_default().insert(r.device_id);
+    }
+    let mut out: Vec<PatchGroup> = order
+        .into_iter()
+        .filter_map(|k| {
+            acc.remove(&k).map(|mut g| {
+                g.devices = devices.get(&k).map(|d| d.len()).unwrap_or(0);
+                g
+            })
+        })
+        .collect();
+    match group_by {
+        GroupBy::Device => out.sort_by_key(|g| {
+            (
+                std::cmp::Reverse(g.severity_rank),
+                g.sublabel.clone().unwrap_or_default().to_lowercase(),
+                g.label.to_lowercase(),
+            )
+        }),
+        GroupBy::Patch => out.sort_by_key(|g| {
+            (
+                std::cmp::Reverse(g.devices),
+                std::cmp::Reverse(g.severity_rank),
+            )
+        }),
+    }
+    out
+}
+
+/// The sample rows belonging to one group.
+pub fn group_members(rows: &[PatchRow], group_by: GroupBy, key: &str) -> Vec<PatchRow> {
+    rows.iter()
+        .filter(|r| group_key(r, group_by) == key)
+        .cloned()
+        .collect()
+}
+
+/// Severity rank mirroring `model::Severity::rank()`, for the demo's group sort.
+fn severity_rank(severity: &str) -> u8 {
+    match severity.to_ascii_uppercase().as_str() {
+        "CRITICAL" => 7,
+        "IMPORTANT" | "HIGH" => 6,
+        "SECURITY" => 5,
+        "MODERATE" | "MEDIUM" => 4,
+        "RECOMMENDED" => 3,
+        "LOW" => 2,
+        "OPTIONAL" | "NONE" => 1,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,5 +891,47 @@ mod tests {
         // Contoso (id 1) has two locations; an unknown org has none.
         assert_eq!(sample_locations(1).len(), 2);
         assert!(sample_locations(999).is_empty());
+    }
+
+    #[test]
+    fn group_rows_by_device_and_by_patch_mirror_the_backend_ordering() {
+        let rows = filtered_result(&FilterParams::default(), "ALL", &["PENDING".into()], None).rows;
+        assert!(!rows.is_empty(), "the sample must produce rows to group");
+
+        // Device groups: one per device, worst severity first.
+        let by_device = group_rows(&rows, GroupBy::Device);
+        let distinct: BTreeSet<i64> = rows.iter().map(|r| r.device_id).collect();
+        assert_eq!(by_device.len(), distinct.len());
+        assert!(by_device.iter().all(|g| g.devices == 1));
+        assert!(
+            by_device
+                .windows(2)
+                .all(|w| w[0].severity_rank >= w[1].severity_rank),
+            "device groups lead with the worst severity"
+        );
+
+        // Patch groups: blast radius first, and every row is accounted for.
+        let by_patch = group_rows(&rows, GroupBy::Patch);
+        assert_eq!(by_patch.iter().map(|g| g.rows).sum::<usize>(), rows.len());
+        assert!(
+            by_patch.windows(2).all(|w| w[0].devices >= w[1].devices),
+            "patch groups lead with blast radius"
+        );
+    }
+
+    #[test]
+    fn group_members_partition_the_rows_exactly() {
+        let rows = filtered_result(&FilterParams::default(), "ALL", &["PENDING".into()], None).rows;
+        for group_by in [GroupBy::Device, GroupBy::Patch] {
+            let groups = group_rows(&rows, group_by);
+            let mut seen = 0usize;
+            for g in &groups {
+                let members = group_members(&rows, group_by, &g.key);
+                assert_eq!(members.len(), g.rows, "header count must match its members");
+                seen += members.len();
+            }
+            assert_eq!(seen, rows.len(), "every row belongs to exactly one group");
+        }
+        assert!(group_members(&rows, GroupBy::Device, "no-such-key").is_empty());
     }
 }

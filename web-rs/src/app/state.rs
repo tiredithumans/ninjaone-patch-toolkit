@@ -240,6 +240,19 @@ pub(crate) struct QueryState {
     /// Active sort for the Patches detail table; pages re-fetch with it. `None` is
     /// the backend's canonical order. Reset by each manual run.
     pub(super) patches_sort: RwSignal<Option<RowSort>>,
+    /// Patches view mode: `None` is the flat row table, `Some(_)` groups by device
+    /// or by patch. Grouping is computed backend-side over the cached rows, so
+    /// switching modes is a fetch, not a client-side regroup of the visible page.
+    pub(super) group_by: RwSignal<Option<GroupBy>>,
+    /// Group headers for the current page of the grouped view, and the total so
+    /// the pager knows how far it runs.
+    pub(super) groups: RwSignal<Vec<PatchGroup>>,
+    pub(super) groups_total: RwSignal<usize>,
+    /// Keys of the groups the operator has opened.
+    pub(super) expanded: RwSignal<BTreeSet<String>>,
+    /// Member rows per opened group. A key present in `expanded` but absent here
+    /// is still loading — which is what the view renders a spinner from.
+    pub(super) members: RwSignal<BTreeMap<String, Vec<PatchRow>>>,
 }
 
 impl QueryState {
@@ -251,6 +264,11 @@ impl QueryState {
             page_rows: RwSignal::new(Vec::new()),
             query_error: RwSignal::new(None),
             patches_sort: RwSignal::new(None),
+            group_by: RwSignal::new(None),
+            groups: RwSignal::new(Vec::new()),
+            groups_total: RwSignal::new(0),
+            expanded: RwSignal::new(BTreeSet::new()),
+            members: RwSignal::new(BTreeMap::new()),
         }
     }
 }
@@ -404,19 +422,25 @@ impl UiState {
     }
 }
 
-/// What was checked for a device, carried alongside the selection.
+/// One device with the specific patch rows the operator ticked on it.
 ///
-/// Selection is **device-keyed**, not row-keyed: NinjaOne has no per-patch apply
-/// endpoint, so checking a patch row selects that row's *device*. The KBs ride
-/// along and are used only when the chosen script declares a `kbAllowList`.
+/// Tracked **per patch**, not merely per device, because the two dispatch paths
+/// differ in what they can honor. **Apply** has no per-KB endpoint — it installs
+/// everything approved on the device regardless of what's ticked — but a library
+/// script declaring `kbAllowList` *can* be told which KBs to install. The earlier
+/// device-keyed model swept every KB on the device into that list the moment one
+/// row was checked, so the one path capable of per-patch targeting could never
+/// actually be given a subset.
+///
+/// Third-party patches carry no KB (NinjaOne's software feed has no `kbNumber`),
+/// so they map to `None` and cannot be targeted individually on either path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DeviceSelection {
     pub name: String,
     pub organization: String,
     pub offline: bool,
-    pub kbs: BTreeSet<String>,
-    /// How many patch rows on this device are checked, for the running total.
-    pub rows: usize,
+    /// Ticked patch rows on this device: patch identity → its KB, if it has one.
+    pub patches: BTreeMap<String, Option<String>>,
 }
 
 /// Selection and dispatch state for the actions surface. Everything stays empty in
@@ -776,6 +800,163 @@ impl AppState {
         });
     }
 
+    /// Switches the Patches view between flat rows and a grouped view.
+    ///
+    /// Resets paging and every expand, because group keys and page offsets mean
+    /// different things in each mode — carrying them over would open arbitrary
+    /// groups. Demo mode groups its in-memory sample instead of round-tripping.
+    pub(super) fn set_group_by(self, group_by: Option<GroupBy>) {
+        if self.query.group_by.get_untracked() == group_by {
+            return;
+        }
+        self.query.group_by.set(group_by);
+        self.query.patches_page.set(0);
+        self.query.expanded.update(|e| e.clear());
+        self.query.members.update(|m| m.clear());
+        match group_by {
+            None => self.fetch_page(0),
+            Some(_) => self.fetch_groups(0),
+        }
+    }
+
+    /// Loads one page of group headers for the active grouping.
+    pub(super) fn fetch_groups(self, page: usize) {
+        let Some(group_by) = self.query.group_by.get_untracked() else {
+            return;
+        };
+        if self.session.demo.get_untracked() {
+            let all = demo::group_rows(&self.demo_rows(), group_by);
+            self.query.groups_total.set(all.len());
+            self.query.groups.set(
+                all.into_iter()
+                    .skip(page * PATCHES_PAGE_SIZE)
+                    .take(PATCHES_PAGE_SIZE)
+                    .collect(),
+            );
+            return;
+        }
+        spawn_local(async move {
+            match api::get_patch_groups(group_by, page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE).await
+            {
+                Ok(page) => {
+                    self.query.groups.set(page.groups);
+                    self.query.groups_total.set(page.total);
+                    self.query.query_error.set(None);
+                }
+                Err(e) => {
+                    self.query.query_error.set(Some(e.clone()));
+                    self.notify(Toast::err(e));
+                }
+            }
+        });
+    }
+
+    /// Opens or closes a group, fetching its members the first time it opens.
+    /// Members are cached per key, so re-opening is free and a collapse doesn't
+    /// discard what was already loaded.
+    pub(super) fn toggle_group(self, key: String) {
+        let open = self.query.expanded.with_untracked(|e| e.contains(&key));
+        if open {
+            self.query.expanded.update(|e| {
+                e.remove(&key);
+            });
+            return;
+        }
+        self.query.expanded.update(|e| {
+            e.insert(key.clone());
+        });
+        if self.query.members.with_untracked(|m| m.contains_key(&key)) {
+            return;
+        }
+        let Some(group_by) = self.query.group_by.get_untracked() else {
+            return;
+        };
+        if self.session.demo.get_untracked() {
+            let rows = demo::group_members(&self.demo_rows(), group_by, &key);
+            self.query.members.update(|m| {
+                m.insert(key, rows);
+            });
+            return;
+        }
+        spawn_local(async move {
+            match api::get_patch_group_members(group_by, key.clone(), 0, GROUP_MEMBER_LIMIT).await {
+                Ok(rows) => self.query.members.update(|m| {
+                    m.insert(key, rows);
+                }),
+                Err(e) => {
+                    // Leave the group open but empty and say why, rather than
+                    // silently collapsing it back under the operator.
+                    self.query.members.update(|m| {
+                        m.insert(key, Vec::new());
+                    });
+                    self.notify(Toast::err(e));
+                }
+            }
+        });
+    }
+
+    /// The sample rows behind demo-mode grouping — the displayed result's rows.
+    fn demo_rows(self) -> Vec<PatchRow> {
+        self.query
+            .result
+            .with_untracked(|r| r.as_ref().map(|r| r.rows.clone()).unwrap_or_default())
+    }
+
+    /// Ticks or clears every member of a group, loading them first if the group has
+    /// never been expanded — otherwise the checkbox on a collapsed group would
+    /// silently do nothing.
+    ///
+    /// Members are capped at `GROUP_MEMBER_LIMIT`, so one click can never select
+    /// more rows than the expanded group would show.
+    pub(super) fn toggle_group_selection(self, key: &str, checked: bool) {
+        if let Some(rows) = self.query.members.with_untracked(|m| m.get(key).cloned()) {
+            for row in &rows {
+                self.toggle_row_selection(row, checked);
+            }
+            return;
+        }
+        let Some(group_by) = self.query.group_by.get_untracked() else {
+            return;
+        };
+        let key = key.to_string();
+        if self.session.demo.get_untracked() {
+            let rows = demo::group_members(&self.demo_rows(), group_by, &key);
+            for row in &rows {
+                self.toggle_row_selection(row, checked);
+            }
+            self.query.members.update(|m| {
+                m.insert(key, rows);
+            });
+            return;
+        }
+        spawn_local(async move {
+            match api::get_patch_group_members(group_by, key.clone(), 0, GROUP_MEMBER_LIMIT).await {
+                Ok(rows) => {
+                    for row in &rows {
+                        self.toggle_row_selection(row, checked);
+                    }
+                    self.query.members.update(|m| {
+                        m.insert(key, rows);
+                    });
+                }
+                Err(e) => self.notify(Toast::err(e)),
+            }
+        });
+    }
+
+    /// `(all, some)` ticked state for a group's loaded members, for its checkbox.
+    pub(super) fn group_selection_state(self, key: &str) -> (bool, bool) {
+        let rows = self
+            .query
+            .members
+            .with(|m| m.get(key).cloned().unwrap_or_default());
+        if rows.is_empty() {
+            return (false, false);
+        }
+        let n = rows.iter().filter(|r| self.is_row_selected(r)).count();
+        (n == rows.len(), n > 0 && n < rows.len())
+    }
+
     /// Cycles a Patches-table column through none → ascending → descending and
     /// re-fetches page 1 in the new order. Demo mode sorts its in-memory rows
     /// instead — the sample ships whole, so there is no backend to re-page from.
@@ -907,44 +1088,41 @@ impl AppState {
 
     // --- Device actions ------------------------------------------------------
 
-    /// Toggles a patch row's device in the selection.
+    /// Whether this exact patch row is ticked.
+    pub(super) fn is_row_selected(self, row: &PatchRow) -> bool {
+        let key = patch_key(row);
+        self.actions.selected.with(|sel| {
+            sel.get(&row.device_id)
+                .is_some_and(|d| d.patches.contains_key(&key))
+        })
+    }
+
+    /// Ticks or unticks exactly the patch row clicked — nothing else.
     ///
-    /// Selection is device-keyed, so the checkbox on *every* row for a device
-    /// reflects the same state — and toggling any one of them toggles the device.
-    /// Checking therefore takes every KB visible for that device on this page
-    /// rather than just the clicked row's, so the count shown and the KBs sent
-    /// match what the operator sees ticked.
+    /// The device is implied by its ticked rows: it enters the selection with the
+    /// first one and leaves when the last is cleared, so a device with nothing
+    /// ticked is never dispatched against. What `Apply` then does on that device
+    /// is still all-or-nothing (there is no per-KB apply endpoint); the per-row
+    /// detail is what lets a `kbAllowList` script receive the actual subset.
     pub(super) fn toggle_row_selection(self, row: &PatchRow, checked: bool) {
-        let device_id = row.device_id;
-        if !checked {
-            self.actions.selected.update(|sel| {
-                sel.remove(&device_id);
-            });
-            return;
-        }
-        let (kbs, rows) = self.query.page_rows.with_untracked(|page| {
-            let mut kbs = BTreeSet::new();
-            let mut rows = 0usize;
-            for r in page.iter().filter(|r| r.device_id == device_id) {
-                rows += 1;
-                if let Some(kb) = r.kb.as_ref().filter(|k| !k.is_empty()) {
-                    kbs.insert(kb.clone());
+        let key = patch_key(row);
+        self.actions.selected.update(|sel| {
+            if checked {
+                sel.entry(row.device_id)
+                    .or_insert_with(|| DeviceSelection {
+                        name: row.device_name.clone(),
+                        organization: row.organization.clone(),
+                        offline: row.offline,
+                        patches: BTreeMap::new(),
+                    })
+                    .patches
+                    .insert(key, row.kb.clone().filter(|k| !k.is_empty()));
+            } else if let Some(entry) = sel.get_mut(&row.device_id) {
+                entry.patches.remove(&key);
+                if entry.patches.is_empty() {
+                    sel.remove(&row.device_id);
                 }
             }
-            (kbs, rows)
-        });
-        self.actions.selected.update(|sel| {
-            sel.insert(
-                device_id,
-                DeviceSelection {
-                    name: row.device_name.clone(),
-                    organization: row.organization.clone(),
-                    offline: row.offline,
-                    kbs,
-                    // The clicked row always counts, even if the page moved under us.
-                    rows: rows.max(1),
-                },
-            );
         });
     }
 
@@ -956,9 +1134,14 @@ impl AppState {
             return (false, false);
         }
         let sel = self.actions.selected.get();
+        // Counts ticked *rows*, not devices: with per-row selection a device can
+        // be partly ticked, and the header box must read indeterminate for that.
         let selected = rows
             .iter()
-            .filter(|r| sel.contains_key(&r.device_id))
+            .filter(|r| {
+                sel.get(&r.device_id)
+                    .is_some_and(|d| d.patches.contains_key(&patch_key(r)))
+            })
             .count();
         (
             selected == rows.len(),
@@ -966,9 +1149,8 @@ impl AppState {
         )
     }
 
-    /// Selects or clears every device represented on the current page. Selection is
-    /// per-device and idempotent, so repeating it for a device's other rows is a
-    /// no-op rather than double-counting.
+    /// Ticks or clears every patch row on the current page. Idempotent per row, so
+    /// re-running it never double-counts.
     pub(super) fn toggle_page_selection(self, checked: bool) {
         let rows = self.query.page_rows.get_untracked();
         for row in &rows {
@@ -986,7 +1168,7 @@ impl AppState {
         self.actions.selected.with(|sel| {
             (
                 sel.len(),
-                sel.values().map(|d| d.rows).sum(),
+                sel.values().map(|d| d.patches.len()).sum(),
                 sel.values().filter(|d| d.offline).count(),
             )
         })
@@ -996,7 +1178,9 @@ impl AppState {
     fn selected_kbs(self) -> Vec<String> {
         self.actions.selected.with_untracked(|sel| {
             sel.values()
-                .flat_map(|d| d.kbs.iter().cloned())
+                // Only ticked rows contribute, and only those that have a KB —
+                // third-party patches have none, so they can't be targeted here.
+                .flat_map(|d| d.patches.values().flatten().cloned())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect()
