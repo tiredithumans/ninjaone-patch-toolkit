@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod auth;
 pub mod export;
 pub mod lookups;

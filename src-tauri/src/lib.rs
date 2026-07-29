@@ -1,3 +1,4 @@
+mod actions;
 mod api;
 mod auth;
 mod commands;
@@ -37,6 +38,7 @@ pub fn run() {
             commands::auth::sign_in,
             commands::auth::sign_out,
             commands::auth::auth_status,
+            commands::auth::reauthorize,
             commands::settings::get_settings,
             commands::settings::save_settings,
             commands::settings::list_presets,
@@ -52,6 +54,12 @@ pub fn run() {
             commands::export::export_report_html,
             commands::update::check_for_update,
             commands::update::install_update,
+            commands::actions::plan_action,
+            commands::actions::run_action,
+            commands::actions::list_jobs,
+            commands::actions::clear_jobs,
+            commands::actions::list_scripts,
+            commands::actions::list_run_as_options,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
