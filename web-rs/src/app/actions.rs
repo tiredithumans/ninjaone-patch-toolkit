@@ -19,7 +19,7 @@ const REBOOT_MODES: [(&str, &str); 2] = [("NORMAL", "Normal"), ("FORCED", "Force
 pub(crate) fn ActionBar() -> impl IntoView {
     let state = expect_context::<AppState>();
 
-    let blocked = move || state.actions.blocked_reason.get();
+    let blocked = move || state.blocked_reason();
     let busy = move || state.actions.dispatching.get();
     let counts = move || state.selection_counts();
     let any = move || counts().0 > 0;
@@ -152,10 +152,9 @@ pub(crate) fn ActionBar() -> impl IntoView {
                                 leptos::task::spawn_local(async move {
                                     match api::reauthorize().await {
                                         Ok(()) => {
-                                            if let Ok(a) = api::auth_status().await {
-                                                state.refresh_action_availability(&a);
-                                                state.session.auth.set(Some(a));
-                                            }
+                                            // Storing the fresh status is enough —
+                                            // the blocked reason derives from it.
+                                            state.session.refresh_auth();
                                             state.notify(Toast::ok("Re-authorized"));
                                         }
                                         Err(e) => state.notify(Toast::err(e)),
@@ -418,7 +417,7 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
     // Per-KB targeting is only honest for a script that declares a kbAllowList;
     // anything else installs whatever the device needs.
     let supports_kb = move || selected_script().is_some_and(|s| s.accepts_kb_allow_list);
-    let disabled = move || state.actions.blocked_reason.with(|r| r.is_some());
+    let disabled = move || state.blocked_reason().is_some();
 
     // Credential roles are a *per-device* property, so this samples the first
     // selected device and offers its roles as suggestions rather than a closed
@@ -592,9 +591,9 @@ pub(crate) fn JobsTable() -> impl IntoView {
 
     view! {
         <div class="jobs">
-            <Show when=move || state.actions.blocked_reason.with(|r| r.is_some())>
+            <Show when=move || state.blocked_reason().is_some()>
                 <p class="empty" role="note">
-                    {move || state.actions.blocked_reason.get().unwrap_or_default()}
+                    {move || state.blocked_reason().unwrap_or_default()}
                 </p>
             </Show>
 
