@@ -128,7 +128,7 @@ fn row(
     name: &str,
     severity: &str,
     status: &str,
-    release_date: &str,
+    first_seen_date: &str,
     installed_date: &str,
     node_class: &'static str,
 ) -> DemoRow {
@@ -155,7 +155,7 @@ fn row(
             // upper-case (`status_class`). Filtering compares case-insensitively.
             severity: severity.to_string(),
             status: status.to_string(),
-            release_date: opt(release_date),
+            first_seen_date: opt(first_seen_date),
             installed_date: opt(installed_date),
         },
     }
@@ -443,7 +443,8 @@ fn sample_severity_by_org() -> Vec<OrgSeverity> {
 }
 
 /// Representative fleet-wide pending-patch age histogram. The labels match the
-/// backend's fixed buckets (`build_age_buckets`), oldest last.
+/// backend's fixed buckets (`build_age_buckets`), oldest last, with the
+/// undated bucket after it.
 fn sample_age_buckets() -> Vec<AgeBucket> {
     [
         ("0-30 days", 13),
@@ -451,6 +452,7 @@ fn sample_age_buckets() -> Vec<AgeBucket> {
         ("61-90 days", 4),
         ("91-180 days", 3),
         ("180+ days", 2),
+        ("Unknown", 1),
     ]
     .into_iter()
     .map(|(label, count)| AgeBucket {
@@ -555,7 +557,7 @@ fn patch_matches(
                 .iter()
                 .any(|s| s.eq_ignore_ascii_case(&row.severity)))
         && f.search.as_deref().is_none_or(|q| search_matches(row, q))
-        && release_in_window(row, f)
+        && first_seen_in_window(row, f)
         && install_in_window(row, install_after_days)
 }
 
@@ -570,24 +572,24 @@ fn search_matches(row: &PatchRow, query: &str) -> bool {
     contains_ci(&row.name, query) || contains_ci(row.kb.as_deref().unwrap_or(""), query)
 }
 
-fn release_in_window(row: &PatchRow, f: &FilterParams) -> bool {
-    let Some(released) = row.release_date.as_deref().and_then(ymd_to_epoch) else {
+fn first_seen_in_window(row: &PatchRow, f: &FilterParams) -> bool {
+    let Some(released) = row.first_seen_date.as_deref().and_then(ymd_to_epoch) else {
         // No release date can't satisfy a date window; pass only when none is set.
-        return f.release_within_days.is_none()
-            && f.release_after.is_none()
-            && f.release_before.is_none();
+        return f.detected_within_days.is_none()
+            && f.detected_after.is_none()
+            && f.detected_before.is_none();
     };
-    if let Some(days) = f.release_within_days
+    if let Some(days) = f.detected_within_days
         && released < SAMPLE_NOW_EPOCH - days * 86_400
     {
         return false;
     }
-    if let Some(after) = f.release_after
+    if let Some(after) = f.detected_after
         && released < after
     {
         return false;
     }
-    if let Some(before) = f.release_before
+    if let Some(before) = f.detected_before
         && released > before
     {
         return false;
@@ -850,7 +852,11 @@ mod tests {
     fn dashboard_rollups_are_always_populated() {
         let r = filtered_result(&filter(), "ALL", &all_statuses(), Some(3650));
         assert!(!r.severity_by_org.is_empty());
-        assert_eq!(r.age_buckets.len(), 5, "fixed five-bucket histogram");
+        assert_eq!(
+            r.age_buckets.len(),
+            6,
+            "fixed six-bucket histogram (five ages + unknown)"
+        );
     }
 
     #[test]

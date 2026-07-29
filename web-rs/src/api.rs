@@ -27,6 +27,17 @@ pub fn is_tauri() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the document is currently hidden (window minimized, or the tab in the
+/// background). Used to skip auto-refresh ticks nobody is there to read. Falls back
+/// to `false` — a missing `document` must never *suppress* a refresh, only ever fail
+/// to skip one.
+pub fn document_hidden() -> bool {
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("document"))
+        .and_then(|doc| js_sys::Reflect::get(&doc, &JsValue::from_str("hidden")))
+        .map(|v| v.as_bool().unwrap_or(false))
+        .unwrap_or(false)
+}
+
 #[derive(serde::Deserialize)]
 struct ErrShape {
     message: Option<String>,

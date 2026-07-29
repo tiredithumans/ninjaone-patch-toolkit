@@ -33,9 +33,9 @@ pub(crate) struct AppliedFilters {
     pub statuses: Vec<String>,
     pub severities: Vec<String>,
     pub search: Option<String>,
-    pub release_window: String,
-    pub release_after: String,
-    pub release_before: String,
+    pub detected_window: String,
+    pub detected_after: String,
+    pub detected_before: String,
     pub install_days: Option<i64>,
 }
 
@@ -155,9 +155,9 @@ pub(crate) struct FilterState {
     pub(super) os_name: RwSignal<String>,
     pub(super) search: RwSignal<String>,
     /// Release-date filter: "" (any), "1"/"7"/"30"/"90" (last N days), or "custom".
-    pub(super) release_window: RwSignal<String>,
-    pub(super) release_after_date: RwSignal<String>,
-    pub(super) release_before_date: RwSignal<String>,
+    pub(super) detected_window: RwSignal<String>,
+    pub(super) detected_after_date: RwSignal<String>,
+    pub(super) detected_before_date: RwSignal<String>,
     pub(super) patch_type: RwSignal<String>,
     pub(super) statuses: RwSignal<Vec<String>>,
     pub(super) install_days: RwSignal<i64>,
@@ -173,9 +173,9 @@ impl FilterState {
             selected_severities: RwSignal::new(Vec::new()),
             os_name: RwSignal::new(String::new()),
             search: RwSignal::new(String::new()),
-            release_window: RwSignal::new(String::new()),
-            release_after_date: RwSignal::new(String::new()),
-            release_before_date: RwSignal::new(String::new()),
+            detected_window: RwSignal::new(String::new()),
+            detected_after_date: RwSignal::new(String::new()),
+            detected_before_date: RwSignal::new(String::new()),
             patch_type: RwSignal::new("ALL".to_string()),
             statuses: RwSignal::new(vec!["PENDING".to_string()]),
             install_days: RwSignal::new(30),
@@ -193,14 +193,14 @@ impl FilterState {
     }
 
     pub(super) fn current_filter(self) -> FilterParams {
-        let window = self.release_window.get_untracked();
-        let (release_within_days, release_after, release_before) = match window.as_str() {
+        let window = self.detected_window.get_untracked();
+        let (detected_within_days, detected_after, detected_before) = match window.as_str() {
             "1" | "7" | "30" | "90" => (window.parse::<i64>().ok(), None, None),
             "custom" => (
                 None,
-                date_to_epoch(&self.release_after_date.get_untracked()),
+                date_to_epoch(&self.detected_after_date.get_untracked()),
                 // Include the whole "before" day (end of day in UTC).
-                date_to_epoch(&self.release_before_date.get_untracked()).map(|e| e + 86_399),
+                date_to_epoch(&self.detected_before_date.get_untracked()).map(|e| e + 86_399),
             ),
             _ => (None, None, None),
         };
@@ -212,9 +212,9 @@ impl FilterState {
             os_name_contains: non_empty(self.os_name.get_untracked()),
             search: non_empty(self.search.get_untracked()),
             severities: self.selected_severities.get_untracked(),
-            release_within_days,
-            release_after,
-            release_before,
+            detected_within_days,
+            detected_after,
+            detected_before,
         }
     }
 }
@@ -664,9 +664,9 @@ impl AppState {
             statuses,
             severities,
             search: non_empty(self.filters.search.get_untracked()),
-            release_window: self.filters.release_window.get_untracked(),
-            release_after: self.filters.release_after_date.get_untracked(),
-            release_before: self.filters.release_before_date.get_untracked(),
+            detected_window: self.filters.detected_window.get_untracked(),
+            detected_after: self.filters.detected_after_date.get_untracked(),
+            detected_before: self.filters.detected_before_date.get_untracked(),
             install_days,
         }
     }
@@ -1051,21 +1051,21 @@ impl AppState {
             .set(f.os_name_contains.unwrap_or_default());
         self.filters.search.set(f.search.unwrap_or_default());
         // Restore the release-date filter UI from the stored bounds.
-        match (f.release_within_days, f.release_after, f.release_before) {
+        match (f.detected_within_days, f.detected_after, f.detected_before) {
             (Some(d), _, _) => {
-                self.filters.release_window.set(d.to_string());
-                self.filters.release_after_date.set(String::new());
-                self.filters.release_before_date.set(String::new());
+                self.filters.detected_window.set(d.to_string());
+                self.filters.detected_after_date.set(String::new());
+                self.filters.detected_before_date.set(String::new());
             }
             (None, after, before) if after.is_some() || before.is_some() => {
-                self.filters.release_window.set("custom".to_string());
-                self.filters.release_after_date.set(epoch_to_date(after));
-                self.filters.release_before_date.set(epoch_to_date(before));
+                self.filters.detected_window.set("custom".to_string());
+                self.filters.detected_after_date.set(epoch_to_date(after));
+                self.filters.detected_before_date.set(epoch_to_date(before));
             }
             _ => {
-                self.filters.release_window.set(String::new());
-                self.filters.release_after_date.set(String::new());
-                self.filters.release_before_date.set(String::new());
+                self.filters.detected_window.set(String::new());
+                self.filters.detected_after_date.set(String::new());
+                self.filters.detected_before_date.set(String::new());
             }
         }
         // Load the org's locations, then restore the saved location.

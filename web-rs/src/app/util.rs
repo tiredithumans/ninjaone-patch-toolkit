@@ -197,9 +197,9 @@ pub(crate) struct FilterChip {
     pub patch: bool,
 }
 
-/// Humanizes the release-date filter into a chip label, or `None` when no window is
+/// Humanizes the first-seen filter into a chip label, or `None` when no window is
 /// set. Pure (no `js_sys`), unlike `date_to_epoch`/`epoch_to_date`, so it host-tests.
-pub(crate) fn release_label(window: &str, after: &str, before: &str) -> Option<String> {
+pub(crate) fn detected_label(window: &str, after: &str, before: &str) -> Option<String> {
     match window {
         "1" => Some("last 24 hours".to_string()),
         "7" => Some("last 7 days".to_string()),
@@ -277,9 +277,9 @@ pub(crate) fn filter_chips(f: &AppliedFilters) -> Vec<FilterChip> {
             patch: true,
         });
     }
-    if let Some(rl) = release_label(&f.release_window, &f.release_after, &f.release_before) {
+    if let Some(rl) = detected_label(&f.detected_window, &f.detected_after, &f.detected_before) {
         out.push(FilterChip {
-            label: format!("Released: {rl}"),
+            label: format!("First seen: {rl}"),
             patch: true,
         });
     }
@@ -382,9 +382,9 @@ fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
         Status => dir(a.status.cmp(&b.status)),
         // The mirror carries dates as ISO `yyyy-mm-dd` strings — lexicographic
         // order is chronological.
-        ReleaseDate => cmp_opt_last(
-            a.release_date.as_deref(),
-            b.release_date.as_deref(),
+        FirstSeenDate => cmp_opt_last(
+            a.first_seen_date.as_deref(),
+            b.first_seen_date.as_deref(),
             sort.desc,
         ),
         InstalledDate => cmp_opt_last(
@@ -616,7 +616,7 @@ mod tests {
             name: "Patch".into(),
             severity: sev.into(),
             status: "PENDING".into(),
-            release_date: None,
+            first_seen_date: None,
             installed_date: installed.map(Into::into),
         }
     }
@@ -785,34 +785,34 @@ mod tests {
     }
 
     #[test]
-    fn release_label_humanizes_each_window() {
+    fn detected_label_humanizes_each_window() {
         assert_eq!(
-            release_label("1", "", ""),
+            detected_label("1", "", ""),
             Some("last 24 hours".to_string())
         );
-        assert_eq!(release_label("7", "", ""), Some("last 7 days".to_string()));
+        assert_eq!(detected_label("7", "", ""), Some("last 7 days".to_string()));
         assert_eq!(
-            release_label("30", "", ""),
+            detected_label("30", "", ""),
             Some("last 30 days".to_string())
         );
         assert_eq!(
-            release_label("90", "", ""),
+            detected_label("90", "", ""),
             Some("last 90 days".to_string())
         );
-        assert_eq!(release_label("", "", ""), None);
+        assert_eq!(detected_label("", "", ""), None);
         assert_eq!(
-            release_label("custom", "2026-01-01", "2026-02-01"),
+            detected_label("custom", "2026-01-01", "2026-02-01"),
             Some("2026-01-01 \u{2192} 2026-02-01".to_string())
         );
         assert_eq!(
-            release_label("custom", "2026-01-01", ""),
+            detected_label("custom", "2026-01-01", ""),
             Some("after 2026-01-01".to_string())
         );
         assert_eq!(
-            release_label("custom", "", "2026-02-01"),
+            detected_label("custom", "", "2026-02-01"),
             Some("before 2026-02-01".to_string())
         );
-        assert_eq!(release_label("custom", "", ""), None);
+        assert_eq!(detected_label("custom", "", ""), None);
     }
 
     #[test]
@@ -899,9 +899,9 @@ mod tests {
             statuses: vec!["INSTALLED".to_string()],
             severities: vec!["Critical".to_string()],
             search: Some("KB5040434".to_string()),
-            release_window: "7".to_string(),
-            release_after: String::new(),
-            release_before: String::new(),
+            detected_window: "7".to_string(),
+            detected_after: String::new(),
+            detected_before: String::new(),
             install_days: Some(30),
         };
         let chips = filter_chips(&full);
@@ -918,7 +918,7 @@ mod tests {
                 "Status: INSTALLED",
                 "Severity: Critical",
                 "Search: KB5040434",
-                "Released: last 7 days",
+                "First seen: last 7 days",
                 "Installed within 30d",
             ]
         );

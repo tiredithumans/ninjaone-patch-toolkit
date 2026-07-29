@@ -75,7 +75,12 @@ pub(crate) fn RunControls() -> impl IntoView {
                     <select on:change=move |ev| {
                         state.run.refresh_secs.set(event_target_value(&ev).parse().unwrap_or(0))
                     }>
-                        {[("0", "Off"), ("30", "30s"), ("60", "1m"), ("300", "5m"), ("900", "15m")]
+                        // No sub-minute cadence: a tick re-pages the whole-fleet
+                        // patch feeds, which on a large tenant takes longer than
+                        // 30s to finish — the option only ever produced a
+                        // back-to-back download loop. The backend enforces its own
+                        // floor regardless (`FORCE_MIN_INTERVAL`).
+                        {[("0", "Off"), ("60", "1m"), ("300", "5m"), ("900", "15m")]
                             .into_iter()
                             .map(|(val, label)| {
                                 let sel = move || state.run.refresh_secs.get().to_string() == val;

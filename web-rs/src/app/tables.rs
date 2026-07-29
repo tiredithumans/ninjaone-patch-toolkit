@@ -14,7 +14,7 @@ const PATCH_COLUMNS: [(&str, RowSortKey); 12] = [
     ("Patch", RowSortKey::Name),
     ("Severity", RowSortKey::Severity),
     ("Status", RowSortKey::Status),
-    ("Release", RowSortKey::ReleaseDate),
+    ("First seen", RowSortKey::FirstSeenDate),
     ("Installed", RowSortKey::InstalledDate),
 ];
 
@@ -261,7 +261,7 @@ fn PatchesTable() -> impl IntoView {
                 kind="filtered"
                 tier="Filtered results"
                 reflects="every patch matching your device scope and all patch filters."
-                filters="Device scope + Type, Status, Severity, Search, Released and Installed-within are all applied."
+                filters="Device scope + Type, Status, Severity, Search, First-seen and Installed-within are all applied."
             />
             <Show
                 when=move || { total() > 0 }
@@ -392,7 +392,7 @@ fn PatchesTable() -> impl IntoView {
                                             <td>
                                                 <span class=stat>{r.status}</span>
                                             </td>
-                                            <td>{r.release_date.unwrap_or_default()}</td>
+                                            <td>{r.first_seen_date.unwrap_or_default()}</td>
                                             <td>{r.installed_date.unwrap_or_default()}</td>
                                         </tr>
                                     }
@@ -675,7 +675,7 @@ fn ComplianceTab() -> impl IntoView {
                 kind="fleet"
                 tier="Fleet health"
                 reflects="the whole pending backlog for the selected device scope."
-                filters="Device scope only (Org / Location / Role / OS Type / OS name). Status, Severity, Search, Released and Installed-within are ignored here."
+                filters="Device scope only (Org / Location / Role / OS Type / OS name). Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
             <ComplianceCharts/>
             <ComplianceRollupTable first_col="Organization" rows=org_rows/>
@@ -750,7 +750,7 @@ fn ComplianceRollupTable(
                             <th scope="col">"Compliant"</th>
                             <th scope="col">"Compliance"</th>
                             <th scope="col">"Pending Critical/Important Patches"</th>
-                            <th scope="col">"Aged (past SLA)"</th>
+                            <th scope="col">"Pending past SLA"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -889,7 +889,7 @@ fn RebootTable() -> impl IntoView {
                 kind="fleet"
                 tier="Fleet health"
                 reflects="devices in the selected device scope flagged for reboot."
-                filters="Device scope only. Status, Severity, Search, Released and Installed-within are ignored here."
+                filters="Device scope only. Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
             <div class="table-wrap">
                 <table>

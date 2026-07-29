@@ -24,11 +24,11 @@ pub struct FilterParams {
     /// Release-date filter: relative window (last N days) and/or absolute bounds
     /// (Unix seconds) for a custom range.
     #[serde(default)]
-    pub release_within_days: Option<i64>,
+    pub detected_within_days: Option<i64>,
     #[serde(default)]
-    pub release_after: Option<i64>,
+    pub detected_after: Option<i64>,
     #[serde(default)]
-    pub release_before: Option<i64>,
+    pub detected_before: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -77,7 +77,7 @@ pub struct PatchRow {
     pub name: String,
     pub severity: String,
     pub status: String,
-    pub release_date: Option<String>,
+    pub first_seen_date: Option<String>,
     pub installed_date: Option<String>,
 }
 
@@ -357,7 +357,7 @@ pub enum RowSortKey {
     Name,
     Severity,
     Status,
-    ReleaseDate,
+    FirstSeenDate,
     InstalledDate,
 }
 

@@ -170,8 +170,16 @@ pub fn App() -> impl IntoView {
         let authed = state.is_authed();
         interval.set_value(None);
         if secs > 0 && authed {
-            let iv =
-                gloo_timers::callback::Interval::new(secs * 1000, move || state.run_query_auto());
+            let iv = gloo_timers::callback::Interval::new(secs * 1000, move || {
+                // A tick re-pages the whole-fleet patch feeds. Nobody is reading the
+                // result while the window is hidden, so skip it rather than download
+                // a fleet into a minimized window all night — the next visible tick
+                // picks up fresh state anyway.
+                if api::document_hidden() {
+                    return;
+                }
+                state.run_query_auto();
+            });
             interval.set_value(Some(iv));
         }
     });

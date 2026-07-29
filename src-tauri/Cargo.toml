@@ -30,7 +30,17 @@ directories = "6.0"
 keyring = "4"
 open = "5.3"
 rand = "0.10"
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "rustls"] }
+# `default-features = false` pins the TLS backend to rustls, but it also drops
+# reqwest's other defaults — `charset`, `http2`, and `system-proxy` — so each is
+# re-added explicitly. `http2` matters because a cold query fans out five
+# concurrent whole-fleet fetches: without it every one needs its own TCP+TLS
+# handshake instead of multiplexing over a single connection. `system-proxy`
+# reads the OS proxy configuration (macOS System Settings / WinINET), which is
+# how a managed desktop is usually configured — without it those operators
+# cannot reach NinjaOne at all. `gzip` is the single biggest byte-count lever:
+# the reporting feeds are six-figure row counts of repetitive JSON, and reqwest
+# only sends `Accept-Encoding` when the feature is compiled in.
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "rustls", "charset", "http2", "system-proxy", "gzip"] }
 rust_xlsxwriter = "0.96"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

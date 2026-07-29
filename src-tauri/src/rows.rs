@@ -124,8 +124,8 @@ pub fn build_rows(
             if !prepared.severity_allowed(severity) {
                 continue;
             }
-            let released = patch.released_at();
-            if !prepared.release_date_allowed(released.map(|r| r.timestamp())) {
+            let first_seen = patch.first_seen_at();
+            if !prepared.detected_within_allowed(first_seen.map(|r| r.timestamp())) {
                 continue;
             }
             let status = patch
@@ -153,9 +153,9 @@ pub fn build_rows(
                 severity: severity.label().to_string(),
                 severity_rank: severity.rank(),
                 status,
-                release_date: fmt_dt(released),
+                first_seen_date: fmt_dt(first_seen),
                 installed_date: fmt_dt(patch.installed_at()),
-                release_ts: patch.release_timestamp.map(|s| s as i64),
+                first_seen_ts: patch.collected_timestamp.map(|s| s as i64),
                 installed_ts: patch.installed_timestamp.map(|s| s as i64),
             });
         }
@@ -208,7 +208,7 @@ pub struct ComplianceBucket {
     pub devices_compliant: usize,
     pub compliance_pct: f64,
     pub pending_critical: usize,
-    /// Pending Critical/Important patches whose release date is older than the SLA
+    /// Pending Critical/Important patches first seen longer ago than the SLA
     /// window — the backlog that has aged past target.
     pub aged_critical: usize,
 }
@@ -270,10 +270,10 @@ pub fn build_compliance(
             .unwrap_or_else(|| "(unknown)".to_string());
         let acc = by_org.entry(org).or_default();
         acc.pending_critical += 1;
-        // A pending Critical/Important patch with no known release date can't be
-        // proven fresh, so flag it as aged for review rather than assuming it is
-        // within SLA (which would understate the backlog).
-        if p.released_at().map(|r| r < sla_cutoff).unwrap_or(true) {
+        // A pending Critical/Important patch NinjaOne has never timestamped
+        // can't be proven recent, so flag it for review rather than assuming it
+        // is within SLA (which would understate the backlog).
+        if p.first_seen_at().map(|r| r < sla_cutoff).unwrap_or(true) {
             acc.aged_critical += 1;
         }
     }
@@ -365,7 +365,7 @@ pub fn build_compliance_by_os(
             .unwrap_or_else(unknown);
         let acc = by_os.entry(os).or_default();
         acc.pending_critical += 1;
-        if p.released_at().map(|r| r < sla_cutoff).unwrap_or(true) {
+        if p.first_seen_at().map(|r| r < sla_cutoff).unwrap_or(true) {
             acc.aged_critical += 1;
         }
     }
@@ -567,34 +567,45 @@ pub fn build_severity_by_org(
     out
 }
 
-/// Fixed labels for the pending-patch age histogram, oldest bucket last.
-const AGE_BUCKET_LABELS: [&str; 5] = [
+/// Fixed labels for the pending-patch age histogram, oldest bucket last, with the
+/// undated bucket after it.
+///
+/// "Unknown" is its own bucket rather than being folded into `180+ days`. Undated
+/// pending patches are lumped with genuinely ancient ones only if you assume the
+/// worst, and the resulting bar is both the tallest and the most alarming — while
+/// actually meaning "we have no timestamp", which is a data-quality signal, not a
+/// backlog. Keeping it separate lets the chart tell the operator which one they are
+/// looking at.
+const AGE_BUCKET_LABELS: [&str; 6] = [
     "0-30 days",
     "31-60 days",
     "61-90 days",
     "91-180 days",
     "180+ days",
+    "Unknown",
 ];
 
-/// Builds the pending-patch age histogram from release age. A pending patch with no
-/// known release date can't be proven fresh, so it falls into the oldest bucket —
-/// the same "can't prove fresh → aged" convention `build_compliance` uses.
+/// Index of the undated bucket in [`AGE_BUCKET_LABELS`].
+const AGE_BUCKET_UNKNOWN: usize = 5;
+
+/// Builds the pending-patch age histogram from how long NinjaOne has been reporting
+/// each pending patch (see [`Patch::collected_timestamp`] — the API exposes no
+/// release date, so this measures detection age, not time-since-publication).
 pub fn build_age_buckets(current_patches: &[&Patch], now: DateTime<Utc>) -> Vec<AgeBucket> {
-    let mut counts = [0usize; 5];
+    let mut counts = [0usize; 6];
     for p in current_patches {
         if !is_pending(p.status.as_deref()) {
             continue;
         }
-        let age_days = p
-            .released_at()
-            .map(|r| (now - r).num_days().max(0))
-            .unwrap_or(i64::MAX);
-        let idx = match age_days {
-            0..=30 => 0,
-            31..=60 => 1,
-            61..=90 => 2,
-            91..=180 => 3,
-            _ => 4,
+        let idx = match p.first_seen_at() {
+            None => AGE_BUCKET_UNKNOWN,
+            Some(seen) => match (now - seen).num_days().max(0) {
+                0..=30 => 0,
+                31..=60 => 1,
+                61..=90 => 2,
+                91..=180 => 3,
+                _ => 4,
+            },
         };
         counts[idx] += 1;
     }
@@ -706,7 +717,7 @@ pub enum RowSortKey {
     Name,
     Severity,
     Status,
-    ReleaseDate,
+    FirstSeenDate,
     InstalledDate,
 }
 
@@ -951,7 +962,7 @@ fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
         // ascending sort surfaces the most urgent first, like the default view.
         Severity => dir(b.severity_rank.cmp(&a.severity_rank)),
         Status => dir(a.status.cmp(&b.status)),
-        ReleaseDate => cmp_opt_last(a.release_ts, b.release_ts, sort.desc, |x, y| x.cmp(y)),
+        FirstSeenDate => cmp_opt_last(a.first_seen_ts, b.first_seen_ts, sort.desc, |x, y| x.cmp(y)),
         InstalledDate => cmp_opt_last(a.installed_ts, b.installed_ts, sort.desc, |x, y| x.cmp(y)),
     }
 }
@@ -1018,7 +1029,7 @@ mod tests {
             severity: Some(sev.into()),
             status: Some(status.into()),
             patch_type: None,
-            release_timestamp: released_days_ago
+            collected_timestamp: released_days_ago
                 .map(|d| (Utc::now() - Duration::days(d)).timestamp() as f64),
             installed_timestamp: None,
         }
@@ -1065,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn release_date_filter_narrows_rows() {
+    fn first_seen_filter_narrows_rows() {
         let d1 = device(1, 10, "Windows Server 2022");
         let by_id = HashMap::from([(1, &d1)]);
         let maps = maps();
@@ -1075,7 +1086,7 @@ mod tests {
         ];
         let cutoff = (Utc::now() - Duration::days(10)).timestamp();
         let filter = FilterParams {
-            release_after: Some(cutoff),
+            detected_after: Some(cutoff),
             ..Default::default()
         };
         let rows = build_rows(
@@ -1520,7 +1531,7 @@ mod tests {
                 "name",
                 "severity",
                 "status",
-                "releaseDate",
+                "firstSeenDate",
                 "installedDate",
             ],
             "PatchRow",
@@ -1805,9 +1816,9 @@ mod tests {
             severity: "Critical".into(),
             severity_rank: 5,
             status: "FAILED".into(),
-            release_date: None,
+            first_seen_date: None,
             installed_date: installed_ts.map(|_| "2026-01-01 00:00 UTC".into()),
-            release_ts: None,
+            first_seen_ts: None,
             installed_ts,
         }
     }
@@ -1855,22 +1866,26 @@ mod tests {
     }
 
     #[test]
-    fn build_age_buckets_route_pending_by_age_and_unknown_to_oldest() {
-        let mut unknown = patch(1, "MANUAL", "CRITICAL", Some(5));
-        unknown.release_timestamp = None; // can't prove fresh → oldest bucket
+    fn build_age_buckets_separate_undated_patches_from_genuinely_old_ones() {
+        let mut undated = patch(1, "MANUAL", "CRITICAL", Some(5));
+        undated.collected_timestamp = None;
         let current = vec![
             patch(1, "MANUAL", "CRITICAL", Some(5)),   // 0-30
             patch(1, "MANUAL", "CRITICAL", Some(200)), // 180+
-            unknown,
+            undated,
             patch(1, "INSTALLED", "CRITICAL", Some(5)), // not pending → ignored
         ];
         let buckets = build_age_buckets(&refs(&current), Utc::now());
-        assert_eq!(buckets.len(), 5, "fixed five-bucket layout");
+        assert_eq!(buckets.len(), 6, "five age bands plus the undated bucket");
         assert_eq!(buckets[0].count, 1, "0-30 bucket");
+        // The undated patch must NOT inflate 180+: folding it in made the tallest,
+        // most alarming bar mean "we have no timestamp" rather than "this is old".
         assert_eq!(
-            buckets[4].count, 2,
-            "180+ holds the aged and unknown-release"
+            buckets[4].count, 1,
+            "180+ holds only the genuinely aged one"
         );
+        assert_eq!(buckets[5].label, "Unknown");
+        assert_eq!(buckets[5].count, 1, "the undated patch lands in Unknown");
     }
 
     #[test]

@@ -46,6 +46,17 @@ const DEVICE_TTL: Duration = Duration::from_secs(15 * 60);
 /// for fresh data.
 const CURRENT_PATCHES_TTL: Duration = Duration::from_secs(120);
 
+/// Floor on how often a *forced* refetch may actually hit the API.
+///
+/// `force` exists so an auto-refresh tick or the manual ↻ can pull fresh patch
+/// state mid-patching, which means it bypasses [`CURRENT_PATCHES_TTL`] — but
+/// unbounded it makes the whole cache decorative on the one path that runs
+/// unattended for hours. Re-paging two whole-fleet reporting feeds costs dozens
+/// of sequential round trips, so a force arriving within this window is served
+/// from cache instead. Enforced backend-side on purpose: the frontend cadence is
+/// a hint, and a stale or buggy one must not be able to hammer the API.
+const FORCE_MIN_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Identifies the tenant a cache entry belongs to. Every whole-fleet/result cache
 /// stamps its entries with this and re-checks it at *read* time, so switching the
 /// instance or client id invalidates them structurally — a caller that forgets to
@@ -78,12 +89,36 @@ struct DeviceCache {
     devices: Arc<Vec<Device>>,
 }
 
-struct CurrentPatchesCache {
+/// One whole-fleet current-patch family (OS *or* third-party), cached independently
+/// of the other.
+///
+/// They are separate slots rather than one pair because the two families are wildly
+/// asymmetric — a whole-fleet third-party feed runs to six figures and is usually the
+/// largest single fetch in a query — and `PatchType` lets the operator ask for only
+/// one. Cached as a pair, an OS-only query still paged the entire software feed and
+/// then discarded it, which also made that feed the critical path: an OS-only query
+/// took about as long as an ALL query. Split, each family is fetched only when the
+/// requested `PatchType` includes it, and a later widening to ALL reuses whatever is
+/// already warm.
+struct FamilyCache {
     at: Instant,
     tenant: TenantKey,
     fetched_at: DateTime<Utc>,
-    os: Arc<Vec<Patch>>,
-    sw: Arc<Vec<Patch>>,
+    patches: Arc<Vec<Patch>>,
+}
+
+impl FamilyCache {
+    /// Whether this entry may be served for `tenant`. `force` still honors
+    /// [`FORCE_MIN_INTERVAL`] so a fast cadence can't turn into a refetch loop.
+    fn is_fresh(&self, tenant: &TenantKey, force: bool) -> bool {
+        self.tenant == *tenant
+            && self.at.elapsed()
+                < if force {
+                    FORCE_MIN_INTERVAL
+                } else {
+                    CURRENT_PATCHES_TTL
+                }
+    }
 }
 
 /// Whole-fleet current patches handed to a query: both families behind `Arc` (a
@@ -112,9 +147,12 @@ pub struct AppState {
     lookups_cache: Mutex<Option<LookupCache>>,
     /// Whole-fleet device inventory cached with a long TTL ([`DEVICE_TTL`]).
     fleet_devices_cache: Mutex<Option<DeviceCache>>,
-    /// Whole-fleet current patches (OS + 3rd-party) cached so a re-filter recomputes
-    /// without a refetch; refreshed on force or past [`CURRENT_PATCHES_TTL`].
-    fleet_current_cache: Mutex<Option<CurrentPatchesCache>>,
+    /// Whole-fleet current OS patches, cached so a re-filter recomputes without a
+    /// refetch; refreshed on force or past [`CURRENT_PATCHES_TTL`].
+    fleet_current_os: Mutex<Option<FamilyCache>>,
+    /// Whole-fleet current third-party patches. Held apart from the OS family so a
+    /// query that doesn't ask for it never pays to fetch it — see [`FamilyCache`].
+    fleet_current_sw: Mutex<Option<FamilyCache>>,
     /// Dispatched action jobs, stamped with the tenant they belong to. Mutable and
     /// long-lived — it outlives the IPC call that created it — so it carries the
     /// same tenant check as `last_result`: a tenant switch reads as a miss, and a
@@ -158,7 +196,8 @@ impl AppState {
             last_result: Mutex::new(None),
             lookups_cache: Mutex::new(None),
             fleet_devices_cache: Mutex::new(None),
-            fleet_current_cache: Mutex::new(None),
+            fleet_current_os: Mutex::new(None),
+            fleet_current_sw: Mutex::new(None),
             jobs: Mutex::new(None),
             job_seq: AtomicU64::new(1),
             job_poller_running: AtomicBool::new(false),
@@ -268,46 +307,100 @@ impl AppState {
         Ok(devices)
     }
 
-    /// Whole-fleet current patches (OS + 3rd-party, no `df`), cached so a re-filter
-    /// recomputes without a refetch. `force` (an auto-refresh tick or the manual
-    /// refresh) bypasses the TTL to pull fresh patch state mid-patching; otherwise
-    /// the cache serves until it passes [`CURRENT_PATCHES_TTL`]. Both families are
-    /// fetched concurrently. The lock is never held across the `.await`.
+    /// Whole-fleet current patches (no `df`) for the requested families, cached so a
+    /// re-filter recomputes without a refetch. `force` (an auto-refresh tick or the
+    /// manual refresh) trades [`CURRENT_PATCHES_TTL`] for [`FORCE_MIN_INTERVAL`] to
+    /// pull fresh patch state mid-patching without letting a fast cadence become a
+    /// refetch loop.
+    ///
+    /// `include_os` / `include_sw` come from the query's `PatchType`. A family that
+    /// wasn't asked for is neither fetched nor returned — `run_query` would discard
+    /// it anyway, and the third-party feed is large enough that fetching it
+    /// unconditionally dominated the query. Any locks are released before the
+    /// `.await`s.
     pub async fn fleet_current_patches(
         &self,
         force: bool,
+        include_os: bool,
+        include_sw: bool,
         on_os: Option<&ProgressFn<'_>>,
         on_sw: Option<&ProgressFn<'_>>,
     ) -> Result<CurrentPatches> {
         let key = self.tenant_key();
-        if !force
-            && let Ok(guard) = self.fleet_current_cache.lock()
-            && let Some(c) = guard.as_ref()
-            && c.tenant == key
-            && c.at.elapsed() < CURRENT_PATCHES_TTL
-        {
-            return Ok(CurrentPatches {
-                os: c.os.clone(),
-                sw: c.sw.clone(),
-                fetched_at: c.fetched_at,
-            });
-        }
-        let (os, sw) = tokio::try_join!(
-            self.api.fleet_os_patches(None, None, on_os),
-            self.api.fleet_software_patches(None, None, on_sw),
+        let cached =
+            |slot: &Mutex<Option<FamilyCache>>| -> Option<(Arc<Vec<Patch>>, DateTime<Utc>)> {
+                let guard = slot.lock().ok()?;
+                let c = guard.as_ref()?;
+                c.is_fresh(&key, force)
+                    .then(|| (c.patches.clone(), c.fetched_at))
+            };
+        let hit_os = include_os.then(|| cached(&self.fleet_current_os)).flatten();
+        let hit_sw = include_sw.then(|| cached(&self.fleet_current_sw)).flatten();
+
+        // Only the requested-and-missing families reach the API, and those that do
+        // still resolve concurrently.
+        let (fetched_os, fetched_sw) = tokio::try_join!(
+            async {
+                match (include_os, &hit_os) {
+                    (true, None) => self.api.fleet_os_patches(None, None, on_os).await.map(Some),
+                    _ => Ok(None),
+                }
+            },
+            async {
+                match (include_sw, &hit_sw) {
+                    (true, None) => self
+                        .api
+                        .fleet_software_patches(None, None, on_sw)
+                        .await
+                        .map(Some),
+                    _ => Ok(None),
+                }
+            },
         )?;
-        let fetched_at = Utc::now();
-        let (os, sw) = (Arc::new(os), Arc::new(sw));
-        if let Ok(mut guard) = self.fleet_current_cache.lock() {
-            *guard = Some(CurrentPatchesCache {
-                at: Instant::now(),
-                tenant: key,
-                fetched_at,
-                os: os.clone(),
-                sw: sw.clone(),
-            });
-        }
-        Ok(CurrentPatches { os, sw, fetched_at })
+
+        let now = Utc::now();
+        let store = |slot: &Mutex<Option<FamilyCache>>, patches: &Arc<Vec<Patch>>| {
+            if let Ok(mut guard) = slot.lock() {
+                *guard = Some(FamilyCache {
+                    at: Instant::now(),
+                    tenant: key.clone(),
+                    fetched_at: now,
+                    patches: patches.clone(),
+                });
+            }
+        };
+
+        let (os, os_at) = match fetched_os {
+            Some(rows) => {
+                let rows = Arc::new(rows);
+                store(&self.fleet_current_os, &rows);
+                (rows, Some(now))
+            }
+            None => match hit_os {
+                Some((rows, at)) => (rows, Some(at)),
+                None => (Arc::new(Vec::new()), None),
+            },
+        };
+        let (sw, sw_at) = match fetched_sw {
+            Some(rows) => {
+                let rows = Arc::new(rows);
+                store(&self.fleet_current_sw, &rows);
+                (rows, Some(now))
+            }
+            None => match hit_sw {
+                Some((rows, at)) => (rows, Some(at)),
+                None => (Arc::new(Vec::new()), None),
+            },
+        };
+
+        Ok(CurrentPatches {
+            os,
+            sw,
+            // The UI's "patch data as of …" must not over-promise: with two families
+            // fetched at different times the data as a whole is only as fresh as the
+            // older one.
+            fetched_at: [os_at, sw_at].into_iter().flatten().min().unwrap_or(now),
+        })
     }
 
     /// Drops cached lookups so a different tenant (after sign-out or an instance
@@ -320,9 +413,7 @@ impl AppState {
         if let Ok(mut guard) = self.fleet_devices_cache.lock() {
             *guard = None;
         }
-        if let Ok(mut guard) = self.fleet_current_cache.lock() {
-            *guard = None;
-        }
+        self.invalidate_current_patches();
     }
 
     /// Stores a query result stamped with the current tenant so paging and export can
@@ -364,7 +455,8 @@ impl AppState {
         }
     }
 
-    /// Drops **only** the whole-fleet current-patch cache.
+    /// Drops **only** the whole-fleet current-patch caches — both families, since an
+    /// apply can move either.
     ///
     /// Called after a mutating action: the device's pending list is about to
     /// change, and [`CURRENT_PATCHES_TTL`] would otherwise keep serving pre-action
@@ -372,8 +464,10 @@ impl AppState {
     /// it also drops the 15-minute device inventory and the org/location/role
     /// lookups, neither of which a patch action can affect.
     pub fn invalidate_current_patches(&self) {
-        if let Ok(mut guard) = self.fleet_current_cache.lock() {
-            *guard = None;
+        for slot in [&self.fleet_current_os, &self.fleet_current_sw] {
+            if let Ok(mut guard) = slot.lock() {
+                *guard = None;
+            }
         }
     }
 
@@ -516,6 +610,37 @@ impl AppState {
 }
 
 #[cfg(test)]
+impl AppState {
+    /// An already-authenticated state whose API client points at `base_url`, for
+    /// tests that exercise the whole-fleet caches against a mock NinjaOne server.
+    /// Mirrors [`AuthState::seeded`]; the settings carry the same base url so the
+    /// tenant stamp matches what the caches record.
+    fn seeded(base_url: String) -> Self {
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), base_url.clone(), "test-token");
+        let api = NinjaApiClient::new(http, auth.clone());
+        let settings = Settings {
+            instance_base_url: base_url,
+            ..Settings::default()
+        };
+        Self {
+            auth,
+            api,
+            settings: Mutex::new(settings),
+            last_result: Mutex::new(None),
+            lookups_cache: Mutex::new(None),
+            fleet_devices_cache: Mutex::new(None),
+            fleet_current_os: Mutex::new(None),
+            fleet_current_sw: Mutex::new(None),
+            jobs: Mutex::new(None),
+            job_seq: AtomicU64::new(1),
+            job_poller_running: AtomicBool::new(false),
+            pending_confirm: Mutex::new(None),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::actions::{ActionKind, JobState};
@@ -534,6 +659,110 @@ mod tests {
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }
+    }
+
+    /// A mock exposing both current-patch feeds, each counting its own hits.
+    async fn patch_feed_server() -> wiremock::MockServer {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for p in [
+            "/api/v2/queries/os-patches",
+            "/api/v2/queries/software-patches",
+        ] {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "results": [{ "id": 1, "deviceId": 1, "kbNumber": "KB1" }],
+                    "cursor": ""
+                })))
+                .mount(&server)
+                .await;
+        }
+        server
+    }
+
+    /// How many requests the mock saw for `path`.
+    async fn hits(server: &wiremock::MockServer, path: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path() == path)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn an_os_only_query_never_fetches_the_third_party_feed() {
+        let server = patch_feed_server().await;
+        let state = AppState::seeded(server.uri());
+
+        let current = state
+            .fleet_current_patches(false, true, false, None, None)
+            .await
+            .expect("os-only fetch");
+
+        assert_eq!(current.os.len(), 1, "the requested family is fetched");
+        assert!(current.sw.is_empty(), "the unrequested family stays empty");
+        // The whole point: a whole-fleet third-party feed runs to six figures and is
+        // usually the largest fetch in a query, so an OS-only query must not page it
+        // just to discard it.
+        assert_eq!(
+            hits(&server, "/api/v2/queries/software-patches").await,
+            0,
+            "software-patches must not be requested at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn widening_to_both_families_reuses_the_already_warm_one() {
+        let server = patch_feed_server().await;
+        let state = AppState::seeded(server.uri());
+
+        state
+            .fleet_current_patches(false, true, false, None, None)
+            .await
+            .expect("os-only fetch");
+        let both = state
+            .fleet_current_patches(false, true, true, None, None)
+            .await
+            .expect("widened fetch");
+
+        assert_eq!(both.os.len(), 1);
+        assert_eq!(both.sw.len(), 1);
+        // Splitting the cache per family must not cost a refetch of the family that
+        // was already warm.
+        assert_eq!(
+            hits(&server, "/api/v2/queries/os-patches").await,
+            1,
+            "the warm OS family must be served from cache"
+        );
+        assert_eq!(hits(&server, "/api/v2/queries/software-patches").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_forced_refetch_inside_the_floor_is_served_from_cache() {
+        let server = patch_feed_server().await;
+        let state = AppState::seeded(server.uri());
+
+        for _ in 0..3 {
+            state
+                .fleet_current_patches(true, true, false, None, None)
+                .await
+                .expect("forced fetch");
+        }
+
+        // `force` bypasses CURRENT_PATCHES_TTL so a patching operator can pull fresh
+        // state — but unbounded it makes the cache decorative on the auto-refresh
+        // path, which runs unattended for hours. FORCE_MIN_INTERVAL is the floor.
+        assert_eq!(
+            hits(&server, "/api/v2/queries/os-patches").await,
+            1,
+            "forced refetches inside FORCE_MIN_INTERVAL must collapse onto the cache"
+        );
     }
 
     #[test]
