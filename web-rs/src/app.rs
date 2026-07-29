@@ -28,10 +28,10 @@ use tables::Results;
 use toaster::Toaster;
 use update::UpdateSplash;
 use util::{
-    MdBlock, MdSpan, SummaryCounts, aged_badge, aria_sort, date_to_epoch, epoch_to_date,
-    filter_chips, format_duration, group_thousands, is_fleet_tab, job_mode_label, next_sort,
-    non_empty, parse_changelog, parse_opt, sev_class, sort_glyph, sort_patch_rows, status_class,
-    summary_line, tab_class,
+    MdBlock, MdSpan, SummaryCounts, action_blocked_reason, aged_badge, aria_sort, date_to_epoch,
+    epoch_to_date, filter_chips, format_duration, group_thousands, is_fleet_tab, job_mode_label,
+    next_sort, non_empty, parse_changelog, parse_opt, sev_class, sort_glyph, sort_patch_rows,
+    status_class, summary_line, tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;
@@ -77,7 +77,6 @@ pub fn App() -> impl IntoView {
         spawn_local(async move {
             if let Ok(a) = api::auth_status().await {
                 let authed = a.authenticated;
-                state.refresh_action_availability(&a);
                 let can_act = authed && a.actions_enabled && a.write_enabled;
                 state.session.auth.set(Some(a));
                 if authed {
@@ -106,10 +105,7 @@ pub fn App() -> impl IntoView {
         state.enter_demo();
         // The action surface still renders in the demo — hiding it would make the
         // hosted page a dishonest advertisement — but every control is disabled and
-        // says why.
-        state.actions.blocked_reason.set(Some(
-            "Patch actions run only in the desktop app.".to_string(),
-        ));
+        // says why. `web_mode` alone drives that now, via `blocked_reason`.
     }
 
     // Stream live record counts from the backend into `progress`, ignoring events

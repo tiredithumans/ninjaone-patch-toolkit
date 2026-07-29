@@ -6,7 +6,46 @@
 use std::cmp::Ordering;
 
 use super::{AppliedFilters, Tab};
-use crate::types::{JobReport, PatchRow, RowSort, RowSortKey};
+use crate::types::{AuthStatus, JobReport, PatchRow, RowSort, RowSortKey};
+
+/// Why the patch-action affordances are unavailable, or `None` when they're live.
+///
+/// Pure and derived on demand rather than cached in a signal: it was previously
+/// stored and recomputed by hand at two call sites, so signing in (or enabling
+/// actions in Settings) left the startup verdict — "Sign in to run patch actions."
+/// — on screen until the app was restarted. Deriving it means every input change
+/// is picked up for free. The backend re-checks all of this; this only decides
+/// what the UI offers.
+///
+/// `auth` is `None` before the first `auth_status` reply, which is treated as
+/// not-yet-signed-in so the controls read as blocked while we don't know, rather
+/// than briefly offering actions that would be rejected.
+pub(crate) fn action_blocked_reason(
+    web_mode: bool,
+    demo: bool,
+    auth: Option<&AuthStatus>,
+) -> Option<String> {
+    if web_mode || demo {
+        return Some("Patch actions run only in the desktop app.".to_string());
+    }
+    let Some(status) = auth.filter(|a| a.authenticated) else {
+        return Some("Sign in to run patch actions.".to_string());
+    };
+    if !status.actions_enabled {
+        return Some("Patch actions are disabled — enable them in Settings.".to_string());
+    }
+    if !status.write_enabled {
+        // Distinguish "we know it's read-only" from "we can't tell", so the
+        // operator isn't told their consent was wrong when it may be fine.
+        return Some(if status.scope_known {
+            "Your NinjaOne sign-in is read-only. Re-authorize to enable actions.".to_string()
+        } else {
+            "Couldn't confirm your sign-in grants the Management scope. Re-authorize to be sure."
+                .to_string()
+        });
+    }
+    None
+}
 
 pub(crate) fn non_empty(s: String) -> Option<String> {
     let t = s.trim();
@@ -871,5 +910,69 @@ mod tests {
         // The first five facets are device-scope; the rest are patch-tier.
         assert!(chips.iter().take(5).all(|c| !c.patch));
         assert!(chips.iter().skip(5).all(|c| c.patch));
+    }
+
+    /// Builds an `AuthStatus` in the state the named step leaves it in.
+    fn auth(authenticated: bool, actions_enabled: bool, write_enabled: bool) -> AuthStatus {
+        AuthStatus {
+            authenticated,
+            instance_base_url: "https://app.ninjarmm.com".into(),
+            actions_enabled,
+            write_enabled,
+            scope_known: true,
+        }
+    }
+
+    #[test]
+    fn blocked_reason_clears_as_the_operator_completes_each_step() {
+        // The reported bug, walked step by step. Each of these used to be computed
+        // once at startup and cached, so the verdict from step 1 stayed on screen
+        // through steps 2 and 3.
+        let signed_out = action_blocked_reason(false, false, Some(&auth(false, false, false)));
+        assert_eq!(signed_out.as_deref(), Some("Sign in to run patch actions."));
+
+        // 2. Signed in, actions still off in Settings — the message must move on
+        // from "sign in", which is now done.
+        let signed_in = action_blocked_reason(false, false, Some(&auth(true, false, false)));
+        assert_eq!(
+            signed_in.as_deref(),
+            Some("Patch actions are disabled — enable them in Settings.")
+        );
+
+        // 3. Actions enabled but the grant predates them (read-only refresh token).
+        let read_only = action_blocked_reason(false, false, Some(&auth(true, true, false)));
+        assert!(read_only.is_some_and(|r| r.contains("read-only")));
+
+        // 4. Fully authorized — nothing blocks.
+        assert!(action_blocked_reason(false, false, Some(&auth(true, true, true))).is_none());
+    }
+
+    #[test]
+    fn blocked_reason_distinguishes_unknown_scope_from_denied_scope() {
+        // scope_known == false means "we couldn't read the grant", not "denied" —
+        // telling the operator their consent was wrong would be a lie.
+        let mut unknown = auth(true, true, false);
+        unknown.scope_known = false;
+        let reason = action_blocked_reason(false, false, Some(&unknown)).expect("blocked");
+        assert!(reason.contains("Couldn't confirm"), "{reason}");
+        assert!(!reason.contains("read-only"), "{reason}");
+    }
+
+    #[test]
+    fn blocked_reason_blocks_the_browser_demo_and_the_unknown_startup_state() {
+        // web/demo wins over everything, including a fully authorized status.
+        let authed = auth(true, true, true);
+        for (web, demo) in [(true, false), (false, true)] {
+            assert_eq!(
+                action_blocked_reason(web, demo, Some(&authed)).as_deref(),
+                Some("Patch actions run only in the desktop app.")
+            );
+        }
+        // Before the first auth_status reply we don't know yet, so fail closed
+        // rather than briefly offering actions the backend would reject.
+        assert_eq!(
+            action_blocked_reason(false, false, None).as_deref(),
+            Some("Sign in to run patch actions.")
+        );
     }
 }

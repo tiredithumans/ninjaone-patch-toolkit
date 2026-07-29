@@ -13,6 +13,13 @@ version and start a fresh `[Unreleased]`.
 
 ### Fixed
 
+- **"Sign in to run patch actions" no longer sticks after you've signed in.** The message
+  explaining why patch actions were unavailable was worked out once when the app started and
+  then left alone, so signing in — or enabling patch actions in Settings — never updated it.
+  The action buttons stayed disabled with a stale reason until the app was restarted. The
+  message is now derived from the current sign-in state each time it's shown, so it keeps up
+  with every step and disappears the moment actions are genuinely available.
+
 - **Third-party patches no longer disappear behind the Severity filter.** NinjaOne grades
   third-party software with its own vocabulary — `security`, `recommended` — and neither was
   recognised, so both collapsed into "Unknown". That sorted them below every other patch in

@@ -452,8 +452,6 @@ pub(crate) struct ActionState {
     pub(super) jobs: RwSignal<Vec<JobReport>>,
     /// A mutating action landed since the displayed result was computed.
     pub(super) results_stale: RwSignal<bool>,
-    /// Why actions are unavailable, if they are.
-    pub(super) blocked_reason: RwSignal<Option<String>>,
 }
 
 /// A planned action held open in the confirmation modal.
@@ -485,7 +483,6 @@ impl ActionState {
             dispatch_progress: RwSignal::new(None),
             jobs: RwSignal::new(Vec::new()),
             results_stale: RwSignal::new(false),
-            blocked_reason: RwSignal::new(None),
         }
     }
 }
@@ -1020,36 +1017,34 @@ impl AppState {
         });
     }
 
+    /// Why actions are unavailable, if they are — tracked, so a view reading this
+    /// re-renders when the operator signs in or flips the Settings toggle.
+    pub(super) fn blocked_reason(self) -> Option<String> {
+        self.session.auth.with(|auth| {
+            action_blocked_reason(
+                self.session.web_mode.get(),
+                self.session.demo.get(),
+                auth.as_ref(),
+            )
+        })
+    }
+
+    /// Same verdict without subscribing — for event handlers, which run outside a
+    /// reactive scope and would otherwise register a spurious dependency.
+    pub(super) fn blocked_reason_untracked(self) -> Option<String> {
+        self.session.auth.with_untracked(|auth| {
+            action_blocked_reason(
+                self.session.web_mode.get_untracked(),
+                self.session.demo.get_untracked(),
+                auth.as_ref(),
+            )
+        })
+    }
+
     /// Whether the action affordances should be live. The backend re-checks all of
     /// this — this only decides what the UI offers.
     pub(super) fn can_act(self) -> bool {
-        !self.session.web_mode.get_untracked()
-            && !self.session.demo.get_untracked()
-            && self.is_authed()
-            && self.actions.blocked_reason.with_untracked(|r| r.is_none())
-    }
-
-    /// Recomputes why actions are unavailable, if they are, from the auth status.
-    pub(super) fn refresh_action_availability(self, status: &AuthStatus) {
-        let reason = if self.session.web_mode.get_untracked() || self.session.demo.get_untracked() {
-            Some("Patch actions run only in the desktop app.".to_string())
-        } else if !status.authenticated {
-            Some("Sign in to run patch actions.".to_string())
-        } else if !status.actions_enabled {
-            Some("Patch actions are disabled — enable them in Settings.".to_string())
-        } else if !status.write_enabled {
-            // Distinguish "we know it's read-only" from "we can't tell", so the
-            // operator isn't told their consent was wrong when it may be fine.
-            Some(if status.scope_known {
-                "Your NinjaOne sign-in is read-only. Re-authorize to enable actions.".to_string()
-            } else {
-                "Couldn't confirm your sign-in grants the Management scope. Re-authorize to be sure."
-                    .to_string()
-            })
-        } else {
-            None
-        };
-        self.actions.blocked_reason.set(reason);
+        self.blocked_reason_untracked().is_none()
     }
 
     /// Builds the request for `kind` from the current selection and form state.
@@ -1095,7 +1090,7 @@ impl AppState {
     /// Asks the backend what `kind` would do and opens the confirmation modal.
     pub(super) fn open_plan(self, kind: ActionKind) {
         if !self.can_act() {
-            if let Some(reason) = self.actions.blocked_reason.get_untracked() {
+            if let Some(reason) = self.blocked_reason_untracked() {
                 self.notify(Toast::err(reason));
             }
             return;
