@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-29
+
 ### Fixed
 
 - **"Sign in to run patch actions" no longer sticks after you've signed in.** The message
