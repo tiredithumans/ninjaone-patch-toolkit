@@ -11,6 +11,34 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **Patch actions — remediate from the same place you find the problem.** Tick patch rows
+  and scan, apply, reboot, or run any script from your NinjaOne automation library, then
+  watch each dispatch reach a terminal state in the new **Jobs** tab. Ticking a row selects
+  its **device**: NinjaOne's API has no per-patch apply endpoint, so targeting specific KBs
+  means running a library script that accepts a `kbAllowList` variable — the toolkit detects
+  which scripts can and only offers per-KB targeting for those.
+- **Off by default, and it stays that way until you say otherwise.** The feature lives
+  behind **Settings → Patch actions**. Until you enable it the app requests the same
+  read-only scope it always has, so an existing install is unchanged. Enabling it adds the
+  `management` scope at the *next* sign-in — the app tells you when your current sign-in is
+  still read-only and offers **Re-authorize**, because the OAuth refresh grant never
+  re-sends the scope on its own.
+- **Guardrails, enforced in the backend rather than the dialog.** Dry run is the default for
+  scripts; a blast-radius cap (25 devices) and org-span cap (1) are hard blockers; offline
+  devices are skipped by default, since NinjaOne queues work for them and would otherwise
+  restart a machine hours later; forced reboots need a typed confirmation and a stated
+  reason, which lands in NinjaOne's own activity feed. Every dispatch is written to an audit
+  log before it goes out, with credential-shaped script parameters redacted.
+
+### Fixed
+
+- **A request that times out mid-flight is no longer re-sent.** The API client retried any
+  timed-out request, which was harmless for reads but would have re-run an action. Timed-out
+  actions are now reported as *Unknown* — never retried, since they may already be running
+  on the device — while reads retry exactly as before.
+
 ## [0.9.1] - 2026-07-02
 
 ### Fixed

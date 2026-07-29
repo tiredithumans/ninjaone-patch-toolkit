@@ -81,13 +81,76 @@ Offline devices are **excluded from the compliance denominator** — they can't 
 patches and report no current-patch records, so scoring them would distort the metric.
 A device counts as compliant when it has **zero** pending/approved patches.
 
+## Patch actions
+
+### The action buttons are greyed out
+
+The bar under the tabs says which of these it is:
+
+- *"Patch actions are disabled"* — switch them on in **Settings → Patch actions**.
+- *"Your NinjaOne sign-in is read-only"* — choose **Re-authorize**. Enabling the feature
+  changes only what the **next** sign-in asks for; the OAuth refresh grant never re-sends
+  the scope, so your existing grant stays read-only until you consent again.
+- *"Couldn't confirm your sign-in grants the Management scope"* — your tenant issues an
+  opaque access token, so the app can't read the granted scope. Re-authorize to be sure.
+- *"Patch actions run only in the desktop app"* — you're in the hosted web demo.
+
+### Everything 403s after re-authorizing
+
+The **`Management`** scope isn't enabled on the API app itself. Add it in NinjaOne under
+**Administration → Apps → API**, then re-authorize again. If NinjaOne rejects the sign-in
+with `invalid_scope`, that is the same cause.
+
+### "Device is not applicable for os apply"
+
+NinjaOne returned 400 for that device: it has no approved OS patches waiting, its patch
+policy doesn't cover OS patching, or the agent doesn't support it (common on non-Windows
+node classes). Run **Scan OS** first, re-query, and check the device actually has pending
+patches.
+
+### The script ran but nothing was installed
+
+Check the exit code in the **Jobs** tab. `Install-CriticalSecurityUpdates.ps1` returns **1**
+for a *configuration* error — meaning it never received its parameters. Either the library
+entry is missing the **String / Overridable** `kbAllowList`, `rebootBehavior` and `dryRun`
+script variables, or the script has no `param()` block to catch positional arguments.
+
+Also confirm you configured the right script: two files in `ninjaone-scripts` share the name
+`Install-CriticalSecurityUpdates.ps1`, and only the one under `Windows/Install/` accepts
+command-line arguments. Binding by numeric **ID** rather than name avoids picking the wrong
+one.
+
+### A job is stuck on "Running"
+
+The poller reads `/activities` every 15 seconds and gives up after 45 minutes. A device that
+is offline, or a long install, will sit in *Running* until then — that is expected, not a
+hang. Hover the status to get the NinjaOne activity/job ID and look the run up in the
+console; the v2 API exposes no script output, so that is where the detail lives.
+
+### A job says "Unknown"
+
+The dispatch request timed out **after** the body was sent, so NinjaOne may or may not have
+queued it. The toolkit deliberately does **not** retry these — a replay could install or
+reboot twice. Check the device's activity feed in NinjaOne before dispatching again.
+
+### An action was refused as "not confirmed"
+
+Confirmation tokens are single-use, expire after five minutes, and are bound to the exact
+device set and parameter string that was planned. Changing the selection (or leaving the
+dialog open too long) invalidates the approval. Re-open the action and confirm again.
+
 ## Credentials & storage
 
 - The **refresh token** and optional **client secret** live in the OS keyring (Keychain /
   Credential Manager / Secret Service) — never in `settings.json`. If the OS keyring is
   locked or unavailable, sign-in/refresh can fail; unlock it and retry.
 - `settings.json` holds only **non-secret** config (instance URL, client id, ports,
-  windows, presets). Deleting it resets those to defaults; it never holds a token.
+  windows, presets, patch-action guardrails). Deleting it resets those to defaults — including
+  turning patch actions back off — and it never holds a token.
+- `action-audit.jsonl` sits beside it and records one line per dispatched action, written
+  before the request goes out and again when it settles. Script parameters that look like
+  credentials (`*pass*`, `*secret*`, `*token*`, `*key*`) are redacted; tokens are never
+  written there. Delete it freely — nothing reads it back.
 
 ## Build & run (contributors)
 
