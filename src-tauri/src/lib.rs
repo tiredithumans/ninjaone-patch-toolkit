@@ -50,6 +50,8 @@ pub fn run() {
             commands::lookups::list_node_classes,
             commands::patches::query_patches,
             commands::patches::get_patch_rows,
+            commands::patches::get_patch_groups,
+            commands::patches::get_patch_group_members,
             commands::export::export_patches_xlsx,
             commands::export::export_report_html,
             commands::update::check_for_update,

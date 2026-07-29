@@ -156,6 +156,60 @@ pub async fn get_patch_rows(
     .await
 }
 
+/// Fetches one page of **group headers** over the backend's cached rows. Grouping
+/// happens backend-side for the same reason paging does: the frontend only ever
+/// holds one page, so it cannot group a fleet it has never seen.
+pub async fn get_patch_groups(
+    group_by: GroupBy,
+    offset: usize,
+    limit: usize,
+) -> Result<GroupPage, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Wrap {
+        group_by: GroupBy,
+        offset: usize,
+        limit: usize,
+    }
+    invoke(
+        "get_patch_groups",
+        args_of(&Wrap {
+            group_by,
+            offset,
+            limit,
+        }),
+    )
+    .await
+}
+
+/// Fetches one page of a single group's member rows. `key` is the opaque
+/// `PatchGroup.key` the backend handed out, so an expand costs no extra state.
+pub async fn get_patch_group_members(
+    group_by: GroupBy,
+    key: String,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<PatchRow>, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Wrap {
+        group_by: GroupBy,
+        key: String,
+        offset: usize,
+        limit: usize,
+    }
+    invoke(
+        "get_patch_group_members",
+        args_of(&Wrap {
+            group_by,
+            key,
+            offset,
+            limit,
+        }),
+    )
+    .await
+}
+
 /// Subscribes to backend `query:progress` events for the lifetime of the app,
 /// decoding each event's payload and handing it to `handler`. The Tauri unlisten
 /// handle is intentionally dropped — the subscription lives as long as the app.

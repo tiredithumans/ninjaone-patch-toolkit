@@ -293,6 +293,11 @@ fn PatchesTable() -> impl IntoView {
                     </div>
                 </Show>
                 <ActionBar/>
+                <ViewModeSwitch/>
+                <Show when=move || state.query.group_by.get().is_some()>
+                    <GroupedPatches/>
+                </Show>
+                <Show when=move || state.query.group_by.get().is_none()>
                 <div class="table-wrap">
                 <table>
                     <thead>
@@ -344,11 +349,17 @@ fn PatchesTable() -> impl IntoView {
                                 .map(|r| {
                                     let sev = sev_class(&r.severity);
                                     let stat = status_class(&r.status);
-                                    // Checking a row selects its *device* — there is
-                                    // no per-patch apply endpoint in the NinjaOne API.
-                                    let device_id = r.device_id;
+                                    // Ticks this patch on this device. Apply still
+                                    // installs everything approved on the device —
+                                    // the per-row detail is what a kbAllowList
+                                    // script is given.
                                     let row = r.clone();
-                                    let label = format!("Select {}", r.device_name);
+                                    let checked_row = r.clone();
+                                    let label = format!(
+                                        "Select {} on {}",
+                                        r.kb.clone().unwrap_or_else(|| r.name.clone()),
+                                        r.device_name,
+                                    );
                                     view! {
                                         <tr>
                                             <td class="col-select">
@@ -356,10 +367,7 @@ fn PatchesTable() -> impl IntoView {
                                                     type="checkbox"
                                                     aria-label=label
                                                     prop:checked=move || {
-                                                        state
-                                                            .actions
-                                                            .selected
-                                                            .with(|s| s.contains_key(&device_id))
+                                                        state.is_row_selected(&checked_row)
                                                     }
                                                     on:change=move |ev| {
                                                         state
@@ -394,8 +402,249 @@ fn PatchesTable() -> impl IntoView {
                     </tbody>
                 </table>
                 </div>
+                </Show>
             </Show>
         </Show>
+    }
+}
+
+/// Flat / By device / By patch switch for the Patches tab. Grouping is a backend
+/// re-query over the cached rows, not a client-side regroup of the visible page.
+#[component]
+fn ViewModeSwitch() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    const MODES: [(Option<GroupBy>, &str); 3] = [
+        (None, "Flat"),
+        (Some(GroupBy::Device), "By device"),
+        (Some(GroupBy::Patch), "By patch"),
+    ];
+    view! {
+        <div class="view-modes" role="group" aria-label="Patch view mode">
+            <span class="chips-label">"View"</span>
+            {MODES
+                .iter()
+                .map(|(mode, label)| {
+                    let mode = *mode;
+                    let active = move || state.query.group_by.get() == mode;
+                    view! {
+                        <button
+                            class=move || if active() { "chip chip-on" } else { "chip" }
+                            aria-pressed=move || active().to_string()
+                            on:click=move |_| state.set_group_by(mode)
+                        >
+                            {*label}
+                        </button>
+                    }
+                })
+                .collect_view()}
+        </div>
+    }
+}
+
+/// The grouped Patches view: one expandable row per group, its members loaded on
+/// demand. Selection stays per patch row — expanding a group and ticking one of
+/// its members selects exactly that patch, the same as in the flat table.
+#[component]
+fn GroupedPatches() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let groups = move || state.query.groups.get();
+    let by_device = move || state.query.group_by.get() == Some(GroupBy::Device);
+    view! {
+        <Show
+            when=move || !groups().is_empty()
+            fallback=|| view! { <p class="empty">"No groups to show."</p> }
+        >
+            <ul class="groups">
+                {move || {
+                    groups()
+                        .into_iter()
+                        .map(|g| {
+                            let key = g.key.clone();
+                            // Each closure below outlives the others, so every one
+                            // takes its own clone of the key.
+                            let (k_all, k_some, k_tick, tog_key, mem_key) = (
+                                key.clone(),
+                                key.clone(),
+                                key.clone(),
+                                key.clone(),
+                                key.clone(),
+                            );
+                            // Signal::derive is Copy, so the caret and the
+                            // aria-expanded attribute can both read it.
+                            let open = Signal::derive(move || {
+                                state.query.expanded.with(|e| e.contains(&key))
+                            });
+                            let sev = sev_class(&g.severity);
+                            let count = if by_device() {
+                                format!("{} patches", group_thousands(g.rows))
+                            } else {
+                                format!("{} devices", group_thousands(g.devices))
+                            };
+                            let sub = g.sublabel.clone().unwrap_or_default();
+                            let label = g.label.clone();
+                            let aria = format!("Select all loaded patches in {label}");
+                            view! {
+                                <li class="group">
+                                    <div class="group-head">
+                                        <input
+                                            type="checkbox"
+                                            aria-label=aria
+                                            prop:checked=move || {
+                                                state.group_selection_state(&k_all).0
+                                            }
+                                            prop:indeterminate=move || {
+                                                state.group_selection_state(&k_some).1
+                                            }
+                                            on:change=move |ev| {
+                                                state
+                                                    .toggle_group_selection(
+                                                        &k_tick,
+                                                        event_target_checked(&ev),
+                                                    )
+                                            }
+                                        />
+                                        <button
+                                            class="group-toggle"
+                                            aria-expanded=move || open.get().to_string()
+                                            on:click=move |_| state.toggle_group(tog_key.clone())
+                                        >
+                                            <span class="group-caret">
+                                                {move || if open.get() { "▾" } else { "▸" }}
+                                            </span>
+                                            <span class="group-label">{g.label}</span>
+                                            <span class="group-sub">{sub}</span>
+                                            <span class=sev>{g.severity}</span>
+                                            <span class="group-count">{count}</span>
+                                            <Show when=move || g.needs_reboot>
+                                                <span class="chip-note">"needs reboot"</span>
+                                            </Show>
+                                            <Show when=move || g.offline>
+                                                <span class="chip-note">"offline"</span>
+                                            </Show>
+                                        </button>
+                                    </div>
+                                    <Show when=move || open.get()>
+                                        {
+                                            let mem_key = mem_key.clone();
+                                            move || {
+                                                let rows = state
+                                                    .query
+                                                    .members
+                                                    .with(|m| m.get(&mem_key).cloned());
+                                                match rows {
+                                                    None => {
+                                                        view! {
+                                                            <p class="empty">"Loading…"</p>
+                                                        }
+                                                            .into_any()
+                                                    }
+                                                    Some(rows) if rows.is_empty() => {
+                                                        view! {
+                                                            <p class="empty">"No patches here."</p>
+                                                        }
+                                                            .into_any()
+                                                    }
+                                                    Some(rows) => {
+                                                        let capped = rows.len() >= GROUP_MEMBER_LIMIT;
+                                                        view! {
+                                                            <>
+                                                                <GroupMembers rows=rows/>
+                                                                // Never imply a partial
+                                                                // list is the whole group.
+                                                                <Show when=move || capped>
+                                                                    <p class="empty">
+                                                                        "Showing the first "
+                                                                        {group_thousands(
+                                                                            GROUP_MEMBER_LIMIT,
+                                                                        )}
+                                                                        " — narrow the filters to see the rest."
+                                                                    </p>
+                                                                </Show>
+                                                            </>
+                                                        }
+                                                            .into_any()
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    </Show>
+                                </li>
+                            }
+                        })
+                        .collect_view()
+                }}
+            </ul>
+        </Show>
+    }
+}
+
+/// The member rows inside an expanded group. Deliberately a compact table rather
+/// than the full detail grid — the group header already carries the shared columns.
+#[component]
+fn GroupMembers(rows: Vec<PatchRow>) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let by_device = move || state.query.group_by.get() == Some(GroupBy::Device);
+    view! {
+        <div class="table-wrap">
+            <table class="group-members">
+                <tbody>
+                    {rows
+                        .into_iter()
+                        .map(|r| {
+                            let row = r.clone();
+                            let checked_row = r.clone();
+                            let sev = sev_class(&r.severity);
+                            let stat = status_class(&r.status);
+                            let aria = format!(
+                                "Select {} on {}",
+                                r.kb.clone().unwrap_or_else(|| r.name.clone()),
+                                r.device_name,
+                            );
+                            view! {
+                                <tr>
+                                    <td class="col-select">
+                                        <input
+                                            type="checkbox"
+                                            aria-label=aria
+                                            prop:checked=move || state.is_row_selected(&checked_row)
+                                            on:change=move |ev| {
+                                                state
+                                                    .toggle_row_selection(
+                                                        &row,
+                                                        event_target_checked(&ev),
+                                                    )
+                                            }
+                                        />
+                                    </td>
+                                    // In a device group the members are patches; in a
+                                    // patch group they are the devices it's missing on.
+                                    <td>
+                                        {move || {
+                                            if by_device() {
+                                                r.kb.clone().unwrap_or_default()
+                                            } else {
+                                                r.device_name.clone()
+                                            }
+                                        }}
+                                    </td>
+                                    <td class="patch-name">
+                                        {move || {
+                                            if by_device() {
+                                                r.name.clone()
+                                            } else {
+                                                r.organization.clone()
+                                            }
+                                        }}
+                                    </td>
+                                    <td><span class=sev>{r.severity.clone()}</span></td>
+                                    <td><span class=stat>{r.status.clone()}</span></td>
+                                </tr>
+                            }
+                        })
+                        .collect_view()}
+                </tbody>
+            </table>
+        </div>
     }
 }
 

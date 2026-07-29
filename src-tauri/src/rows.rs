@@ -717,6 +717,185 @@ pub struct RowSort {
     pub desc: bool,
 }
 
+/// Which key the Patches view groups its rows by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum GroupBy {
+    Device,
+    Patch,
+}
+
+/// Separator joining the fields of a composite group key. A unit separator can't
+/// occur in a device or patch name, so one group's key can never collide with or
+/// forge another's.
+const GROUP_KEY_SEP: char = '\u{1f}';
+
+/// The stable identity the frontend echoes back to fetch a group's members and to
+/// key its expand state. Keyed on the same tuple the group is built from, so it
+/// round-trips without the backend holding per-request state.
+pub fn group_key(row: &PatchRow, group_by: GroupBy) -> String {
+    match group_by {
+        GroupBy::Device => row.device_id.to_string(),
+        GroupBy::Patch => format!(
+            "{}{GROUP_KEY_SEP}{}{GROUP_KEY_SEP}{}",
+            row.patch_type,
+            row.kb.as_deref().unwrap_or(""),
+            row.name
+        ),
+    }
+}
+
+/// One collapsed group header. Members are **not** carried: a patch group can span
+/// the whole fleet (a single Chrome update covers every device), so members are
+/// paged separately via [`group_member_page`] when the operator expands it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchGroup {
+    pub key: String,
+    pub label: String,
+    /// Organization for a device group; KB for a patch group (blank when absent —
+    /// third-party patches carry no KB).
+    pub sublabel: Option<String>,
+    pub rows: usize,
+    /// Distinct devices in the group: always 1 for a device group, and the
+    /// affected-device count for a patch group.
+    pub devices: usize,
+    /// Highest severity among the members, so a collapsed group still shows how
+    /// urgent its worst patch is.
+    pub severity: String,
+    pub severity_rank: u8,
+    /// Device groups only — the id actions dispatch against, and its state.
+    pub device_id: Option<i64>,
+    pub offline: bool,
+    pub needs_reboot: bool,
+}
+
+/// Builds every group over the cached rows, ordered most-urgent-first.
+///
+/// Device groups keep the canonical severity → org → device order the flat view
+/// uses; patch groups lead with blast radius (affected devices) then severity,
+/// matching [`build_failures`], because "this update is missing on 212 machines"
+/// is the thing worth seeing first.
+pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
+    struct Acc {
+        label: String,
+        sublabel: Option<String>,
+        rows: usize,
+        devices: HashSet<i64>,
+        severity: String,
+        severity_rank: u8,
+        device_id: Option<i64>,
+        offline: bool,
+        needs_reboot: bool,
+    }
+    let mut groups: HashMap<String, Acc> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for r in rows {
+        let key = group_key(r, group_by);
+        let acc = groups.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            match group_by {
+                GroupBy::Device => Acc {
+                    label: r.device_name.clone(),
+                    sublabel: Some(r.organization.clone()),
+                    rows: 0,
+                    devices: HashSet::new(),
+                    severity: r.severity.clone(),
+                    severity_rank: r.severity_rank,
+                    device_id: Some(r.device_id),
+                    offline: r.offline,
+                    needs_reboot: r.needs_reboot,
+                },
+                GroupBy::Patch => Acc {
+                    label: r.name.clone(),
+                    sublabel: r.kb.clone().filter(|k| !k.is_empty()),
+                    rows: 0,
+                    devices: HashSet::new(),
+                    severity: r.severity.clone(),
+                    severity_rank: r.severity_rank,
+                    device_id: None,
+                    offline: false,
+                    needs_reboot: false,
+                },
+            }
+        });
+        acc.rows += 1;
+        acc.devices.insert(r.device_id);
+        // Records for the same group can disagree; surface the worst.
+        if r.severity_rank > acc.severity_rank {
+            acc.severity_rank = r.severity_rank;
+            acc.severity = r.severity.clone();
+        }
+    }
+
+    let mut out: Vec<PatchGroup> = order
+        .into_iter()
+        .filter_map(|k| groups.remove(&k).map(|a| (k, a)))
+        .map(|(key, a)| PatchGroup {
+            key,
+            label: a.label,
+            sublabel: a.sublabel,
+            rows: a.rows,
+            devices: a.devices.len(),
+            severity: a.severity,
+            severity_rank: a.severity_rank,
+            device_id: a.device_id,
+            offline: a.offline,
+            needs_reboot: a.needs_reboot,
+        })
+        .collect();
+
+    match group_by {
+        GroupBy::Device => out.sort_by_cached_key(|g| {
+            (
+                Reverse(g.severity_rank),
+                g.sublabel.clone().unwrap_or_default().to_lowercase(),
+                g.label.to_lowercase(),
+            )
+        }),
+        GroupBy::Patch => {
+            out.sort_by_cached_key(|g| (Reverse(g.devices), Reverse(g.severity_rank)))
+        }
+    }
+    out
+}
+
+/// One page of group headers plus the total, so the frontend can page groups the
+/// same way it pages flat rows.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupPage {
+    pub groups: Vec<PatchGroup>,
+    pub total: usize,
+}
+
+/// Slices `build_groups` into one page.
+pub fn group_page(rows: &[PatchRow], group_by: GroupBy, offset: usize, limit: usize) -> GroupPage {
+    let all = build_groups(rows, group_by);
+    GroupPage {
+        total: all.len(),
+        groups: all.into_iter().skip(offset).take(limit).collect(),
+    }
+}
+
+/// One page of a single group's member rows, in the cache's canonical order.
+/// Filtering by key rather than storing members on the group keeps a fleet-wide
+/// patch group (one entry per device) off the wire until it's actually expanded.
+pub fn group_member_page(
+    rows: &[PatchRow],
+    group_by: GroupBy,
+    key: &str,
+    offset: usize,
+    limit: usize,
+) -> Vec<PatchRow> {
+    rows.iter()
+        .filter(|r| group_key(r, group_by) == key)
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
 /// Serves one page of the cached detail rows, optionally re-ordered by `sort`.
 ///
 /// `None` reproduces the cache order exactly (the canonical severity/org/device
@@ -1419,6 +1598,111 @@ mod tests {
             severity_rank: sev_rank,
             ..failed_row(1, device, "KB1", installed_ts)
         }
+    }
+
+    /// A row on `device`, carrying `name`/`kb` so grouping can be exercised both ways.
+    fn group_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, rank: u8) -> PatchRow {
+        PatchRow {
+            device_id,
+            device_name: device.into(),
+            kb: kb.map(Into::into),
+            name: name.into(),
+            severity_rank: rank,
+            patch_type: if kb.is_some() { "OS" } else { "SOFTWARE" }.into(),
+            ..failed_row(device_id, device, "KB1", None)
+        }
+    }
+
+    #[test]
+    fn build_groups_by_device_rolls_up_rows_and_worst_severity() {
+        let rows = vec![
+            group_row(1, "web-01", Some("KB1"), "Cumulative Update", 3),
+            group_row(1, "web-01", None, "Google Chrome 138", 7),
+            group_row(2, "web-02", Some("KB1"), "Cumulative Update", 4),
+        ];
+        let groups = build_groups(&rows, GroupBy::Device);
+        assert_eq!(groups.len(), 2, "one group per device");
+
+        // Highest severity in the group wins, so a collapsed row still reads as
+        // urgent as its worst member — and that ordering puts web-01 first.
+        assert_eq!(groups[0].label, "web-01");
+        assert_eq!(groups[0].severity_rank, 7);
+        assert_eq!(groups[0].rows, 2);
+        assert_eq!(groups[0].devices, 1, "a device group is exactly one device");
+        assert_eq!(groups[0].device_id, Some(1));
+        assert_eq!(groups[1].label, "web-02");
+    }
+
+    #[test]
+    fn build_groups_by_patch_leads_with_blast_radius() {
+        let rows = vec![
+            // A critical patch on one device...
+            group_row(1, "web-01", Some("KB9"), "Rare Critical", 7),
+            // ...versus a less severe one missing on three.
+            group_row(1, "web-01", None, "Google Chrome 138", 3),
+            group_row(2, "web-02", None, "Google Chrome 138", 3),
+            group_row(3, "web-03", None, "Google Chrome 138", 3),
+        ];
+        let groups = build_groups(&rows, GroupBy::Patch);
+        assert_eq!(groups.len(), 2);
+        // Blast radius leads: "missing on 3 machines" outranks "critical on 1".
+        assert_eq!(groups[0].label, "Google Chrome 138");
+        assert_eq!(groups[0].devices, 3);
+        assert_eq!(groups[0].rows, 3);
+        assert_eq!(
+            groups[0].sublabel, None,
+            "third-party patches carry no KB, so the sublabel stays empty"
+        );
+        assert_eq!(groups[1].label, "Rare Critical");
+        assert_eq!(groups[1].sublabel.as_deref(), Some("KB9"));
+        assert_eq!(groups[1].device_id, None, "a patch group spans devices");
+    }
+
+    #[test]
+    fn group_members_returns_only_that_groups_rows() {
+        let rows = vec![
+            group_row(1, "web-01", Some("KB1"), "Cumulative Update", 5),
+            group_row(2, "web-02", Some("KB1"), "Cumulative Update", 5),
+            group_row(1, "web-01", None, "Google Chrome 138", 3),
+        ];
+        // A patch group's members are the affected devices...
+        let key = group_key(&rows[0], GroupBy::Patch);
+        let members = group_member_page(&rows, GroupBy::Patch, &key, 0, 10);
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().all(|r| r.name == "Cumulative Update"));
+
+        // ...and a device group's members are that device's patches.
+        let key = group_key(&rows[0], GroupBy::Device);
+        let members = group_member_page(&rows, GroupBy::Device, &key, 0, 10);
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().all(|r| r.device_id == 1));
+
+        // Paging and a stale/unknown key both behave.
+        assert_eq!(
+            group_member_page(&rows, GroupBy::Device, &key, 1, 10).len(),
+            1
+        );
+        assert!(group_member_page(&rows, GroupBy::Device, "nope", 0, 10).is_empty());
+    }
+
+    #[test]
+    fn group_keys_cannot_collide_across_distinct_patches() {
+        // The key joins patch_type/kb/name; a name containing the joiner would
+        // otherwise be able to impersonate another group's key.
+        let a = group_row(1, "web-01", Some("KB1"), "Update", 5);
+        let b = group_row(1, "web-01", None, "KB1\u{1f}Update", 5);
+        assert_ne!(group_key(&a, GroupBy::Patch), group_key(&b, GroupBy::Patch));
+    }
+
+    #[test]
+    fn group_page_slices_and_reports_the_total() {
+        let rows: Vec<PatchRow> = (1..=5)
+            .map(|i| group_row(i, &format!("srv{i}"), Some("KB1"), "Cumulative Update", 5))
+            .collect();
+        let page = group_page(&rows, GroupBy::Device, 2, 2);
+        assert_eq!(page.total, 5, "total counts every group, not the page");
+        assert_eq!(page.groups.len(), 2);
+        assert!(group_page(&rows, GroupBy::Device, 99, 2).groups.is_empty());
     }
 
     #[test]

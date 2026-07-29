@@ -8,6 +8,21 @@ use std::cmp::Ordering;
 use super::{AppliedFilters, Tab};
 use crate::types::{AuthStatus, JobReport, PatchRow, RowSort, RowSortKey};
 
+/// Identity of a patch *within a device's selection*.
+///
+/// The same `(patch_type, kb, name)` tuple the backend groups patches by, so a row
+/// ticked in the flat view and the same patch ticked inside a grouped view refer to
+/// one thing. Joined with a unit separator, which can't occur in a patch name, so
+/// two distinct patches can never produce the same key.
+pub(crate) fn patch_key(row: &PatchRow) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}",
+        row.patch_type,
+        row.kb.as_deref().unwrap_or(""),
+        row.name
+    )
+}
+
 /// Why the patch-action affordances are unavailable, or `None` when they're live.
 ///
 /// Pure and derived on demand rather than cached in a signal: it was previously
@@ -974,5 +989,41 @@ mod tests {
             action_blocked_reason(false, false, None).as_deref(),
             Some("Sign in to run patch actions.")
         );
+    }
+
+    #[test]
+    fn patch_key_identifies_a_patch_not_a_device() {
+        // The reported bug: ticking one software patch marked every patch on that
+        // device. Two different patches on the same device must key differently...
+        let mut a = sortable("web-01", "Critical", None);
+        a.device_id = 1;
+        a.kb = Some("KB5040434".into());
+        a.name = "Cumulative Update".into();
+        let mut b = a.clone();
+        b.kb = None;
+        b.patch_type = "SOFTWARE".into();
+        b.name = "Google Chrome 138".into();
+        assert_ne!(patch_key(&a), patch_key(&b));
+
+        // ...while the same patch on a different device keys the same, so the
+        // by-patch grouped view and the flat view agree on identity.
+        let mut same_patch_other_device = a.clone();
+        same_patch_other_device.device_id = 2;
+        same_patch_other_device.device_name = "web-02".into();
+        assert_eq!(patch_key(&a), patch_key(&same_patch_other_device));
+    }
+
+    #[test]
+    fn patch_key_separator_cannot_be_forged_by_a_name() {
+        // A KB-less patch whose name embeds the separator must not collide with a
+        // genuine KB'd patch of the same type.
+        let mut real = sortable("web-01", "Critical", None);
+        real.patch_type = "OS".into();
+        real.kb = Some("KB1".into());
+        real.name = "Update".into();
+        let mut forged = real.clone();
+        forged.kb = None;
+        forged.name = "KB1\u{1f}Update".into();
+        assert_ne!(patch_key(&real), patch_key(&forged));
     }
 }

@@ -146,6 +146,41 @@ pub struct SeverityCounts {
     pub unknown: usize,
 }
 
+/// Which key the Patches view groups its rows by. Mirrors `rows::GroupBy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum GroupBy {
+    Device,
+    Patch,
+}
+
+/// One collapsed group header. Mirrors `rows::PatchGroup`. Members are fetched
+/// separately via `get_patch_group_members` — a patch group can span the whole
+/// fleet, so its rows stay off the wire until the operator expands it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchGroup {
+    pub key: String,
+    pub label: String,
+    pub sublabel: Option<String>,
+    pub rows: usize,
+    pub devices: usize,
+    pub severity: String,
+    pub severity_rank: u8,
+    pub offline: bool,
+    pub needs_reboot: bool,
+}
+
+/// One page of group headers plus the total. Mirrors `rows::GroupPage`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupPage {
+    #[serde(default)]
+    pub groups: Vec<PatchGroup>,
+    #[serde(default)]
+    pub total: usize,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrgSeverity {
