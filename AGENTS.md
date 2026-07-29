@@ -377,8 +377,18 @@ secrets are **not** stored there — see below).
   `rank() >= Important.rank()` compliance/SLA rollups. Adding a value means: `from_raw` + `label`
   + `rank` (`model.rs`) → `SeverityCounts` + its `match` (`rows.rs`) → the `web-rs/src/types.rs`
   mirror → `SEV_BANDS`/`sum_severity`/`sev_count`/`severity_segments` (`charts.rs`) →
-  `SEVERITY_BANDS`/`total_severity`/`severity_value` (`report.rs`) → `sev_class` (`util.rs`) →
-  `SEVERITY_OPTIONS` → the `.sev-*`/`.seg-*` CSS → `demo.rs`.
+  `SEVERITY_BANDS`/`total_severity`/`severity_value` (`report.rs`) → `sev_class` **and**
+  `sev_ordinal` **and** `severity_raw` (`util.rs`) → `SEVERITY_OPTIONS` → the `.sev-*` **and**
+  `.chart .seg-*` **and** `.chart-swatch.seg-*` CSS (three separate rule families — the middle one
+  sets `fill` and is scoped to `.chart`, so it does nothing for a legend `<span>`) → `demo.rs`.
+  - **This list was previously incomplete, and every site it omitted had silently drifted:**
+    `report.rs` summed six of eight bands by hand (a `security`/`recommended`-only backlog printed
+    "No pending patches"; a mixed one overflowed the viewBox), the two `.chart-swatch` rules were
+    missing (blank legend squares), `.sev-optional`/`.sev-unknown` were missing (both collapsed into
+    `.sev-none`, so "low priority" and "unmapped" rendered identically), and `sev_ordinal` ranked
+    both classifications *below* `Optional`. Prefer deriving over enumerating where you can —
+    `write_severity_chart` now sums via `SEVERITY_BANDS` so its denominator cannot diverge from the
+    segments it draws, which removes one hand-maintained site from this list entirely.
 
 - **Installed/Failed vs current patches (status routing — load-bearing).** Per the official spec,
   the current `/queries/{os,software}-patches` feed returns only patches "for which there were **no

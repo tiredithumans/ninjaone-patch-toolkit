@@ -11,6 +11,7 @@
 use leptos::prelude::*;
 
 use super::AppState;
+use super::util::severity_raw;
 use crate::types::{OrgSeverity, SeverityCounts};
 
 /// Severity bands in most-to-least-urgent order, paired with the CSS class that
@@ -303,11 +304,43 @@ fn SeverityBreakdown() -> impl IntoView {
                         {segs
                             .into_iter()
                             .map(|s| {
-                                view! {
-                                    <li>
-                                        <span class=format!("chart-swatch {}", s.class)></span>
-                                        {format!("{}: {}", s.label, s.count)}
-                                    </li>
+                                let swatch = format!("chart-swatch {}", s.class);
+                                let text = format!("{}: {}", s.label, s.count);
+                                // The legend entry, not the <rect>, is the drill-down
+                                // target: a real <button> is keyboard-reachable and
+                                // announced, where a clickable SVG rect is neither.
+                                let raw = severity_raw(s.label);
+                                match raw {
+                                    Some(raw) => {
+                                        let title = format!(
+                                            "Show the {} patch rows",
+                                            s.label,
+                                        );
+                                        view! {
+                                            <li>
+                                                <button
+                                                    class="drill drill-legend"
+                                                    title=title
+                                                    on:click=move |_| {
+                                                        state.drill_to_severity(raw.to_string())
+                                                    }
+                                                >
+                                                    <span class=swatch.clone()></span>
+                                                    {text.clone()}
+                                                </button>
+                                            </li>
+                                        }
+                                            .into_any()
+                                    }
+                                    None => {
+                                        view! {
+                                            <li>
+                                                <span class=swatch.clone()></span>
+                                                {text.clone()}
+                                            </li>
+                                        }
+                                            .into_any()
+                                    }
                                 }
                             })
                             .collect_view()}

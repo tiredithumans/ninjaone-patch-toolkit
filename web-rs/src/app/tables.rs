@@ -215,13 +215,29 @@ fn ScopeBanner(
 #[component]
 fn PatchesTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // The total row count comes from the summary; the visible page lives in
-    // `page_rows`, fetched from the backend cache rather than held in full here.
-    let total = move || {
+    let grouped = move || state.query.group_by.get().is_some();
+    // Whether the query matched anything at all. Keyed on `rows_total` in both view
+    // modes: it's the query-level truth, and it's already populated when the result
+    // arrives, whereas `groups_total` is only filled once a header page lands — so
+    // gating the empty state on the grouped total would flash "no patches matched"
+    // over every grouped refetch.
+    let rows_total = move || {
         state
             .query
             .result
             .with(|r| r.as_ref().map_or(0, |r| r.rows_total))
+    };
+    // The pager, by contrast, paginates whichever unit the active view mode shows:
+    // flat rows or group headers. Sizing it from `rows_total` while grouped is what
+    // left ~98% of groups unreachable — it read "Page 1 of 400" off 40,000 rows
+    // while the grouped view only ever rendered the first 100 groups, and every
+    // Next click fetched rows that were rendered nowhere.
+    let total = move || {
+        if grouped() {
+            state.query.groups_total.get()
+        } else {
+            rows_total()
+        }
     };
     let page_count = move || total().div_ceil(PATCHES_PAGE_SIZE).max(1);
     // Clamp the stored page so a shorter result (e.g. after an auto-refresh) can't
@@ -233,7 +249,8 @@ fn PatchesTable() -> impl IntoView {
         let start = page() * PATCHES_PAGE_SIZE;
         let end = (start + PATCHES_PAGE_SIZE).min(t);
         format!(
-            "Rows {}\u{2013}{} of {} \u{00b7} Page {} of {}",
+            "{} {}\u{2013}{} of {} \u{00b7} Page {} of {}",
+            if grouped() { "Groups" } else { "Rows" },
             start + 1,
             end,
             group_thousands(t),
@@ -241,10 +258,15 @@ fn PatchesTable() -> impl IntoView {
             page_count(),
         )
     };
-    // Page navigation updates the index and fetches that page's rows on demand.
+    // Page navigation updates the index and fetches that page on demand — of
+    // headers or of rows, matching what the view is actually showing.
     let go_to = move |target: usize| {
         state.query.patches_page.set(target);
-        state.fetch_page(target);
+        if grouped() {
+            state.fetch_groups(target);
+        } else {
+            state.fetch_page(target);
+        }
     };
     let go_prev = move |_| go_to(page().saturating_sub(1));
     let go_next = move |_| {
@@ -264,7 +286,7 @@ fn PatchesTable() -> impl IntoView {
                 filters="Device scope + Type, Status, Severity, Search, First-seen and Installed-within are all applied."
             />
             <Show
-                when=move || { total() > 0 }
+                when=move || { rows_total() > 0 }
                 fallback=|| {
                     view! {
                         <p class="empty">
@@ -678,7 +700,7 @@ fn ComplianceTab() -> impl IntoView {
                 filters="Device scope only (Org / Location / Role / OS Type / OS name). Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
             <ComplianceCharts/>
-            <ComplianceRollupTable first_col="Organization" rows=org_rows/>
+            <ComplianceRollupTable first_col="Organization" rows=org_rows drill=RollupDrill::Organization/>
             <section class="compliance-os">
                 <h3 class="chart-title">"Compliance by OS"</h3>
                 <div class="chart-card">
@@ -731,11 +753,25 @@ impl From<&OsCompliance> for ComplianceRow {
 
 /// Shared table for the two compliance rollups (per-organization and per-OS):
 /// identical columns, differing only in the grouping column's header and values.
+/// What clicking a rollup row's label should narrow to, or `None` for a rollup whose
+/// grouping key isn't a filter facet.
+///
+/// The per-OS rollup buckets on `os.name`, and the only OS control is the free-text
+/// `os_name` substring facet — close enough to look clickable but not the same thing,
+/// so it stays inert rather than shipping a drill-down that quietly matches the wrong
+/// devices.
+#[derive(Clone, Copy, PartialEq)]
+enum RollupDrill {
+    Organization,
+}
+
 #[component]
 fn ComplianceRollupTable(
     first_col: &'static str,
     #[prop(into)] rows: Signal<Vec<ComplianceRow>>,
+    #[prop(optional)] drill: Option<RollupDrill>,
 ) -> impl IntoView {
+    let state = expect_context::<AppState>();
     view! {
         <Show
             when=move || rows.with(|r| !r.is_empty())
@@ -762,9 +798,33 @@ fn ComplianceRollupTable(
                                     let (aged_class, aged_label, aged_title) = aged_badge(
                                         b.aged_critical,
                                     );
+                                    let label_cell = match drill {
+                                        Some(RollupDrill::Organization) => {
+                                            let org = b.label.clone();
+                                            let title = format!(
+                                                "Show {}'s patch rows",
+                                                b.label,
+                                            );
+                                            view! {
+                                                <td>
+                                                    <button
+                                                        class="drill"
+                                                        title=title
+                                                        on:click=move |_| {
+                                                            state.drill_to_org(org.clone())
+                                                        }
+                                                    >
+                                                        {b.label.clone()}
+                                                    </button>
+                                                </td>
+                                            }
+                                                .into_any()
+                                        }
+                                        None => view! { <td>{b.label.clone()}</td> }.into_any(),
+                                    };
                                     view! {
                                         <tr>
-                                            <td>{b.label}</td>
+                                            {label_cell}
                                             <td>{b.devices_total}</td>
                                             <td>{b.devices_compliant}</td>
                                             <td>{pct}</td>
@@ -839,12 +899,37 @@ fn FailuresTable() -> impl IntoView {
                                 .into_iter()
                                 .map(|f| {
                                     let sev = sev_class(&f.severity);
+                                    // Third-party patches carry no `kbNumber`, so fall
+                                    // back to the name — `search_allowed` matches the
+                                    // needle against KB *and* name, so one control
+                                    // covers both.
+                                    let needle = f
+                                        .kb
+                                        .clone()
+                                        .filter(|k| !k.is_empty())
+                                        .unwrap_or_else(|| f.name.clone());
+                                    let title = format!("Show the rows for {needle}");
+                                    let kb_label = f.kb.clone().unwrap_or_default();
                                     view! {
                                         <tr>
                                             <td>
                                                 <span class=sev>{f.severity}</span>
                                             </td>
-                                            <td>{f.kb.unwrap_or_default()}</td>
+                                            <td>
+                                                <button
+                                                    class="drill"
+                                                    title=title
+                                                    on:click=move |_| {
+                                                        state.drill_to_patch(needle.clone())
+                                                    }
+                                                >
+                                                    {if kb_label.is_empty() {
+                                                        "(no KB)".to_string()
+                                                    } else {
+                                                        kb_label.clone()
+                                                    }}
+                                                </button>
+                                            </td>
                                             <td class="patch-name">{f.name}</td>
                                             <td>{f.affected_devices}</td>
                                             <td>{f.latest_failure.unwrap_or_default()}</td>

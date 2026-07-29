@@ -225,12 +225,18 @@ fn write_os_compliance(buf: &mut String, by_os: &[OsCompliance]) {
 }
 
 fn write_severity_chart(buf: &mut String, total: &SeverityCounts) {
-    let sum = total.critical
-        + total.important
-        + total.moderate
-        + total.low
-        + total.optional
-        + total.unknown;
+    // Derived from the same `SEVERITY_BANDS` the segments below are drawn from, so
+    // the denominator cannot diverge from the numerators. It used to be a
+    // hand-written sum that omitted `security` and `recommended` — the two bands
+    // NinjaOne uses most on third-party patches (which carry the grade in `impact`).
+    // A backlog made up only of those read as `sum == 0` and printed "No pending
+    // patches" while the in-app chart on the same cached result showed thousands;
+    // a mixed backlog overflowed the fixed-width track and clipped the low bands off
+    // the right while overstating every visible width.
+    let sum: usize = SEVERITY_BANDS
+        .iter()
+        .map(|(label, _)| severity_value(total, label))
+        .sum();
     if sum == 0 {
         buf.push_str("<p class=\"empty\">No pending patches.</p>");
         return;
@@ -409,6 +415,63 @@ mod tests {
             "all five HTML-significant characters are escaped"
         );
         assert_eq!(escape_html("plain text"), "plain text");
+    }
+
+    #[test]
+    fn severity_chart_renders_a_backlog_of_only_security_and_recommended() {
+        // The denominator used to omit these two bands, so a backlog made up only of
+        // them summed to zero and the report printed "No pending patches" while the
+        // in-app chart on the same data showed thousands.
+        let total = SeverityCounts {
+            security: 1_204,
+            recommended: 87,
+            ..SeverityCounts::default()
+        };
+        let mut buf = String::new();
+        write_severity_chart(&mut buf, &total);
+
+        assert!(
+            !buf.contains("No pending patches"),
+            "1,291 pending patches must not render as an empty chart: {buf}"
+        );
+        assert!(buf.contains("<rect"), "segments must be drawn");
+    }
+
+    #[test]
+    fn severity_segments_never_overflow_the_track() {
+        // With the two omitted bands populated alongside counted ones, the segments
+        // summed to more than the denominator and ran past the fixed-width viewBox,
+        // clipping the low bands and overstating every visible width.
+        let total = SeverityCounts {
+            critical: 10,
+            important: 10,
+            security: 40,
+            moderate: 10,
+            recommended: 20,
+            low: 10,
+            optional: 5,
+            unknown: 5,
+        };
+        let mut buf = String::new();
+        write_severity_chart(&mut buf, &total);
+
+        // Sum every rendered segment width and compare against the 620px track.
+        let widths: Vec<f64> = buf
+            .split("width=\"")
+            .skip(2) // the <svg> width, then the first rect
+            .filter_map(|s| s.split('"').next())
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        assert_eq!(widths.len(), 8, "all eight bands are populated");
+        let painted: f64 = widths.iter().sum();
+        assert!(
+            painted <= 620.5,
+            "segments must tile the 620px track, not overflow it (painted {painted:.1}px)"
+        );
+        assert!(
+            painted > 619.0,
+            "a fully-populated breakdown should fill the track (painted {painted:.1}px)"
+        );
     }
 
     #[test]

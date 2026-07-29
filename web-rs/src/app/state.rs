@@ -757,6 +757,17 @@ impl AppState {
                     } else {
                         self.fetch_page(page);
                     }
+                    // A grouped view is built from group headers and per-group member
+                    // pages, none of which ride along with the summary — so without
+                    // this the previous query's headers and cached members stayed on
+                    // screen against the new result's counts, and re-ticking a
+                    // checkbox could select a device/patch pair that isn't in the
+                    // current result at all.
+                    if self.query.group_by.get_untracked().is_some() {
+                        self.query.expanded.update(|e| e.clear());
+                        self.query.members.update(|m| m.clear());
+                        self.fetch_groups(page);
+                    }
                     self.query.result.set(Some(r));
                     self.query.applied_filters.set(Some(snapshot));
                     self.query.query_error.set(None);
@@ -992,6 +1003,63 @@ impl AppState {
 
     /// Demo-mode counterpart to `run_query`: filters the in-memory sample with the
     /// current facets (no backend, no auth) and recomputes the row count.
+    /// Narrows the filters to one organization and shows the matching patch rows.
+    ///
+    /// The rollup tabs used to be terminal: reading "Contoso · 63% · 41 pending
+    /// Critical/Important" gave the operator no way to reach those 41 rows except to
+    /// scroll back to Filters, re-pick the org by hand, tick Severity, press Run and
+    /// switch tabs. That is what made five tabs read as five disconnected reports
+    /// rather than one console — and it was self-inflicted, because the whole fleet is
+    /// already cached backend-side, so an org/severity narrowing is a client-side
+    /// re-filter with zero HTTP calls.
+    ///
+    /// Matching on the display name is deliberate: the compliance rollup is keyed by
+    /// org *name* (`ComplianceBucket.organization`) because that is what labels a row,
+    /// and the backend's synthetic `(unknown)` bucket has no id at all. An unmatched
+    /// name leaves the org scope alone rather than silently clearing it.
+    pub(super) fn drill_to_org(self, organization: String) {
+        let id = self
+            .lookups
+            .orgs
+            .with_untracked(|orgs| orgs.iter().find(|o| o.name == organization).map(|o| o.id));
+        match id {
+            Some(id) => self.filters.org_id.set(Some(id)),
+            None => self.notify(Toast::err(format!(
+                "No organization named \"{organization}\" in the current scope — showing every org."
+            ))),
+        }
+        self.drill_run();
+    }
+
+    /// Narrows to a single severity band and shows the matching patch rows. Replaces
+    /// the selection rather than adding to it, so clicking a chart segment shows that
+    /// segment and not an accumulation of everything clicked before it.
+    pub(super) fn drill_to_severity(self, severity: String) {
+        self.filters.selected_severities.set(vec![severity]);
+        self.drill_run();
+    }
+
+    /// Narrows to one patch by KB (or by name when the patch carries no KB — third
+    /// party patches have no `kbNumber`) and shows the affected rows. `search_allowed`
+    /// matches the needle against both fields, so one control covers both cases.
+    pub(super) fn drill_to_patch(self, needle: String) {
+        self.filters.search.set(needle);
+        self.drill_run();
+    }
+
+    /// Shared tail of every drill-down: re-run and land the operator on the rows.
+    ///
+    /// Flat view on purpose — a drill-down is a request to see *the rows behind this
+    /// number*, and a grouped view would re-collapse them behind headers. Filters are
+    /// left expanded/collapsed as the operator had them; the chip row already reports
+    /// what the drill-down applied.
+    fn drill_run(self) {
+        self.query.patches_page.set(0);
+        self.set_group_by(None);
+        self.ui.active_tab.set(Tab::Patches);
+        self.run_query();
+    }
+
     pub(super) fn run_demo_query(self, silent: bool) {
         let statuses = self.filters.statuses.get_untracked();
         if statuses.is_empty() {
@@ -1009,6 +1077,15 @@ impl AppState {
         self.query.patches_page.set(0);
         self.query.page_rows.set(r.rows.clone());
         self.query.result.set(Some(r));
+        // Same reason as the live path: a grouped view's headers and members don't
+        // ride along with the result, so they'd otherwise describe the last query.
+        // `fetch_groups` re-derives them from `demo_rows()`, which reads the result
+        // just set above.
+        if self.query.group_by.get_untracked().is_some() {
+            self.query.expanded.update(|e| e.clear());
+            self.query.members.update(|m| m.clear());
+            self.fetch_groups(0);
+        }
         self.query
             .applied_filters
             .set(Some(self.snapshot_filters()));
