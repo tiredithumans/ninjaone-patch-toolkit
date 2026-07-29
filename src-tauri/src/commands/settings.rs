@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::UiError;
-use crate::settings::Preset;
+use crate::settings::{
+    ActionSettings, MAX_ACTION_CONCURRENCY, MAX_DEVICES_PER_ACTION_CEILING, Preset,
+};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -16,6 +18,7 @@ pub struct SettingsView {
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
+    pub actions: ActionSettings,
 }
 
 fn view(state: &AppState) -> SettingsView {
@@ -29,6 +32,7 @@ fn view(state: &AppState) -> SettingsView {
         has_client_secret: state.auth.has_client_secret(),
         presets: s.presets,
         auto_check_updates: s.auto_check_updates,
+        actions: s.actions,
     }
 }
 
@@ -52,6 +56,10 @@ pub struct SaveSettingsArgs {
     pub clear_secret: bool,
     #[serde(default = "default_auto_check")]
     pub auto_check_updates: bool,
+    /// Omitted by a frontend that predates the actions panel, which then leaves the
+    /// write path disabled rather than silently enabling it.
+    #[serde(default)]
+    pub actions: ActionSettings,
 }
 
 fn default_auto_check() -> bool {
@@ -90,6 +98,52 @@ fn validate_settings_input(args: &SaveSettingsArgs) -> Result<(), UiError> {
     if args.sla_days < 1 {
         return Err(UiError::new("SLA (days) must be at least 1."));
     }
+    validate_action_settings(&args.actions)?;
+    Ok(())
+}
+
+/// Same reject-don't-clamp policy for the write-path knobs. These are guardrails,
+/// so a typo that silently became "500 devices" or "concurrency 0" (which would
+/// deadlock the dispatch semaphore) is exactly the failure mode to avoid.
+fn validate_action_settings(a: &ActionSettings) -> Result<(), UiError> {
+    if a.concurrency < 1 || a.concurrency > MAX_ACTION_CONCURRENCY {
+        return Err(UiError::new(format!(
+            "Dispatch concurrency must be between 1 and {MAX_ACTION_CONCURRENCY}."
+        )));
+    }
+    if a.max_devices_per_action < 1 || a.max_devices_per_action > MAX_DEVICES_PER_ACTION_CEILING {
+        return Err(UiError::new(format!(
+            "Max devices per action must be between 1 and {MAX_DEVICES_PER_ACTION_CEILING}."
+        )));
+    }
+    if a.max_orgs_per_action < 1 {
+        return Err(UiError::new(
+            "Max organizations per action must be at least 1.",
+        ));
+    }
+    if a.run_as.trim().is_empty() {
+        return Err(UiError::new("Run-as identity cannot be empty."));
+    }
+    if a.window_start_minute >= 1440 || a.window_end_minute >= 1440 {
+        return Err(UiError::new(
+            "Maintenance-window times must be within a 24-hour day.",
+        ));
+    }
+    if a.window_start_minute == a.window_end_minute {
+        return Err(UiError::new(
+            "Maintenance-window start and end must differ — an empty window blocks every action.",
+        ));
+    }
+    if a.window_days.iter().any(|d| *d > 6) {
+        return Err(UiError::new(
+            "Maintenance-window days must be 0 (Sunday) through 6 (Saturday).",
+        ));
+    }
+    if a.require_maintenance_window && a.window_days.is_empty() {
+        return Err(UiError::new(
+            "A maintenance window with no days selected blocks every action.",
+        ));
+    }
     Ok(())
 }
 
@@ -107,6 +161,7 @@ pub fn save_settings(
     validate_settings_input(&args)?;
 
     let instance_changed;
+    let actions_changed;
     let snapshot = {
         let mut guard = state
             .settings
@@ -123,6 +178,9 @@ pub fn save_settings(
         guard.install_window_days = args.install_window_days;
         guard.sla_days = args.sla_days;
         guard.auto_check_updates = args.auto_check_updates;
+        actions_changed = guard.actions.enabled != args.actions.enabled;
+        guard.actions = args.actions;
+        guard.actions.run_as = guard.actions.run_as.trim().to_string();
         guard.save().map_err(UiError::from)?;
         guard.clone()
     };
@@ -131,6 +189,7 @@ pub fn save_settings(
         snapshot.instance_base_url.clone(),
         snapshot.client_id.clone(),
         snapshot.callback_port,
+        snapshot.actions.enabled,
     );
     // The instance may have changed — drop cached lookups so a different tenant
     // doesn't inherit stale org/location/role names, and drop the cached query
@@ -138,6 +197,16 @@ pub fn save_settings(
     state.clear_lookups_cache();
     if instance_changed {
         state.clear_last_result();
+        state.clear_jobs();
+    }
+    // Toggling actions changes the OAuth scope the next sign-in requests, but the
+    // *current* grant is unchanged — the frontend reads `write_enabled` from
+    // auth_status and prompts for re-authorization when the two disagree.
+    if actions_changed {
+        tracing::info!(
+            enabled = snapshot.actions.enabled,
+            "patch actions toggled; re-authorization required for the scope to take effect"
+        );
     }
 
     match args.client_secret.map(|s| s.trim().to_string()) {
@@ -192,7 +261,10 @@ pub fn delete_preset(state: State<'_, AppState>, name: String) -> Result<Vec<Pre
 
 #[cfg(test)]
 mod tests {
-    use super::{SaveSettingsArgs, require_https_instance, validate_settings_input};
+    use super::{
+        ActionSettings, SaveSettingsArgs, require_https_instance, validate_action_settings,
+        validate_settings_input,
+    };
 
     #[test]
     fn https_instance_is_required() {
@@ -216,6 +288,7 @@ mod tests {
             client_secret: None,
             clear_secret: false,
             auto_check_updates: true,
+            actions: ActionSettings::default(),
         }
     }
 
@@ -228,5 +301,110 @@ mod tests {
         assert!(validate_settings_input(&args(11434, 0, 30)).is_err());
         assert!(validate_settings_input(&args(11434, -5, 30)).is_err());
         assert!(validate_settings_input(&args(11434, 30, 0)).is_err());
+    }
+
+    #[test]
+    fn action_settings_default_to_fully_disabled() {
+        let a = ActionSettings::default();
+        assert!(!a.enabled, "the write path must be opt-in");
+        assert!(!a.allow_offline_targets);
+        assert!(!a.allow_window_override);
+        assert_eq!(a.max_orgs_per_action, 1);
+        assert!(validate_action_settings(&a).is_ok());
+    }
+
+    #[test]
+    fn action_guardrail_bounds_reject_invalid_values() {
+        let base = ActionSettings::default();
+
+        // Concurrency 0 would deadlock the dispatch semaphore.
+        assert!(
+            validate_action_settings(&ActionSettings {
+                concurrency: 0,
+                ..base.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_action_settings(&ActionSettings {
+                concurrency: 17,
+                ..base.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_action_settings(&ActionSettings {
+                max_devices_per_action: 0,
+                ..base.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_action_settings(&ActionSettings {
+                max_devices_per_action: 501,
+                ..base.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_action_settings(&ActionSettings {
+                max_orgs_per_action: 0,
+                ..base.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_action_settings(&ActionSettings {
+                run_as: "  ".into(),
+                ..base.clone()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_window_that_can_never_open_is_rejected() {
+        let base = ActionSettings::default();
+
+        // Identical bounds are a zero-length window, which would block everything.
+        assert!(
+            validate_action_settings(&ActionSettings {
+                window_start_minute: 120,
+                window_end_minute: 120,
+                ..base.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_action_settings(&ActionSettings {
+                window_start_minute: 1440,
+                ..base.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_action_settings(&ActionSettings {
+                window_days: vec![7],
+                ..base.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_action_settings(&ActionSettings {
+                require_maintenance_window: true,
+                window_days: vec![],
+                ..base.clone()
+            })
+            .is_err()
+        );
+        // Days may be empty as long as the window isn't being enforced.
+        assert!(
+            validate_action_settings(&ActionSettings {
+                require_maintenance_window: false,
+                window_days: vec![],
+                ..base
+            })
+            .is_ok()
+        );
     }
 }

@@ -35,6 +35,72 @@ fn default_true() -> bool {
     true
 }
 
+pub const DEFAULT_ACTION_CONCURRENCY: usize = 8;
+pub const MAX_ACTION_CONCURRENCY: usize = 16;
+pub const DEFAULT_MAX_DEVICES_PER_ACTION: usize = 25;
+pub const MAX_DEVICES_PER_ACTION_CEILING: usize = 500;
+/// NinjaOne's default run-as identity for a script.
+pub const DEFAULT_RUN_AS: &str = "system";
+
+/// Write-path configuration.
+///
+/// Every field defaults off/empty, and `enabled` gates the rest: an install that
+/// never opens this panel keeps requesting the read-only OAuth scope and can't
+/// dispatch anything. That is what makes adding the write path a non-breaking
+/// change for existing deployments — see `auth::scope_for`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ActionSettings {
+    /// Master switch. Also decides whether sign-in asks for the `management` scope.
+    pub enabled: bool,
+    /// Library script id used for KB-targeted OS remediation. NinjaOne has no
+    /// script-upload API, so the script is added to the library by hand and its
+    /// numeric id copied out of the Admin → Library → Automation URL.
+    pub os_patch_script_id: Option<i64>,
+    pub software_patch_script_id: Option<i64>,
+    /// NinjaOne run-as identity: `system`, `loggedonuser`, or a credential role.
+    pub run_as: String,
+    pub concurrency: usize,
+    /// Blast-radius cap. A *blocker*, not a warning — raising it is a deliberate
+    /// edit here rather than a click in a confirmation dialog.
+    pub max_devices_per_action: usize,
+    /// How many distinct organizations one action may span. Defaults to 1 because a
+    /// cross-tenant mistake is the highest-consequence error available here.
+    pub max_orgs_per_action: usize,
+    /// NinjaOne *queues* work for an offline device, so an action dispatched now can
+    /// reboot it hours later when it comes back. Off by default.
+    pub allow_offline_targets: bool,
+    pub require_maintenance_window: bool,
+    /// Days the window is open, `0` = Sunday, matching `chrono::Weekday::num_days_from_sunday`.
+    pub window_days: Vec<u8>,
+    /// Window bounds as minutes past local midnight. A start later than the end
+    /// means the window wraps past midnight.
+    pub window_start_minute: u16,
+    pub window_end_minute: u16,
+    pub allow_window_override: bool,
+}
+
+impl Default for ActionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            os_patch_script_id: None,
+            software_patch_script_id: None,
+            run_as: DEFAULT_RUN_AS.to_string(),
+            concurrency: DEFAULT_ACTION_CONCURRENCY,
+            max_devices_per_action: DEFAULT_MAX_DEVICES_PER_ACTION,
+            max_orgs_per_action: 1,
+            allow_offline_targets: false,
+            require_maintenance_window: false,
+            // Mon–Fri 02:00–05:00 local, used only once the window is switched on.
+            window_days: vec![1, 2, 3, 4, 5],
+            window_start_minute: 2 * 60,
+            window_end_minute: 5 * 60,
+            allow_window_override: false,
+        }
+    }
+}
+
 /// Non-secret app configuration persisted to `settings.json`. The client secret and
 /// refresh token live in the OS keyring, never here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +118,10 @@ pub struct Settings {
     /// settings files without the field are treated as enabled.
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    /// Write-path configuration. Absent from every settings file written before the
+    /// actions feature existed, so it defaults to fully disabled.
+    #[serde(default)]
+    pub actions: ActionSettings,
 }
 
 impl Default for Settings {
@@ -64,6 +134,7 @@ impl Default for Settings {
             sla_days: DEFAULT_SLA_DAYS,
             presets: Vec::new(),
             auto_check_updates: true,
+            actions: ActionSettings::default(),
         }
     }
 }
@@ -133,6 +204,12 @@ mod tests {
                 install_days: Some(45),
             }],
             auto_check_updates: false,
+            actions: ActionSettings {
+                enabled: true,
+                os_patch_script_id: Some(123),
+                max_devices_per_action: 10,
+                ..ActionSettings::default()
+            },
         };
 
         original.save_to(&path).expect("save");
@@ -144,6 +221,9 @@ mod tests {
         assert_eq!(loaded.install_window_days, 14);
         assert_eq!(loaded.sla_days, 7);
         assert!(!loaded.auto_check_updates);
+        assert!(loaded.actions.enabled);
+        assert_eq!(loaded.actions.os_patch_script_id, Some(123));
+        assert_eq!(loaded.actions.max_devices_per_action, 10);
         assert_eq!(loaded.presets.len(), 1);
         assert_eq!(loaded.presets[0].name, "Servers");
         assert_eq!(loaded.presets[0].install_days, Some(45));
@@ -194,6 +274,43 @@ mod tests {
             loaded.auto_check_updates,
             "a missing autoCheckUpdates defaults to enabled"
         );
+        // The load-bearing migration guarantee: an install that predates patch
+        // actions stays read-only. If this ever flips, every existing deployment
+        // would start requesting the `management` scope without being asked.
+        assert!(
+            !loaded.actions.enabled,
+            "a settings file with no `actions` block must not enable the write path"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_partial_actions_block_keeps_the_remaining_guardrails() {
+        // A file that enables actions but predates the newer guardrail fields must
+        // still get their safe defaults rather than zero/empty.
+        let path = temp_path("partial-actions");
+        fs::write(
+            &path,
+            r#"{
+                "instanceBaseUrl": "https://us2.ninjarmm.com",
+                "callbackPort": 11434,
+                "installWindowDays": 30,
+                "slaDays": 30,
+                "actions": { "enabled": true }
+            }"#,
+        )
+        .expect("write");
+        let loaded = Settings::load_from(&path).expect("load partial");
+
+        assert!(loaded.actions.enabled);
+        assert_eq!(
+            loaded.actions.max_devices_per_action,
+            DEFAULT_MAX_DEVICES_PER_ACTION
+        );
+        assert_eq!(loaded.actions.concurrency, DEFAULT_ACTION_CONCURRENCY);
+        assert_eq!(loaded.actions.max_orgs_per_action, 1);
+        assert_eq!(loaded.actions.run_as, DEFAULT_RUN_AS);
+        assert!(!loaded.actions.allow_offline_targets);
         let _ = fs::remove_file(&path);
     }
 }
