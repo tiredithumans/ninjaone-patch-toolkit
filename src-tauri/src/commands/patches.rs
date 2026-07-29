@@ -93,8 +93,12 @@ pub async fn query_patches(
     let p_os = |n: usize| progress("osPatches", n);
     let p_sw = |n: usize| progress("swPatches", n);
     let devices_fut = state.fleet_devices(Some(&p_devices as &ProgressFn));
+    // The requested `PatchType` decides which families are fetched at all — a
+    // family this query can't display is never worth a whole-fleet page-through.
     let current_fut = state.fleet_current_patches(
         force,
+        args.patch_type.includes_os(),
+        args.patch_type.includes_software(),
         Some(&p_os as &ProgressFn),
         Some(&p_sw as &ProgressFn),
     );
