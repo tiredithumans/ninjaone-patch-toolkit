@@ -700,7 +700,7 @@ fn ComplianceTab() -> impl IntoView {
                 filters="Device scope only (Org / Location / Role / OS Type / OS name). Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
             <ComplianceCharts/>
-            <ComplianceRollupTable first_col="Organization" rows=org_rows/>
+            <ComplianceRollupTable first_col="Organization" rows=org_rows drill=RollupDrill::Organization/>
             <section class="compliance-os">
                 <h3 class="chart-title">"Compliance by OS"</h3>
                 <div class="chart-card">
@@ -753,11 +753,25 @@ impl From<&OsCompliance> for ComplianceRow {
 
 /// Shared table for the two compliance rollups (per-organization and per-OS):
 /// identical columns, differing only in the grouping column's header and values.
+/// What clicking a rollup row's label should narrow to, or `None` for a rollup whose
+/// grouping key isn't a filter facet.
+///
+/// The per-OS rollup buckets on `os.name`, and the only OS control is the free-text
+/// `os_name` substring facet — close enough to look clickable but not the same thing,
+/// so it stays inert rather than shipping a drill-down that quietly matches the wrong
+/// devices.
+#[derive(Clone, Copy, PartialEq)]
+enum RollupDrill {
+    Organization,
+}
+
 #[component]
 fn ComplianceRollupTable(
     first_col: &'static str,
     #[prop(into)] rows: Signal<Vec<ComplianceRow>>,
+    #[prop(optional)] drill: Option<RollupDrill>,
 ) -> impl IntoView {
+    let state = expect_context::<AppState>();
     view! {
         <Show
             when=move || rows.with(|r| !r.is_empty())
@@ -784,9 +798,33 @@ fn ComplianceRollupTable(
                                     let (aged_class, aged_label, aged_title) = aged_badge(
                                         b.aged_critical,
                                     );
+                                    let label_cell = match drill {
+                                        Some(RollupDrill::Organization) => {
+                                            let org = b.label.clone();
+                                            let title = format!(
+                                                "Show {}'s patch rows",
+                                                b.label,
+                                            );
+                                            view! {
+                                                <td>
+                                                    <button
+                                                        class="drill"
+                                                        title=title
+                                                        on:click=move |_| {
+                                                            state.drill_to_org(org.clone())
+                                                        }
+                                                    >
+                                                        {b.label.clone()}
+                                                    </button>
+                                                </td>
+                                            }
+                                                .into_any()
+                                        }
+                                        None => view! { <td>{b.label.clone()}</td> }.into_any(),
+                                    };
                                     view! {
                                         <tr>
-                                            <td>{b.label}</td>
+                                            {label_cell}
                                             <td>{b.devices_total}</td>
                                             <td>{b.devices_compliant}</td>
                                             <td>{pct}</td>
@@ -861,12 +899,37 @@ fn FailuresTable() -> impl IntoView {
                                 .into_iter()
                                 .map(|f| {
                                     let sev = sev_class(&f.severity);
+                                    // Third-party patches carry no `kbNumber`, so fall
+                                    // back to the name — `search_allowed` matches the
+                                    // needle against KB *and* name, so one control
+                                    // covers both.
+                                    let needle = f
+                                        .kb
+                                        .clone()
+                                        .filter(|k| !k.is_empty())
+                                        .unwrap_or_else(|| f.name.clone());
+                                    let title = format!("Show the rows for {needle}");
+                                    let kb_label = f.kb.clone().unwrap_or_default();
                                     view! {
                                         <tr>
                                             <td>
                                                 <span class=sev>{f.severity}</span>
                                             </td>
-                                            <td>{f.kb.unwrap_or_default()}</td>
+                                            <td>
+                                                <button
+                                                    class="drill"
+                                                    title=title
+                                                    on:click=move |_| {
+                                                        state.drill_to_patch(needle.clone())
+                                                    }
+                                                >
+                                                    {if kb_label.is_empty() {
+                                                        "(no KB)".to_string()
+                                                    } else {
+                                                        kb_label.clone()
+                                                    }}
+                                                </button>
+                                            </td>
                                             <td class="patch-name">{f.name}</td>
                                             <td>{f.affected_devices}</td>
                                             <td>{f.latest_failure.unwrap_or_default()}</td>

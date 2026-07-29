@@ -401,6 +401,21 @@ fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
     }
 }
 
+/// Maps a severity's display label ("Critical") back to the raw API value the
+/// severity filter holds ("CRITICAL"), via the same `SEVERITY_OPTIONS` table the
+/// filter chips are built from.
+///
+/// Looked up rather than uppercased: uppercasing happens to work for the current
+/// vocabulary, but it would silently produce an unmatchable value the moment a label
+/// gains a space or a hyphen, and the failure mode — a drill-down that filters to
+/// nothing — looks like "no patches" rather than a bug.
+pub(crate) fn severity_raw(label: &str) -> Option<&'static str> {
+    super::SEVERITY_OPTIONS
+        .iter()
+        .find(|(_, display)| *display == label)
+        .map(|(raw, _)| *raw)
+}
+
 /// Severity ordinal (0 = most urgent) — the exact inverse of the backend's
 /// `Severity::rank()` (`src-tauri/src/model.rs`), which runs Critical 7 → Unknown 0.
 ///
@@ -666,6 +681,21 @@ mod tests {
             sev_ordinal("Recommended") < sev_ordinal("Unknown"),
             "Recommended must outrank Unknown"
         );
+    }
+
+    #[test]
+    fn severity_raw_round_trips_every_chart_band() {
+        // The severity chart labels bands with display names; the filter holds raw API
+        // values. Every band the chart can draw must map to something the filter
+        // accepts, or its drill-down silently filters to nothing.
+        for (raw, display) in super::super::SEVERITY_OPTIONS {
+            assert_eq!(
+                severity_raw(display),
+                Some(raw),
+                "band {display} must map back to {raw}"
+            );
+        }
+        assert_eq!(severity_raw("Nonexistent"), None);
     }
 
     #[test]

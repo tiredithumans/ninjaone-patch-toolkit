@@ -989,6 +989,40 @@ tbody tr:hover {
   gap: 6px;
 }
 
+/* Drill-down affordance on a rollup value: reads as the data it replaces until
+   hovered/focused, so the tables stay scannable rather than turning into a wall of
+   links. A real <button> keeps it keyboard-reachable and announced. */
+.drill {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-bottom: 1px dotted var(--muted);
+}
+
+.drill:hover,
+.drill:focus-visible {
+  color: var(--accent-2);
+  border-bottom-color: var(--accent-2);
+}
+
+.drill-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: none;
+}
+
+.drill-legend:hover,
+.drill-legend:focus-visible {
+  border-bottom: none;
+  text-decoration: underline;
+}
+
 .chart-swatch {
   width: 12px;
   height: 12px;
