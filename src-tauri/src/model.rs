@@ -78,23 +78,39 @@ impl Device {
     }
 }
 
-/// MSRC-aligned severity buckets returned by NinjaOne's patch feed.
+/// Severity buckets returned by NinjaOne's patch feeds.
+///
+/// Mostly MSRC-aligned, but NinjaOne mixes in two of its own classifications that
+/// are **not** MSRC severities and needed their own variants rather than being
+/// forced into one: `security` (the largest bucket on a real OS feed — it says the
+/// patch is a security update but not how urgent) and `recommended` (the
+/// non-critical tier of third-party patch approval). Both previously fell through
+/// to [`Unknown`](Self::Unknown), which sank them to the bottom of the severity
+/// sort and made them vanish whenever the severity facet was active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Severity {
     Critical,
     Important,
+    Security,
     Moderate,
+    Recommended,
     Low,
     Optional,
     Unknown,
 }
 
 impl Severity {
+    /// Case-insensitive, because NinjaOne returns two vocabularies on the same
+    /// field: uppercase MSRC values (`CRITICAL`, `IMPORTANT`, `OPTIONAL`, `NONE`)
+    /// alongside lowercase engine values (`critical`, `security`, `optional`,
+    /// `recommended`, `unknown`).
     pub fn from_raw(raw: &str) -> Self {
         match raw.to_ascii_uppercase().as_str() {
             "CRITICAL" => Self::Critical,
             "IMPORTANT" | "HIGH" => Self::Important,
+            "SECURITY" => Self::Security,
             "MODERATE" | "MEDIUM" => Self::Moderate,
+            "RECOMMENDED" => Self::Recommended,
             "LOW" => Self::Low,
             "OPTIONAL" | "NONE" => Self::Optional,
             _ => Self::Unknown,
@@ -105,19 +121,29 @@ impl Severity {
         match self {
             Self::Critical => "Critical",
             Self::Important => "Important",
+            Self::Security => "Security",
             Self::Moderate => "Moderate",
+            Self::Recommended => "Recommended",
             Self::Low => "Low",
             Self::Optional => "Optional",
             Self::Unknown => "Unknown",
         }
     }
 
-    /// Higher = more urgent. Used for SLA aging on Critical/Important.
+    /// Higher = more urgent. Drives the severity sort and the "Important or above"
+    /// threshold the compliance/SLA rollups use (`rank() < Important.rank()`).
+    ///
+    /// `Security` and `Recommended` sit **below** `Important` deliberately: both are
+    /// classifications rather than urgency grades, so an ungraded security update
+    /// shouldn't silently enter the critical-backlog and SLA-aging figures. They
+    /// still rank above `Unknown`, so they sort and filter as real severities.
     pub fn rank(self) -> u8 {
         match self {
-            Self::Critical => 5,
-            Self::Important => 4,
-            Self::Moderate => 3,
+            Self::Critical => 7,
+            Self::Important => 6,
+            Self::Security => 5,
+            Self::Moderate => 4,
+            Self::Recommended => 3,
             Self::Low => 2,
             Self::Optional => 1,
             Self::Unknown => 0,
@@ -457,6 +483,50 @@ mod tests {
         assert_eq!(Severity::from_raw("Critical"), Severity::Critical);
         assert_eq!(Severity::from_raw("important"), Severity::Important);
         assert_eq!(Severity::from_raw("garbage"), Severity::Unknown);
+    }
+
+    #[test]
+    fn severity_from_raw_maps_ninjaones_own_classifications() {
+        // Both vocabularies arrive on the same field, in both cases. `security` is
+        // the largest bucket on a real OS feed and `recommended` is the third-party
+        // non-critical tier; before they were mapped, both fell to Unknown — rank 0,
+        // so they sorted below every other patch and the severity facet dropped them.
+        assert_eq!(Severity::from_raw("security"), Severity::Security);
+        assert_eq!(Severity::from_raw("SECURITY"), Severity::Security);
+        assert_eq!(Severity::from_raw("recommended"), Severity::Recommended);
+        assert_eq!(Severity::from_raw("RECOMMENDED"), Severity::Recommended);
+        // NinjaOne's literal "unknown" still means unknown.
+        assert_eq!(Severity::from_raw("unknown"), Severity::Unknown);
+    }
+
+    #[test]
+    fn ninjaone_classifications_rank_below_important_but_above_unknown() {
+        // Load-bearing: the compliance and SLA-aging rollups keep a patch only when
+        // `rank() >= Important.rank()`. Ranking either of these at or above Important
+        // would sweep a whole classification into the critical backlog and move the
+        // operator's numbers without them asking for it.
+        for sev in [Severity::Security, Severity::Recommended] {
+            assert!(sev.rank() < Severity::Important.rank());
+            assert!(sev.rank() > Severity::Unknown.rank());
+        }
+        // The ordering the table sorts by stays strictly descending.
+        let ranks: Vec<u8> = [
+            Severity::Critical,
+            Severity::Important,
+            Severity::Security,
+            Severity::Moderate,
+            Severity::Recommended,
+            Severity::Low,
+            Severity::Optional,
+            Severity::Unknown,
+        ]
+        .iter()
+        .map(|s| s.rank())
+        .collect();
+        assert!(
+            ranks.windows(2).all(|w| w[0] > w[1]),
+            "severity ranks must be strictly descending: {ranks:?}"
+        );
     }
 
     fn patch_with_release(ts: f64) -> Patch {

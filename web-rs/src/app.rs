@@ -49,13 +49,20 @@ const STATUS_OPTIONS: [&str; 5] = ["PENDING", "APPROVED", "REJECTED", "INSTALLED
 /// Releases page linked from the web demo's "Get the app" call to action.
 const RELEASES_URL: &str = "https://github.com/tiredithumans/ninjaone-patch-toolkit/releases";
 
-/// Severity facet options as (raw value sent to the backend, display label).
-const SEVERITY_OPTIONS: [(&str, &str); 5] = [
+/// Severity facet options as (raw value sent to the backend, display label), in
+/// `Severity::rank()` order. Covers NinjaOne's full vocabulary, not just the MSRC
+/// subset: `SECURITY` and `RECOMMENDED` are its own classifications, and `UNKNOWN`
+/// is selectable because an unrated patch is otherwise unreachable — ticking any
+/// severity would silently exclude every patch NinjaOne didn't grade.
+const SEVERITY_OPTIONS: [(&str, &str); 8] = [
     ("CRITICAL", "Critical"),
     ("IMPORTANT", "Important"),
+    ("SECURITY", "Security"),
     ("MODERATE", "Moderate"),
+    ("RECOMMENDED", "Recommended"),
     ("LOW", "Low"),
     ("OPTIONAL", "Optional"),
+    ("UNKNOWN", "Unknown"),
 ];
 
 #[component]

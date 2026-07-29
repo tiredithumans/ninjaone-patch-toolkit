@@ -15,10 +15,12 @@ use crate::types::{OrgSeverity, SeverityCounts};
 
 /// Severity bands in most-to-least-urgent order, paired with the CSS class that
 /// fills their chart segment / legend swatch.
-const SEV_BANDS: [(&str, &str); 6] = [
+const SEV_BANDS: [(&str, &str); 8] = [
     ("Critical", "seg-critical"),
     ("Important", "seg-important"),
+    ("Security", "seg-security"),
     ("Moderate", "seg-moderate"),
+    ("Recommended", "seg-recommended"),
     ("Low", "seg-low"),
     ("Optional", "seg-optional"),
     ("Unknown", "seg-unknown"),
@@ -68,7 +70,9 @@ fn sum_severity(by_org: &[OrgSeverity]) -> SeverityCounts {
     for o in by_org {
         t.critical += o.counts.critical;
         t.important += o.counts.important;
+        t.security += o.counts.security;
         t.moderate += o.counts.moderate;
+        t.recommended += o.counts.recommended;
         t.low += o.counts.low;
         t.optional += o.counts.optional;
         t.unknown += o.counts.unknown;
@@ -80,7 +84,9 @@ fn sev_count(c: &SeverityCounts, label: &str) -> usize {
     match label {
         "Critical" => c.critical,
         "Important" => c.important,
+        "Security" => c.security,
         "Moderate" => c.moderate,
+        "Recommended" => c.recommended,
         "Low" => c.low,
         "Optional" => c.optional,
         _ => c.unknown,
@@ -101,7 +107,14 @@ struct Segment {
 /// Lays the non-empty severity bands out left-to-right across `track` pixels,
 /// proportional to each band's share of the total.
 fn severity_segments(c: &SeverityCounts, track: f64) -> Vec<Segment> {
-    let total = c.critical + c.important + c.moderate + c.low + c.optional + c.unknown;
+    let total = c.critical
+        + c.important
+        + c.security
+        + c.moderate
+        + c.recommended
+        + c.low
+        + c.optional
+        + c.unknown;
     if total == 0 {
         return Vec::new();
     }

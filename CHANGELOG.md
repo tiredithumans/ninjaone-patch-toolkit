@@ -11,6 +11,23 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Third-party patches no longer disappear behind the Severity filter.** NinjaOne grades
+  third-party software with its own vocabulary — `security`, `recommended` — and neither was
+  recognised, so both collapsed into "Unknown". That sorted them below every other patch in
+  the table and, worse, made them vanish entirely the moment any severity was ticked, since
+  an unrecognised grade could never match a selection. Both are now first-class severities
+  with their own badges and chart bands, alongside a new **Unknown** option so patches
+  NinjaOne never graded stay reachable instead of being silently excluded by every possible
+  filter. On a real fleet this was hiding the single largest bucket of OS patches too.
+
+### Changed
+
+- `Security` and `Recommended` rank below `Important`, so they sort and filter as real
+  severities without entering the critical-backlog and SLA-aging figures on the Compliance
+  tab — existing compliance numbers are unaffected.
+
 ## [0.10.0] - 2026-07-29
 
 ### Added

@@ -429,7 +429,9 @@ pub struct FailureGroup {
 pub struct SeverityCounts {
     pub critical: usize,
     pub important: usize,
+    pub security: usize,
     pub moderate: usize,
+    pub recommended: usize,
     pub low: usize,
     pub optional: usize,
     pub unknown: usize,
@@ -546,7 +548,9 @@ pub fn build_severity_by_org(
         match p.severity_enum() {
             Severity::Critical => counts.critical += 1,
             Severity::Important => counts.important += 1,
+            Severity::Security => counts.security += 1,
             Severity::Moderate => counts.moderate += 1,
+            Severity::Recommended => counts.recommended += 1,
             Severity::Low => counts.low += 1,
             Severity::Optional => counts.optional += 1,
             Severity::Unknown => counts.unknown += 1,

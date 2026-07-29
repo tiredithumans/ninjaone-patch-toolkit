@@ -300,6 +300,23 @@ secrets are **not** stored there — see below).
   applied **client-side** against rows after fetch. Keep the split: an identity/scope facet extends
   `device_allowed`; a substring/text facet is a client-side `*_allowed()`.
 
+- **Severity: NinjaOne sends two vocabularies on one field (load-bearing).** The feeds mix
+  uppercase MSRC values (`CRITICAL`/`IMPORTANT`/`OPTIONAL`/`NONE`) with lowercase engine values
+  (`critical`/`security`/`optional`/`recommended`/`unknown`), and third-party patches carry the
+  grade in `impact`, not `severity` (aliased onto `Patch::severity`). `security` and `recommended`
+  are NinjaOne **classifications, not urgency grades**, so `Severity` models them as their own
+  variants — bucketing them into MSRC levels would misreport them in the export and charts.
+  Anything `from_raw` fails to map becomes `Unknown` (rank 0), which both sinks it below every
+  other patch in the severity sort **and** makes it unreachable from the severity facet; that is
+  why an unmapped value reads as "those patches don't exist". `SEVERITY_OPTIONS`
+  (`web-rs/src/app.rs`) must therefore cover the whole vocabulary including `UNKNOWN`. Ranks are
+  ordered so `Security`/`Recommended` fall **below** `Important`, keeping them out of the
+  `rank() >= Important.rank()` compliance/SLA rollups. Adding a value means: `from_raw` + `label`
+  + `rank` (`model.rs`) → `SeverityCounts` + its `match` (`rows.rs`) → the `web-rs/src/types.rs`
+  mirror → `SEV_BANDS`/`sum_severity`/`sev_count`/`severity_segments` (`charts.rs`) →
+  `SEVERITY_BANDS`/`total_severity`/`severity_value` (`report.rs`) → `sev_class` (`util.rs`) →
+  `SEVERITY_OPTIONS` → the `.sev-*`/`.seg-*` CSS → `demo.rs`.
+
 - **Installed/Failed vs current patches (status routing — load-bearing).** Per the official spec,
   the current `/queries/{os,software}-patches` feed returns only patches "for which there were **no
   installation attempts**" (statuses `MANUAL`/`APPROVED`/`REJECTED`), while `/queries/*-patch-installs`
