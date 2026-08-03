@@ -5,6 +5,20 @@ name: Screenshot
 # Runs automatically when a release is published (so the README image tracks each
 # shipped version) and on manual dispatch — run it after a UI change you want
 # reflected in the README. Either way it only opens a PR when the image changed.
+#
+# The PR branch name is **fixed**, so repeated runs update one PR instead of opening
+# a new one each time. It used to key the branch on `github.run_id`, which meant
+# every release published another PR against the same file: three had piled up, two
+# of them superseded — and merging the oldest would have reverted the README image to
+# an older render.
+#
+# If `SCREENSHOT_PAT` is set (a fine-grained PAT with `contents: write` and
+# `pull-requests: write`), the branch is pushed and the PR opened as that identity so
+# the required CI checks actually run. With the default `GITHUB_TOKEN` they do not:
+# GitHub deliberately suppresses workflow triggers for events raised by that token to
+# prevent recursion, so the PR sits with zero checks and — because `main` requires
+# four — can never be merged without an admin override. The run still succeeds in
+# that case and prints how to kick the checks off by hand.
 on:
   workflow_dispatch:
   release:
@@ -24,7 +38,14 @@ jobs:
     name: Capture demo
     runs-on: ubuntu-latest
     steps:
+      # `ref: main` on purpose: a `release: published` run would otherwise check out
+      # the tag, and the PR branch would carry whatever that commit was rather than
+      # branching cleanly from main. `token` decides who pushes — see the note at the
+      # top about why that governs whether CI runs on the resulting PR.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          token: ${{ secrets.SCREENSHOT_PAT || secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
           targets: wasm32-unknown-unknown
@@ -46,27 +67,52 @@ jobs:
       - name: Capture screenshot
         run: node scripts/screenshot.mjs
 
-      - name: Push the refreshed screenshot and open a PR
+      - name: Push the refreshed screenshot and open or update its PR
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SCREENSHOT_PAT || secrets.GITHUB_TOKEN }}
+          # Fixed, so every run reuses one branch and one PR.
+          BRANCH: chore/refresh-screenshot
+          HAVE_PAT: ${{ secrets.SCREENSHOT_PAT != '' && 'yes' || 'no' }}
+          REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
+
           if git diff --quiet -- docs/images/screenshot.png; then
             echo "Screenshot unchanged — nothing to open."
             exit 0
           fi
-          branch="chore/refresh-screenshot-${{ github.run_id }}"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
+          git checkout -B "$BRANCH"
           git add docs/images/screenshot.png
           git commit -m "docs: refresh the README demo screenshot"
-          git push origin "$branch"
-          # Opening the PR needs the repo setting "Allow GitHub Actions to create and
-          # approve pull requests" (off by default for security). If it's blocked,
-          # don't fail the run — the branch is pushed; surface a one-click link for a
-          # maintainer (or `gh pr create`) to open the PR.
-          if ! gh pr create --base main --head "$branch" \
-                --title "docs: refresh the README demo screenshot" \
-                --body "Automated capture of the live web demo via \`scripts/screenshot.mjs\` (\`.github/workflows/screenshot.yml\`). Review the image and merge."; then
-            echo "::notice title=Open the PR::Pushed ${branch}; open it at https://github.com/${{ github.repository }}/compare/main...${branch}?expand=1"
+          # Force needed because the branch is reused: the previous run's commit is
+          # not an ancestor once main has moved on. Safe — nothing but this workflow
+          # ever writes to this branch, and the image is regenerated from scratch.
+          git push --force origin "$BRANCH"
+
+          existing=$(gh pr list --head "$BRANCH" --base main --state open \
+                       --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            echo "Updated existing PR #${existing} rather than opening another."
+            url="https://github.com/${REPO}/pull/${existing}"
+          else
+            # Opening the PR needs the repo setting "Allow GitHub Actions to create
+            # and approve pull requests" (off by default for security) when running
+            # on GITHUB_TOKEN. If it is blocked, don't fail the run — the branch is
+            # pushed; surface a one-click link so a maintainer can open it.
+            if ! url=$(gh pr create --base main --head "$BRANCH" \
+                  --title "docs: refresh the README demo screenshot" \
+                  --body "Automated capture of the live web demo via \`scripts/screenshot.mjs\` (\`.github/workflows/screenshot.yml\`). Review the image and merge."); then
+              echo "::notice title=Open the PR::Pushed ${BRANCH}; open it at https://github.com/${REPO}/compare/main...${BRANCH}?expand=1"
+              exit 0
+            fi
+          fi
+
+          echo "::notice title=Screenshot PR::${url}"
+
+          if [ "$HAVE_PAT" = "no" ]; then
+            echo "::warning title=CI will not run on this PR::Pushed with GITHUB_TOKEN, so GitHub suppresses the pull_request trigger and the required checks never report — the PR cannot merge as-is. Close and reopen it from a user account to trigger CI, or set a SCREENSHOT_PAT secret so this workflow pushes as a real identity."
           fi
