@@ -24,7 +24,16 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 anyhow = "1.0"
-base64 = "0.23"
+# `simd-unsafe` is on by default in 0.23 and is the crate's *only* source of
+# `unsafe`; without it base64 is `#![forbid(unsafe_code)]`. It only accelerates the
+# `Simd`/`Avx2`/`Neon` engines, and we exclusively use the scalar
+# `general_purpose::{STANDARD, URL_SAFE_NO_PAD}` — so turning it off costs nothing
+# and removes the only unsafe code in our dependency's own source.
+#
+# As with reqwest below, `default-features = false` drops `std` too, so it has to be
+# re-added by hand — dropping it silently would push the crate to `no_std` and take
+# the allocating `encode`/`decode` APIs with it.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 keyring = "4"
