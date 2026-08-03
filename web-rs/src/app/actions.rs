@@ -205,10 +205,10 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
             let device_count = plan.eligible.len();
             let blocked = plan.is_blocked();
             // A forced reboot is the one action here with unrecoverable data loss,
-            // so it needs more than a click to confirm.
-            let needs_typed = !blocked
-                && kind == ActionKind::Reboot
-                && pending.request.reboot_mode == Some(RebootMode::Forced);
+            // so it needs more than a click to confirm. Both rules live in `util`
+            // so they are host-tested rather than only exercised by clicking.
+            let needs_typed =
+                util::needs_typed_confirmation(blocked, kind, pending.request.reboot_mode);
             let dry_run = plan.dry_run;
             let expected = device_count.to_string();
             // A `Signal` rather than a bare closure: `Show` renders its children
@@ -217,13 +217,15 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
             let can_confirm = Signal::derive({
                 let expected = expected.clone();
                 move || {
-                !blocked
-                    && !state.actions.dispatching.get()
-                    && (!needs_typed
-                        || state
-                            .actions
-                            .confirm_input
-                            .with(|t| t.trim() == expected.as_str()))
+                    state.actions.confirm_input.with(|typed| {
+                        util::can_confirm_action(
+                            blocked,
+                            state.actions.dispatching.get(),
+                            needs_typed,
+                            typed,
+                            &expected,
+                        )
+                    })
                 }
             });
 

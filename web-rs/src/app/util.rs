@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 
 use super::{AppliedFilters, Tab};
-use crate::types::{AuthStatus, JobReport, PatchRow, RowSort, RowSortKey};
+use crate::types::{ActionKind, AuthStatus, JobReport, PatchRow, RebootMode, RowSort, RowSortKey};
 
 /// Identity of a patch *within a device's selection*.
 ///
@@ -117,6 +117,103 @@ pub(crate) fn group_thousands(n: usize) -> String {
 
 pub(crate) fn tab_class(active: Tab, this: Tab) -> &'static str {
     if active == this { "tab tab-on" } else { "tab" }
+}
+
+/// The count shown on a group header, which counts the *other* axis from the one
+/// the rows are grouped by: a by-device group is summarised by how many patches it
+/// holds, a by-patch group by how many devices it spans.
+///
+/// Extracted because the two are trivially invertible and the inverted form still
+/// renders a plausible-looking number — the kind of mistake only an assertion
+/// catches.
+pub(crate) fn group_count_label(by_device: bool, rows: usize, devices: usize) -> String {
+    if by_device {
+        format!("{} patches", group_thousands(rows))
+    } else {
+        format!("{} devices", group_thousands(devices))
+    }
+}
+
+/// Whether the confirm dialog must demand a typed device count rather than a
+/// single click. A forced reboot is the one action here that destroys unsaved work
+/// on machines the operator may not own, so it is deliberately harder to fire.
+///
+/// A blocked plan never needs it: the dispatch button is disabled anyway, and
+/// asking someone to type a count that cannot be submitted reads as a bug.
+pub(crate) fn needs_typed_confirmation(
+    blocked: bool,
+    kind: ActionKind,
+    reboot_mode: Option<RebootMode>,
+) -> bool {
+    !blocked && kind == ActionKind::Reboot && reboot_mode == Some(RebootMode::Forced)
+}
+
+/// Whether the confirm button may fire. Extracted from the modal body so the rule
+/// that guards the destructive path is host-testable rather than only reachable by
+/// clicking through a browser.
+pub(crate) fn can_confirm_action(
+    blocked: bool,
+    dispatching: bool,
+    needs_typed: bool,
+    typed: &str,
+    expected: &str,
+) -> bool {
+    !blocked && !dispatching && (!needs_typed || typed.trim() == expected)
+}
+
+/// Number of pages needed for `total` items, never less than 1 so "Page 1 of 1"
+/// is what an empty result reads as rather than "Page 1 of 0".
+pub(crate) fn page_count(total: usize, page_size: usize) -> usize {
+    if page_size == 0 {
+        return 1;
+    }
+    total.div_ceil(page_size).max(1)
+}
+
+/// Clamps a stored page index into range. The stored index outlives the result it
+/// was chosen against — an auto-refresh returning fewer rows, or switching between
+/// flat and grouped view, can both leave it past the end.
+pub(crate) fn clamp_page(stored: usize, page_count: usize) -> usize {
+    stored.min(page_count.saturating_sub(1))
+}
+
+/// Half-open `[start, end)` item range shown on `page`, clamped to `total`.
+pub(crate) fn page_bounds(page: usize, page_size: usize, total: usize) -> (usize, usize) {
+    let start = (page * page_size).min(total);
+    let end = start.saturating_add(page_size).min(total);
+    (start, end)
+}
+
+/// The pager caption, e.g. `Rows 101–200 of 12,300 · Page 2 of 123`.
+///
+/// `unit` names what is being paged, which is *not* always rows: the grouped view
+/// pages group headers. Sizing this from the row total while grouped is what once
+/// left ~98% of groups unreachable — it read "Page 1 of 400" off 40,000 rows while
+/// the view only ever rendered the first 100 groups.
+pub(crate) fn pager_summary(unit: &str, page: usize, page_size: usize, total: usize) -> String {
+    let (start, end) = page_bounds(page, page_size, total);
+    format!(
+        "{} {}\u{2013}{} of {} \u{00b7} Page {} of {}",
+        unit,
+        if total == 0 { 0 } else { start + 1 },
+        end,
+        group_thousands(total),
+        page + 1,
+        page_count(total, page_size),
+    )
+}
+
+/// Page index one step back, saturating at the first page.
+pub(crate) fn prev_page(current: usize) -> usize {
+    current.saturating_sub(1)
+}
+
+/// Page index one step forward, saturating at the last page. Takes `page_count`
+/// rather than a total so the caller cannot disagree with `page_count` about how
+/// many pages exist.
+pub(crate) fn next_page(current: usize, page_count: usize) -> usize {
+    let last = page_count.saturating_sub(1);
+    current.min(last).saturating_add(1).min(last)
 }
 
 /// The counts the tier-aware results summary needs — all already on `QueryResult`,
@@ -578,6 +675,155 @@ fn flush_para(blocks: &mut Vec<MdBlock>, para: &mut Vec<String>) {
 mod tests {
     use super::*;
     use crate::types::{ActionKind, JobState};
+
+    /// A group header counts the axis it is NOT grouped by. Inverting these still
+    /// renders a plausible number, so assert the direction explicitly.
+    #[test]
+    fn group_header_counts_the_opposite_axis() {
+        // Grouped by device: the header says how many patches that device has.
+        assert_eq!(group_count_label(true, 1_200, 1), "1,200 patches");
+        // Grouped by patch: the header says how many devices need it.
+        assert_eq!(group_count_label(false, 1_200, 340), "340 devices");
+        assert_eq!(group_count_label(true, 0, 0), "0 patches");
+        assert_eq!(group_count_label(false, 0, 0), "0 devices");
+    }
+
+    /// The typed-count gate exists to make a forced reboot hard to fire by accident.
+    #[test]
+    fn only_a_forced_reboot_demands_a_typed_confirmation() {
+        assert!(needs_typed_confirmation(
+            false,
+            ActionKind::Reboot,
+            Some(RebootMode::Forced)
+        ));
+        // A normal reboot, and every non-reboot action, confirm with a click.
+        assert!(!needs_typed_confirmation(
+            false,
+            ActionKind::Reboot,
+            Some(RebootMode::Normal)
+        ));
+        assert!(!needs_typed_confirmation(false, ActionKind::Reboot, None));
+        assert!(!needs_typed_confirmation(
+            false,
+            ActionKind::OsPatchApply,
+            Some(RebootMode::Forced)
+        ));
+        // A blocked plan can't be dispatched at all, so demanding a typed count
+        // would just be a dead end.
+        assert!(!needs_typed_confirmation(
+            true,
+            ActionKind::Reboot,
+            Some(RebootMode::Forced)
+        ));
+    }
+
+    #[test]
+    fn confirm_is_refused_until_the_device_count_is_typed_exactly() {
+        // No typed count required: a click is enough.
+        assert!(can_confirm_action(false, false, false, "", "12"));
+
+        // Typed count required.
+        assert!(can_confirm_action(false, false, true, "12", "12"));
+        assert!(
+            can_confirm_action(false, false, true, "  12  ", "12"),
+            "surrounding whitespace is forgiven"
+        );
+        assert!(!can_confirm_action(false, false, true, "", "12"));
+        assert!(!can_confirm_action(false, false, true, "1", "12"));
+        assert!(!can_confirm_action(false, false, true, "13", "12"));
+        assert!(
+            !can_confirm_action(false, false, true, "1 2", "12"),
+            "interior whitespace is not stripped"
+        );
+
+        // A blocked plan or an in-flight dispatch overrides everything, so a
+        // correct count cannot double-fire an action.
+        assert!(!can_confirm_action(true, false, true, "12", "12"));
+        assert!(!can_confirm_action(false, true, true, "12", "12"));
+        assert!(!can_confirm_action(true, false, false, "", "12"));
+        assert!(!can_confirm_action(false, true, false, "", "12"));
+    }
+
+    #[test]
+    fn page_count_never_reports_zero_pages() {
+        assert_eq!(
+            page_count(0, 100),
+            1,
+            "an empty result is still 'Page 1 of 1'"
+        );
+        assert_eq!(page_count(1, 100), 1);
+        assert_eq!(
+            page_count(100, 100),
+            1,
+            "an exact fill must not spill a page"
+        );
+        assert_eq!(page_count(101, 100), 2);
+        assert_eq!(page_count(40_000, 100), 400);
+        // Degenerate page size must not divide by zero.
+        assert_eq!(page_count(50, 0), 1);
+    }
+
+    /// The stored page index outlives the result it was chosen against, so every
+    /// read has to clamp. Not clamping is what stranded the view past the end when
+    /// an auto-refresh returned fewer rows.
+    #[test]
+    fn clamp_page_pulls_a_stale_index_back_into_range() {
+        assert_eq!(clamp_page(0, 1), 0);
+        assert_eq!(clamp_page(7, 400), 7, "in range is left alone");
+        assert_eq!(clamp_page(399, 400), 399, "the last page is in range");
+        assert_eq!(clamp_page(400, 400), 399, "one past the end clamps back");
+        assert_eq!(clamp_page(9_999, 3), 2);
+        // A result that shrank to empty still has one page, index 0.
+        assert_eq!(clamp_page(12, 1), 0);
+        assert_eq!(clamp_page(12, 0), 0, "no pages must not underflow");
+    }
+
+    #[test]
+    fn page_bounds_clamp_to_the_total() {
+        assert_eq!(page_bounds(0, 100, 250), (0, 100));
+        assert_eq!(page_bounds(1, 100, 250), (100, 200));
+        // Last page is partial.
+        assert_eq!(page_bounds(2, 100, 250), (200, 250));
+        // Exact fill: the last page is full, not empty.
+        assert_eq!(page_bounds(1, 100, 200), (100, 200));
+        // Past the end yields an empty, non-panicking range.
+        assert_eq!(page_bounds(9, 100, 250), (250, 250));
+        assert_eq!(page_bounds(0, 100, 0), (0, 0));
+    }
+
+    #[test]
+    fn pager_summary_is_one_based_and_names_its_unit() {
+        assert_eq!(
+            pager_summary("Rows", 0, 100, 12_300),
+            "Rows 1\u{2013}100 of 12,300 \u{00b7} Page 1 of 123"
+        );
+        assert_eq!(
+            pager_summary("Groups", 1, 100, 250),
+            "Groups 101\u{2013}200 of 250 \u{00b7} Page 2 of 3"
+        );
+        // The last page reports the real end, not the page size.
+        assert_eq!(
+            pager_summary("Rows", 2, 100, 250),
+            "Rows 201\u{2013}250 of 250 \u{00b7} Page 3 of 3"
+        );
+        // An empty result must not read "1–0 of 0".
+        assert_eq!(
+            pager_summary("Devices", 0, 100, 0),
+            "Devices 0\u{2013}0 of 0 \u{00b7} Page 1 of 1"
+        );
+    }
+
+    #[test]
+    fn page_steps_saturate_at_both_ends() {
+        assert_eq!(prev_page(0), 0, "Prev on the first page stays put");
+        assert_eq!(prev_page(5), 4);
+        assert_eq!(next_page(0, 3), 1);
+        assert_eq!(next_page(2, 3), 2, "Next on the last page stays put");
+        // A stale index past the end still lands on the last page, not beyond it.
+        assert_eq!(next_page(99, 3), 2);
+        assert_eq!(next_page(0, 1), 0, "a single page has nowhere to go");
+        assert_eq!(next_page(0, 0), 0, "no pages must not underflow");
+    }
 
     #[test]
     fn group_thousands_inserts_separators() {

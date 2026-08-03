@@ -11,11 +11,28 @@ use serde_json::Value;
 use super::NinjaApiClient;
 use crate::model::Activity;
 
+/// Rows requested per activity poll.
+///
+/// This endpoint is deliberately **not** routed through `get_paginated`: that helper
+/// pages a newest-*last* feed by advancing an ascending `after` id over a bare array
+/// or a `{ results, cursor }` envelope, whereas `/activities` is newest-first and
+/// answers with either a bare array or an `{ activities: [...] }` envelope. Driving
+/// it with the wrong cursor semantics would page in the wrong direction, which is a
+/// worse failure than a bounded window — so the request is a single shot with an
+/// explicit size, and a full page is reported rather than silently accepted.
+const ACTIVITY_PAGE_SIZE: u32 = 500;
+
 impl NinjaApiClient {
     /// Activity log, newest first. `newer_than` is a Unix timestamp in **seconds**.
     ///
     /// The response is a bare array on most tenants but an `{ "activities": [...] }`
     /// envelope on others, so both are accepted.
+    ///
+    /// Scoped to one device and to activities since just before dispatch, so the
+    /// [`ACTIVITY_PAGE_SIZE`] window is ample in practice. A device noisy enough to
+    /// overflow it within a job's timeout would push the terminal activity out of
+    /// reach, so that case is logged rather than left to look like a job that simply
+    /// never finished — the job itself still resolves via its timeout.
     pub async fn activities(
         &self,
         device_id: Option<i64>,
@@ -28,6 +45,7 @@ impl NinjaApiClient {
         if let Some(after) = newer_than {
             query.push(("newerThan", after.to_string()));
         }
+        query.push(("pageSize", ACTIVITY_PAGE_SIZE.to_string()));
 
         let raw: Value = self.get_json("/activities", &query).await?;
         let items = match raw {
@@ -39,6 +57,17 @@ impl NinjaApiClient {
             },
             other => bail!("unexpected activities response shape: {other}"),
         };
+
+        if items.len() >= ACTIVITY_PAGE_SIZE as usize {
+            // A full page means the window may be truncated and a terminal activity
+            // could be out of view. Surfaced so a job that then times out has a
+            // logged cause instead of looking like the device never answered.
+            tracing::warn!(
+                device_id,
+                returned = items.len(),
+                "activity page came back full; a terminal activity may be beyond the window"
+            );
+        }
 
         // A single malformed entry shouldn't blind the poller to every other job on
         // the device, so unparseable rows are dropped rather than failing the call.

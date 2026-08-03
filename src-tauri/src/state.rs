@@ -73,6 +73,15 @@ struct TenantKey {
 #[derive(Debug)]
 pub struct CachePoisoned;
 
+/// Opaque claim on a query run, issued by [`AppState::begin_query`] and redeemed by
+/// [`AppState::store_last_result_if_current`]. Carries the generation that orders
+/// overlapping queries and the tenant the run started under, so neither can be
+/// re-derived (or forged) at write time.
+pub struct QueryToken {
+    generation: u64,
+    tenant: TenantKey,
+}
+
 struct LookupCache {
     at: Instant,
     tenant: TenantKey,
@@ -160,6 +169,17 @@ pub struct AppState {
     jobs: Mutex<Option<(TenantKey, Vec<JobReport>)>>,
     /// Monotonic source of `JobReport.id` / `batch_id`.
     job_seq: AtomicU64,
+    /// Monotonic query generation, bumped by [`AppState::begin_query`]. Queries
+    /// overlap routinely — an auto-refresh tick fires while a manual Run is still
+    /// paging the fleet — and whichever *finished* last used to win the cache
+    /// regardless of which started last. Since the frontend renders the summary of
+    /// the run it started last, the two could disagree: the visible table came from
+    /// one query while paging, export and the HTML report read another.
+    ///
+    /// Owned here rather than taken from the frontend's `query_id`, which is a
+    /// display hint for dropping stale progress events — a stale or malicious
+    /// frontend must not be able to decide which result is authoritative.
+    query_generation: AtomicU64,
     /// At most one poller at a time, so a burst of batches doesn't spawn N tasks
     /// all hammering `/activities`.
     job_poller_running: AtomicBool,
@@ -200,6 +220,7 @@ impl AppState {
             fleet_current_sw: Mutex::new(None),
             jobs: Mutex::new(None),
             job_seq: AtomicU64::new(1),
+            query_generation: AtomicU64::new(0),
             job_poller_running: AtomicBool::new(false),
             pending_confirm: Mutex::new(None),
         })
@@ -416,16 +437,63 @@ impl AppState {
         self.invalidate_current_patches();
     }
 
-    /// Stores a query result stamped with the current tenant so paging and export can
-    /// read it. A poisoned cache is warned (not panicked) so the staleness is
-    /// observable but the app survives.
-    pub fn store_last_result(&self, result: QueryResult) {
-        let key = self.tenant_key();
+    /// Claims the next query generation and records the tenant the query is starting
+    /// under. Call once at the *start* of a query and hand the token back to
+    /// [`store_last_result_if_current`].
+    ///
+    /// [`store_last_result_if_current`]: Self::store_last_result_if_current
+    pub fn begin_query(&self) -> QueryToken {
+        QueryToken {
+            generation: self.query_generation.fetch_add(1, Ordering::SeqCst) + 1,
+            tenant: self.tenant_key(),
+        }
+    }
+
+    /// Stores a query result for paging and export, **unless** a newer query has
+    /// started or the tenant changed while this one was in flight. Returns whether
+    /// the write happened.
+    ///
+    /// Two races close here, and they need opposite treatment:
+    ///
+    /// *Supersession.* Ordering by completion rather than by start let an
+    /// auto-refresh tick clobber a manual Run: the two overlap routinely, a warm
+    /// cache can let either finish first, and the frontend renders the summary of the
+    /// run *it* started last. Dropping the superseded write keeps the cache — read by
+    /// export, the HTML report and row paging — consistent with the summary on
+    /// screen.
+    ///
+    /// *Tenant drift.* The stamp is taken from the token, i.e. the tenant the query
+    /// started under, not from the tenant that happens to be current now. A
+    /// whole-fleet fetch runs for minutes; stamping at write time meant a result
+    /// fetched under the old tenant could be labelled with the new one if the
+    /// operator switched instance mid-query — the one way the tenant defense could be
+    /// *wrong* rather than merely miss. A drifted result is dropped rather than
+    /// stored under either key.
+    ///
+    /// A poisoned cache is warned (not panicked) so the failure is observable but the
+    /// app survives.
+    pub fn store_last_result_if_current(&self, token: QueryToken, result: QueryResult) -> bool {
+        if token.tenant != self.tenant_key() {
+            return false;
+        }
         match self.last_result.lock() {
-            Ok(mut slot) => *slot = Some((key, result)),
-            // A poisoned cache means export/paging would read the previous run — warn
-            // rather than silently dropping the write so the staleness is observable.
-            Err(_) => warn!("result cache poisoned; export and paging will use the prior query"),
+            Ok(mut slot) => {
+                // Checked under the lock so a query that started between the caller's
+                // last look and here cannot still lose to us.
+                if self.query_generation.load(Ordering::SeqCst) != token.generation {
+                    return false;
+                }
+                *slot = Some((token.tenant, result));
+                true
+            }
+            // Once poisoned the slot stays poisoned: `with_current_result` returns
+            // `Err(CachePoisoned)`, so export, the HTML report and row paging all
+            // fail outright rather than serving the prior query. Warn so that shows
+            // up in the log as the cause.
+            Err(_) => {
+                warn!("result cache poisoned; export, report and paging will now fail");
+                false
+            }
         }
     }
 
@@ -577,8 +645,37 @@ impl AppState {
             .is_ok()
     }
 
-    pub fn release_job_poller(&self) {
+    /// Releases the poller claim **only if** no unresolved job remains. Returns
+    /// `true` when the claim was released and the caller should stop polling, and
+    /// `false` when work appeared and it must keep going.
+    ///
+    /// Closes a lost-wakeup race. The poller used to break out of its loop on an
+    /// empty pending set and release the claim afterwards; a batch dispatched in
+    /// that gap recorded its jobs, then found `try_claim_job_poller` still `false`
+    /// because the flag had not been cleared yet — so nothing polled it, and those
+    /// jobs sat unresolved until some later dispatch happened to start a new poller.
+    ///
+    /// The check and the release happen under the jobs lock, and dispatch records
+    /// its jobs before calling `try_claim_job_poller`. A concurrent dispatch is
+    /// therefore either visible here (we keep polling) or strictly after the release
+    /// (its own claim succeeds). There is no order in which it is neither.
+    pub fn release_job_poller_if_idle(&self) -> bool {
+        let Ok(guard) = self.jobs.lock() else {
+            // A poisoned job store cannot be polled meaningfully; release so a
+            // later dispatch can at least try.
+            self.job_poller_running.store(false, Ordering::Release);
+            return true;
+        };
+        let key = self.tenant_key();
+        let has_pending = guard.as_ref().is_some_and(|(tenant, jobs)| {
+            *tenant == key && jobs.iter().any(|j| !j.state.is_terminal())
+        });
+        if has_pending {
+            return false;
+        }
         self.job_poller_running.store(false, Ordering::Release);
+        drop(guard);
+        true
     }
 
     /// Records the plan the operator is being asked to confirm, replacing any
@@ -634,6 +731,7 @@ impl AppState {
             fleet_current_sw: Mutex::new(None),
             jobs: Mutex::new(None),
             job_seq: AtomicU64::new(1),
+            query_generation: AtomicU64::new(0),
             job_poller_running: AtomicBool::new(false),
             pending_confirm: Mutex::new(None),
         }
@@ -772,7 +870,7 @@ mod tests {
         // before exporting" rather than writing a stale workbook.
         assert!(state.with_current_result(|_| ()).unwrap().is_none());
 
-        state.store_last_result(sample_result());
+        state.store_last_result_if_current(state.begin_query(), sample_result());
         assert!(state.with_current_result(|_| ()).unwrap().is_some());
 
         // Sign-out / instance change drops the cache so a later export can't leak a
@@ -781,10 +879,76 @@ mod tests {
         assert!(state.with_current_result(|_| ()).unwrap().is_none());
     }
 
+    /// An auto-refresh tick and a manual Run overlap routinely and do not finish in
+    /// start order. The run that started last owns the cache, because that is the one
+    /// whose summary the frontend renders — otherwise the visible table and the rows
+    /// behind paging/export come from different queries.
+    #[test]
+    fn a_superseded_query_does_not_clobber_a_newer_one() {
+        let state = AppState::new().expect("build state");
+
+        let first = state.begin_query();
+        let second = state.begin_query();
+
+        // The newer run finishes first.
+        assert!(state.store_last_result_if_current(second, sample_result()));
+        // The older run finishes second and must NOT overwrite it.
+        assert!(
+            !state.store_last_result_if_current(first, sample_result()),
+            "a query superseded before it finished must drop its cache write"
+        );
+        assert!(state.with_current_result(|_| ()).unwrap().is_some());
+    }
+
+    /// Starting a run retires the previous generation even if that run never
+    /// completes, so a late arrival from an abandoned query is dropped rather than
+    /// resurrecting rows the operator has moved on from.
+    #[test]
+    fn a_query_retired_by_a_later_start_is_dropped_even_if_the_later_one_never_finishes() {
+        let state = AppState::new().expect("build state");
+
+        let abandoned = state.begin_query();
+        let _newer = state.begin_query(); // started, never stored
+
+        assert!(!state.store_last_result_if_current(abandoned, sample_result()));
+        assert!(state.with_current_result(|_| ()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_lone_query_stores_normally() {
+        let state = AppState::new().expect("build state");
+        let only = state.begin_query();
+        assert!(state.store_last_result_if_current(only, sample_result()));
+        assert!(state.with_current_result(|_| ()).unwrap().is_some());
+    }
+
+    /// A whole-fleet fetch runs for minutes. If the operator switches instance while
+    /// one is in flight, the result belongs to the tenant it was *fetched* under —
+    /// stamping it with whatever tenant is current at write time would file another
+    /// tenant's rows under the new one, which is the one way the tenant check can be
+    /// wrong rather than merely miss.
+    #[test]
+    fn a_query_that_spans_a_tenant_switch_is_dropped_not_restamped() {
+        let state = AppState::new().expect("build state");
+        let token = state.begin_query();
+
+        // The operator switches instance while the query is still running.
+        state.settings.lock().unwrap().instance_base_url = "https://other.example.com".into();
+
+        assert!(
+            !state.store_last_result_if_current(token, sample_result()),
+            "a result fetched under the previous tenant must not be stored"
+        );
+        assert!(
+            state.with_current_result(|_| ()).unwrap().is_none(),
+            "and it must not be readable under the new tenant either"
+        );
+    }
+
     #[test]
     fn last_result_invisible_after_instance_switch() {
         let state = AppState::new().expect("build state");
-        state.store_last_result(sample_result());
+        state.store_last_result_if_current(state.begin_query(), sample_result());
         assert!(state.with_current_result(|_| ()).unwrap().is_some());
 
         // Switch the instance WITHOUT calling clear_* — the read must still miss, so a
@@ -802,7 +966,7 @@ mod tests {
         // switching to a different client id (app registration) left the prior rows
         // exportable. Tenant-keyed reads close that gap.
         let state = AppState::new().expect("build state");
-        state.store_last_result(sample_result());
+        state.store_last_result_if_current(state.begin_query(), sample_result());
         assert!(state.with_current_result(|_| ()).unwrap().is_some());
 
         state.settings.lock().unwrap().client_id = Some("different-client".into());
@@ -903,7 +1067,39 @@ mod tests {
             !state.try_claim_job_poller(),
             "a second batch must join the running poller, not spawn another"
         );
-        state.release_job_poller();
+        // Idle (no jobs recorded), so the claim is released and re-claimable.
+        assert!(state.release_job_poller_if_idle());
+        assert!(state.try_claim_job_poller());
+    }
+
+    /// The lost-wakeup race: the poller finds its pending set empty and moves to
+    /// release, but a batch is dispatched in that gap. Its `try_claim` fails because
+    /// the flag is still set, so if the poller released unconditionally those jobs
+    /// would never be polled by anyone.
+    #[test]
+    fn the_poller_keeps_its_claim_when_work_arrives_during_release() {
+        let state = AppState::new().expect("build state");
+        assert!(state.try_claim_job_poller());
+
+        // A batch lands: its jobs are recorded before it tries to claim.
+        state.append_jobs(vec![sample_job(1, JobState::Running)]);
+        assert!(
+            !state.try_claim_job_poller(),
+            "the running poller still holds the claim"
+        );
+
+        assert!(
+            !state.release_job_poller_if_idle(),
+            "an unresolved job must keep the poller alive rather than orphan it"
+        );
+        assert!(
+            !state.try_claim_job_poller(),
+            "and the claim must still be held"
+        );
+
+        // Once the job settles, the poller may retire.
+        state.apply_job_updates(vec![sample_job(1, JobState::Completed)]);
+        assert!(state.release_job_poller_if_idle());
         assert!(state.try_claim_job_poller());
     }
 }

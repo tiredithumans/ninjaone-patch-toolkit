@@ -63,7 +63,14 @@ impl Device {
     }
 
     pub fn os_name(&self) -> Option<String> {
-        self.os.as_ref().and_then(|o| o.name.clone())
+        self.os_name_str().map(str::to_string)
+    }
+
+    /// Borrowing form of [`os_name`](Self::os_name). Preferred in per-patch loops:
+    /// the owning variant allocates a `String` for every patch examined, including
+    /// the majority that the filters immediately discard.
+    pub fn os_name_str(&self) -> Option<&str> {
+        self.os.as_ref().and_then(|o| o.name.as_deref())
     }
 
     pub fn needs_reboot(&self) -> bool {

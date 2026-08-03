@@ -166,6 +166,14 @@ Note: `fmt-check` formats **both** crates, so there is no separate `web-fmt-chec
 the `#[cfg(test)]` module). Components and `js_sys`-backed helpers aren't unit-tested, so `verify`
 still leans on `web-check` (compile) + `web-clippy` for the rest of the frontend.
 
+**Non-trivial logic therefore does not belong in a `#[component]` body** — put it in
+`web-rs/src/app/util.rs` as a free function and test it there. A `#[component]` can only be
+compile-checked, so arithmetic written inline inside one is unreachable by any test. The pager
+(`page_count`/`clamp_page`/`page_bounds`/`pager_summary`/`prev_page`/`next_page`), the group-header
+count and the confirm-dialog gate (`needs_typed_confirmation`/`can_confirm_action`) all live in
+`util.rs` for this reason — the pager arithmetic had already caused a "98% of groups unreachable"
+bug while sitting inline in `tables.rs`.
+
 The app needs no build-time config: the **Region/Instance**, **Client ID**, and optional **Secret**
 are entered at runtime in **Settings** (persisted to `settings.json` via the `directories` crate;
 secrets are **not** stored there — see below).
@@ -193,12 +201,26 @@ secrets are **not** stored there — see below).
   no prior successful query = empty. Don't add a second source of truth for the rows.
   - **Tenant-keyed, method-gated access.** `last_result` is **private** and stamped with the tenant
     (`Mutex<Option<(TenantKey, QueryResult)>>`, `TenantKey` = instance URL + client id). Never touch it
-    directly — write via `state.store_last_result(result)` and read via
+    directly — write via `state.store_last_result_if_current(token, result)` and read via
     `state.with_current_result(|r| …)`, which compare the stamp at read time, so a result from a
     different tenant reads as a miss. The whole-fleet input caches (devices/current/lookups) carry the
     same stamp. This makes the `clear_lookups_cache` / `clear_last_result` calls (sign-out, instance
     change) belt-and-suspenders for correctness — a forgotten one can't leak a prior tenant's rows; they
     remain only to reclaim memory promptly and to wipe rows on an explicit same-tenant sign-out.
+  - **The write is generation- and tenant-gated (load-bearing).** `query_patches` claims a
+    `QueryToken` via `state.begin_query()` **before** any fetch and redeems it at the store. Two
+    things ride on that ordering. Overlapping queries (an auto-refresh tick during a manual Run) are
+    ordered by *start*, not by completion, so the run the frontend renders is the run whose rows are
+    cached — otherwise the visible table and the rows behind paging/export come from different
+    queries. And the tenant stamp is taken from the token, i.e. the tenant the query was *fetched*
+    under; a whole-fleet fetch runs for minutes, so stamping at write time could file the old
+    tenant's rows under the new one — the one way the tenant check can be *wrong* rather than merely
+    miss. A superseded or tenant-drifted result is dropped, not stored. The frontend mirrors this:
+    `run_query` compares `query_seq` after the await and discards a superseded response (while still
+    clearing its own busy flag).
+  - **The three paging commands all return empty on a cache miss**, never an error. A miss is a
+    normal transient (tenant switch, sign-out, superseded query); the frontend already renders its
+    own empty state from the absent result.
   `get_patch_rows` also takes an optional `sort` (`rows::RowSort`) and re-orders **per request** via a
   ref-sort in `rows::page_rows` — the cached rows themselves are never reordered; their canonical
   severity/org/device order feeds the export and the summary's inline first page.
@@ -280,6 +302,16 @@ secrets are **not** stored there — see below).
     with a JWT-claim fallback; `None` means *unknowable*, not *denied*, and the UI words the two
     differently. `commands::auth::reauthorize` drops the keyring refresh token **first** so the
     browser flow must issue a fresh grant.
+  - **The refresh is single-flight, and only `invalid_grant` clears the credential (load-bearing).**
+    A query deliberately fans out many concurrent API calls and each one calls `access_token()`
+    first, so without a guard they all observe the same stale token and each POSTs the same
+    `refresh_token` — last-writer-wins on both the keyring and the in-memory set. `access_token()`
+    therefore takes `refresh_lock` (a `tokio::Mutex`) and re-checks under it, so concurrent callers
+    await one grant. That composes with the error arm: `refresh_grant_is_dead` clears the stored
+    refresh token **only** on a 400/401 whose OAuth `error` is `invalid_grant`. Clearing on any
+    non-2xx (the old behavior) meant a 429, a 5xx or a captive-portal page forced an interactive
+    re-login — and under refresh-token rotation the loser of a refresh race erased the credential
+    the winner had just stored. Deliberately **not** "any 4xx": 429 is a retry-later status.
 
 - **Write path (patch actions) — load-bearing rules.** The feature is opt-in
   (`settings.actions.enabled`, default false) and every command re-checks
@@ -301,12 +333,21 @@ secrets are **not** stored there — see below).
     replay the body and re-run the action; 429/401 still replay (the gateway rejected before
     the device queue). A timed-out dispatch becomes `JobState::Unknown` — polled, never
     auto-retried.
-  - **Confirm tokens are payload-bound and single-use.** `plan_action` hashes
-    (kind ‖ sorted device ids ‖ script ref ‖ parameters ‖ reboot mode ‖ dry_run) into a
-    5-minute token; `run_action` re-plans from scratch and re-checks the hash. Editing the
-    selection after the dialog opened invalidates the approval rather than widening it.
+  - **Confirm tokens are payload-bound and single-use.** `plan_action` hashes **everything that
+    reaches NinjaOne or that the guardrails read** — kind ‖ sorted device ids ‖ targets ‖ script
+    ref ‖ effective parameters ‖ run_as ‖ reboot choice ‖ reboot mode ‖ include_offline ‖
+    override_window ‖ dry_run — into a 5-minute token; `run_action` re-plans from scratch and
+    re-checks the hash. Editing the selection after the dialog opened invalidates the approval
+    rather than widening it. `request_hash` **destructures `ActionRequest` exhaustively**, so a new
+    field is a compile error there rather than a silent omission — which is exactly how
+    `include_offline`, `override_window` and `run_as` came to be missing (the first two gate
+    `plan()`'s offline warning and maintenance-window blocker; the third is the execution identity).
+    Fields are separated by `0x1f` so two different requests can't concatenate to one hash input.
   - **Guardrails live in `actions::plan`**, which is pure with an injected clock. Adding one
-    means extending `blockers`/`warnings` there, not adding a dialog.
+    means extending `blockers`/`warnings` there, not adding a dialog. The one exception is the
+    `dry_run` check, which is *also* asserted at the dispatch site in `run_action` — defense in
+    depth, so a new `ActionKind` whose `supports_dry_run()` is wrong can't send a real mutating
+    POST while the UI says "Dry run".
   - **After a mutating action, call `invalidate_current_patches()`** (and
     `invalidate_fleet_devices()` after a reboot) — `clear_lookups_cache()` is too blunt, and
     the 120 s current-patch TTL would otherwise serve pre-action data. `last_result` is
@@ -314,6 +355,11 @@ secrets are **not** stored there — see below).
   - **Job state is tenant-stamped** in `AppState.jobs`, mirroring `last_result` — a tenant
     switch reads as a miss. The poller is single-claim (`try_claim_job_poller`) and emits
     `action:progress` (no capability change needed; `core:event:default` already covers it).
+    It retires via `release_job_poller_if_idle()`, which re-checks for pending jobs **and**
+    clears the claim flag under the jobs lock. Dispatch appends its jobs before calling
+    `try_claim_job_poller`, so a batch landing during shutdown is either seen (the poller keeps
+    going) or strictly after the release (its own claim succeeds). Releasing unconditionally left
+    jobs dispatched in that gap with no poller at all.
   - **NinjaOne v2 has no script-output endpoint.** A job resolves from `/activities` only, so
     surface the exit code plus the activity/series correlator.
 
@@ -375,12 +421,25 @@ secrets are **not** stored there — see below).
   (`web-rs/src/app.rs`) must therefore cover the whole vocabulary including `UNKNOWN`. Ranks are
   ordered so `Security`/`Recommended` fall **below** `Important`, keeping them out of the
   `rank() >= Important.rank()` compliance/SLA rollups. Adding a value means: `from_raw` + `label`
-  + `rank` (`model.rs`) → `SeverityCounts` + its `match` (`rows.rs`) → the `web-rs/src/types.rs`
-  mirror → `SEV_BANDS`/`sum_severity`/`sev_count`/`severity_segments` (`charts.rs`) →
-  `SEVERITY_BANDS`/`total_severity`/`severity_value` (`report.rs`) → `sev_class` **and**
-  `sev_ordinal` **and** `severity_raw` (`util.rs`) → `SEVERITY_OPTIONS` → the `.sev-*` **and**
-  `.chart .seg-*` **and** `.chart-swatch.seg-*` CSS (three separate rule families — the middle one
-  sets `fill` and is scoped to `.chart`, so it does nothing for a legend `<span>`) → `demo.rs`.
+  + `rank` (`model.rs`) → the `SeverityCounts` field **and** `SeverityCounts::BANDS` **and** its
+  `AddAssign` (`rows.rs`) → the `web-rs/src/types.rs` mirror →
+  `SEV_BANDS`/`sum_severity`/`sev_count`/`severity_segments` (`charts.rs`) → `SEVERITY_COLORS`
+  (`report.rs`) → `sev_class` **and** `sev_ordinal` **and** `severity_raw` (`util.rs`) →
+  `SEVERITY_OPTIONS` → the `.sev-*` **and** `.chart .seg-*` **and** `.chart-swatch.seg-*` CSS
+  (three separate rule families — the middle one sets `fill` and is scoped to `.chart`, so it does
+  nothing for a legend `<span>`) → `demo.rs`.
+  - **`rows::SeverityCounts::BANDS` is the canonical enumeration on the counts side.** It pairs each
+    label with a typed accessor, and `total()`, the HTML report's chart, its legend and its
+    denominator all derive from it — so they cannot disagree about how many bands exist.
+    `report.rs` now contributes only `SEVERITY_COLORS`, whose length is tied to `BANDS.len()` by its
+    array type (a band without a color is a compile error). The old `severity_value` matched bands
+    by **string label** with a `_ => counts.unknown` catch-all, so a renamed band silently reported
+    Unknown's count and double-counted it into the total. `total_severity_is_the_sum_of_its_bands`
+    (`rows.rs`) fails if a field is added to the struct but not to `BANDS`.
+  - **`rows::FailureGroup::COLUMNS` is the shared failure-table definition**, read by both
+    `export.rs` (the workbook) and `report.rs` (the HTML report), so the two renderings of one
+    cached result cannot diverge — they previously did, the report having silently dropped
+    `Patch Type`. `export.rs` contributes only `FAILURE_WIDTHS`, length-tied to `COLUMNS.len()`.
   - **This list was previously incomplete, and every site it omitted had silently drifted:**
     `report.rs` summed six of eight bands by hand (a `security`/`recommended`-only backlog printed
     "No pending patches"; a mixed one overflowed the viewBox), the two `.chart-swatch` rules were

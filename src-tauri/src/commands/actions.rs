@@ -139,29 +139,77 @@ fn require_actions_enabled(state: &AppState) -> Result<(), UiError> {
     }
 }
 
-/// Stable fingerprint of everything that determines what would be dispatched.
+/// Stable fingerprint of everything that determines what would be dispatched **and
+/// everything the guardrails react to**.
 ///
 /// A confirmation token is only honored alongside a matching hash, so editing the
-/// device list (or the parameters, or the reboot mode) after the dialog opened
-/// invalidates the approval instead of silently widening it.
+/// device list (or the parameters, the reboot mode, the run-as identity, or either
+/// guardrail toggle) after the dialog opened invalidates the approval instead of
+/// silently widening it.
+///
+/// The request is destructured exhaustively so that adding a field to
+/// `ActionRequest` fails to compile here rather than silently falling outside the
+/// binding — which is exactly how `include_offline`, `override_window` and `run_as`
+/// came to be missing. The first two are the flags `plan()` uses to gate the
+/// offline-queue warning and the maintenance-window blocker, so a token issued
+/// under one blast radius validated under a wider one; `run_as` selects the
+/// execution identity sent to NinjaOne, so an approval for `system` validated after
+/// being switched to a stored credential.
 fn request_hash(req: &ActionRequest, parameters: &str) -> String {
-    let mut ids = req.device_ids.clone();
+    let ActionRequest {
+        kind,
+        device_ids,
+        targets,
+        script_id,
+        script_uid,
+        // Display-only and audit-only fields are deliberately excluded: they change
+        // nothing about what is dispatched or what the guardrails say.
+        script_name: _,
+        // The *effective* parameters are hashed via the `parameters` argument, which
+        // is what actually goes on the wire.
+        parameters: _,
+        run_as,
+        reboot,
+        reboot_mode,
+        reason: _,
+        include_offline,
+        override_window,
+        dry_run,
+        // The token being validated cannot be part of its own fingerprint.
+        confirm_token: _,
+    } = req;
+
+    let mut ids = device_ids.clone();
     ids.sort_unstable();
     ids.dedup();
 
     let mut hasher = Sha256::new();
-    hasher.update(format!("{:?}", req.kind));
-    hasher.update(
+    // Every field is followed by a separator byte that cannot occur in the encoded
+    // values, so no two different requests can concatenate to the same input (e.g.
+    // targets ["a","b"] vs ["a\u{1f}b"]).
+    let mut field = |bytes: &[u8]| {
+        hasher.update(bytes);
+        hasher.update([0x1f]);
+    };
+
+    field(format!("{kind:?}").as_bytes());
+    field(
         ids.iter()
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
-            .join(","),
+            .join(",")
+            .as_bytes(),
     );
-    hasher.update(req.script_id.unwrap_or_default().to_le_bytes());
-    hasher.update(req.script_uid.clone().unwrap_or_default());
-    hasher.update(parameters);
-    hasher.update(format!("{:?}", req.reboot_mode));
-    hasher.update([u8::from(req.dry_run)]);
+    field(targets.join("\u{1f}").as_bytes());
+    field(&script_id.unwrap_or_default().to_le_bytes());
+    field(script_uid.as_deref().unwrap_or_default().as_bytes());
+    field(parameters.as_bytes());
+    field(run_as.as_deref().unwrap_or_default().as_bytes());
+    field(format!("{reboot:?}").as_bytes());
+    field(format!("{reboot_mode:?}").as_bytes());
+    field(&[u8::from(*include_offline)]);
+    field(&[u8::from(*override_window)]);
+    field(&[u8::from(*dry_run)]);
     hex(&hasher.finalize())
 }
 
@@ -401,34 +449,47 @@ pub async fn run_action(
             });
 
             let _permit = sem.acquire().await;
-            let outcome = match kind {
-                ActionKind::OsPatchScan => api
-                    .device_patch_scan(target.device_id, PatchType::Os)
-                    .await
-                    .map(|_| None),
-                ActionKind::SoftwarePatchScan => api
-                    .device_patch_scan(target.device_id, PatchType::Software)
-                    .await
-                    .map(|_| None),
-                ActionKind::OsPatchApply => api
-                    .device_patch_apply(target.device_id, PatchType::Os)
-                    .await
-                    .map(|_| None),
-                ActionKind::SoftwarePatchApply => api
-                    .device_patch_apply(target.device_id, PatchType::Software)
-                    .await
-                    .map(|_| None),
-                ActionKind::Reboot => api
-                    .device_reboot(target.device_id, reboot_mode, &reason)
-                    .await
-                    .map(|_| None),
-                ActionKind::Script => match script {
-                    Some(ref s) => api
-                        .run_script(target.device_id, s, &parameters, &run_as)
+            // Defense in depth: `plan()` already blocks a dry run on a kind with no
+            // preview mode, and `run_action` refuses a blocked plan — but that put
+            // the "a dry run never mutates a device" property two files away from
+            // the POSTs that would do the mutating, resting entirely on
+            // `supports_dry_run()` being right. A new `ActionKind` that answers it
+            // wrongly would otherwise dispatch for real while the UI said "Dry run".
+            let outcome = if dry_run && !kind.supports_dry_run() {
+                Err(anyhow::anyhow!(
+                    "refusing to dispatch \"{}\" as a dry run: it has no preview mode",
+                    kind.label()
+                ))
+            } else {
+                match kind {
+                    ActionKind::OsPatchScan => api
+                        .device_patch_scan(target.device_id, PatchType::Os)
                         .await
-                        .map(Some),
-                    None => Err(anyhow::anyhow!("no script selected")),
-                },
+                        .map(|_| None),
+                    ActionKind::SoftwarePatchScan => api
+                        .device_patch_scan(target.device_id, PatchType::Software)
+                        .await
+                        .map(|_| None),
+                    ActionKind::OsPatchApply => api
+                        .device_patch_apply(target.device_id, PatchType::Os)
+                        .await
+                        .map(|_| None),
+                    ActionKind::SoftwarePatchApply => api
+                        .device_patch_apply(target.device_id, PatchType::Software)
+                        .await
+                        .map(|_| None),
+                    ActionKind::Reboot => api
+                        .device_reboot(target.device_id, reboot_mode, &reason)
+                        .await
+                        .map(|_| None),
+                    ActionKind::Script => match script {
+                        Some(ref s) => api
+                            .run_script(target.device_id, s, &parameters, &run_as)
+                            .await
+                            .map(Some),
+                        None => Err(anyhow::anyhow!("no script selected")),
+                    },
+                }
             };
 
             match outcome {
@@ -560,7 +621,13 @@ fn spawn_job_poller(app: &AppHandle) {
                 (state.pending_jobs(), state.api.clone())
             };
             if pending.is_empty() {
-                break;
+                // Release and exit only if still idle when checked under the jobs
+                // lock; otherwise a batch dispatched since the snapshot above would
+                // be left with no poller running (see `release_job_poller_if_idle`).
+                if app.state::<AppState>().release_job_poller_if_idle() {
+                    return;
+                }
+                continue;
             }
 
             let now = Utc::now();
@@ -634,7 +701,6 @@ fn spawn_job_poller(app: &AppHandle) {
                 },
             );
         }
-        app.state::<AppState>().release_job_poller();
     });
 }
 
@@ -721,6 +787,77 @@ mod tests {
             dry_run: false,
             confirm_token: None,
         }
+    }
+
+    /// Every field the guardrails read, or that reaches NinjaOne, must be bound to
+    /// the token — otherwise an approval obtained under one blast radius validates
+    /// under a wider one.
+    #[test]
+    fn request_hash_binds_every_guardrail_and_dispatch_input() {
+        let base = request(ActionKind::Reboot, vec![1, 2]);
+        let h = request_hash(&base, "");
+
+        // `plan()` gates the offline-queue warning on this.
+        let mut offline = request(ActionKind::Reboot, vec![1, 2]);
+        offline.include_offline = true;
+        assert_ne!(h, request_hash(&offline, ""), "include_offline must bind");
+
+        // ...and the maintenance-window blocker on this.
+        let mut window = request(ActionKind::Reboot, vec![1, 2]);
+        window.override_window = true;
+        assert_ne!(h, request_hash(&window, ""), "override_window must bind");
+
+        // `run_as` is sent to NinjaOne verbatim as the execution identity, so an
+        // approval for `system` must not validate against a stored credential.
+        let mut elevated = request(ActionKind::Reboot, vec![1, 2]);
+        elevated.run_as = Some("domain-admin".into());
+        assert_ne!(h, request_hash(&elevated, ""), "run_as must bind");
+
+        let mut reboot = request(ActionKind::Reboot, vec![1, 2]);
+        reboot.reboot = RebootChoice::Auto;
+        assert_ne!(h, request_hash(&reboot, ""), "reboot choice must bind");
+
+        let mut mode = request(ActionKind::Reboot, vec![1, 2]);
+        mode.reboot_mode = Some(RebootMode::Forced);
+        assert_ne!(h, request_hash(&mode, ""), "reboot mode must bind");
+
+        let mut dry = request(ActionKind::Reboot, vec![1, 2]);
+        dry.dry_run = true;
+        assert_ne!(h, request_hash(&dry, ""), "dry_run must bind");
+
+        let mut targets = request(ActionKind::Reboot, vec![1, 2]);
+        targets.targets = vec!["KB5000001".into()];
+        assert_ne!(h, request_hash(&targets, ""), "targets must bind");
+
+        // The effective parameters are what actually go on the wire.
+        assert_ne!(
+            h,
+            request_hash(&base, "dryRun=false"),
+            "parameters must bind"
+        );
+    }
+
+    /// Field values are separated, so two different requests cannot concatenate
+    /// into the same hash input.
+    #[test]
+    fn request_hash_is_not_confusable_across_field_boundaries() {
+        let mut a = request(ActionKind::Script, vec![1]);
+        a.targets = vec!["ab".into()];
+        a.script_uid = Some(String::new());
+
+        let mut b = request(ActionKind::Script, vec![1]);
+        b.targets = vec!["a".into(), "b".into()];
+        b.script_uid = Some(String::new());
+        assert_ne!(request_hash(&a, ""), request_hash(&b, ""));
+
+        let mut c = request(ActionKind::Script, vec![1]);
+        c.targets = vec!["x".into()];
+        c.script_uid = Some("y".into());
+
+        let mut d = request(ActionKind::Script, vec![1]);
+        d.targets = vec!["xy".into()];
+        d.script_uid = None;
+        assert_ne!(request_hash(&c, ""), request_hash(&d, ""));
     }
 
     #[test]
