@@ -109,11 +109,40 @@ struct TokenResponse {
     scope: Option<String>,
 }
 
+/// Whether a failed refresh response means the *grant itself* is dead, i.e. the
+/// stored refresh token can never work again and clearing it is correct.
+///
+/// Only `invalid_grant` (RFC 6749 §5.2) says that. A 429, a 5xx, a proxy's HTML
+/// error page, or a connect failure all mean "ask again later" — clearing on
+/// those turned a network blip into a forced interactive sign-in, and combined
+/// with a concurrent refresh it let the loser of a race erase the credential the
+/// winner had just stored. Anything unparseable is treated as *not* dead: a
+/// spurious re-login is a much worse failure than one extra doomed retry.
+fn refresh_grant_is_dead(status: reqwest::StatusCode, body: &str) -> bool {
+    // RFC 6749 §5.2 returns 400 for `invalid_grant` (401 for the client-auth
+    // variants). Deliberately NOT "any 4xx": 429 is a retry-later status, and a
+    // rate limit must never cost the operator their credential.
+    if !matches!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNAUTHORIZED
+    ) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("invalid_grant"))
+}
+
 /// Shared auth state used by the API client and the Tauri commands.
 #[derive(Clone)]
 pub struct AuthState {
     inner: Arc<RwLock<Inner>>,
     http: reqwest::Client,
+    /// Serializes the refresh grant. See `access_token`.
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct Inner {
@@ -147,6 +176,7 @@ impl AuthState {
                 request_management,
             })),
             http,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -231,20 +261,38 @@ impl AuthState {
 
     /// Returns a valid access token, refreshing if needed. Does NOT start an
     /// interactive login — the UI layer decides when to prompt.
+    ///
+    /// The refresh is single-flight. A query fans out many concurrent API calls
+    /// (the whole-fleet device and current-patch fetches are deliberately
+    /// parallel), and each one calls this before its request. Without the lock
+    /// they all observe the same stale token and each POSTs the same
+    /// `refresh_token`: last-writer-wins on both the keyring and the in-memory
+    /// set, and under refresh-token rotation every loser presents an
+    /// already-consumed token and gets `invalid_grant` back — which used to
+    /// delete the credential the winner had just stored.
     pub async fn access_token(&self) -> Result<String> {
-        let snapshot = self
+        if let Some(token) = self.fresh_access_token()? {
+            return Ok(token);
+        }
+
+        let _guard = self.refresh_lock.lock().await;
+
+        // Re-check under the lock: whoever held it before us may have already
+        // refreshed, in which case this call is a cache hit rather than a
+        // second grant.
+        if let Some(token) = self.fresh_access_token()? {
+            return Ok(token);
+        }
+
+        let stored_refresh = self
             .inner
             .read()
             .map_err(|_| anyhow!("auth state poisoned"))?
             .tokens
-            .clone();
-        if let Some(tokens) = snapshot {
-            if !tokens.is_stale() {
-                return Ok(tokens.access_token);
-            }
-            if let Some(refresh) = tokens.refresh_token {
-                return self.refresh(&refresh).await;
-            }
+            .as_ref()
+            .and_then(|t| t.refresh_token.clone());
+        if let Some(refresh) = stored_refresh {
+            return self.refresh(&refresh).await;
         }
 
         if let Ok(refresh) = load_keyring(KEYRING_USER_REFRESH) {
@@ -252,6 +300,19 @@ impl AuthState {
         }
 
         bail!("not authenticated");
+    }
+
+    /// The cached access token, if one is present and not within the staleness
+    /// skew. `None` means a refresh is needed.
+    fn fresh_access_token(&self) -> Result<Option<String>> {
+        Ok(self
+            .inner
+            .read()
+            .map_err(|_| anyhow!("auth state poisoned"))?
+            .tokens
+            .as_ref()
+            .filter(|t| !t.is_stale())
+            .map(|t| t.access_token.clone()))
     }
 
     async fn refresh(&self, refresh_token: &str) -> Result<String> {
@@ -279,10 +340,17 @@ impl AuthState {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = truncate_body(&resp.text().await.unwrap_or_default());
-            // Clear invalid refresh token so the next attempt forces interactive login.
-            let _ = delete_keyring(KEYRING_USER_REFRESH);
-            self.clear_tokens_locked();
+            let raw = resp.text().await.unwrap_or_default();
+            let text = truncate_body(&raw);
+            // Only drop the stored credential when the server says the grant is
+            // dead. A transient failure (429, 5xx, proxy error page) leaves it in
+            // place so the next attempt can succeed without an interactive login.
+            if refresh_grant_is_dead(status, &raw) {
+                let _ = delete_keyring(KEYRING_USER_REFRESH);
+                self.clear_tokens_locked();
+            } else {
+                debug!(%status, "refresh failed transiently; keeping stored credential");
+            }
             bail!("refresh failed ({status}): {text}");
         }
 
@@ -497,6 +565,7 @@ impl AuthState {
         Self {
             inner: Arc::new(RwLock::new(inner)),
             http,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -525,6 +594,7 @@ impl AuthState {
         Self {
             inner: Arc::new(RwLock::new(inner)),
             http,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -686,6 +756,48 @@ fn delete_keyring(user: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dead grant is the *only* thing that may clear the stored refresh token.
+    /// Everything else has to leave it alone: clearing on a transient failure is
+    /// what turned a network blip into a forced interactive sign-in.
+    #[test]
+    fn only_invalid_grant_clears_the_stored_credential() {
+        use reqwest::StatusCode;
+
+        assert!(refresh_grant_is_dead(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid_grant","error_description":"expired"}"#
+        ));
+        // Case-insensitive per RFC 6749's ABNF being a bare string.
+        assert!(refresh_grant_is_dead(
+            StatusCode::UNAUTHORIZED,
+            r#"{"error":"INVALID_GRANT"}"#
+        ));
+
+        // Transient / not-about-this-token: keep the credential.
+        assert!(!refresh_grant_is_dead(
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"invalid_grant"}"#,
+        ));
+        assert!(!refresh_grant_is_dead(
+            StatusCode::BAD_GATEWAY,
+            "<html>upstream timeout</html>"
+        ));
+        assert!(!refresh_grant_is_dead(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ""
+        ));
+        // A captive portal answering 400 with HTML must not look like a dead grant.
+        assert!(!refresh_grant_is_dead(
+            StatusCode::BAD_REQUEST,
+            "<html>sign in to the wifi</html>"
+        ));
+        // A different OAuth error code is not our token's problem.
+        assert!(!refresh_grant_is_dead(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid_client"}"#
+        ));
+    }
 
     /// RFC 7636 Appendix B test vector.
     #[test]
