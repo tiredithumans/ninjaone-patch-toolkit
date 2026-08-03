@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::error::UiError;
 use crate::settings::{
-    ActionSettings, MAX_ACTION_CONCURRENCY, MAX_DEVICES_PER_ACTION_CEILING, Preset,
+    ActionSettings, MAX_ACTION_CONCURRENCY, MAX_DEVICES_PER_ACTION_CEILING, MAX_WINDOW_DAYS, Preset,
 };
 use crate::state::AppState;
 
@@ -92,11 +92,15 @@ fn validate_settings_input(args: &SaveSettingsArgs) -> Result<(), UiError> {
     if args.callback_port == 0 {
         return Err(UiError::new("Callback port must be between 1 and 65535."));
     }
-    if args.install_window_days < 1 {
-        return Err(UiError::new("Install window (days) must be at least 1."));
+    if args.install_window_days < 1 || args.install_window_days > MAX_WINDOW_DAYS {
+        return Err(UiError::new(format!(
+            "Install window (days) must be between 1 and {MAX_WINDOW_DAYS}."
+        )));
     }
-    if args.sla_days < 1 {
-        return Err(UiError::new("SLA (days) must be at least 1."));
+    if args.sla_days < 1 || args.sla_days > MAX_WINDOW_DAYS {
+        return Err(UiError::new(format!(
+            "SLA (days) must be between 1 and {MAX_WINDOW_DAYS}."
+        )));
     }
     validate_action_settings(&args.actions)?;
     Ok(())
@@ -262,8 +266,8 @@ pub fn delete_preset(state: State<'_, AppState>, name: String) -> Result<Vec<Pre
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionSettings, SaveSettingsArgs, require_https_instance, validate_action_settings,
-        validate_settings_input,
+        ActionSettings, MAX_WINDOW_DAYS, SaveSettingsArgs, require_https_instance,
+        validate_action_settings, validate_settings_input,
     };
 
     #[test]
@@ -301,6 +305,17 @@ mod tests {
         assert!(validate_settings_input(&args(11434, 0, 30)).is_err());
         assert!(validate_settings_input(&args(11434, -5, 30)).is_err());
         assert!(validate_settings_input(&args(11434, 30, 0)).is_err());
+    }
+
+    /// The upper bound is a panic guard, not a preference: both windows reach
+    /// `chrono::Duration::days`, which panics on an out-of-range day count.
+    #[test]
+    fn day_windows_reject_values_that_would_overflow_duration_days() {
+        assert!(validate_settings_input(&args(11434, MAX_WINDOW_DAYS, MAX_WINDOW_DAYS)).is_ok());
+        assert!(validate_settings_input(&args(11434, MAX_WINDOW_DAYS + 1, 30)).is_err());
+        assert!(validate_settings_input(&args(11434, 30, MAX_WINDOW_DAYS + 1)).is_err());
+        assert!(validate_settings_input(&args(11434, i64::MAX, 30)).is_err());
+        assert!(validate_settings_input(&args(11434, 30, i64::MAX)).is_err());
     }
 
     #[test]

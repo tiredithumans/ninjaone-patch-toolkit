@@ -13,6 +13,14 @@ pub const DEFAULT_BASE_URL: &str = "https://us2.ninjarmm.com";
 pub const DEFAULT_CALLBACK_PORT: u16 = 11434;
 pub const DEFAULT_INSTALL_WINDOW_DAYS: i64 = 30;
 pub const DEFAULT_SLA_DAYS: i64 = 30;
+/// Upper bound for every operator-supplied day window (install lookback, SLA, the
+/// per-query first-seen window), matching the `max="3650"` on the frontend inputs.
+///
+/// This is a panic guard, not just ergonomics: these values reach
+/// `chrono::Duration::days`, which panics when the day count overflows its
+/// millisecond representation. A hand-edited `settings.json` or a stale frontend
+/// could otherwise hand a command `i64::MAX` and take the process down.
+pub const MAX_WINDOW_DAYS: i64 = 3650;
 
 /// A named, reusable filter combination. The device/OS/search/severity facets live
 /// in `filter`; the patch-query selectors (type/status/install window) are stored
