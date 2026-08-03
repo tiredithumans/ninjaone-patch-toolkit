@@ -239,23 +239,19 @@ fn PatchesTable() -> impl IntoView {
             rows_total()
         }
     };
-    let page_count = move || total().div_ceil(PATCHES_PAGE_SIZE).max(1);
-    // Clamp the stored page so a shorter result (e.g. after an auto-refresh) can't
-    // leave us past the last page.
-    let page = move || state.query.patches_page.get().min(page_count() - 1);
+    // Pager arithmetic lives in `util` so it can be host-tested; this component only
+    // wires signals to it. The clamp matters because the stored page outlives the
+    // result it was chosen against (an auto-refresh returning fewer rows, or a
+    // switch between flat and grouped view, can both strand it past the end).
+    let page_count = move || util::page_count(total(), PATCHES_PAGE_SIZE);
+    let page = move || util::clamp_page(state.query.patches_page.get(), page_count());
     let rows = move || state.query.page_rows.get();
     let pager_summary = move || {
-        let t = total();
-        let start = page() * PATCHES_PAGE_SIZE;
-        let end = (start + PATCHES_PAGE_SIZE).min(t);
-        format!(
-            "{} {}\u{2013}{} of {} \u{00b7} Page {} of {}",
+        util::pager_summary(
             if grouped() { "Groups" } else { "Rows" },
-            start + 1,
-            end,
-            group_thousands(t),
-            page() + 1,
-            page_count(),
+            page(),
+            PATCHES_PAGE_SIZE,
+            total(),
         )
     };
     // Page navigation updates the index and fetches that page on demand — of
@@ -268,11 +264,8 @@ fn PatchesTable() -> impl IntoView {
             state.fetch_page(target);
         }
     };
-    let go_prev = move |_| go_to(page().saturating_sub(1));
-    let go_next = move |_| {
-        let last = page_count().saturating_sub(1);
-        go_to((page().min(last) + 1).min(last));
-    };
+    let go_prev = move |_| go_to(util::prev_page(page()));
+    let go_next = move |_| go_to(util::next_page(page(), page_count()));
 
     view! {
         <Show
@@ -497,11 +490,7 @@ fn GroupedPatches() -> impl IntoView {
                                 state.query.expanded.with(|e| e.contains(&key))
                             });
                             let sev = sev_class(&g.severity);
-                            let count = if by_device() {
-                                format!("{} patches", group_thousands(g.rows))
-                            } else {
-                                format!("{} devices", group_thousands(g.devices))
-                            };
+                            let count = util::group_count_label(by_device(), g.rows, g.devices);
                             let sub = g.sublabel.clone().unwrap_or_default();
                             let label = g.label.clone();
                             let aria = format!("Select all loaded patches in {label}");
@@ -949,21 +938,30 @@ fn FailuresTable() -> impl IntoView {
 #[component]
 fn RebootTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // The backend already trimmed the device list to the needs-reboot subset, so
-    // clone that directly; the emptiness check clones nothing.
-    let devices = move || {
-        state.query.result.with(|r| {
-            r.as_ref()
-                .map(|r| r.reboot_devices.clone())
-                .unwrap_or_default()
-        })
-    };
-    let has_devices = move || {
+    // Paged client-side. The backend trims the list to the needs-reboot subset and
+    // ships it whole in the summary, but "subset" is not "small" — on a fleet mid
+    // patch cycle it can be thousands of devices, and this used to clone the entire
+    // vector and materialise a <tr> for every one of them on every reactive re-run,
+    // in a UI whose every other table is built around paging.
+    let page = RwSignal::new(0usize);
+    let total = move || {
         state
             .query
             .result
-            .with(|r| r.as_ref().is_some_and(|r| !r.reboot_devices.is_empty()))
+            .with(|r| r.as_ref().map_or(0, |r| r.reboot_devices.len()))
     };
+    let page_count = move || util::page_count(total(), PATCHES_PAGE_SIZE);
+    let current = move || util::clamp_page(page.get(), page_count());
+    // Only the visible window is cloned, not the whole subset.
+    let devices = move || {
+        let (start, end) = util::page_bounds(current(), PATCHES_PAGE_SIZE, total());
+        state.query.result.with(|r| {
+            r.as_ref()
+                .map(|r| r.reboot_devices[start..end].to_vec())
+                .unwrap_or_default()
+        })
+    };
+    let has_devices = move || total() > 0;
 
     view! {
         <Show
@@ -976,6 +974,27 @@ fn RebootTable() -> impl IntoView {
                 reflects="devices in the selected device scope flagged for reboot."
                 filters="Device scope only. Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
+            <Show when=move || { page_count() > 1 }>
+                <div class="pager">
+                    <button
+                        class="btn"
+                        prop:disabled=move || current() == 0
+                        on:click=move |_| page.set(util::prev_page(current()))
+                    >
+                        "‹ Prev"
+                    </button>
+                    <span class="pager-info">
+                        {move || util::pager_summary("Devices", current(), PATCHES_PAGE_SIZE, total())}
+                    </span>
+                    <button
+                        class="btn"
+                        prop:disabled=move || { current() + 1 >= page_count() }
+                        on:click=move |_| page.set(util::next_page(current(), page_count()))
+                    >
+                        "Next ›"
+                    </button>
+                </div>
+            </Show>
             <div class="table-wrap">
                 <table>
                     <thead>
