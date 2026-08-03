@@ -89,15 +89,20 @@ impl FilterParams {
         {
             return false;
         }
-        let classes: Vec<String> = self
+        // Compared with `eq_ignore_ascii_case` rather than uppercasing both sides:
+        // this runs once per device across the whole fleet, and the previous version
+        // rebuilt the uppercased class list *and* re-uppercased `node_class` inside
+        // the predicate — two allocations per device for a case-insensitive compare
+        // that needs none. Same rule `prepare()` documents for the text needles.
+        let mut classes = self
             .node_classes
             .iter()
-            .map(|c| c.trim().to_ascii_uppercase())
+            .map(|c| c.trim())
             .filter(|c| !c.is_empty())
-            .collect();
-        if !classes.is_empty() {
+            .peekable();
+        if classes.peek().is_some() {
             match device.node_class.as_deref() {
-                Some(nc) if classes.iter().any(|c| c == &nc.to_ascii_uppercase()) => {}
+                Some(nc) if classes.any(|c| c.eq_ignore_ascii_case(nc)) => {}
                 _ => return false,
             }
         }

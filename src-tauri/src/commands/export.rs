@@ -7,6 +7,17 @@ use crate::export::write_workbook;
 use crate::rows::QueryResult;
 use crate::state::AppState;
 
+/// Errors unless a query result is cached for the current tenant. The probe returns
+/// `()` from inside the lock, so it costs nothing — the previous version cloned the
+/// entire `QueryResult` just to discover it existed, which on a 10k-row fleet meant
+/// two full deep copies per export (one thrown away immediately).
+fn require_cached_result(state: &AppState) -> Result<(), UiError> {
+    state
+        .with_current_result(|_| ())
+        .map_err(|_| UiError::new("result cache poisoned"))?
+        .ok_or_else(|| UiError::new("Run a query before exporting."))
+}
+
 /// Clones the cached query result for the current tenant, or errors if no query has
 /// run for it (a tenant switch invalidates the previous one). The lock is taken and
 /// released synchronously inside `with_current_result` — never held across the
@@ -29,9 +40,10 @@ pub async fn export_patches_xlsx(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, UiError> {
-    // Cheap precondition before the dialog; the full clone waits until the
-    // operator has committed to a path (a cancelled dialog costs nothing).
-    cached_result(&state)?;
+    // Fail before opening the dialog rather than after the operator picks a path.
+    // This only probes for presence; the one clone happens below, once the save is
+    // committed (a cancelled dialog copies nothing).
+    require_cached_result(&state)?;
 
     let default_name = format!(
         "ninjaone-patches-{}.xlsx",
@@ -89,8 +101,8 @@ pub async fn export_report_html(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, UiError> {
-    // Same clone-after-dialog flow as the Excel export above.
-    cached_result(&state)?;
+    // Same probe-then-clone-after-dialog flow as the Excel export above.
+    require_cached_result(&state)?;
 
     let default_name = format!(
         "ninjaone-report-{}.html",
