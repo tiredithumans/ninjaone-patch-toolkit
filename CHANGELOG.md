@@ -11,6 +11,32 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-08-03
+
+Maintenance only — **no user-facing changes**. If you are on 0.11.1 there is nothing new to see in
+the app; this release exists to ship the dependency and supply-chain updates below.
+
+### Security
+
+- **Removed the only `unsafe` code from the base64 dependency.** base64 0.23 enables a `simd-unsafe`
+  feature by default, which is that crate's sole source of `unsafe`; with it disabled the crate is
+  `#![forbid(unsafe_code)]`. It exists purely to accelerate SIMD encode/decode engines that this app
+  never uses — every call site uses the scalar engine — so the SIMD code was compiled into the
+  shipped binary but never reached. It is now compiled out. This matters because base64 sits on the
+  sign-in path (the PKCE challenge and the access token's scope claim) and on the patch-action
+  confirmation path.
+
+### Changed
+
+- Updated `base64` (0.22 → 0.23) and the `calamine` test dependency (0.36.0 → 0.36.1).
+- Refreshed the README demo screenshot.
+
+### Fixed
+
+- The screenshot workflow opened a fresh pull request on every release instead of updating one, and
+  those pull requests could never pass their required checks. Both are fixed; this only affects
+  repository maintenance, not the app.
+
 ## [0.11.1] - 2026-08-03
 
 ### Fixed
