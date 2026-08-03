@@ -4,6 +4,7 @@
 //!
 //! Adapted from `ninjaone-patch-dashboard`'s `snapshot.rs` device↔patch join.
 
+use std::borrow::Cow;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{HashMap, HashSet};
 
@@ -12,6 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::filter::FilterParams;
 use crate::model::{Device, Location, Organization, Patch, PatchRow, Role, Severity};
+
+/// Placeholder for a name the join could not resolve — an orphan device, a device
+/// reporting no OS, or a patch whose organization is not in the lookups.
+const UNKNOWN_LABEL: &str = "(unknown)";
 
 /// Id→name maps used to label patch rows without repeated lookups.
 pub struct LookupMaps {
@@ -30,9 +35,14 @@ impl LookupMaps {
     }
 
     fn org_name(&self, id: Option<i64>) -> String {
+        self.org_name_str(id).to_string()
+    }
+
+    /// Borrowing form of [`org_name`](Self::org_name), for per-patch loops.
+    fn org_name_str(&self, id: Option<i64>) -> &str {
         id.and_then(|i| self.orgs.get(&i))
-            .cloned()
-            .unwrap_or_else(|| "(unknown)".to_string())
+            .map(String::as_str)
+            .unwrap_or(UNKNOWN_LABEL)
     }
 
     fn location_name(&self, id: Option<i64>) -> Option<String> {
@@ -111,9 +121,13 @@ pub fn build_rows(
             if !filter.node_classes.is_empty() && device.is_none() {
                 continue;
             }
-            let os_name = device.and_then(Device::os_name);
+            // Borrowed for the filter check; the owned copy is taken below, only
+            // for rows that survive. Allocating here cost one String per patch
+            // examined rather than per patch kept — and on a whole-fleet
+            // third-party feed the filters discard the large majority.
+            let os_name_ref = device.and_then(Device::os_name_str);
 
-            if !prepared.os_name_allowed(os_name.as_deref()) {
+            if !prepared.os_name_allowed(os_name_ref) {
                 continue;
             }
             if !prepared.search_allowed(patch.kb_number.as_deref(), patch.name.as_deref()) {
@@ -125,6 +139,7 @@ pub fn build_rows(
                 continue;
             }
             let first_seen = patch.first_seen_at();
+            let installed = patch.installed_at();
             if !prepared.detected_within_allowed(first_seen.map(|r| r.timestamp())) {
                 continue;
             }
@@ -143,7 +158,7 @@ pub fn build_rows(
                 organization: maps.org_name(device.and_then(|d| d.organization_id)),
                 location: maps.location_name(device.and_then(|d| d.location_id)),
                 device_role: maps.role_name(device.and_then(|d| d.node_role_id)),
-                os_name,
+                os_name: os_name_ref.map(str::to_string),
                 node_class: device.and_then(|d| d.node_class.clone()),
                 needs_reboot: device.map(|d| d.needs_reboot()).unwrap_or(false),
                 offline: device.map(|d| d.is_offline()).unwrap_or(false),
@@ -154,9 +169,16 @@ pub fn build_rows(
                 severity_rank: severity.rank(),
                 status,
                 first_seen_date: fmt_dt(first_seen),
-                installed_date: fmt_dt(patch.installed_at()),
-                first_seen_ts: patch.collected_timestamp.map(|s| s as i64),
-                installed_ts: patch.installed_timestamp.map(|s| s as i64),
+                installed_date: fmt_dt(installed),
+                // Normalised through `first_seen_at`/`installed_at` like the dates
+                // beside them, NOT read raw off the patch. NinjaOne returns
+                // milliseconds for these on some endpoints, and taking the raw value
+                // made a row disagree with itself: it displayed the correct date
+                // (which goes through `unix_to_datetime`) while sorting as a
+                // year-58000 timestamp — so a millisecond-valued record always won
+                // "latest failure" and the First-seen sort put it on top.
+                first_seen_ts: first_seen.map(|d| d.timestamp()),
+                installed_ts: installed.map(|d| d.timestamp()),
             });
         }
     }
@@ -213,24 +235,66 @@ pub struct ComplianceBucket {
     pub aged_critical: usize,
 }
 
-/// Computes per-org compliance from device summaries and the current (pending/
-/// approved) patches. `sla_days` flags aged Critical/Important backlog.
-pub fn build_compliance(
-    summaries: &[DeviceSummary],
-    current_patches: &[&Patch],
-    devices_by_id: &HashMap<i64, &Device>,
-    maps: &LookupMaps,
+/// One compliance bucket under construction, keyed by whatever the caller groups on.
+#[derive(Default)]
+struct ComplianceAcc {
+    total: usize,
+    compliant: usize,
+    pending_critical: usize,
+    aged_critical: usize,
+}
+
+impl ComplianceAcc {
+    /// Compliant share. An empty bucket is 100%, not 0% — it has no devices to be
+    /// non-compliant.
+    fn pct(&self) -> f64 {
+        if self.total == 0 {
+            100.0
+        } else {
+            (self.compliant as f64 / self.total as f64) * 100.0
+        }
+    }
+}
+
+/// Whether a current-patch record belongs to the backlog the compliance rollups
+/// track: not yet installed, and at least Important.
+///
+/// NinjaOne uses MANUAL (pending approval) and APPROVED for current patches not yet
+/// installed — both count. The rank threshold deliberately excludes `Security` and
+/// `Recommended`, which are NinjaOne *classifications* rather than urgency grades.
+fn counts_toward_backlog(p: &Patch) -> bool {
+    matches!(p.status.as_deref(), Some("MANUAL") | Some("APPROVED"))
+        && p.severity_enum().rank() >= Severity::Important.rank()
+}
+
+/// Whether a pending patch has aged past the SLA cutoff.
+///
+/// A patch NinjaOne has never timestamped can't be proven recent, so it is flagged
+/// for review rather than assumed within SLA (which would understate the backlog).
+fn is_aged(p: &Patch, sla_cutoff: DateTime<Utc>) -> bool {
+    p.first_seen_at().map(|r| r < sla_cutoff).unwrap_or(true)
+}
+
+/// The body shared by [`build_compliance`] and [`build_compliance_by_os`], which
+/// differ only in what they group by.
+///
+/// Factored out because the two were ~72 lines of near-verbatim copy — the offline
+/// exclusion, the pending predicate, the Important threshold, the SLA cutoff and the
+/// percentage — so any change to a compliance rule had to be made twice or the
+/// Compliance and By-OS tabs would quietly disagree about the same fleet.
+///
+/// Keys are `Cow` so a grouping that can borrow (OS name, device summary fields)
+/// allocates only when a bucket is first created, rather than once per patch.
+fn accumulate_compliance<'a>(
+    summaries: &'a [DeviceSummary],
+    current_patches: &'a [&Patch],
+    devices_by_id: &HashMap<i64, &'a Device>,
     sla_days: i64,
     now: DateTime<Utc>,
-) -> Vec<ComplianceBucket> {
-    #[derive(Default)]
-    struct Acc {
-        total: usize,
-        compliant: usize,
-        pending_critical: usize,
-        aged_critical: usize,
-    }
-    let mut by_org: HashMap<String, Acc> = HashMap::new();
+    device_key: impl Fn(&'a DeviceSummary) -> Cow<'a, str>,
+    patch_key: impl Fn(Option<&'a Device>) -> Cow<'a, str>,
+) -> HashMap<String, ComplianceAcc> {
+    let mut by_key: HashMap<String, ComplianceAcc> = HashMap::new();
 
     for s in summaries {
         // An offline device can't apply patches and reports no current patch
@@ -244,7 +308,11 @@ pub fn build_compliance(
         if offline {
             continue;
         }
-        let acc = by_org.entry(s.organization.clone()).or_default();
+        let key = device_key(s);
+        let acc = match by_key.get_mut(key.as_ref()) {
+            Some(acc) => acc,
+            None => by_key.entry(key.into_owned()).or_default(),
+        };
         acc.total += 1;
         if s.pending_count == 0 {
             acc.compliant += 1;
@@ -253,30 +321,43 @@ pub fn build_compliance(
 
     let sla_cutoff = now - Duration::days(sla_days);
     for p in current_patches {
-        // NinjaOne uses MANUAL (pending approval) and APPROVED for current patches
-        // not yet installed — both count toward the pending backlog.
-        let is_pending = matches!(p.status.as_deref(), Some("MANUAL") | Some("APPROVED"));
-        if !is_pending {
+        if !counts_toward_backlog(p) {
             continue;
         }
-        let sev = p.severity_enum();
-        if sev.rank() < Severity::Important.rank() {
-            continue;
-        }
-        let org = p
-            .device_id
-            .and_then(|id| devices_by_id.get(&id))
-            .map(|d| maps.org_name(d.organization_id))
-            .unwrap_or_else(|| "(unknown)".to_string());
-        let acc = by_org.entry(org).or_default();
+        let device = p.device_id.and_then(|id| devices_by_id.get(&id)).copied();
+        let key = patch_key(device);
+        let acc = match by_key.get_mut(key.as_ref()) {
+            Some(acc) => acc,
+            None => by_key.entry(key.into_owned()).or_default(),
+        };
         acc.pending_critical += 1;
-        // A pending Critical/Important patch NinjaOne has never timestamped
-        // can't be proven recent, so flag it for review rather than assuming it
-        // is within SLA (which would understate the backlog).
-        if p.first_seen_at().map(|r| r < sla_cutoff).unwrap_or(true) {
+        if is_aged(p, sla_cutoff) {
             acc.aged_critical += 1;
         }
     }
+
+    by_key
+}
+
+/// Computes per-org compliance from device summaries and the current (pending/
+/// approved) patches. `sla_days` flags aged Critical/Important backlog.
+pub fn build_compliance(
+    summaries: &[DeviceSummary],
+    current_patches: &[&Patch],
+    devices_by_id: &HashMap<i64, &Device>,
+    maps: &LookupMaps,
+    sla_days: i64,
+    now: DateTime<Utc>,
+) -> Vec<ComplianceBucket> {
+    let by_org = accumulate_compliance(
+        summaries,
+        current_patches,
+        devices_by_id,
+        sla_days,
+        now,
+        |s| Cow::Borrowed(s.organization.as_str()),
+        |d| Cow::Borrowed(maps.org_name_str(d.and_then(|d| d.organization_id))),
+    );
 
     let mut buckets: Vec<ComplianceBucket> = by_org
         .into_iter()
@@ -284,11 +365,7 @@ pub fn build_compliance(
             organization,
             devices_total: a.total,
             devices_compliant: a.compliant,
-            compliance_pct: if a.total == 0 {
-                100.0
-            } else {
-                (a.compliant as f64 / a.total as f64) * 100.0
-            },
+            compliance_pct: a.pct(),
             pending_critical: a.pending_critical,
             aged_critical: a.aged_critical,
         })
@@ -322,53 +399,15 @@ pub fn build_compliance_by_os(
     sla_days: i64,
     now: DateTime<Utc>,
 ) -> Vec<OsCompliance> {
-    #[derive(Default)]
-    struct Acc {
-        total: usize,
-        compliant: usize,
-        pending_critical: usize,
-        aged_critical: usize,
-    }
-    let unknown = || "(unknown)".to_string();
-    let mut by_os: HashMap<String, Acc> = HashMap::new();
-
-    for s in summaries {
-        let offline = devices_by_id
-            .get(&s.device_id)
-            .map(|d| d.is_offline())
-            .unwrap_or(false);
-        if offline {
-            continue;
-        }
-        let acc = by_os
-            .entry(s.os_name.clone().unwrap_or_else(unknown))
-            .or_default();
-        acc.total += 1;
-        if s.pending_count == 0 {
-            acc.compliant += 1;
-        }
-    }
-
-    let sla_cutoff = now - Duration::days(sla_days);
-    for p in current_patches {
-        let is_pending = matches!(p.status.as_deref(), Some("MANUAL") | Some("APPROVED"));
-        if !is_pending {
-            continue;
-        }
-        if p.severity_enum().rank() < Severity::Important.rank() {
-            continue;
-        }
-        let os = p
-            .device_id
-            .and_then(|id| devices_by_id.get(&id))
-            .and_then(|d| d.os_name())
-            .unwrap_or_else(unknown);
-        let acc = by_os.entry(os).or_default();
-        acc.pending_critical += 1;
-        if p.first_seen_at().map(|r| r < sla_cutoff).unwrap_or(true) {
-            acc.aged_critical += 1;
-        }
-    }
+    let by_os = accumulate_compliance(
+        summaries,
+        current_patches,
+        devices_by_id,
+        sla_days,
+        now,
+        |s| Cow::Borrowed(s.os_name.as_deref().unwrap_or(UNKNOWN_LABEL)),
+        |d| Cow::Borrowed(d.and_then(|d| d.os_name_str()).unwrap_or(UNKNOWN_LABEL)),
+    );
 
     let mut buckets: Vec<OsCompliance> = by_os
         .into_iter()
@@ -376,11 +415,7 @@ pub fn build_compliance_by_os(
             os,
             devices_total: a.total,
             devices_compliant: a.compliant,
-            compliance_pct: if a.total == 0 {
-                100.0
-            } else {
-                (a.compliant as f64 / a.total as f64) * 100.0
-            },
+            compliance_pct: a.pct(),
             pending_critical: a.pending_critical,
             aged_critical: a.aged_critical,
         })
@@ -423,6 +458,44 @@ pub struct FailureGroup {
     pub latest_failure_ts: Option<i64>,
 }
 
+/// One rendered cell of a failure-table row. `Count` is written as a number by the
+/// Excel exporter and right-aligned by the HTML report; `Text` is written as-is
+/// (and HTML-escaped by the report).
+pub enum FailureCell {
+    Text(String),
+    Count(usize),
+}
+
+/// One failure-table column: its header and how to read that cell off a group.
+pub type FailureColumn = (&'static str, fn(&FailureGroup) -> FailureCell);
+
+impl FailureGroup {
+    /// The failure-table columns as (header, accessor), in display order.
+    ///
+    /// Shared by the Excel exporter and the HTML report so the two cannot disagree
+    /// about what a failure row contains — they previously did: the workbook wrote
+    /// seven columns while the report rendered six, having silently dropped
+    /// `Patch Type`, so the same cached result exported two different tables.
+    pub const COLUMNS: [FailureColumn; 7] = [
+        ("Severity", |f| FailureCell::Text(f.severity.clone())),
+        ("Patch Type", |f| FailureCell::Text(f.patch_type.clone())),
+        ("KB", |f| {
+            FailureCell::Text(f.kb.clone().unwrap_or_default())
+        }),
+        ("Patch", |f| FailureCell::Text(f.name.clone())),
+        ("Affected Devices", |f| {
+            FailureCell::Count(f.affected_devices)
+        }),
+        ("Latest Failure", |f| {
+            FailureCell::Text(f.latest_failure.clone().unwrap_or_default())
+        }),
+        ("Devices", |f| FailureCell::Text(f.device_names.join(", "))),
+    ];
+}
+
+/// One severity band: its display label and how to read that band off the counts.
+pub type SeverityBand = (&'static str, fn(&SeverityCounts) -> usize);
+
 /// Pending-patch counts by MSRC severity bucket, for the dashboard breakdown.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -435,6 +508,61 @@ pub struct SeverityCounts {
     pub low: usize,
     pub optional: usize,
     pub unknown: usize,
+}
+
+impl SeverityCounts {
+    /// Every band as (display label, accessor), most-to-least urgent — the same
+    /// order as `Severity::rank()`, including NinjaOne's two non-MSRC
+    /// classifications (`Security`, `Recommended`).
+    ///
+    /// This is the canonical enumeration on the counts side. Consumers derive from
+    /// it instead of restating the vocabulary: the HTML report's severity chart, its
+    /// legend and its denominator all read this array, so they cannot disagree about
+    /// how many bands exist. The report used to match bands by *string label* with a
+    /// `_ => counts.unknown` catch-all, which meant a renamed band silently reported
+    /// Unknown's count and then double-counted it into the total.
+    pub const BANDS: [SeverityBand; 8] = [
+        ("Critical", |c| c.critical),
+        ("Important", |c| c.important),
+        ("Security", |c| c.security),
+        ("Moderate", |c| c.moderate),
+        ("Recommended", |c| c.recommended),
+        ("Low", |c| c.low),
+        ("Optional", |c| c.optional),
+        ("Unknown", |c| c.unknown),
+    ];
+
+    /// Total across every band. Derived from [`BANDS`](Self::BANDS) so it can never
+    /// sum a different set than the charts draw.
+    pub fn total(&self) -> usize {
+        Self::BANDS.iter().map(|(_, get)| get(self)).sum()
+    }
+}
+
+impl std::ops::AddAssign<&SeverityCounts> for SeverityCounts {
+    /// Field-wise sum. Written out once, here, next to the struct — the one place a
+    /// newly added band is hardest to miss. `total_severity_is_the_sum_of_its_bands`
+    /// fails if a field is added to the struct but not to [`SeverityCounts::BANDS`].
+    fn add_assign(&mut self, o: &SeverityCounts) {
+        let SeverityCounts {
+            critical,
+            important,
+            security,
+            moderate,
+            recommended,
+            low,
+            optional,
+            unknown,
+        } = o;
+        self.critical += critical;
+        self.important += important;
+        self.security += security;
+        self.moderate += moderate;
+        self.recommended += recommended;
+        self.low += low;
+        self.optional += optional;
+        self.unknown += unknown;
+    }
 }
 
 /// A per-organization pending-patch severity breakdown for the dashboard charts.
@@ -873,7 +1001,7 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
 
 /// One page of group headers plus the total, so the frontend can page groups the
 /// same way it pages flat rows.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupPage {
     pub groups: Vec<PatchGroup>,
@@ -999,6 +1127,80 @@ mod tests {
     fn refs(patches: &[Patch]) -> Vec<&Patch> {
         patches.iter().collect()
     }
+
+    /// Guards the one hand-maintained pairing left in the severity vocabulary: a
+    /// field added to `SeverityCounts` but not to `BANDS` makes `total()` disagree
+    /// with the fields, and everything derived from `BANDS` (the report's chart, its
+    /// legend, its denominator) would silently drop that band.
+    ///
+    /// Distinct prime-ish values so a duplicated or transposed accessor is caught
+    /// too, not just a missing one.
+    #[test]
+    fn total_severity_is_the_sum_of_its_bands() {
+        let c = SeverityCounts {
+            critical: 2,
+            important: 3,
+            security: 5,
+            moderate: 7,
+            recommended: 11,
+            low: 13,
+            optional: 17,
+            unknown: 19,
+        };
+        assert_eq!(
+            c.total(),
+            2 + 3 + 5 + 7 + 11 + 13 + 17 + 19,
+            "SeverityCounts::BANDS must cover every field exactly once"
+        );
+
+        // Each accessor must read a distinct field, in the declared order.
+        let read: Vec<usize> = SeverityCounts::BANDS
+            .iter()
+            .map(|(_, get)| get(&c))
+            .collect();
+        assert_eq!(read, vec![2, 3, 5, 7, 11, 13, 17, 19]);
+
+        let labels: Vec<&str> = SeverityCounts::BANDS.iter().map(|(l, _)| *l).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Critical",
+                "Important",
+                "Security",
+                "Moderate",
+                "Recommended",
+                "Low",
+                "Optional",
+                "Unknown"
+            ],
+            "band order mirrors Severity::rank(), most urgent first"
+        );
+    }
+
+    /// `AddAssign` is the other field-wise site; it must agree with `BANDS` too.
+    #[test]
+    fn severity_counts_add_assign_sums_every_band() {
+        let a = SeverityCounts {
+            critical: 1,
+            important: 2,
+            security: 3,
+            moderate: 4,
+            recommended: 5,
+            low: 6,
+            optional: 7,
+            unknown: 8,
+        };
+        let mut sum = SeverityCounts::default();
+        sum += &a;
+        sum += &a;
+        assert_eq!(sum.total(), a.total() * 2);
+        for ((_, get), expected) in SeverityCounts::BANDS
+            .iter()
+            .zip([2, 4, 6, 8, 10, 12, 14, 16])
+        {
+            assert_eq!(get(&sum), expected);
+        }
+    }
     use super::*;
     use crate::model::OsInfo;
 
@@ -1041,6 +1243,50 @@ mod tests {
             locations: HashMap::from([(100, "HQ".to_string())]),
             roles: HashMap::from([(2, "Domain Controller".to_string())]),
         }
+    }
+
+    /// A row must not disagree with itself. Some NinjaOne endpoints return these
+    /// `*At` fields in **milliseconds**; the displayed date goes through
+    /// `unix_to_datetime` (which normalises), so writing the raw value into the sort
+    /// timestamp made a millisecond-valued record render as 2026 while sorting as a
+    /// year-58000 date — always winning "latest failure" and the First-seen sort.
+    #[test]
+    fn row_timestamps_are_normalised_like_the_dates_beside_them() {
+        let seconds = 1_777_000_000_f64;
+        let mut ms_patch = patch(1, "FAILED", "CRITICAL", None);
+        ms_patch.collected_timestamp = Some(seconds * 1000.0);
+        ms_patch.installed_timestamp = Some(seconds * 1000.0);
+
+        let devices = [device(1, 10, "Windows Server 2022")];
+        let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+        let patches = vec![ms_patch];
+        let rows = build_rows(
+            &by_id,
+            &maps(),
+            &[PatchSource {
+                patches: &refs(&patches),
+                type_label: "OS",
+                status_override: None,
+                status_filter: None,
+            }],
+            &FilterParams::default(),
+        );
+
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(
+            r.first_seen_ts,
+            Some(seconds as i64),
+            "a millisecond value must be normalised, not stored raw"
+        );
+        assert_eq!(r.installed_ts, Some(seconds as i64));
+        // And the timestamp must agree with the date rendered next to it.
+        let from_ts = DateTime::<Utc>::from_timestamp(r.first_seen_ts.unwrap(), 0).unwrap();
+        assert_eq!(
+            r.first_seen_date,
+            fmt_dt(Some(from_ts)),
+            "the sort timestamp and the displayed date must describe the same instant"
+        );
     }
 
     #[test]
@@ -1733,6 +1979,134 @@ mod tests {
         assert_eq!(page[0].device_name, "srv1");
         assert_eq!(page[1].device_name, "srv2");
         assert!(page_rows(&rows, 10, 2, None).is_empty(), "offset past end");
+    }
+
+    /// Every `RowSortKey` variant round-trips: each sorts ascending, and reverses
+    /// under `desc`. Only 3 of the 12 were covered, so a key wired to the wrong
+    /// field — or one added without a `compare_rows` arm — went unnoticed.
+    #[test]
+    fn every_sort_key_orders_and_reverses() {
+        // `lo` and `hi` differ in exactly one field, and `lo` must come first when
+        // ascending. `device_id` (1 = lo, 2 = hi) is the discriminator, so a key
+        // wired to the wrong field is caught by position rather than by re-asking
+        // the comparator under test.
+        let base = |id: i64| PatchRow {
+            device_id: id,
+            ..failed_row(1, "dev", "KB1", None)
+        };
+        macro_rules! case {
+            ($key:expr, $field:ident, $lo:expr, $hi:expr) => {{
+                let mut l = base(1);
+                l.$field = $lo;
+                let mut h = base(2);
+                h.$field = $hi;
+                ($key, l, h)
+            }};
+        }
+
+        let cases: Vec<(RowSortKey, PatchRow, PatchRow)> = vec![
+            case!(
+                RowSortKey::Organization,
+                organization,
+                "alpha".into(),
+                "Beta".into()
+            ),
+            case!(
+                RowSortKey::Location,
+                location,
+                Some("aisle".into()),
+                Some("Bay".into())
+            ),
+            case!(
+                RowSortKey::Role,
+                device_role,
+                Some("app".into()),
+                Some("DB".into())
+            ),
+            case!(
+                RowSortKey::Device,
+                device_name,
+                "alpha".into(),
+                "Beta".into()
+            ),
+            case!(
+                RowSortKey::Os,
+                os_name,
+                Some("alpine".into()),
+                Some("Windows".into())
+            ),
+            case!(
+                RowSortKey::PatchType,
+                patch_type,
+                "OS".into(),
+                "SOFTWARE".into()
+            ),
+            case!(RowSortKey::Kb, kb, Some("KB1".into()), Some("KB2".into())),
+            case!(RowSortKey::Name, name, "aardvark".into(), "Zebra".into()),
+            // Ascending severity is most-urgent-first, so the HIGHER rank is `lo`.
+            case!(RowSortKey::Severity, severity_rank, 7, 2),
+            case!(
+                RowSortKey::Status,
+                status,
+                "Approved".into(),
+                "Failed".into()
+            ),
+            case!(
+                RowSortKey::FirstSeenDate,
+                first_seen_ts,
+                Some(100),
+                Some(200)
+            ),
+            case!(
+                RowSortKey::InstalledDate,
+                installed_ts,
+                Some(100),
+                Some(200)
+            ),
+        ];
+
+        assert_eq!(
+            cases.len(),
+            12,
+            "every RowSortKey variant needs a case here"
+        );
+
+        for (key, lo, hi) in cases {
+            // Fed in reverse so an unsorted passthrough fails.
+            let rows = vec![hi, lo];
+            let ids = |desc: bool| -> Vec<i64> {
+                page_rows(&rows, 0, 10, Some(RowSort { key, desc }))
+                    .iter()
+                    .map(|r| r.device_id)
+                    .collect()
+            };
+            assert_eq!(ids(false), vec![1, 2], "{key:?} did not order ascending");
+            assert_eq!(ids(true), vec![2, 1], "{key:?} did not reverse under desc");
+        }
+    }
+
+    /// `PatchType` and `Status` compare case-sensitively (byte order), unlike the
+    /// name-ish keys. Both are backend-normalised values, so this pins the current
+    /// behavior rather than leaving it accidental.
+    #[test]
+    fn patch_type_and_status_sort_by_byte_order() {
+        let lower = PatchRow {
+            patch_type: "os".into(),
+            ..failed_row(1, "a", "KB1", None)
+        };
+        let upper = PatchRow {
+            patch_type: "OS".into(),
+            ..failed_row(2, "b", "KB1", None)
+        };
+        let sort = RowSort {
+            key: RowSortKey::PatchType,
+            desc: false,
+        };
+        assert_eq!(
+            compare_rows(&upper, &lower, sort),
+            Ordering::Less,
+            "uppercase sorts before lowercase — byte order, not case-insensitive"
+        );
     }
 
     #[test]

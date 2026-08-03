@@ -7,27 +7,40 @@
 use std::fmt::Write;
 
 use crate::rows::{
-    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, OrgSeverity, OsCompliance,
-    QueryResult, SeverityCounts,
+    AgeBucket, ComplianceBucket, DeviceSummary, FailureCell, FailureGroup, OrgSeverity,
+    OsCompliance, QueryResult, SeverityCounts,
 };
 
 /// At most this many table rows are rendered per section; a fleet-scale failure or
 /// reboot list is summarized rather than dumped (a note records the truncation).
 const MAX_TABLE_ROWS: usize = 100;
 
-/// Severity bands in most-to-least-urgent order, paired with their bar color.
-/// Mirrors `Severity::rank()` ordering, including NinjaOne's two non-MSRC
-/// classifications (`Security`, `Recommended`).
-const SEVERITY_BANDS: [(&str, &str); 8] = [
-    ("Critical", "#dc2626"),
-    ("Important", "#ea580c"),
-    ("Security", "#c026d3"),
-    ("Moderate", "#d97706"),
-    ("Recommended", "#0891b2"),
-    ("Low", "#2563eb"),
-    ("Optional", "#6b7280"),
-    ("Unknown", "#9ca3af"),
+/// Bar color per severity band, in the same order as [`SeverityCounts::BANDS`].
+///
+/// Only the colors live here — the labels and the counts come from
+/// `SeverityCounts::BANDS`, so this file no longer restates the vocabulary. The
+/// length is tied to it by the array type, so adding a band without a color is a
+/// compile error rather than a chart that silently drops a segment.
+const SEVERITY_COLORS: [&str; SeverityCounts::BANDS.len()] = [
+    "#dc2626", // Critical
+    "#ea580c", // Important
+    "#c026d3", // Security
+    "#d97706", // Moderate
+    "#0891b2", // Recommended
+    "#2563eb", // Low
+    "#6b7280", // Optional
+    "#9ca3af", // Unknown
 ];
+
+/// The severity bands as (label, count, color), derived rather than enumerated.
+fn severity_bands(
+    counts: &SeverityCounts,
+) -> impl Iterator<Item = (&'static str, usize, &'static str)> + use<'_> {
+    SeverityCounts::BANDS
+        .iter()
+        .zip(SEVERITY_COLORS)
+        .map(move |((label, get), color)| (*label, get(counts), color))
+}
 
 /// Escapes the five HTML-significant characters so interpolated names can't inject
 /// markup (or break the surrounding attribute/element) into the report.
@@ -71,31 +84,9 @@ fn compliance_color(pct: f64) -> &'static str {
 fn total_severity(by_org: &[OrgSeverity]) -> SeverityCounts {
     let mut t = SeverityCounts::default();
     for o in by_org {
-        t.critical += o.counts.critical;
-        t.important += o.counts.important;
-        t.security += o.counts.security;
-        t.moderate += o.counts.moderate;
-        t.recommended += o.counts.recommended;
-        t.low += o.counts.low;
-        t.optional += o.counts.optional;
-        t.unknown += o.counts.unknown;
+        t += &o.counts;
     }
     t
-}
-
-/// Reads a severity band's count off a `SeverityCounts` by its `SEVERITY_BANDS`
-/// label (the catch-all is `Unknown`).
-fn severity_value(counts: &SeverityCounts, label: &str) -> usize {
-    match label {
-        "Critical" => counts.critical,
-        "Important" => counts.important,
-        "Security" => counts.security,
-        "Moderate" => counts.moderate,
-        "Recommended" => counts.recommended,
-        "Low" => counts.low,
-        "Optional" => counts.optional,
-        _ => counts.unknown,
-    }
 }
 
 /// Builds the standalone HTML report. Infallible — writing into a `String` via
@@ -233,10 +224,7 @@ fn write_severity_chart(buf: &mut String, total: &SeverityCounts) {
     // patches" while the in-app chart on the same cached result showed thousands;
     // a mixed backlog overflowed the fixed-width track and clipped the low bands off
     // the right while overstating every visible width.
-    let sum: usize = SEVERITY_BANDS
-        .iter()
-        .map(|(label, _)| severity_value(total, label))
-        .sum();
+    let sum = total.total();
     if sum == 0 {
         buf.push_str("<p class=\"empty\">No pending patches.</p>");
         return;
@@ -248,8 +236,7 @@ fn write_severity_chart(buf: &mut String, total: &SeverityCounts) {
         w = track as i32
     );
     let mut x = 0.0_f64;
-    for (label, color) in SEVERITY_BANDS {
-        let v = severity_value(total, label);
+    for (_, v, color) in severity_bands(total) {
         if v == 0 {
             continue;
         }
@@ -261,8 +248,7 @@ fn write_severity_chart(buf: &mut String, total: &SeverityCounts) {
         x += seg;
     }
     buf.push_str("</svg><ul class=\"legend\">");
-    for (label, color) in SEVERITY_BANDS {
-        let v = severity_value(total, label);
+    for (label, v, color) in severity_bands(total) {
         if v == 0 {
             continue;
         }
@@ -318,22 +304,29 @@ fn write_failures_table(buf: &mut String, failures: &[FailureGroup]) {
         );
         return;
     }
-    buf.push_str(
-        "<table><thead><tr><th>Severity</th><th>KB</th><th>Patch</th>\
-         <th>Affected devices</th><th>Latest failure</th><th>Devices</th></tr></thead><tbody>",
-    );
+    // Headers and cells both come from `FailureGroup::COLUMNS`, the same list the
+    // Excel exporter writes, so the two renderings of one cached result cannot
+    // disagree about the columns — this table used to omit `Patch Type` entirely.
+    buf.push_str("<table><thead><tr>");
+    for (title, _) in FailureGroup::COLUMNS {
+        let _ = write!(buf, "<th>{}</th>", escape_html(title));
+    }
+    buf.push_str("</tr></thead><tbody>");
     for f in failures.iter().take(MAX_TABLE_ROWS) {
-        let sev = escape_html(&f.severity);
-        let kb = escape_html(f.kb.as_deref().unwrap_or("\u{2014}"));
-        let name = escape_html(&f.name);
-        let devices = escape_html(&f.device_names.join(", "));
-        let latest = escape_html(f.latest_failure.as_deref().unwrap_or("\u{2014}"));
-        let _ = write!(
-            buf,
-            "<tr><td>{sev}</td><td>{kb}</td><td>{name}</td>\
-             <td class=\"num\">{n}</td><td>{latest}</td><td>{devices}</td></tr>",
-            n = f.affected_devices
-        );
+        buf.push_str("<tr>");
+        for (_, value) in FailureGroup::COLUMNS {
+            match value(f) {
+                // An em dash reads better than a blank cell in a printed report.
+                FailureCell::Text(s) if s.is_empty() => buf.push_str("<td>\u{2014}</td>"),
+                FailureCell::Text(s) => {
+                    let _ = write!(buf, "<td>{}</td>", escape_html(&s));
+                }
+                FailureCell::Count(n) => {
+                    let _ = write!(buf, "<td class=\"num\">{n}</td>");
+                }
+            }
+        }
+        buf.push_str("</tr>");
     }
     buf.push_str("</tbody></table>");
     if failures.len() > MAX_TABLE_ROWS {
@@ -406,6 +399,68 @@ footer{margin-top:32px;color:#9ca3af;font-size:11px;border-top:1px solid #e5e7eb
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The HTML report and the Excel workbook render the same `FailureGroup` list,
+    /// so they must agree on the columns. They previously did not: the workbook had
+    /// seven, the report six, silently missing `Patch Type`.
+    #[test]
+    fn the_failure_table_renders_every_shared_column() {
+        let html = render_report(&sample_result());
+        for (title, _) in FailureGroup::COLUMNS {
+            assert!(
+                html.contains(&format!("<th>{title}</th>")),
+                "failure table is missing the {title:?} column"
+            );
+        }
+        // And the value that used to be dropped actually reaches the cell.
+        assert!(
+            html.contains("<td>OS</td>"),
+            "Patch Type's value must be rendered, not just its header"
+        );
+    }
+
+    /// Every color has a band and vice versa; the array types tie the lengths, and
+    /// this pins the pairing to the declared order.
+    #[test]
+    fn severity_bands_pair_each_label_with_its_color() {
+        let counts = SeverityCounts {
+            critical: 1,
+            important: 1,
+            security: 1,
+            moderate: 1,
+            recommended: 1,
+            low: 1,
+            optional: 1,
+            unknown: 1,
+        };
+        let bands: Vec<_> = severity_bands(&counts).collect();
+        assert_eq!(bands.len(), SeverityCounts::BANDS.len());
+        assert_eq!(bands[0].0, "Critical");
+        assert_eq!(bands[0].2, "#dc2626");
+        assert_eq!(bands[bands.len() - 1].0, "Unknown");
+        assert_eq!(bands[bands.len() - 1].2, "#9ca3af");
+        assert_eq!(counts.total(), 8);
+    }
+
+    /// A backlog made up only of NinjaOne's two non-MSRC classifications must chart
+    /// normally. The hand-written denominator used to omit both, so this printed
+    /// "No pending patches" while the in-app chart showed thousands.
+    #[test]
+    fn a_classification_only_backlog_still_charts() {
+        let mut buf = String::new();
+        let counts = SeverityCounts {
+            security: 40,
+            recommended: 60,
+            ..Default::default()
+        };
+        write_severity_chart(&mut buf, &counts);
+        assert!(!buf.contains("No pending patches"), "got: {buf}");
+        assert!(buf.contains("Security: 40"));
+        assert!(buf.contains("Recommended: 60"));
+        // Segment widths must fill the track exactly, not overflow it.
+        assert!(buf.contains("width=\"248.0\""), "got: {buf}");
+        assert!(buf.contains("width=\"372.0\""), "got: {buf}");
+    }
 
     #[test]
     fn escape_html_escapes_markup() {

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rust_xlsxwriter::{Color, Format, Workbook};
 
 use crate::model::PatchRow;
-use crate::rows::{ComplianceBucket, DeviceSummary, FailureGroup, OsCompliance};
+use crate::rows::{ComplianceBucket, DeviceSummary, FailureCell, FailureGroup, OsCompliance};
 
 const DETAIL_HEADERS: [&str; 14] = [
     "Organization",
@@ -48,15 +48,12 @@ const REBOOT_HEADERS: [&str; 6] = [
     "Pending Patches",
 ];
 
-const FAILURE_HEADERS: [&str; 7] = [
-    "Severity",
-    "Patch Type",
-    "KB",
-    "Patch",
-    "Affected Devices",
-    "Latest Failure",
-    "Devices",
-];
+/// Column widths for the Patch Failures sheet, positionally paired with
+/// [`FailureGroup::COLUMNS`] — which is where the headers and cell values live, so
+/// the workbook and the HTML report render the same columns. Tying the length to
+/// `COLUMNS.len()` makes a new column without a width a compile error.
+const FAILURE_WIDTHS: [f64; FailureGroup::COLUMNS.len()] =
+    [11.0, 11.0, 12.0, 40.0, 16.0, 20.0, 60.0];
 
 fn header_format() -> Format {
     Format::new()
@@ -250,25 +247,27 @@ fn write_failures_sheet(
         .set_name("Patch Failures")
         .context("name failures sheet")?;
 
-    for (col, title) in FAILURE_HEADERS.iter().enumerate() {
+    for (col, (title, _)) in FailureGroup::COLUMNS.iter().enumerate() {
         sheet
             .write_string_with_format(0, col as u16, *title, header)
             .context("write header")?;
     }
 
+    // Cells are written from the same accessor list that produced the headers, so a
+    // column can no longer be headed one thing and filled with another.
     for (i, f) in failures.iter().enumerate() {
         let row = (i + 1) as u32;
-        sheet.write_string(row, 0, &f.severity)?;
-        sheet.write_string(row, 1, &f.patch_type)?;
-        sheet.write_string(row, 2, f.kb.as_deref().unwrap_or_default())?;
-        sheet.write_string(row, 3, &f.name)?;
-        sheet.write_number(row, 4, f.affected_devices as f64)?;
-        sheet.write_string(row, 5, f.latest_failure.as_deref().unwrap_or_default())?;
-        sheet.write_string(row, 6, f.device_names.join(", "))?;
+        for (col, (_, value)) in FailureGroup::COLUMNS.iter().enumerate() {
+            let col = col as u16;
+            match value(f) {
+                FailureCell::Text(s) => sheet.write_string(row, col, &s)?,
+                FailureCell::Count(n) => sheet.write_number(row, col, n as f64)?,
+            };
+        }
     }
 
     sheet.set_freeze_panes(1, 0).context("freeze header")?;
-    apply_widths(sheet, &[11.0, 11.0, 12.0, 40.0, 16.0, 20.0, 60.0])?;
+    apply_widths(sheet, &FAILURE_WIDTHS)?;
     Ok(())
 }
 
