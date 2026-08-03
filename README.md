@@ -49,8 +49,11 @@ web-rs/      Leptos 0.8 (CSR) frontend, bundled by Trunk, talking to the backend
 ```
 
 Backend modules of note: `auth.rs` (PKCE + keyring), `api/` (client, pagination, lookups,
-devices, patches), `filter.rs` (`df` builder + client‑side facets), `rows.rs` (join →
-`PatchRow`, compliance), `export.rs` (`rust_xlsxwriter`).
+devices, patches, actions), `state.rs` (tenant‑stamped whole‑fleet + result caches),
+`filter.rs` (`df` builder + client‑side facets), `rows.rs` (join → `PatchRow`, compliance,
+SLA/severity/age rollups), `actions.rs` + `commands/actions.rs` (opt‑in device‑action
+guardrails, dispatch and job polling), `export.rs` (`rust_xlsxwriter`), `report.rs`
+(standalone HTML report).
 
 ## NinjaOne setup
 

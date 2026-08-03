@@ -11,6 +11,48 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Signing out on its own during a query.** Every API call refreshes the access token when it is
+  stale, and a query deliberately fans out many calls at once — so they could all refresh the *same*
+  refresh token simultaneously. With token rotation, every loser of that race presented an
+  already-used token, and the app treated the resulting rejection as "your session is dead" and
+  erased the stored credential the winner had just saved. The refresh is now single-flight (one
+  grant, the rest wait for it), and the credential is only cleared when the server actually says the
+  grant is invalid — a rate limit, a gateway error, or a captive-portal page no longer costs you your
+  sign-in.
+- **The table showing one query while export and paging held another.** An auto-refresh tick
+  overlapping a manual **Run query** could finish in either order, and whichever finished last won
+  the cache — so the rows on screen, the rows you paged to, and the rows in an Excel export could
+  come from different queries. The run you started last now wins consistently, on both sides. A query
+  that spans an instance switch is discarded rather than being filed under the new tenant.
+- **Patch actions: approving one thing and being able to send another.** The confirmation token did
+  not cover *Include offline devices*, *Override maintenance window*, or the **Run as** identity, so
+  an approval obtained with those settings still validated after they were changed. All three are now
+  bound to the confirmation, and changing any of them re-opens the dialog instead of silently
+  widening what gets dispatched.
+- **Jobs that were dispatched but never polled.** A batch sent in the moment the job poller was
+  shutting down could be left with nothing watching it, so it sat unresolved until the next dispatch
+  happened to start a new poller.
+- **A wrong "latest failure" and a wrong First seen sort.** Some patch records arrive with
+  millisecond timestamps. The displayed date handled that, but the value used for *sorting* did not —
+  so an affected row displayed the correct date while sorting as though it were thousands of years in
+  the future, permanently winning "latest failure" and pinning itself to the top of a First-seen
+  sort.
+- **The HTML report's failure table was missing the Patch Type column** that the Excel export has
+  had all along. Both now render from one shared column definition.
+- **A very large day value in Settings could crash a query.** The install and SLA windows are now
+  bounded (1–3650 days) at both ends.
+- **The Needs Reboot tab now pages** instead of rendering every device at once, matching the rest of
+  the app.
+- Grouping while no query result is loaded (after signing out, or switching instance mid-request) no
+  longer raises a spurious "Run a query before grouping" error.
+
+### Changed
+
+- The README's backend module map and several code comments described behavior the code no longer
+  had; they now match what actually happens.
+
 ## [0.11.0] - 2026-07-29
 
 ### Added
