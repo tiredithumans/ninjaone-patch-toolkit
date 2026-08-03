@@ -736,7 +736,23 @@ impl AppState {
         self.run.query_started_ms.set(started);
         flag.set(true);
         spawn_local(async move {
-            match api::query_patches(args, seq, force).await {
+            let outcome = api::query_patches(args, seq, force).await;
+            // Apply only if this is still the newest run. Queries overlap routinely
+            // (an auto-refresh tick fires while a manual Run is still paging the
+            // fleet) and they do not resolve in start order, so without this a
+            // superseded response could overwrite a newer one on screen — while the
+            // backend, which now drops the superseded *cache* write, kept the newer
+            // rows. The table would then disagree with paging and export.
+            //
+            // Not an early return: this run still owns the busy/refreshing flag it
+            // set, and a manual Run superseded by a refresh tick would otherwise
+            // leave `busy` stuck on forever.
+            let superseded = self.run.query_seq.get_untracked() != seq;
+            if superseded {
+                flag.set(false);
+                return;
+            }
+            match outcome {
                 Ok(r) => {
                     // Jump back to page 1 on a manual run; an auto-refresh keeps the
                     // current page, clamped in case the new result is shorter.

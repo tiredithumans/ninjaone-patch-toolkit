@@ -16,6 +16,7 @@ use crate::rows::{
     build_failures, build_rows, build_severity_by_org, group_member_page, group_page, page_rows,
     pending_counts,
 };
+use crate::settings::MAX_WINDOW_DAYS;
 use crate::state::{AppState, CurrentPatches};
 
 /// The org/location/role lookups a query joins against, each shared behind `Arc`
@@ -75,8 +76,13 @@ pub async fn query_patches(
     force_refresh: Option<bool>,
 ) -> Result<QuerySummary, UiError> {
     let settings = state.settings_snapshot();
+    // Claimed before any fetch so overlapping queries are ordered by *start*, and so
+    // the result is stamped with the tenant it was actually fetched under. Redeemed
+    // at the store below.
+    let token = state.begin_query();
     // `qid` (0 when the frontend omits it) lets the frontend drop progress events
-    // tagged with a run it has already superseded.
+    // tagged with a run it has already superseded. Display only — the authoritative
+    // ordering is `token`, which the frontend cannot influence.
     let qid = query_id.unwrap_or(0);
     // A re-filter (Run query) reuses the cached whole-fleet data; an auto-refresh
     // tick / manual refresh passes `force_refresh` to pull fresh patch state.
@@ -109,7 +115,10 @@ pub async fn query_patches(
         devices_fut,
         current_fut,
         settings.install_window_days,
-        settings.sla_days,
+        // Clamped for the same panic-guard reason as the install window: the SLA
+        // window reaches `Duration::days` in the compliance rollups, and a
+        // settings.json predating the range validation can still hold anything.
+        settings.sla_days.clamp(1, MAX_WINDOW_DAYS),
         args,
         Utc::now(),
         &progress,
@@ -120,8 +129,16 @@ pub async fn query_patches(
     // Hand the frontend a lightweight summary (first page + rollups) and keep the
     // full result in the tenant-stamped cache for paging (`get_patch_rows`) and
     // export — moving it in rather than cloning every row.
+    //
+    // The write is dropped if a newer query started, or if the operator switched
+    // tenant, while this one was in flight. The summary is still returned: the
+    // frontend applies only its own newest run (`query_seq`), so a superseded
+    // response is discarded there rather than surfaced as an error the operator
+    // never caused.
     let summary = QuerySummary::from_result(&result, FIRST_PAGE_ROWS);
-    state.store_last_result(result);
+    if !state.store_last_result_if_current(token, result) {
+        tracing::debug!(qid, "query superseded before its result could be cached");
+    }
     Ok(summary)
 }
 
@@ -158,7 +175,8 @@ where
     // Resolve the relative first-seen window into an absolute lower bound; the
     // filter is applied client-side in build_rows, which has no clock.
     if let Some(days) = filter.detected_within_days {
-        filter.detected_after = Some((now - Duration::days(days.max(0))).timestamp());
+        filter.detected_after =
+            Some((now - Duration::days(days.clamp(0, MAX_WINDOW_DAYS))).timestamp());
     }
     // Install-history queries are fetched fresh per query and narrowed server-side by
     // identity (org/location/role) via the patch `df`; the node-class facet and the
@@ -198,13 +216,16 @@ where
     };
     let include_os = args.patch_type.includes_os();
     let include_sw = args.patch_type.includes_software();
-    // The configured window is validated >= 1 in save_settings; clamp the optional
-    // per-query override the same way so a 0/negative lookback can't invert into a
-    // future `after` bound that would match no install history.
+    // The configured window is validated 1..=MAX_WINDOW_DAYS in save_settings; clamp
+    // the optional per-query override the same way so a 0/negative lookback can't
+    // invert into a future `after` bound that would match no install history. The
+    // upper bound is load-bearing too: `Duration::days` panics on an out-of-range day
+    // count, and a settings.json written before that validation existed (or edited by
+    // hand) can still carry one.
     let days = args
         .install_after_days
         .unwrap_or(install_window_days)
-        .max(1);
+        .clamp(1, MAX_WINDOW_DAYS);
     let after = (now - Duration::days(days)).timestamp();
 
     // 2. The cached whole-fleet devices/current-patches (futures), the lookups, and
@@ -386,6 +407,14 @@ where
 /// page through a large fleet without receiving every row over IPC. `sort` re-orders
 /// the view per request (the cached rows keep their canonical order). Returns an
 /// empty page when there is no cached result or the offset is past the end.
+///
+/// All three paging commands treat a cache miss the same way — an empty page, not an
+/// error. A miss is a normal transient: a tenant switch, a sign-out, or a superseded
+/// query can all retire the cache while a page request is in flight, and none of them
+/// is something the operator did wrong. `get_patch_groups` used to error here, which
+/// toasted "Run a query before grouping" at someone who had just switched instance.
+/// The frontend renders its own "Run a query" empty state from the absence of a
+/// result, so the error carried no information the UI lacked.
 #[tauri::command]
 pub async fn get_patch_rows(
     state: State<'_, AppState>,
@@ -417,10 +446,13 @@ pub async fn get_patch_groups(
     offset: usize,
     limit: usize,
 ) -> Result<GroupPage, UiError> {
-    state
+    // Empty on a miss, matching `get_patch_rows` / `get_patch_group_members` — see
+    // the note on `get_patch_rows`.
+    let page = state
         .with_current_result(|r| group_page(&r.rows, group_by, offset, limit))
         .map_err(|_| UiError::new("result cache poisoned"))?
-        .ok_or_else(|| UiError::new("Run a query before grouping"))
+        .unwrap_or_default();
+    Ok(page)
 }
 
 /// Serves one page of a single group's member rows. `key` is the opaque
