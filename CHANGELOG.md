@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-03
+
 ### Fixed
 
 - **Signing out on its own during a query.** Every API call refreshes the access token when it is
