@@ -11,7 +11,7 @@
 //! modified frontend must not be able to talk the backend into a wider blast
 //! radius than Settings allows.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -43,9 +43,18 @@ pub struct ActionRequest {
     pub kind: ActionKind,
     pub device_ids: Vec<i64>,
     /// KBs (OS) or product titles (software) for a script that accepts an allow
-    /// list. Ignored by the native endpoints, which have no per-patch variant.
+    /// list, keyed by the device that gets them. Ignored by the native endpoints,
+    /// which have no per-patch variant.
+    ///
+    /// A device is sent only the patches ticked *on it*. This replaced a batch-wide
+    /// `targets: Vec<String>` that handed every device the union of the selection, so
+    /// a device received KBs it did not have and the operator's "install this patch
+    /// on that device" became "install every selected patch everywhere" — invisible
+    /// in the confirmation dialog, since the one parameter string it showed looked
+    /// correct for whichever device you checked it against. Don't reintroduce a
+    /// batch-wide list; a genuinely uniform string is what `parameters` is for.
     #[serde(default)]
-    pub targets: Vec<String>,
+    pub device_targets: HashMap<i64, Vec<String>>,
     #[serde(default)]
     pub script_id: Option<i64>,
     #[serde(default)]
@@ -158,11 +167,13 @@ fn require_actions_enabled(state: &AppState) -> Result<(), UiError> {
 /// under one blast radius validated under a wider one; `run_as` selects the
 /// execution identity sent to NinjaOne, so an approval for `system` validated after
 /// being switched to a stored credential.
-fn request_hash(req: &ActionRequest, parameters: &str) -> String {
+fn request_hash(req: &ActionRequest, parameters: &str, script: Option<&ScriptRef>) -> String {
     let ActionRequest {
         kind,
         device_ids,
-        targets,
+        // Covered by the `parameters` argument, which is the canonical per-device
+        // rendering these compose into — the only form that reaches NinjaOne.
+        device_targets: _,
         script_id,
         script_uid,
         // Display-only and audit-only fields are deliberately excluded: they change
@@ -189,7 +200,7 @@ fn request_hash(req: &ActionRequest, parameters: &str) -> String {
     let mut hasher = Sha256::new();
     // Every field is followed by a separator byte that cannot occur in the encoded
     // values, so no two different requests can concatenate to the same input (e.g.
-    // targets ["a","b"] vs ["a\u{1f}b"]).
+    // parameters "a" ‖ "b" vs "ab" ‖ "").
     let mut field = |bytes: &[u8]| {
         hasher.update(bytes);
         hasher.update([0x1f]);
@@ -203,9 +214,19 @@ fn request_hash(req: &ActionRequest, parameters: &str) -> String {
             .join(",")
             .as_bytes(),
     );
-    field(targets.join("\u{1f}").as_bytes());
     field(&script_id.unwrap_or_default().to_le_bytes());
     field(script_uid.as_deref().unwrap_or_default().as_bytes());
+    // The *resolved* script — for a remediation kind it comes from Settings rather
+    // than the request, so without this an id edited between the dialog opening and
+    // the confirm would run a different script under the same approval.
+    field(
+        match script {
+            Some(ScriptRef::Script { id }) => format!("script:{id}"),
+            Some(ScriptRef::Action { uid }) => format!("action:{uid}"),
+            None => String::new(),
+        }
+        .as_bytes(),
+    );
     field(parameters.as_bytes());
     field(run_as.as_deref().unwrap_or_default().as_bytes());
     field(format!("{reboot:?}").as_bytes());
@@ -226,21 +247,157 @@ fn random_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// The `parameters` string this request will send. Composed from the targets when
-/// the operator hasn't written one by hand.
-fn effective_parameters(req: &ActionRequest) -> Option<String> {
-    if req.kind != ActionKind::Script {
+/// The `parameters` string sent to each device, keyed by device id.
+///
+/// `BTreeMap` rather than `HashMap` so the canonical rendering below — and thus the
+/// confirmation hash — does not depend on iteration order.
+///
+/// Three shapes, one function, because they must agree: `Script` sends one
+/// hand-composed string to every device; a remediation kind composes a *distinct*
+/// string per device from that device's ticked patches; a native endpoint takes no
+/// parameters at all.
+fn per_device_parameters(req: &ActionRequest) -> BTreeMap<i64, String> {
+    if !req.kind.runs_a_script() {
+        return BTreeMap::new();
+    }
+    // A hand-written string is batch-wide by nature and is sent verbatim — the
+    // toolkit never rewrites what the operator typed. The remediation kinds have no
+    // field to type it in, and honoring one there would silently discard the
+    // per-device targeting that is their entire purpose.
+    if !req.kind.is_remediation()
+        && let Some(verbatim) = req
+            .parameters
+            .as_ref()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+    {
+        return req
+            .device_ids
+            .iter()
+            .map(|id| (*id, verbatim.to_string()))
+            .collect();
+    }
+    // Otherwise compose from that device's own targets. `device_targets` is empty
+    // when nothing is being targeted (KB targeting off, or a script that takes no
+    // allow list), which yields the same empty-list string for every device.
+    req.device_ids
+        .iter()
+        .map(|id| {
+            let targets = req.device_targets.get(id).cloned().unwrap_or_default();
+            (
+                *id,
+                crate::actions::build_parameters(req.kind, &targets, req.reboot, req.dry_run),
+            )
+        })
+        .collect()
+}
+
+/// The per-device parameters as one canonical string, for the confirmation hash.
+///
+/// Every string that will reach NinjaOne appears here exactly once, bound to the
+/// device it will be sent to, so re-ticking a single row on a single device
+/// invalidates the approval.
+///
+/// Each value is **length-prefixed**. A separator alone is not enough here: unlike
+/// the fields `request_hash` joins, a parameter string can be typed by hand in the
+/// script picker, so `{1: "a\u{1e}2=b"}` would otherwise render identically to
+/// `{1: "a", 2: "b"}` — two different dispatches sharing one approval.
+fn canonical_parameters(params: &BTreeMap<i64, String>) -> String {
+    params
+        .iter()
+        .map(|(id, p)| format!("{id}:{}:{p}", p.len()))
+        .collect::<Vec<_>>()
+        .join("\u{1e}")
+}
+
+/// What the operator is shown in the confirmation dialog.
+///
+/// One line per device when the strings differ (remediation), the bare string when
+/// they don't (a hand-driven script) — the toolkit never sends a `parameters` string
+/// the operator has not seen, and with per-device targeting that means all of them.
+fn parameters_preview(
+    params: &BTreeMap<i64, String>,
+    eligible: &[PlannedTarget],
+) -> Option<String> {
+    if params.is_empty() {
         return None;
     }
-    Some(match req.parameters.as_ref().map(|p| p.trim()) {
-        Some(p) if !p.is_empty() => p.to_string(),
-        _ => crate::actions::build_parameters(req.kind, &req.targets, req.reboot, req.dry_run),
-    })
+    let mut distinct = params.values().collect::<BTreeSet<_>>();
+    if distinct.len() <= 1 {
+        return distinct.pop_first().cloned();
+    }
+    Some(
+        eligible
+            .iter()
+            .filter_map(|t| {
+                params
+                    .get(&t.device_id)
+                    .map(|p| format!("{} → {p}", t.device_name))
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// Eligible devices that would be dispatched to with no target list of their own.
+fn untargeted_names<'a>(
+    eligible: &'a [PlannedTarget],
+    device_targets: &HashMap<i64, Vec<String>>,
+) -> Vec<&'a str> {
+    eligible
+        .iter()
+        .filter(|t| !device_targets.contains_key(&t.device_id))
+        .map(|t| t.device_name.as_str())
+        .collect()
+}
+
+/// A device-name list for a warning, capped so a 25-device batch stays one sentence.
+fn summarize_names(names: &[&str]) -> String {
+    const SHOWN: usize = 5;
+    if names.len() <= SHOWN {
+        return names.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        names[..SHOWN].join(", "),
+        names.len() - SHOWN
+    )
+}
+
+/// The script a request will actually run. For a remediation kind it comes from
+/// Settings, never from the request — a stale frontend must not be able to name its
+/// own script and inherit the remediation kind's guardrails.
+fn resolve_script(
+    req: &ActionRequest,
+    settings: &crate::settings::ActionSettings,
+) -> Option<ScriptRef> {
+    if req.kind.is_remediation() {
+        return crate::actions::remediation_script_id(req.kind, settings)
+            .map(|id| ScriptRef::Script { id });
+    }
+    match (req.script_id, req.script_uid.clone()) {
+        (Some(id), _) => Some(ScriptRef::Script { id }),
+        (None, Some(uid)) => Some(ScriptRef::Action { uid }),
+        _ => None,
+    }
+}
+
+/// A planned request, resolved down to exactly what would be dispatched.
+///
+/// The parameters and the script ride along with the plan because all three must be
+/// derived from one pass: the confirmation hash covers them, and `run_action` sends
+/// them. Recomputing any of them separately is how the approved request and the
+/// dispatched one drift apart.
+struct PlannedAction {
+    plan: ActionPlan,
+    /// Device id → the `parameters` string that device will be sent.
+    parameters: BTreeMap<i64, String>,
+    script: Option<ScriptRef>,
 }
 
 /// Shared planning path for `plan_action` and `run_action`, so the two can never
 /// disagree about what the guardrails say.
-async fn build_plan(state: &AppState, req: &ActionRequest) -> Result<ActionPlan, UiError> {
+async fn build_plan(state: &AppState, req: &ActionRequest) -> Result<PlannedAction, UiError> {
     let settings = state.settings_snapshot();
     let devices: Vec<Device> = state
         .fleet_devices(None)
@@ -251,6 +408,16 @@ async fn build_plan(state: &AppState, req: &ActionRequest) -> Result<ActionPlan,
     let (orgs, _, _) = state.lookups().await.map_err(UiError::from)?;
     let org_names: HashMap<i64, String> = orgs.iter().map(|o| (o.id, o.name.clone())).collect();
 
+    // Only the targets belonging to devices actually in this request count — a
+    // frontend that left stale entries in the map must not satisfy the "something is
+    // selected" guardrail with patches for devices it is not dispatching to.
+    let target_count = req
+        .device_ids
+        .iter()
+        .filter_map(|id| req.device_targets.get(id))
+        .map(|t| t.len())
+        .sum();
+
     let mut p = plan(PlanInput {
         kind: req.kind,
         device_ids: &req.device_ids,
@@ -260,17 +427,37 @@ async fn build_plan(state: &AppState, req: &ActionRequest) -> Result<ActionPlan,
         include_offline: req.include_offline,
         override_window: req.override_window,
         reboot_mode: req.reboot_mode,
+        reboot: req.reboot,
         dry_run: req.dry_run,
+        target_count,
         now: Local::now(),
     });
 
-    p.parameters_preview = effective_parameters(req);
+    let parameters = per_device_parameters(req);
+    p.parameters_preview = parameters_preview(&parameters, &p.eligible);
+    let script = resolve_script(req, &settings.actions);
 
     // Request-shape problems the pure planner can't see, since they depend on
     // settings and on which script was picked.
     if req.kind == ActionKind::Script && req.script_id.is_none() && req.script_uid.is_none() {
         p.blockers
             .push("No script selected. Choose one from the automation library.".into());
+    }
+    // A hand-picked script with KB targeting on, dispatched to a device that has
+    // nothing ticked, receives an empty allow list. Not a blocker — the operator
+    // chose those devices and the script may do something useful without a list —
+    // but a remediation script would install nothing on them, and the per-device
+    // preview alone is easy to skim past when it runs to 25 lines.
+    if req.kind == ActionKind::Script && !req.device_targets.is_empty() {
+        let empty = untargeted_names(&p.eligible, &req.device_targets);
+        if !empty.is_empty() {
+            p.warnings.push(format!(
+                "{} device(s) have no selected patches and would be sent an empty allow list ({}). \
+                 A script that only installs from that list will do nothing on them.",
+                empty.len(),
+                summarize_names(&empty)
+            ));
+        }
     }
     if req.kind == ActionKind::Reboot
         && req
@@ -285,7 +472,11 @@ async fn build_plan(state: &AppState, req: &ActionRequest) -> Result<ActionPlan,
             "A reboot needs a stated reason — it is recorded in NinjaOne's activity feed.".into(),
         );
     }
-    Ok(p)
+    Ok(PlannedAction {
+        plan: p,
+        parameters,
+        script,
+    })
 }
 
 /// Reports what an action would do, without doing it.
@@ -295,17 +486,27 @@ pub async fn plan_action(
     request: ActionRequest,
 ) -> Result<ActionPlan, UiError> {
     require_actions_enabled(&state)?;
-    let mut p = build_plan(&state, &request).await?;
+    let PlannedAction {
+        mut plan,
+        parameters,
+        script,
+    } = build_plan(&state, &request).await?;
 
     // A blocked plan has nothing to confirm, so it gets no token. Scans are not
     // mutating and skip confirmation entirely.
-    if !p.is_blocked() && request.kind.is_mutating() {
-        let params = p.parameters_preview.clone().unwrap_or_default();
+    if !plan.is_blocked() && request.kind.is_mutating() {
         let token = random_token();
-        state.store_pending_confirm(token.clone(), request_hash(&request, &params));
-        p.confirm_token = Some(token);
+        state.store_pending_confirm(
+            token.clone(),
+            request_hash(
+                &request,
+                &canonical_parameters(&parameters),
+                script.as_ref(),
+            ),
+        );
+        plan.confirm_token = Some(token);
     }
-    Ok(p)
+    Ok(plan)
 }
 
 /// Dispatches an action to every eligible device.
@@ -318,15 +519,25 @@ pub async fn run_action(
     require_actions_enabled(&state)?;
 
     // Re-plan rather than trusting anything the frontend computed.
-    let p = build_plan(&state, &request).await?;
+    let PlannedAction {
+        plan: p,
+        parameters,
+        script,
+    } = build_plan(&state, &request).await?;
     if p.is_blocked() {
         return Err(UiError::new(p.blockers.join(" ")));
     }
 
-    let parameters = p.parameters_preview.clone().unwrap_or_default();
     if request.kind.is_mutating() {
         let token = request.confirm_token.as_deref().unwrap_or_default();
-        if !state.consume_confirm_token(token, &request_hash(&request, &parameters)) {
+        if !state.consume_confirm_token(
+            token,
+            &request_hash(
+                &request,
+                &canonical_parameters(&parameters),
+                script.as_ref(),
+            ),
+        ) {
             return Err(UiError::new(
                 "This action was not confirmed, or the confirmation expired or no longer matches \
                  the selection. Review the plan and confirm again.",
@@ -340,11 +551,6 @@ pub async fn run_action(
         .clone()
         .filter(|r| !r.trim().is_empty())
         .unwrap_or_else(|| settings.actions.run_as.clone());
-    let script = match (request.script_id, request.script_uid.clone()) {
-        (Some(id), _) => Some(ScriptRef::Script { id }),
-        (None, Some(uid)) => Some(ScriptRef::Action { uid }),
-        _ => None,
-    };
     let detail = action_detail(&request);
 
     let (batch_id, id_base) = state.next_job_ids(p.eligible.len() + p.skipped.len());
@@ -393,7 +599,7 @@ pub async fn run_action(
         kind: request.kind,
         script,
         run_as,
-        parameters: parameters.clone(),
+        parameters,
         reason: request.reason.clone().unwrap_or_default(),
         reboot_mode: request.reboot_mode.unwrap_or(RebootMode::Normal),
         dry_run: request.dry_run,
@@ -474,7 +680,9 @@ struct DispatchContext {
     kind: ActionKind,
     script: Option<ScriptRef>,
     run_as: String,
-    parameters: String,
+    /// Device id → its `parameters` string. The one genuinely per-device field in
+    /// here: a remediation script is told which patches to install *on that device*.
+    parameters: BTreeMap<i64, String>,
     reason: String,
     reboot_mode: RebootMode,
     dry_run: bool,
@@ -583,7 +791,13 @@ async fn dispatch_one(
         device_name: target.device_name.clone(),
         organization: target.organization.clone(),
         detail: ctx.detail.clone(),
-        parameters: (!ctx.parameters.is_empty()).then(|| audit::redact_parameters(&ctx.parameters)),
+        // This device's own parameters, so the audit trail records what each device
+        // was actually told to install rather than a batch-wide approximation.
+        parameters: ctx
+            .parameters
+            .get(&target.device_id)
+            .filter(|p| !p.is_empty())
+            .map(|p| audit::redact_parameters(p)),
         dry_run: ctx.dry_run,
         confirm_token_prefix: ctx.confirm_prefix.clone(),
         outcome: "dispatching".into(),
@@ -663,14 +877,27 @@ async fn send_action(
             .device_reboot(device_id, ctx.reboot_mode, &ctx.reason)
             .await
             .map(|_| None),
-        ActionKind::Script => match ctx.script {
-            Some(ref sref) => ctx
-                .api
-                .run_script(device_id, sref, &ctx.parameters, &ctx.run_as)
+        // The remediation kinds are dispatched exactly like a hand-driven script —
+        // they differ only in where the script ref and the parameters came from.
+        ActionKind::Script | ActionKind::OsPatchRemediate | ActionKind::SoftwarePatchRemediate => {
+            let Some(sref) = ctx.script.as_ref() else {
+                return Err(anyhow::anyhow!("no script selected"));
+            };
+            // An empty allow list would install nothing while reporting success, so
+            // it fails here too rather than only in `plan()` — same defense-in-depth
+            // as the dry-run refusal above.
+            let params = ctx.parameters.get(&device_id).map_or("", String::as_str);
+            if ctx.kind.is_remediation() && params.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "refusing to dispatch \"{}\" with no target list for this device",
+                    ctx.kind.label()
+                ));
+            }
+            ctx.api
+                .run_script(device_id, sref, params, &ctx.run_as)
                 .await
-                .map(Some),
-            None => Err(anyhow::anyhow!("no script selected")),
-        },
+                .map(Some)
+        }
     }
 }
 
@@ -857,11 +1084,17 @@ pub async fn list_run_as_options(
 mod tests {
     use super::*;
 
+    /// `request_hash` with no resolved script, which is every case except the two
+    /// remediation kinds.
+    fn hash(req: &ActionRequest, parameters: &str) -> String {
+        request_hash(req, parameters, None)
+    }
+
     fn request(kind: ActionKind, ids: Vec<i64>) -> ActionRequest {
         ActionRequest {
             kind,
             device_ids: ids,
-            targets: Vec::new(),
+            device_targets: HashMap::new(),
             script_id: None,
             script_uid: None,
             script_name: None,
@@ -883,95 +1116,103 @@ mod tests {
     #[test]
     fn request_hash_binds_every_guardrail_and_dispatch_input() {
         let base = request(ActionKind::Reboot, vec![1, 2]);
-        let h = request_hash(&base, "");
+        let h = hash(&base, "");
 
         // `plan()` gates the offline-queue warning on this.
         let mut offline = request(ActionKind::Reboot, vec![1, 2]);
         offline.include_offline = true;
-        assert_ne!(h, request_hash(&offline, ""), "include_offline must bind");
+        assert_ne!(h, hash(&offline, ""), "include_offline must bind");
 
         // ...and the maintenance-window blocker on this.
         let mut window = request(ActionKind::Reboot, vec![1, 2]);
         window.override_window = true;
-        assert_ne!(h, request_hash(&window, ""), "override_window must bind");
+        assert_ne!(h, hash(&window, ""), "override_window must bind");
 
         // `run_as` is sent to NinjaOne verbatim as the execution identity, so an
         // approval for `system` must not validate against a stored credential.
         let mut elevated = request(ActionKind::Reboot, vec![1, 2]);
         elevated.run_as = Some("domain-admin".into());
-        assert_ne!(h, request_hash(&elevated, ""), "run_as must bind");
+        assert_ne!(h, hash(&elevated, ""), "run_as must bind");
 
         let mut reboot = request(ActionKind::Reboot, vec![1, 2]);
         reboot.reboot = RebootChoice::Auto;
-        assert_ne!(h, request_hash(&reboot, ""), "reboot choice must bind");
+        assert_ne!(h, hash(&reboot, ""), "reboot choice must bind");
 
         let mut mode = request(ActionKind::Reboot, vec![1, 2]);
         mode.reboot_mode = Some(RebootMode::Forced);
-        assert_ne!(h, request_hash(&mode, ""), "reboot mode must bind");
+        assert_ne!(h, hash(&mode, ""), "reboot mode must bind");
 
         let mut dry = request(ActionKind::Reboot, vec![1, 2]);
         dry.dry_run = true;
-        assert_ne!(h, request_hash(&dry, ""), "dry_run must bind");
+        assert_ne!(h, hash(&dry, ""), "dry_run must bind");
 
-        let mut targets = request(ActionKind::Reboot, vec![1, 2]);
-        targets.targets = vec!["KB5000001".into()];
-        assert_ne!(h, request_hash(&targets, ""), "targets must bind");
-
-        // The effective parameters are what actually go on the wire.
-        assert_ne!(
-            h,
-            request_hash(&base, "dryRun=false"),
-            "parameters must bind"
-        );
+        // The effective parameters are what actually go on the wire. `device_targets`
+        // binds through them — see `the_confirmation_binds_every_devices_own_parameters`.
+        assert_ne!(h, hash(&base, "dryRun=false"), "parameters must bind");
     }
 
     /// Field values are separated, so two different requests cannot concatenate
     /// into the same hash input.
     #[test]
     fn request_hash_is_not_confusable_across_field_boundaries() {
-        let mut a = request(ActionKind::Script, vec![1]);
-        a.targets = vec!["ab".into()];
-        a.script_uid = Some(String::new());
-
-        let mut b = request(ActionKind::Script, vec![1]);
-        b.targets = vec!["a".into(), "b".into()];
-        b.script_uid = Some(String::new());
-        assert_ne!(request_hash(&a, ""), request_hash(&b, ""));
-
+        // `parameters` and `run_as` are hashed adjacently, so a value that ends where
+        // the next begins must not produce the same input as the pair shifted along.
         let mut c = request(ActionKind::Script, vec![1]);
-        c.targets = vec!["x".into()];
-        c.script_uid = Some("y".into());
-
+        c.run_as = Some("y".into());
         let mut d = request(ActionKind::Script, vec![1]);
-        d.targets = vec!["xy".into()];
-        d.script_uid = None;
-        assert_ne!(request_hash(&c, ""), request_hash(&d, ""));
+        d.run_as = None;
+        assert_ne!(hash(&c, "x"), hash(&d, "xy"));
+    }
+
+    /// The per-device rendering is the hash's only view of `device_targets`, so no
+    /// two distinct target maps may render to the same string.
+    #[test]
+    fn canonical_parameters_cannot_be_forged_across_devices() {
+        // Device 12 with "x" vs device 1 with "2=x" — the id/value boundary.
+        assert_ne!(
+            canonical_parameters(&BTreeMap::from([(12, "x".to_string())])),
+            canonical_parameters(&BTreeMap::from([(1, "2=x".to_string())]))
+        );
+        // ...and the boundary between two devices' entries, including a parameter
+        // string that reproduces the rendering byte for byte. The operator can type
+        // one of these by hand, so a separator alone would not be enough.
+        let two_devices = canonical_parameters(&BTreeMap::from([
+            (1, "a".to_string()),
+            (2, "b".to_string()),
+        ]));
+        for forged in ["a\u{1e}2=b", "a\u{1e}2:1:b"] {
+            assert_ne!(
+                two_devices,
+                canonical_parameters(&BTreeMap::from([(1, forged.to_string())])),
+                "{forged} must not render as two devices' parameters"
+            );
+        }
     }
 
     #[test]
     fn request_hash_ignores_device_order_but_not_membership() {
         let a = request(ActionKind::Reboot, vec![3, 1, 2]);
         let b = request(ActionKind::Reboot, vec![1, 2, 3]);
-        assert_eq!(request_hash(&a, ""), request_hash(&b, ""));
+        assert_eq!(hash(&a, ""), hash(&b, ""));
 
         // Adding a device must invalidate an approval issued for the smaller set.
         let c = request(ActionKind::Reboot, vec![1, 2, 3, 4]);
-        assert_ne!(request_hash(&a, ""), request_hash(&c, ""));
+        assert_ne!(hash(&a, ""), hash(&c, ""));
     }
 
     #[test]
     fn request_hash_covers_the_fields_that_change_what_happens() {
         let base = request(ActionKind::Script, vec![1]);
-        let baseline = request_hash(&base, "kbAllowList=1 dryRun=true");
+        let baseline = hash(&base, "kbAllowList=1 dryRun=true");
 
         assert_ne!(
             baseline,
-            request_hash(&base, "kbAllowList=999 dryRun=false"),
+            hash(&base, "kbAllowList=999 dryRun=false"),
             "different parameters must not reuse an approval"
         );
         assert_ne!(
             baseline,
-            request_hash(
+            hash(
                 &ActionRequest {
                     dry_run: true,
                     ..base.clone()
@@ -982,7 +1223,7 @@ mod tests {
         );
         assert_ne!(
             baseline,
-            request_hash(
+            hash(
                 &ActionRequest {
                     script_id: Some(7),
                     ..base.clone()
@@ -993,7 +1234,7 @@ mod tests {
         );
         assert_ne!(
             baseline,
-            request_hash(
+            hash(
                 &ActionRequest {
                     kind: ActionKind::Reboot,
                     ..base
@@ -1006,26 +1247,173 @@ mod tests {
 
     #[test]
     fn effective_parameters_composes_only_for_scripts() {
-        let mut req = request(ActionKind::Script, vec![1]);
-        req.targets = vec!["KB5040434".into()];
+        // A hand-picked script targets per device too, so its KB targeting cannot
+        // drift back to handing every device the union of the selection.
+        let mut req = request(ActionKind::Script, vec![1, 2]);
+        req.device_targets =
+            HashMap::from([(1, vec!["KB5040434".into()]), (2, vec!["KB5041580".into()])]);
         assert_eq!(
-            effective_parameters(&req).as_deref(),
-            Some("kbAllowList=5040434 rebootBehavior=Never dryRun=false")
+            per_device_parameters(&req),
+            BTreeMap::from([
+                (
+                    1,
+                    "kbAllowList=5040434 rebootBehavior=Never dryRun=false".to_string()
+                ),
+                (
+                    2,
+                    "kbAllowList=5041580 rebootBehavior=Never dryRun=false".to_string()
+                ),
+            ])
         );
 
-        // A hand-written string is used verbatim — never silently rewritten.
+        // A hand-written string is used verbatim — never silently rewritten — and it
+        // is batch-wide by nature, which is the one place that is still correct.
         req.parameters = Some("  -Verbose  ".into());
-        assert_eq!(effective_parameters(&req).as_deref(), Some("-Verbose"));
+        assert_eq!(
+            per_device_parameters(&req),
+            BTreeMap::from([(1, "-Verbose".into()), (2, "-Verbose".into())])
+        );
+
+        // KB targeting off: no per-device targets, so every device gets the same
+        // empty allow list rather than one device's leaking onto another.
+        let bare = request(ActionKind::Script, vec![1, 2]);
+        let empty = "kbAllowList= rebootBehavior=Never dryRun=false";
+        assert_eq!(
+            per_device_parameters(&bare),
+            BTreeMap::from([(1, empty.into()), (2, empty.into())])
+        );
 
         // Native endpoints take no parameters at all.
+        assert!(per_device_parameters(&request(ActionKind::Reboot, vec![1])).is_empty());
+        assert!(per_device_parameters(&request(ActionKind::OsPatchApply, vec![1])).is_empty());
+    }
+
+    /// The devices a hand-picked script would reach with an empty allow list. They
+    /// stay in the batch (the operator chose them), so the dialog has to name them.
+    #[test]
+    fn untargeted_devices_are_named_and_capped() {
+        let eligible: Vec<PlannedTarget> = (1..=8)
+            .map(|id| PlannedTarget {
+                device_id: id,
+                device_name: format!("srv-{id}"),
+                organization: "Contoso".into(),
+                offline: false,
+            })
+            .collect();
+        let targets = HashMap::from([(1, vec!["KB1".to_string()])]);
+
+        let names = untargeted_names(&eligible, &targets);
+        assert_eq!(names.len(), 7, "every device but srv-1 lacks a target list");
+        assert!(!names.contains(&"srv-1"));
+
+        // Capped, so a 25-device batch stays one readable sentence.
         assert_eq!(
-            effective_parameters(&request(ActionKind::Reboot, vec![1])),
-            None
+            summarize_names(&names),
+            "srv-2, srv-3, srv-4, srv-5, srv-6, and 2 more"
+        );
+        assert_eq!(summarize_names(&["a", "b"]), "a, b");
+    }
+
+    /// The point of the remediation kinds: a device is told to install the patches
+    /// ticked *on it*, not the union of the batch.
+    #[test]
+    fn remediation_parameters_are_scoped_to_each_device() {
+        let mut req = request(ActionKind::OsPatchRemediate, vec![1, 2]);
+        req.device_targets = HashMap::from([
+            (1, vec!["KB5040434".into(), "KB5041580".into()]),
+            (2, vec!["KB5041580".into()]),
+        ]);
+
+        let params = per_device_parameters(&req);
+        assert_eq!(
+            params[&1],
+            "kbAllowList=5040434,5041580 rebootBehavior=Never dryRun=false"
         );
         assert_eq!(
-            effective_parameters(&request(ActionKind::OsPatchApply, vec![1])),
-            None
+            params[&2],
+            "kbAllowList=5041580 rebootBehavior=Never dryRun=false"
         );
+
+        // A batch-wide override would discard exactly that scoping, so it is ignored
+        // on this path rather than quietly widening every device's target list.
+        req.parameters = Some("kbAllowList=999".into());
+        assert_eq!(per_device_parameters(&req), params);
+
+        // A device with nothing ticked gets an empty list, which `plan()` blocks and
+        // `send_action` refuses — it must never silently inherit another device's.
+        let mut partial = request(ActionKind::OsPatchRemediate, vec![1, 2]);
+        partial.device_targets = HashMap::from([(1, vec!["KB5040434".into()])]);
+        assert_eq!(
+            per_device_parameters(&partial)[&2],
+            "kbAllowList= rebootBehavior=Never dryRun=false"
+        );
+    }
+
+    /// Per-device parameters must each be bound to the approval, or re-ticking one
+    /// row on one device would reuse a token issued for a different install.
+    #[test]
+    fn the_confirmation_binds_every_devices_own_parameters() {
+        let mut a = request(ActionKind::OsPatchRemediate, vec![1, 2]);
+        a.device_targets =
+            HashMap::from([(1, vec!["KB5040434".into()]), (2, vec!["KB5041580".into()])]);
+        // The same two KBs, swapped between the two devices.
+        let mut b = request(ActionKind::OsPatchRemediate, vec![1, 2]);
+        b.device_targets =
+            HashMap::from([(1, vec!["KB5041580".into()]), (2, vec!["KB5040434".into()])]);
+
+        let canon = |r: &ActionRequest| canonical_parameters(&per_device_parameters(r));
+        assert_ne!(
+            hash(&a, &canon(&a)),
+            hash(&b, &canon(&b)),
+            "which device gets which patch must bind"
+        );
+
+        // The resolved script is not in the request at all for these kinds, so it is
+        // hashed separately — an id edited in Settings mid-dialog must invalidate.
+        assert_ne!(
+            request_hash(&a, &canon(&a), Some(&ScriptRef::Script { id: 42 })),
+            request_hash(&a, &canon(&a), Some(&ScriptRef::Script { id: 43 })),
+            "the resolved remediation script must bind"
+        );
+    }
+
+    /// The operator is shown every string that will be sent, which with per-device
+    /// targeting means one line per device — but only when they actually differ.
+    #[test]
+    fn the_preview_shows_each_devices_own_parameters() {
+        let eligible = vec![
+            PlannedTarget {
+                device_id: 1,
+                device_name: "srv-a".into(),
+                organization: "Contoso".into(),
+                offline: false,
+            },
+            PlannedTarget {
+                device_id: 2,
+                device_name: "srv-b".into(),
+                organization: "Contoso".into(),
+                offline: false,
+            },
+        ];
+
+        let differing = BTreeMap::from([
+            (1, "kbAllowList=1".to_string()),
+            (2, "kbAllowList=2".into()),
+        ]);
+        assert_eq!(
+            parameters_preview(&differing, &eligible).as_deref(),
+            Some("srv-a → kbAllowList=1\nsrv-b → kbAllowList=2")
+        );
+
+        // Identical strings collapse to one line — a hand-driven script would
+        // otherwise repeat itself once per device for no information.
+        let same = BTreeMap::from([(1, "-Verbose".to_string()), (2, "-Verbose".into())]);
+        assert_eq!(
+            parameters_preview(&same, &eligible).as_deref(),
+            Some("-Verbose")
+        );
+
+        assert_eq!(parameters_preview(&BTreeMap::new(), &eligible), None);
     }
 
     #[test]
@@ -1041,9 +1429,15 @@ mod tests {
         let mut reboot = request(ActionKind::Reboot, vec![1]);
         reboot.reboot_mode = Some(RebootMode::Forced);
         assert_eq!(action_detail(&reboot), "Reboot (FORCED)");
+        // The Jobs tab and the audit log must record which of the two applies ran —
+        // "Apply OS patches" was ambiguous between them.
         assert_eq!(
             action_detail(&request(ActionKind::OsPatchApply, vec![1])),
-            "Apply OS patches"
+            "Apply all OS patches"
+        );
+        assert_eq!(
+            action_detail(&request(ActionKind::OsPatchRemediate, vec![1])),
+            "Apply selected OS patches"
         );
     }
 }

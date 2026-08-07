@@ -57,31 +57,158 @@ pub(crate) fn ActionBar() -> impl IntoView {
                 }}
             </div>
             <div class="action-bar-buttons">
-                {ACTION_BUTTONS
+                {ACTION_GROUPS
                     .iter()
-                    .map(|(kind, label)| {
-                        let kind = *kind;
+                    .map(|(heading, kinds)| {
                         view! {
-                            <button
-                                class="btn btn-sm"
-                                title=move || disabled_reason().unwrap_or_else(|| kind.label().to_string())
-                                prop:disabled=move || disabled_reason().is_some()
-                                on:click=move |_| state.open_plan(kind)
-                            >
-                                {*label}
-                            </button>
+                            <div class="action-group">
+                                <span class="action-group-label">{*heading}</span>
+                                {kinds
+                                    .iter()
+                                    .map(|(kind, label)| {
+                                        let kind = *kind;
+                                        // Two reasons stack: the ones that block every
+                                        // action, then the ones specific to this kind
+                                        // (no remediation script, nothing of its family
+                                        // ticked). The tooltip always says which.
+                                        let why = move || {
+                                            disabled_reason()
+                                                .or_else(|| {
+                                                    util::kind_disabled_reason(
+                                                        kind,
+                                                        state.remediation_script_configured(kind),
+                                                        state.remediation_targets(kind).len(),
+                                                    )
+                                                })
+                                        };
+                                        view! {
+                                            <button
+                                                class="btn btn-sm"
+                                                title=move || {
+                                                    why().unwrap_or_else(|| kind.label().to_string())
+                                                }
+                                                prop:disabled=move || why().is_some()
+                                                on:click=move |_| state.open_plan(kind)
+                                            >
+                                                {*label}
+                                            </button>
+                                        }
+                                    })
+                                    .collect_view()}
+                            </div>
                         }
                     })
                     .collect_view()}
+                <div class="action-group">
+                    <span class="action-group-label">"Restart"</span>
+                    <button
+                        class="btn btn-sm"
+                        title=move || {
+                            disabled_reason()
+                                .unwrap_or_else(|| ActionKind::Reboot.label().to_string())
+                        }
+                        prop:disabled=move || disabled_reason().is_some()
+                        on:click=move |_| state.open_plan(ActionKind::Reboot)
+                    >
+                        "Reboot…"
+                    </button>
+                </div>
             </div>
 
-            // Reboot needs its mode and reason chosen before planning: the reason is
-            // recorded in NinjaOne's own activity feed, and the backend refuses a
-            // reboot without one.
+            // Which patches "Install only the selected patches" would actually send,
+            // per device. The distinction between the two Install rows is only
+            // trustworthy if the operator can see the target list it derives from.
             <Show when=any>
-                <div class="action-bar-reboot">
+                <div class="action-bar-targets">
+                    {move || {
+                        [ActionKind::OsPatchRemediate, ActionKind::SoftwarePatchRemediate]
+                            .into_iter()
+                            .filter_map(|kind| {
+                                let targets = state.remediation_targets(kind);
+                                let summary = util::remediation_summary(kind, &targets)?;
+                                Some(view! { <span class="action-target-chip">{summary}</span> })
+                            })
+                            .collect_view()
+                    }}
+                </div>
+            </Show>
+
+            // Everything below applies to whichever action is dispatched next, so it
+            // is rendered once. These used to be split across the action bar and the
+            // Jobs tab's script picker, bound to the same signals — so ticking "Dry
+            // run" one tab away silently changed what an Apply button would do.
+            <Show when=any>
+                <div class="action-bar-options">
+                    <span class="action-options-label">"Applies to every action"</span>
+                    <label class="checkbox">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || state.actions.include_offline.get()
+                            on:change=move |ev| {
+                                state.actions.include_offline.set(event_target_checked(&ev))
+                            }
+                        />
+                        "Include offline devices"
+                    </label>
+                </div>
+
+                // The native endpoints take no parameters, have no preview mode (a dry
+                // run of one is a `plan()` blocker) and run as NinjaOne's agent, so
+                // these three reach only the script-driven actions. Saying which is
+                // what stops "Dry run" from reading as protection it isn't giving.
+                <div class="action-bar-options">
+                    <span class="action-options-label">
+                        "Applies to installs of selected patches, and to scripts"
+                    </span>
+                    <label class="action-bar-runas">
+                        "Run as"
+                        <input
+                            type="text"
+                            list="run-as-roles"
+                            placeholder="system"
+                            prop:value=move || state.actions.run_as.get()
+                            on:input=move |ev| state.actions.run_as.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <RunAsRoles/>
+                    <label class="checkbox">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || {
+                                state.actions.script_reboot.get() == RebootChoice::Auto
+                            }
+                            on:change=move |ev| {
+                                state
+                                    .actions
+                                    .script_reboot
+                                    .set(
+                                        if event_target_checked(&ev) {
+                                            RebootChoice::Auto
+                                        } else {
+                                            RebootChoice::Never
+                                        },
+                                    )
+                            }
+                        />
+                        "Restart the device after installing"
+                    </label>
+                    <label class="checkbox">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || state.actions.dry_run.get()
+                            on:change=move |ev| state.actions.dry_run.set(event_target_checked(&ev))
+                        />
+                        "Dry run (the script reports what it would install)"
+                    </label>
+                </div>
+
+                // Reboot needs its mode and reason chosen before planning: the reason
+                // is recorded in NinjaOne's own activity feed, and the backend refuses
+                // a reboot without one.
+                <div class="action-bar-options">
+                    <span class="action-options-label">"Applies to Reboot"</span>
                     <label>
-                        "Reboot mode"
+                        "Mode"
                         <select
                             prop:value=move || state.actions.reboot_mode.get()
                             on:change=move |ev| {
@@ -97,7 +224,7 @@ pub(crate) fn ActionBar() -> impl IntoView {
                         </select>
                     </label>
                     <label class="action-bar-reason">
-                        "Reboot reason"
+                        "Reason"
                         <input
                             type="text"
                             placeholder="e.g. July patch cycle"
@@ -105,17 +232,16 @@ pub(crate) fn ActionBar() -> impl IntoView {
                             on:input=move |ev| state.actions.reason.set(event_target_value(&ev))
                         />
                     </label>
-                    <label class="checkbox">
-                        <input
-                            type="checkbox"
-                            prop:checked=move || state.actions.include_offline.get()
-                            on:change=move |ev| {
-                                state.actions.include_offline.set(event_target_checked(&ev))
-                            }
-                        />
-                        "Include offline devices"
-                    </label>
                 </div>
+
+                // Collapsed: the two "Install only the selected patches" buttons cover
+                // the common case, and this is the escape hatch for any other library
+                // script. It lives here rather than in the Jobs tab so that dispatch
+                // happens where the selection it targets is visible.
+                <details class="action-bar-script">
+                    <summary>"Run a library script…"</summary>
+                    <ScriptPicker/>
+                </details>
             </Show>
             <Show when=move || blocked().is_some()>
                 <p class="action-bar-blocked" role="note">
@@ -154,13 +280,35 @@ pub(crate) fn ActionBar() -> impl IntoView {
     }
 }
 
-/// The actions offered, in escalating order of consequence.
-const ACTION_BUTTONS: [(ActionKind, &str); 5] = [
-    (ActionKind::OsPatchScan, "Scan OS"),
-    (ActionKind::SoftwarePatchScan, "Scan software"),
-    (ActionKind::OsPatchApply, "Apply OS patches"),
-    (ActionKind::SoftwarePatchApply, "Apply software patches"),
-    (ActionKind::Reboot, "Reboot…"),
+/// The actions offered, grouped so the choice the operator actually has to make —
+/// *all* approved patches vs *only* the ones they ticked — is the visible one.
+///
+/// The two are genuinely different mechanisms: "all" is NinjaOne's native apply
+/// endpoint, which has no per-patch variant, and "selected" is a library script that
+/// receives a target list. Presenting them as one "Apply" button meant the ticked
+/// rows looked like they narrowed an apply that in fact ignored them.
+const ACTION_GROUPS: [(&str, &[(ActionKind, &str)]); 3] = [
+    (
+        "Scan",
+        &[
+            (ActionKind::OsPatchScan, "OS"),
+            (ActionKind::SoftwarePatchScan, "Software"),
+        ],
+    ),
+    (
+        "Install all approved patches",
+        &[
+            (ActionKind::OsPatchApply, "OS"),
+            (ActionKind::SoftwarePatchApply, "Software"),
+        ],
+    ),
+    (
+        "Install only the selected patches",
+        &[
+            (ActionKind::OsPatchRemediate, "OS"),
+            (ActionKind::SoftwarePatchRemediate, "Software"),
+        ],
+    ),
 ];
 
 /// Confirmation modal. Shows exactly what will happen — including the literal
@@ -271,9 +419,22 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                             .clone()
                             .filter(|p| !p.is_empty())
                             .map(|params| {
+                                // Both script paths target per device, so the preview
+                                // is one line per device whenever the strings differ.
+                                // Keyed off the rendering rather than the kind: a
+                                // batch where every device happens to get the same
+                                // string collapses to one line, and calling that
+                                // "per device" would be misleading.
+                                let per_device = params.contains('\n');
                                 view! {
                                     <>
-                                        <p class="modal-label">"Parameters sent to the script"</p>
+                                        <p class="modal-label">
+                                            {if per_device {
+                                                "Parameters sent to each device"
+                                            } else {
+                                                "Parameters sent to the script"
+                                            }}
+                                        </p>
                                         <pre class="modal-params">{params}</pre>
                                     </>
                                 }
@@ -387,7 +548,55 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
     }
 }
 
-/// Script picker: choose a library script, set its parameters and run-as identity.
+/// Suggestions for the shared "Run as" field, as a bare `<datalist>`.
+///
+/// Its own component because the input it feeds now lives in the action bar's shared
+/// options while the fetch is driven by the selection — and because credential roles
+/// are a *per-device* property, so this samples the first selected device and offers
+/// its roles as suggestions rather than a closed list: a role valid there may not
+/// exist on every other target.
+#[component]
+fn RunAsRoles() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let roles = RwSignal::new(Vec::<String>::new());
+
+    Effect::new(move |_| {
+        let first = state.actions.selected.with(|s| s.keys().next().copied());
+        let Some(device_id) = first.filter(|_| state.can_act()) else {
+            roles.set(Vec::new());
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            match api::list_run_as_options(device_id).await {
+                Ok(opts) => roles.set(opts.roles),
+                // Every other call in this file routes failures through a Toast.
+                // Swallowing this one left an empty "Run as" datalist that looked
+                // exactly like a device with no configured credentials, so the
+                // operator had no way to tell a failed lookup from a real answer.
+                Err(e) => state.notify(Toast::err(e)),
+            }
+        });
+    });
+
+    view! {
+        <datalist id="run-as-roles">
+            {move || {
+                roles
+                    .get()
+                    .into_iter()
+                    .map(|role| view! { <option value=role></option> })
+                    .collect_view()
+            }}
+        </datalist>
+    }
+}
+
+/// Script picker: choose a library script and set its parameters.
+///
+/// Deliberately *not* a self-contained dispatch surface. Run-as, the reboot behavior
+/// and the dry-run flag are shared with the "Install only the selected patches"
+/// actions and rendered once above it — they mean the same thing for any
+/// script-driven dispatch, and duplicating them here is what let the two disagree.
 #[component]
 pub(crate) fn ScriptPicker() -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -404,32 +613,8 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
     let supports_kb = move || selected_script().is_some_and(|s| s.accepts_kb_allow_list);
     let disabled = move || state.blocked_reason().is_some();
 
-    // Credential roles are a *per-device* property, so this samples the first
-    // selected device and offers its roles as suggestions rather than a closed
-    // list — a role valid there may not exist on every other target.
-    let run_as_roles = RwSignal::new(Vec::<String>::new());
-    Effect::new(move |_| {
-        let first = state.actions.selected.with(|s| s.keys().next().copied());
-        let Some(device_id) = first.filter(|_| state.can_act()) else {
-            run_as_roles.set(Vec::new());
-            return;
-        };
-        leptos::task::spawn_local(async move {
-            match api::list_run_as_options(device_id).await {
-                Ok(opts) => run_as_roles.set(opts.roles),
-                // Every other call in this file routes failures through a Toast.
-                // Swallowing this one left an empty "Run as" datalist that looked
-                // exactly like a device with no configured credentials, so the
-                // operator had no way to tell a failed lookup from a real answer.
-                Err(e) => state.notify(Toast::err(e)),
-            }
-        });
-    });
-
     view! {
         <fieldset class="script-picker" prop:disabled=disabled>
-            <legend>"Run a script"</legend>
-
             <label>
                 "Script"
                 <select
@@ -487,26 +672,6 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
                     })
             }}
 
-            <label>
-                "Run as"
-                <input
-                    type="text"
-                    list="run-as-roles"
-                    placeholder="system"
-                    prop:value=move || state.actions.run_as.get()
-                    on:input=move |ev| state.actions.run_as.set(event_target_value(&ev))
-                />
-                <datalist id="run-as-roles">
-                    {move || {
-                        run_as_roles
-                            .get()
-                            .into_iter()
-                            .map(|role| view! { <option value=role></option> })
-                            .collect_view()
-                    }}
-                </datalist>
-            </label>
-
             <Show when=supports_kb>
                 <label class="checkbox">
                     <input
@@ -518,46 +683,22 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
                     />
                     "Target only the selected KBs"
                 </label>
+                // Same per-device targeting the remediation actions use, so the
+                // operator can see it is the ticked rows and not their union.
+                <Show when=move || state.actions.use_kb_targeting.get()>
+                    <p class="script-picker-targets">
+                        {move || util::kb_targeting_summary(&state.script_kb_targets())}
+                    </p>
+                </Show>
             </Show>
 
-            <label class="checkbox">
-                <input
-                    type="checkbox"
-                    prop:checked=move || {
-                        state.actions.script_reboot.get() == RebootChoice::Auto
-                    }
-                    on:change=move |ev| {
-                        state
-                            .actions
-                            .script_reboot
-                            .set(
-                                if event_target_checked(&ev) {
-                                    RebootChoice::Auto
-                                } else {
-                                    RebootChoice::Never
-                                },
-                            )
-                    }
-                />
-                "Reboot the device after installing"
-            </label>
-
             <label class="script-picker-params">
-                "Parameters (sent verbatim; leave empty to compose from the selection)"
+                "Parameters (sent verbatim to every device; leave empty to compose from the selection)"
                 <textarea
                     rows="2"
                     prop:value=move || state.actions.script_params.get()
                     on:input=move |ev| state.actions.script_params.set(event_target_value(&ev))
                 ></textarea>
-            </label>
-
-            <label class="checkbox">
-                <input
-                    type="checkbox"
-                    prop:checked=move || state.actions.dry_run.get()
-                    on:change=move |ev| state.actions.dry_run.set(event_target_checked(&ev))
-                />
-                "Dry run (preview — the script reports what it would install)"
             </label>
 
             <button
@@ -587,8 +728,8 @@ pub(crate) fn JobsTable() -> impl IntoView {
                 </p>
             </Show>
 
-            <ScriptPicker/>
-
+            // Dispatch lives in the action bar on the Patches tab, next to the
+            // selection it targets. This tab is history.
             <div class="jobs-toolbar">
                 <button class="btn btn-sm" on:click=move |_| state.refresh_jobs()>
                     "Refresh"
@@ -607,7 +748,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
                 if jobs.is_empty() {
                     return view! {
                         <p class="empty">
-                            "No actions dispatched yet. Select patch rows, then choose an action."
+                            "No actions dispatched yet. Select patch rows on the Patches tab, then choose an action from the bar above the table."
                         </p>
                     }
                         .into_any();

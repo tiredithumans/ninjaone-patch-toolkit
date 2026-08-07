@@ -431,8 +431,23 @@ pub(crate) struct DeviceSelection {
     pub name: String,
     pub organization: String,
     pub offline: bool,
-    /// Ticked patch rows on this device: patch identity → its KB, if it has one.
-    pub patches: BTreeMap<String, Option<String>>,
+    /// Ticked patch rows on this device, keyed by `util::patch_key`.
+    pub patches: BTreeMap<String, SelectedPatch>,
+}
+
+/// What a ticked row contributes to a remediation script's target list.
+///
+/// The two families are targeted differently — OS patches by KB number, third-party
+/// software by product title — and a device can have rows of both ticked at once, so
+/// the row has to remember which it is. Keying only by KB (the earlier shape) made
+/// software rows indistinguishable from OS rows that happen to lack one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SelectedPatch {
+    /// `None` for third-party patches — NinjaOne's software feed has no `kbNumber`.
+    pub kb: Option<String>,
+    /// The product/patch title, which is how a software patch is targeted.
+    pub name: String,
+    pub is_os: bool,
 }
 
 /// Selection and dispatch state for the actions surface. Everything stays empty in
@@ -1226,7 +1241,14 @@ impl AppState {
                         patches: BTreeMap::new(),
                     })
                     .patches
-                    .insert(key, row.kb.clone().filter(|k| !k.is_empty()));
+                    .insert(
+                        key,
+                        SelectedPatch {
+                            kb: row.kb.clone().filter(|k| !k.is_empty()),
+                            name: row.name.clone(),
+                            is_os: row.patch_type.eq_ignore_ascii_case("OS"),
+                        },
+                    );
             } else if let Some(entry) = sel.get_mut(&row.device_id) {
                 entry.patches.remove(&key);
                 if entry.patches.is_empty() {
@@ -1284,16 +1306,32 @@ impl AppState {
         })
     }
 
-    /// KBs checked across the selection, for a script that accepts an allow list.
-    fn selected_kbs(self) -> Vec<String> {
-        self.actions.selected.with_untracked(|sel| {
-            sel.values()
-                // Only ticked rows contribute, and only those that have a KB —
-                // third-party patches have none, so they can't be targeted here.
-                .flat_map(|d| d.patches.values().flatten().cloned())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()
+    /// Per-device targets for a remediation kind, and the devices that have any.
+    pub(super) fn remediation_targets(self, kind: ActionKind) -> BTreeMap<i64, Vec<String>> {
+        self.actions
+            .selected
+            .with(|sel| util::remediation_targets(sel, kind))
+    }
+
+    /// Per-device KBs a hand-picked `kbAllowList` script would receive. Same shape as
+    /// the OS remediation targets — the checkbox says "the selected KBs", and there
+    /// is only one honest reading of that.
+    pub(super) fn script_kb_targets(self) -> BTreeMap<i64, Vec<String>> {
+        self.actions
+            .selected
+            .with(|sel| util::targets_by_device(sel, true))
+    }
+
+    /// Whether a library script id is configured for this remediation kind's patch
+    /// family. Advisory — the backend re-reads the same setting and blocks without
+    /// one; this is what lets the button explain itself instead of failing on click.
+    pub(super) fn remediation_script_configured(self, kind: ActionKind) -> bool {
+        self.settings.f_actions.with(|a| {
+            if kind.is_os_family() {
+                a.os_patch_script_id.is_some()
+            } else {
+                a.software_patch_script_id.is_some()
+            }
         })
     }
 
@@ -1343,16 +1381,50 @@ impl AppState {
 
     /// Builds the request for `kind` from the current selection and form state.
     pub(super) fn build_request(self, kind: ActionKind) -> ActionRequest {
-        let device_ids: Vec<i64> = self
-            .actions
-            .selected
-            .with_untracked(|s| s.keys().copied().collect());
+        // Which patches each device is told to install. A remediation kind takes its
+        // own family; the hand-picked script path takes KBs, which is what its
+        // "Target only the selected KBs" checkbox means and all a `kbAllowList`
+        // script can accept.
+        let device_targets = self.actions.selected.with_untracked(|sel| {
+            if kind.is_remediation() {
+                util::remediation_targets(sel, kind)
+            } else if kind == ActionKind::Script && self.actions.use_kb_targeting.get_untracked() {
+                util::targets_by_device(sel, true)
+            } else {
+                BTreeMap::new()
+            }
+        });
+        // A remediation kind dispatches only to devices that have a ticked patch of
+        // its family: sending the whole selection would hand a device with only
+        // software rows ticked an empty OS allow list — a job that reports success
+        // having installed nothing. A hand-picked script keeps every selected device,
+        // because the operator chose them and the script may do something useful
+        // without a target list; `plan()` warns about the ones that get an empty one.
+        let device_ids: Vec<i64> = if kind.is_remediation() {
+            device_targets.keys().copied().collect()
+        } else {
+            self.actions
+                .selected
+                .with_untracked(|s| s.keys().copied().collect())
+        };
+
         let mut req = ActionRequest::new(kind, device_ids);
+        req.device_targets = device_targets;
         req.include_offline = self.actions.include_offline.get_untracked();
         req.override_window = self.actions.override_window.get_untracked();
-        // Only a script has a real preview; for everything else the backend rejects
-        // a dry run outright rather than pretending.
-        req.dry_run = kind == ActionKind::Script && self.actions.dry_run.get_untracked();
+
+        // The three shared run options. They are rendered once, in the action bar,
+        // and mean the same thing for every script-driven dispatch — a remediation
+        // install and a hand-picked script differ in *what* runs, not in how the
+        // reboot behavior, preview flag or execution identity are chosen. The native
+        // endpoints ignore all three: they take no parameters, have no preview mode
+        // (a dry run of one is a `plan()` blocker), and run as NinjaOne's agent.
+        if kind.runs_a_script() {
+            req.dry_run = self.actions.dry_run.get_untracked();
+            req.reboot = self.actions.script_reboot.get_untracked();
+            let run_as = self.actions.run_as.get_untracked();
+            req.run_as = (!run_as.trim().is_empty()).then_some(run_as);
+        }
 
         if kind == ActionKind::Reboot {
             req.reboot_mode = Some(if self.actions.reboot_mode.get_untracked() == "FORCED" {
@@ -1363,20 +1435,14 @@ impl AppState {
             req.reason = Some(self.actions.reason.get_untracked());
         }
         if kind == ActionKind::Script {
-            req.reboot = self.actions.script_reboot.get_untracked();
             let id = self.actions.script_id.get_untracked();
             req.script_id = id;
             req.script_name = self
                 .actions
                 .scripts
                 .with_untracked(|s| s.iter().find(|s| Some(s.id) == id).map(|s| s.name.clone()));
-            let run_as = self.actions.run_as.get_untracked();
-            req.run_as = (!run_as.trim().is_empty()).then_some(run_as);
             let params = self.actions.script_params.get_untracked();
             req.parameters = (!params.trim().is_empty()).then_some(params);
-            if self.actions.use_kb_targeting.get_untracked() {
-                req.targets = self.selected_kbs();
-            }
         }
         req
     }
