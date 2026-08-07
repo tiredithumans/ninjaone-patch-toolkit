@@ -73,6 +73,29 @@ struct TenantKey {
 #[derive(Debug)]
 pub struct CachePoisoned;
 
+/// Why a [`QueryToken`] redemption did or didn't reach the result cache.
+///
+/// The three failure arms are deliberately distinct rather than one `false`,
+/// because the caller must treat them differently. Supersession is invisible to
+/// the operator and the frontend already drops the response itself (it applies
+/// only its own newest `query_seq`), so the summary may still be returned. Tenant
+/// drift has no such frontend guard — `query_seq` counts runs the frontend
+/// *starts*, and switching instance never bumps it — so returning the summary
+/// would paint the previous tenant's rows over the new tenant's empty cache, with
+/// paging and export reading the miss. Poisoning is the same shape: the rows would
+/// be on screen while every path that re-reads them fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreOutcome {
+    /// Cached, and authoritative for this tenant.
+    Stored,
+    /// A newer query started while this one was in flight.
+    Superseded,
+    /// The operator switched instance/client id while this query was in flight.
+    TenantChanged,
+    /// The cache lock was poisoned by a panic while held.
+    Poisoned,
+}
+
 /// Opaque claim on a query run, issued by [`AppState::begin_query`] and redeemed by
 /// [`AppState::store_last_result_if_current`]. Carries the generation that orders
 /// overlapping queries and the tenant the run started under, so neither can be
@@ -180,6 +203,26 @@ pub struct AppState {
     /// display hint for dropping stale progress events — a stale or malicious
     /// frontend must not be able to decide which result is authoritative.
     query_generation: AtomicU64,
+    /// Bumped by [`AppState::invalidate_fleet_devices`], and re-read under the slot
+    /// lock before a fetch stores. Without it, a whole-fleet fetch that started
+    /// before an invalidation could complete after it and write pre-action data back
+    /// into the slot the invalidation had just cleared — restarting [`DEVICE_TTL`] on
+    /// exactly the rows the caller wanted gone. `TenantKey` cannot cover this: it is
+    /// the same tenant.
+    devices_epoch: AtomicU64,
+    /// The same guard for both current-patch families. Bumped by
+    /// [`AppState::invalidate_current_patches`], which a mutating action calls — and
+    /// whose whole purpose is defeated if an in-flight fetch stores over it.
+    current_epoch: AtomicU64,
+    /// Single-flight gates for the two whole-fleet fetches, mirroring
+    /// `AuthState::refresh_lock`. Queries overlap routinely, and on a cold cache both
+    /// would otherwise page the entire inventory / third-party feed independently —
+    /// the largest fetch in the app, run twice. A waiter re-checks the cache after
+    /// acquiring and normally finds the winner's rows already there. Held across
+    /// `.await`, so these are `tokio` mutexes; the `std` ones above are not.
+    devices_fetch_lock: tokio::sync::Mutex<()>,
+    os_fetch_lock: tokio::sync::Mutex<()>,
+    sw_fetch_lock: tokio::sync::Mutex<()>,
     /// At most one poller at a time, so a burst of batches doesn't spawn N tasks
     /// all hammering `/activities`.
     job_poller_running: AtomicBool,
@@ -221,6 +264,11 @@ impl AppState {
             jobs: Mutex::new(None),
             job_seq: AtomicU64::new(1),
             query_generation: AtomicU64::new(0),
+            devices_epoch: AtomicU64::new(0),
+            current_epoch: AtomicU64::new(0),
+            devices_fetch_lock: tokio::sync::Mutex::new(()),
+            os_fetch_lock: tokio::sync::Mutex::new(()),
+            sw_fetch_lock: tokio::sync::Mutex::new(()),
             job_poller_running: AtomicBool::new(false),
             pending_confirm: Mutex::new(None),
         })
@@ -310,22 +358,41 @@ impl AppState {
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Arc<Vec<Device>>> {
         let key = self.tenant_key();
-        if let Ok(guard) = self.fleet_devices_cache.lock()
-            && let Some(c) = guard.as_ref()
-            && c.tenant == key
-            && c.at.elapsed() < DEVICE_TTL
-        {
-            return Ok(c.devices.clone());
+        if let Some(hit) = self.cached_devices(&key) {
+            return Ok(hit);
         }
+        // Single-flight: the loser of the race waits here rather than paging the
+        // whole inventory a second time, then finds the winner's rows on the
+        // re-check below.
+        let _fetching = self.devices_fetch_lock.lock().await;
+        if let Some(hit) = self.cached_devices(&key) {
+            return Ok(hit);
+        }
+        // Sampled *before* the fetch and re-checked under the slot lock at the store,
+        // so an `invalidate_fleet_devices` landing during the await wins.
+        let epoch = self.devices_epoch.load(Ordering::SeqCst);
         let devices = Arc::new(self.api.devices(None, on_progress).await?);
         if let Ok(mut guard) = self.fleet_devices_cache.lock() {
-            *guard = Some(DeviceCache {
-                at: Instant::now(),
-                tenant: key,
-                devices: devices.clone(),
-            });
+            if self.devices_epoch.load(Ordering::SeqCst) == epoch {
+                *guard = Some(DeviceCache {
+                    at: Instant::now(),
+                    tenant: key,
+                    devices: devices.clone(),
+                });
+            } else {
+                tracing::debug!("device inventory invalidated mid-fetch; not caching");
+            }
         }
         Ok(devices)
+    }
+
+    /// A live device-cache entry for `tenant`, or `None` on a miss / past
+    /// [`DEVICE_TTL`]. Split out so the pre-lock probe and the post-lock re-check in
+    /// [`Self::fleet_devices`] cannot drift apart.
+    fn cached_devices(&self, tenant: &TenantKey) -> Option<Arc<Vec<Device>>> {
+        let guard = self.fleet_devices_cache.lock().ok()?;
+        let c = guard.as_ref()?;
+        (c.tenant == *tenant && c.at.elapsed() < DEVICE_TTL).then(|| c.devices.clone())
     }
 
     /// Whole-fleet current patches (no `df`) for the requested families, cached so a
@@ -348,70 +415,49 @@ impl AppState {
         on_sw: Option<&ProgressFn<'_>>,
     ) -> Result<CurrentPatches> {
         let key = self.tenant_key();
-        let cached =
-            |slot: &Mutex<Option<FamilyCache>>| -> Option<(Arc<Vec<Patch>>, DateTime<Utc>)> {
-                let guard = slot.lock().ok()?;
-                let c = guard.as_ref()?;
-                c.is_fresh(&key, force)
-                    .then(|| (c.patches.clone(), c.fetched_at))
-            };
-        let hit_os = include_os.then(|| cached(&self.fleet_current_os)).flatten();
-        let hit_sw = include_sw.then(|| cached(&self.fleet_current_sw)).flatten();
 
-        // Only the requested-and-missing families reach the API, and those that do
-        // still resolve concurrently.
-        let (fetched_os, fetched_sw) = tokio::try_join!(
+        // Each family resolves through its own single-flight gate, so an OS-only
+        // query never waits on an in-flight third-party fetch it doesn't need.
+        let (os_hit, sw_hit) = tokio::try_join!(
             async {
-                match (include_os, &hit_os) {
-                    (true, None) => self.api.fleet_os_patches(None, None, on_os).await.map(Some),
-                    _ => Ok(None),
+                match include_os {
+                    true => self
+                        .current_family(
+                            &self.fleet_current_os,
+                            &self.os_fetch_lock,
+                            &key,
+                            force,
+                            || self.api.fleet_os_patches(None, None, on_os),
+                        )
+                        .await
+                        .map(Some),
+                    false => Ok(None),
                 }
             },
             async {
-                match (include_sw, &hit_sw) {
-                    (true, None) => self
-                        .api
-                        .fleet_software_patches(None, None, on_sw)
+                match include_sw {
+                    true => self
+                        .current_family(
+                            &self.fleet_current_sw,
+                            &self.sw_fetch_lock,
+                            &key,
+                            force,
+                            || self.api.fleet_software_patches(None, None, on_sw),
+                        )
                         .await
                         .map(Some),
-                    _ => Ok(None),
+                    false => Ok(None),
                 }
             },
         )?;
 
-        let now = Utc::now();
-        let store = |slot: &Mutex<Option<FamilyCache>>, patches: &Arc<Vec<Patch>>| {
-            if let Ok(mut guard) = slot.lock() {
-                *guard = Some(FamilyCache {
-                    at: Instant::now(),
-                    tenant: key.clone(),
-                    fetched_at: now,
-                    patches: patches.clone(),
-                });
-            }
+        let (os, os_at) = match os_hit {
+            Some((rows, at)) => (rows, Some(at)),
+            None => (Arc::new(Vec::new()), None),
         };
-
-        let (os, os_at) = match fetched_os {
-            Some(rows) => {
-                let rows = Arc::new(rows);
-                store(&self.fleet_current_os, &rows);
-                (rows, Some(now))
-            }
-            None => match hit_os {
-                Some((rows, at)) => (rows, Some(at)),
-                None => (Arc::new(Vec::new()), None),
-            },
-        };
-        let (sw, sw_at) = match fetched_sw {
-            Some(rows) => {
-                let rows = Arc::new(rows);
-                store(&self.fleet_current_sw, &rows);
-                (rows, Some(now))
-            }
-            None => match hit_sw {
-                Some((rows, at)) => (rows, Some(at)),
-                None => (Arc::new(Vec::new()), None),
-            },
+        let (sw, sw_at) = match sw_hit {
+            Some((rows, at)) => (rows, Some(at)),
+            None => (Arc::new(Vec::new()), None),
         };
 
         Ok(CurrentPatches {
@@ -420,8 +466,72 @@ impl AppState {
             // The UI's "patch data as of …" must not over-promise: with two families
             // fetched at different times the data as a whole is only as fresh as the
             // older one.
-            fetched_at: [os_at, sw_at].into_iter().flatten().min().unwrap_or(now),
+            fetched_at: [os_at, sw_at]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or_else(Utc::now),
         })
+    }
+
+    /// Serves one current-patch family from its slot, fetching it at most once
+    /// across concurrent callers.
+    ///
+    /// Three guards compose here, in this order: the cheap pre-lock probe, the
+    /// single-flight gate (so the loser waits instead of re-paging a six-figure
+    /// feed), and the re-check under that gate — which is what turns the wait into a
+    /// cache hit. The store is then epoch-gated for the same reason
+    /// [`Self::fleet_devices`] is: a mutating action's `invalidate_current_patches`
+    /// landing during the await must not be undone by this write, or
+    /// [`CURRENT_PATCHES_TTL`] restarts on pre-action rows.
+    async fn current_family<F, Fut>(
+        &self,
+        slot: &Mutex<Option<FamilyCache>>,
+        fetch_lock: &tokio::sync::Mutex<()>,
+        key: &TenantKey,
+        force: bool,
+        fetch: F,
+    ) -> Result<(Arc<Vec<Patch>>, DateTime<Utc>)>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<Patch>>>,
+    {
+        if let Some(hit) = Self::fresh_family(slot, key, force) {
+            return Ok(hit);
+        }
+        let _fetching = fetch_lock.lock().await;
+        if let Some(hit) = Self::fresh_family(slot, key, force) {
+            return Ok(hit);
+        }
+        let epoch = self.current_epoch.load(Ordering::SeqCst);
+        let patches = Arc::new(fetch().await?);
+        let now = Utc::now();
+        if let Ok(mut guard) = slot.lock() {
+            if self.current_epoch.load(Ordering::SeqCst) == epoch {
+                *guard = Some(FamilyCache {
+                    at: Instant::now(),
+                    tenant: key.clone(),
+                    fetched_at: now,
+                    patches: patches.clone(),
+                });
+            } else {
+                tracing::debug!("current patches invalidated mid-fetch; not caching");
+            }
+        }
+        Ok((patches, now))
+    }
+
+    /// A live entry in one family slot, or `None` on a miss / stale. Shared by the
+    /// probe and the post-gate re-check so the two cannot disagree.
+    fn fresh_family(
+        slot: &Mutex<Option<FamilyCache>>,
+        key: &TenantKey,
+        force: bool,
+    ) -> Option<(Arc<Vec<Patch>>, DateTime<Utc>)> {
+        let guard = slot.lock().ok()?;
+        let c = guard.as_ref()?;
+        c.is_fresh(key, force)
+            .then(|| (c.patches.clone(), c.fetched_at))
     }
 
     /// Drops cached lookups so a different tenant (after sign-out or an instance
@@ -431,9 +541,10 @@ impl AppState {
         if let Ok(mut guard) = self.lookups_cache.lock() {
             *guard = None;
         }
-        if let Ok(mut guard) = self.fleet_devices_cache.lock() {
-            *guard = None;
-        }
+        // Through the epoch-bumping invalidators, not by clearing the slots here — a
+        // tenant switch is exactly when a long whole-fleet fetch is likely still in
+        // flight, and a bare clear would let it store its rows straight back.
+        self.invalidate_fleet_devices();
         self.invalidate_current_patches();
     }
 
@@ -472,19 +583,23 @@ impl AppState {
     ///
     /// A poisoned cache is warned (not panicked) so the failure is observable but the
     /// app survives.
-    pub fn store_last_result_if_current(&self, token: QueryToken, result: QueryResult) -> bool {
+    pub fn store_last_result_if_current(
+        &self,
+        token: QueryToken,
+        result: QueryResult,
+    ) -> StoreOutcome {
         if token.tenant != self.tenant_key() {
-            return false;
+            return StoreOutcome::TenantChanged;
         }
         match self.last_result.lock() {
             Ok(mut slot) => {
                 // Checked under the lock so a query that started between the caller's
                 // last look and here cannot still lose to us.
                 if self.query_generation.load(Ordering::SeqCst) != token.generation {
-                    return false;
+                    return StoreOutcome::Superseded;
                 }
                 *slot = Some((token.tenant, result));
-                true
+                StoreOutcome::Stored
             }
             // Once poisoned the slot stays poisoned: `with_current_result` returns
             // `Err(CachePoisoned)`, so export, the HTML report and row paging all
@@ -492,7 +607,7 @@ impl AppState {
             // up in the log as the cause.
             Err(_) => {
                 warn!("result cache poisoned; export, report and paging will now fail");
-                false
+                StoreOutcome::Poisoned
             }
         }
     }
@@ -532,6 +647,11 @@ impl AppState {
     /// it also drops the 15-minute device inventory and the org/location/role
     /// lookups, neither of which a patch action can affect.
     pub fn invalidate_current_patches(&self) {
+        // Bumped *before* the slots are cleared. A fetch that is about to store
+        // re-reads the epoch under the slot lock, so whichever order the two
+        // interleave it sees the bump and drops its write — clearing alone would
+        // leave the window this method exists to close.
+        self.current_epoch.fetch_add(1, Ordering::SeqCst);
         for slot in [&self.fleet_current_os, &self.fleet_current_sw] {
             if let Ok(mut guard) = slot.lock() {
                 *guard = None;
@@ -542,6 +662,8 @@ impl AppState {
     /// Drops **only** the device inventory. A reboot flips `os.needsReboot`, and
     /// [`DEVICE_TTL`] is 15 minutes — long enough to render the reboot invisible.
     pub fn invalidate_fleet_devices(&self) {
+        // Same ordering as `invalidate_current_patches`: bump, then clear.
+        self.devices_epoch.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut guard) = self.fleet_devices_cache.lock() {
             *guard = None;
         }
@@ -563,12 +685,13 @@ impl AppState {
             warn!("job store poisoned; dispatched jobs will not appear in the Jobs tab");
             return;
         };
+        // `insert` hands back the `&mut` directly, so the re-lookup that needed an
+        // `expect` is gone. That expect was the only one in production code, and it
+        // sat inside a held guard — a panic there would have poisoned the job store
+        // for the rest of the process, which the arm above warns is unrecoverable.
         let jobs = match guard.as_mut() {
             Some((t, jobs)) if *t == key => jobs,
-            _ => {
-                *guard = Some((key, Vec::new()));
-                &mut guard.as_mut().expect("just inserted").1
-            }
+            _ => &mut guard.insert((key, Vec::new())).1,
         };
         jobs.extend(new_jobs);
 
@@ -732,6 +855,11 @@ impl AppState {
             jobs: Mutex::new(None),
             job_seq: AtomicU64::new(1),
             query_generation: AtomicU64::new(0),
+            devices_epoch: AtomicU64::new(0),
+            current_epoch: AtomicU64::new(0),
+            devices_fetch_lock: tokio::sync::Mutex::new(()),
+            os_fetch_lock: tokio::sync::Mutex::new(()),
+            sw_fetch_lock: tokio::sync::Mutex::new(()),
             job_poller_running: AtomicBool::new(false),
             pending_confirm: Mutex::new(None),
         }
@@ -863,6 +991,101 @@ mod tests {
         );
     }
 
+    /// A whole-fleet feed takes long enough that a mutating action routinely lands
+    /// mid-fetch. `invalidate_current_patches` exists precisely so the next query
+    /// re-reads post-action state — but the fetch stored unconditionally after its
+    /// await, so it wrote the pre-action rows straight back and CURRENT_PATCHES_TTL
+    /// restarted on them. The tenant stamp cannot catch this: it is the same tenant.
+    #[tokio::test]
+    async fn an_invalidation_during_a_fetch_is_not_undone_by_that_fetch() {
+        use std::time::Duration as StdDuration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "results": [{ "id": 1, "deviceId": 1, "kbNumber": "KB1" }],
+                        "cursor": ""
+                    }))
+                    // Long enough for the action below to land while this is in flight.
+                    .set_delay(StdDuration::from_millis(150)),
+            )
+            .mount(&server)
+            .await;
+        let state = Arc::new(AppState::seeded(server.uri()));
+
+        let fetching = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                state
+                    .fleet_current_patches(false, true, false, None, None)
+                    .await
+                    .expect("in-flight fetch")
+            })
+        };
+        // Stand in for `run_action` completing an apply while the fetch is paging.
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+        state.invalidate_current_patches();
+        fetching.await.expect("join");
+
+        // The in-flight fetch may still return its rows to its own caller — it has
+        // them — but it must not leave them in the cache for the *next* query.
+        state
+            .fleet_current_patches(false, true, false, None, None)
+            .await
+            .expect("post-action fetch");
+        assert_eq!(
+            hits(&server, "/api/v2/queries/os-patches").await,
+            2,
+            "the query after the action must re-fetch, not be served pre-action rows"
+        );
+    }
+
+    /// Queries overlap by design (an auto-refresh tick fires while a manual Run is
+    /// still paging), so on a cold cache both used to page the entire inventory
+    /// independently — the largest fetch in the app, run twice.
+    #[tokio::test]
+    async fn concurrent_cold_fetches_collapse_onto_one_request() {
+        use std::time::Duration as StdDuration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{ "id": 1, "systemName": "web-01" }]))
+                    .set_delay(StdDuration::from_millis(100)),
+            )
+            .mount(&server)
+            .await;
+        let state = Arc::new(AppState::seeded(server.uri()));
+
+        let (a, b) = tokio::join!(
+            {
+                let state = state.clone();
+                async move { state.fleet_devices(None).await.expect("first") }
+            },
+            {
+                let state = state.clone();
+                async move { state.fleet_devices(None).await.expect("second") }
+            }
+        );
+
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        assert_eq!(
+            hits(&server, "/api/v2/devices-detailed").await,
+            1,
+            "the second caller must wait on the first fetch, not start its own"
+        );
+    }
+
     #[test]
     fn last_result_cache_starts_empty_and_clears() {
         let state = AppState::new().expect("build state");
@@ -891,10 +1114,14 @@ mod tests {
         let second = state.begin_query();
 
         // The newer run finishes first.
-        assert!(state.store_last_result_if_current(second, sample_result()));
+        assert_eq!(
+            state.store_last_result_if_current(second, sample_result()),
+            StoreOutcome::Stored
+        );
         // The older run finishes second and must NOT overwrite it.
-        assert!(
-            !state.store_last_result_if_current(first, sample_result()),
+        assert_eq!(
+            state.store_last_result_if_current(first, sample_result()),
+            StoreOutcome::Superseded,
             "a query superseded before it finished must drop its cache write"
         );
         assert!(state.with_current_result(|_| ()).unwrap().is_some());
@@ -910,7 +1137,10 @@ mod tests {
         let abandoned = state.begin_query();
         let _newer = state.begin_query(); // started, never stored
 
-        assert!(!state.store_last_result_if_current(abandoned, sample_result()));
+        assert_eq!(
+            state.store_last_result_if_current(abandoned, sample_result()),
+            StoreOutcome::Superseded
+        );
         assert!(state.with_current_result(|_| ()).unwrap().is_none());
     }
 
@@ -918,7 +1148,10 @@ mod tests {
     fn a_lone_query_stores_normally() {
         let state = AppState::new().expect("build state");
         let only = state.begin_query();
-        assert!(state.store_last_result_if_current(only, sample_result()));
+        assert_eq!(
+            state.store_last_result_if_current(only, sample_result()),
+            StoreOutcome::Stored
+        );
         assert!(state.with_current_result(|_| ()).unwrap().is_some());
     }
 
@@ -935,9 +1168,10 @@ mod tests {
         // The operator switches instance while the query is still running.
         state.settings.lock().unwrap().instance_base_url = "https://other.example.com".into();
 
-        assert!(
-            !state.store_last_result_if_current(token, sample_result()),
-            "a result fetched under the previous tenant must not be stored"
+        assert_eq!(
+            state.store_last_result_if_current(token, sample_result()),
+            StoreOutcome::TenantChanged,
+            "a result fetched under the previous tenant must not be stored, and the              caller must be able to tell that apart from supersession"
         );
         assert!(
             state.with_current_result(|_| ()).unwrap().is_none(),
