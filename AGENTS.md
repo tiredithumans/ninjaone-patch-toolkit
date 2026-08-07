@@ -109,8 +109,12 @@ scripts/                         # dev/CI tooling (not shipped)
   1. Implement `#[tauri::command] pub async fn` under `src-tauri/src/commands/<domain>.rs`,
      `State<'_, AppState>` first, `Result<T, UiError>` out.
   2. Add `commands::<domain>::<name>` to `tauri::generate_handler![]` in `src-tauri/src/lib.rs`.
-  3. Add a typed `invoke("<name>", …)` wrapper in `web-rs/src/api.rs` (+ mirror types in
-     `web-rs/src/types.rs`).
+  3. Add a typed wrapper in `web-rs/src/api.rs` via the `ipc!` macro (+ mirror types in
+     `web-rs/src/types.rs`). `ipc!(name(arg: T, …) -> Ret)` generates the camelCase arg struct and
+     the `invoke` call, so the arg keys equal the wrapper's parameter names and the command string
+     equals the wrapper's name **by construction** — both of which the hand-written version left
+     free to drift. A wrapper deliberately named differently spells the target out:
+     `ipc!(export_patches as "export_patches_xlsx", () -> Option<String>)`.
 
 - **New NinjaOne endpoint** — add a method on `NinjaApiClient` (`api/<domain>.rs`); reuse
   `get_paginated` / `request_raw` rather than hand-rolling reqwest + retry + cursor logic.
@@ -167,7 +171,13 @@ the `#[cfg(test)]` module). Components and `js_sys`-backed helpers aren't unit-t
 still leans on `web-check` (compile) + `web-clippy` for the rest of the frontend.
 
 **Non-trivial logic therefore does not belong in a `#[component]` body** — put it in
-`web-rs/src/app/util.rs` as a free function and test it there. A `#[component]` can only be
+`web-rs/src/app/util.rs` as a free function and test it there. The same rule covers `state.rs`,
+which is not a component file: `filter_params` (the `FilterParams` mapping behind *every* query,
+lifted out of `FilterState::current_filter`), `parse_clamped` / `parse_optional_id` (the settings
+number fields — `<input type="number">` treats `min`/`max` as advisory, so the clamp is the real
+guard), and `action_disabled_reason` / `selection_summary` all live in `util.rs` for this reason.
+`date_to_epoch` / `epoch_to_date` are plain civil-date arithmetic rather than `js_sys::Date`, so
+they host-test too — and `demo.rs` shares them instead of keeping the second copy it used to. A `#[component]` can only be
 compile-checked, so arithmetic written inline inside one is unreachable by any test. The pager
 (`page_count`/`clamp_page`/`page_bounds`/`pager_summary`/`prev_page`/`next_page`), the group-header
 count and the confirm-dialog gate (`needs_typed_confirmation`/`can_confirm_action`) all live in
@@ -215,9 +225,21 @@ secrets are **not** stored there — see below).
     queries. And the tenant stamp is taken from the token, i.e. the tenant the query was *fetched*
     under; a whole-fleet fetch runs for minutes, so stamping at write time could file the old
     tenant's rows under the new one — the one way the tenant check can be *wrong* rather than merely
-    miss. A superseded or tenant-drifted result is dropped, not stored. The frontend mirrors this:
-    `run_query` compares `query_seq` after the await and discards a superseded response (while still
-    clearing its own busy flag).
+    miss. A superseded or tenant-drifted result is dropped, not stored.
+  - **The three drop reasons are distinct, and the caller must treat them differently.**
+    `store_last_result_if_current` returns a `StoreOutcome`, not a bool. `Superseded` is invisible to
+    the operator and the frontend already discards the response itself (`run_query` compares
+    `query_seq` after the await and drops a superseded one, while still clearing its own busy flag),
+    so the summary is still returned. `TenantChanged` and `Poisoned` are **errors**:
+    `commands::patches::summary_for` refuses to hand back a renderable summary, because the frontend
+    has no equivalent guard — `query_seq` counts runs the frontend *starts*, and switching instance
+    never bumps it, so returning the summary painted the previous tenant's rows over the new tenant's
+    empty cache while paging and export read the miss. Keep the rule: return a summary only when the
+    rows behind it are readable.
+  - **A tenant switch also clears the frontend.** `save_settings` reports `tenant_changed` on its
+    `SettingsView` (both halves of the tenant key — instance *and* client id), and
+    `apply_settings_view` calls `clear_results()`. Without it the previous tenant's rows stayed
+    rendered against a cache that had already been dropped — the same divergence one layer up.
   - **The three paging commands all return empty on a cache miss**, never an error. A miss is a
     normal transient (tenant switch, sign-out, superseded query); the frontend already renders its
     own empty state from the absent result.
@@ -260,6 +282,17 @@ secrets are **not** stored there — see below).
     ~80 serial cursor pages of data that was then dropped, *and* made it the critical path (an OS-only
     query took about as long as an ALL query). Widening `Os` → `All` still reuses whatever is warm.
     Don't merge them back into one pair.
+  - **The stores are epoch-gated, and the fetches are single-flight (load-bearing).** A whole-fleet
+    fetch runs for minutes, so a mutating action's `invalidate_current_patches()` routinely lands
+    while one is in flight. The store used to be unconditional, so the in-flight fetch wrote its
+    pre-action rows straight back and `CURRENT_PATCHES_TTL` restarted on them — the tenant stamp
+    cannot catch this, it is the same tenant. `devices_epoch` / `current_epoch` are sampled before
+    the fetch and re-read **under the slot lock** at the store; the invalidators bump the epoch
+    *before* clearing the slot, so the two orderings both lose the write. Separately, each cache has
+    a `tokio::Mutex` fetch gate (mirroring `AuthState::refresh_lock`) with a re-check after
+    acquiring: queries overlap by design, and on a cold cache both callers used to page the entire
+    inventory / third-party feed independently. Per family, so an OS-only query never waits on an
+    in-flight third-party fetch.
   - **`force_refresh`** (camelCase `forceRefresh`, the auto-refresh tick / manual ↻) trades
     `CURRENT_PATCHES_TTL` for `FORCE_MIN_INTERVAL` to pull fresh patch state mid-patching; a normal Run
     query leaves it false. The floor is enforced **backend-side on purpose**: the frontend cadence is a
@@ -302,6 +335,20 @@ secrets are **not** stored there — see below).
     with a JWT-claim fallback; `None` means *unknowable*, not *denied*, and the UI words the two
     differently. `commands::auth::reauthorize` drops the keyring refresh token **first** so the
     browser flow must issue a fresh grant.
+  - **In-memory before keyring, and only the token that got the 401 is invalidated.**
+    `store_tokens` assigns `inner.tokens` **first** and downgrades a keyring write failure to a
+    warning. The server has already rotated the grant by then, so propagating the error discarded a
+    valid token set and the next attempt replayed the consumed refresh token into `invalid_grant`,
+    which clears the credential — a transient locked keychain became a forced interactive sign-in.
+    Degrading to "no persistence this session" is correct: the access token is in-memory only anyway.
+    Relatedly, `invalidate_access_token(&stale)` takes the token that actually got the 401 and
+    no-ops unless it is still the current one; a query fans out many concurrent requests, so a
+    lagging 401 answering a *replaced* token used to mark the fresh one stale and chain into
+    redundant grants.
+  - **The callback listener loops over connections.** `wait_for_callback` accepts repeatedly and
+    answers anything without `code`/`state`/`error` with a 404, with a per-socket read timeout.
+    Handling exactly one accept meant a browser preconnect, favicon fetch or port probe consumed the
+    sign-in — the documented "a hung sign-in usually means the callback never arrived" symptom.
   - **The refresh is single-flight, and only `invalid_grant` clears the credential (load-bearing).**
     A query deliberately fans out many concurrent API calls and each one calls `access_token()`
     first, so without a guard they all observe the same stale token and each POSTs the same
@@ -370,6 +417,15 @@ secrets are **not** stored there — see below).
   JSON array **and** the `{ results, cursor }` envelope, where `cursor` may be a string or a
   `{ name, offset, … }` object; it stops when a page returns 0 rows even if the server echoes a
   stale token. Don't hand-roll a second reqwest/cursor loop.
+  - **The retry policy is a pure function.** `retry_for(status, replay, attempt, retry_after)`
+    returns `Retry::{No, Wait, Reauth}`, and `decode_response` handles the body — extracted from a
+    ~300-line `request_raw` so the policy can be tested without a server. Its arms are below.
+  - **An unreadable `cursor` is an error, not end-of-pages.** `next_cursor` returns
+    `Result<Option<String>>` and bails on a shape it cannot interpret (an object with no usable
+    `name`, a number, an array). It is only consulted after a page that *returned rows* — the caller
+    checks `page_len == 0` first — so treating an unknown shape as "finished" ended the fetch
+    mid-fleet and handed back a partial result that looked complete, understating every compliance
+    number derived from it. This mirrors the `results`-not-an-array arm, which has always bailed.
   - **The 5xx and connect arms are `Idempotent`-only.** A reporting pull is dozens of *sequential*
     cursor pages, so a gateway 502 on a late page used to discard every page already accumulated —
     5xx is the most common transient failure on that path, far more so than 429. But a 5xx on an
@@ -425,9 +481,13 @@ secrets are **not** stored there — see below).
   `AddAssign` (`rows.rs`) → the `web-rs/src/types.rs` mirror →
   `SEV_BANDS`/`sum_severity`/`sev_count`/`severity_segments` (`charts.rs`) → `SEVERITY_COLORS`
   (`report.rs`) → `sev_class` **and** `sev_ordinal` **and** `severity_raw` (`util.rs`) →
-  `SEVERITY_OPTIONS` → the `.sev-*` **and** `.chart .seg-*` **and** `.chart-swatch.seg-*` CSS
-  (three separate rule families — the middle one sets `fill` and is scoped to `.chart`, so it does
-  nothing for a legend `<span>`) → `demo.rs`.
+  `SEVERITY_OPTIONS` → the CSS → `demo.rs`. The CSS end of this is now guarded: the eight band
+  colors are `--sev-*` / `--sev-*-fg` custom properties defined once on `:root`, and the three rule
+  families (`.sev-*`, `.chart .seg-*`, `.chart-swatch.seg-*`) `var()` them rather than restating hex
+  values. `severity_css_defines_every_band` (`util.rs`) compiles `styles.css` in with `include_str!`
+  and fails if a band is missing any of the four — CSS cannot give a compile error, so that test is
+  the substitute. The three families still exist for a reason: the middle one sets `fill` and is
+  scoped to `.chart`, so it does nothing for a legend `<span>`.
   - **`rows::SeverityCounts::BANDS` is the canonical enumeration on the counts side.** It pairs each
     label with a typed accessor, and `total()`, the HTML report's chart, its legend and its
     denominator all derive from it — so they cannot disagree about how many bands exist.
@@ -436,10 +496,15 @@ secrets are **not** stored there — see below).
     by **string label** with a `_ => counts.unknown` catch-all, so a renamed band silently reported
     Unknown's count and double-counted it into the total. `total_severity_is_the_sum_of_its_bands`
     (`rows.rs`) fails if a field is added to the struct but not to `BANDS`.
-  - **`rows::FailureGroup::COLUMNS` is the shared failure-table definition**, read by both
-    `export.rs` (the workbook) and `report.rs` (the HTML report), so the two renderings of one
-    cached result cannot diverge — they previously did, the report having silently dropped
-    `Patch Type`. `export.rs` contributes only `FAILURE_WIDTHS`, length-tied to `COLUMNS.len()`.
+  - **`rows::TableColumn<T>` is the shared table definition.** Every table rendered from a cached
+    `QueryResult` — `FailureGroup::COLUMNS`, `DeviceSummary::COLUMNS`, `ComplianceBucket::COLUMNS`,
+    `OsCompliance::COLUMNS`, plus `export.rs`'s own `DETAIL_COLUMNS` — pairs each header with the
+    accessor that fills it, so a column is one declaration rather than two lists agreeing by
+    convention. `export.rs` renders all five through one `write_sheet` and contributes only the
+    width arrays, each length-tied to its `COLUMNS.len()`; `report.rs` renders through one
+    `write_table`. Both had already diverged: the report dropped `Patch Type` from the failures
+    table, and hardcoded the reboot table's headers as "Role"/"Pending patches" against the
+    workbook's "Device Role"/"Pending Patches".
   - **This list was previously incomplete, and every site it omitted had silently drifted:**
     `report.rs` summed six of eight bands by hand (a `security`/`recommended`-only backlog printed
     "No pending patches"; a mixed one overflowed the viewBox), the two `.chart-swatch` rules were
@@ -551,6 +616,16 @@ each gate is also callable independently. Use the recipe flags from `/justfile`;
 7. **Dependency audit** *(optional locally)* — `just audit` (RustSec advisories, both lockfiles)
    + `just deny` / `just web-deny` (licenses + supply-chain sources + bans via `deny.toml`).
 8. **CodeQL** *(GitHub-side)* — Rust security queries, build-mode `none` (`.github/workflows/codeql.yml`).
+9. **Manifest versions** *(GitHub-side)* — the `versions` job in `ci.yml` checks that
+   `tauri.conf.json`, `src-tauri/Cargo.toml` and `web-rs/Cargo.toml` carry the same version on
+   **every PR**. `release.yml`'s guard also compares them against the tag, but only under
+   `if: startsWith(github.ref, 'refs/tags/')` — i.e. after the tag and its irreversible release run
+   have been pushed. The two crates share no workspace, so this is bumped by hand and the manifests
+   co-change in ~23 of every 300 commits.
+
+CI runs the same gates in the same order (`ci.yml`'s frontend job runs `web-check`, `web-clippy`,
+`web-build`, `web-test`) — keep it that way; a CI sequence that quietly differs from the documented
+one is how the two drift.
 
 For behavior changes not provable by a unit test, run `just dev` and exercise the view.
 
