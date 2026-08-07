@@ -5,7 +5,9 @@
 //! and so could not be tested at all; it is now plain arithmetic.
 
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
+use super::state::DeviceSelection;
 use super::{AppliedFilters, Tab};
 use crate::types::{
     ActionKind, AuthStatus, FilterParams, JobReport, PatchRow, RebootMode, RowSort, RowSortKey,
@@ -24,6 +26,137 @@ pub(crate) fn patch_key(row: &PatchRow) -> String {
         row.kb.as_deref().unwrap_or(""),
         row.name
     )
+}
+
+/// The per-device target list a script dispatch would send, keyed by device id.
+///
+/// Devices with nothing ticked *of that family* are omitted entirely rather than
+/// mapped to an empty list — for a remediation action they are not dispatched to at
+/// all, so the confirmation dialog's device count is the number of devices that will
+/// actually install something. Third-party patches carry no KB, so an OS target list
+/// silently skips them and vice versa; that is the same asymmetry the two NinjaOne
+/// feeds have.
+///
+/// Every path that sends an allow list goes through this — the two remediation kinds
+/// and the hand-picked script's "Target only the selected KBs". Nothing hands a
+/// device the batch-wide union of the selection any more.
+pub(crate) fn targets_by_device(
+    selected: &BTreeMap<i64, DeviceSelection>,
+    want_os: bool,
+) -> BTreeMap<i64, Vec<String>> {
+    selected
+        .iter()
+        .filter_map(|(id, device)| {
+            let targets: Vec<String> = device
+                .patches
+                .values()
+                .filter(|p| p.is_os == want_os)
+                // OS patches are targeted by KB, software by product title.
+                .filter_map(|p| {
+                    if want_os {
+                        p.kb.clone()
+                    } else {
+                        Some(p.name.clone())
+                    }
+                })
+                .filter(|t| !t.trim().is_empty())
+                // The same patch can appear on a device via two rows (an install
+                // attempt and the pending record); the allow list wants it once.
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            (!targets.is_empty()).then_some((*id, targets))
+        })
+        .collect()
+}
+
+/// [`targets_by_device`] for a remediation kind, which picks the family. Empty for
+/// any other kind — the native endpoints take no target list at all.
+pub(crate) fn remediation_targets(
+    selected: &BTreeMap<i64, DeviceSelection>,
+    kind: ActionKind,
+) -> BTreeMap<i64, Vec<String>> {
+    if !kind.is_remediation() {
+        return BTreeMap::new();
+    }
+    targets_by_device(selected, kind.is_os_family())
+}
+
+/// What "install only the selected patches" would send, in one line per family.
+///
+/// `None` when the family has nothing ticked, so a selection of pure OS patches
+/// doesn't render an empty "Software: 0" next to it.
+pub(crate) fn remediation_summary(
+    kind: ActionKind,
+    targets: &BTreeMap<i64, Vec<String>>,
+) -> Option<String> {
+    if targets.is_empty() {
+        return None;
+    }
+    let family = if kind.is_os_family() {
+        "OS"
+    } else {
+        "Software"
+    };
+    // Distinct patches, not the sum of per-device lists: the same KB ticked on ten
+    // devices is one patch going to ten devices, and reporting "10 patches" for it
+    // is the batch-wide reading this whole path exists to replace.
+    let distinct: BTreeSet<&String> = targets.values().flatten().collect();
+    Some(format!(
+        "{family}: {} patch(es) on {} device(s)",
+        distinct.len(),
+        targets.len()
+    ))
+}
+
+/// What the script picker's "Target only the selected KBs" would actually send.
+///
+/// Spells out *per device* because that is the whole correction: the checkbox used to
+/// hand every device the combined list from the entire selection.
+pub(crate) fn kb_targeting_summary(targets: &BTreeMap<i64, Vec<String>>) -> String {
+    if targets.is_empty() {
+        return "No KBs selected — every device would be sent an empty allow list.".to_string();
+    }
+    let distinct: BTreeSet<&String> = targets.values().flatten().collect();
+    format!(
+        "Each device is sent only its own KBs — {} distinct KB(s) across {} device(s).",
+        distinct.len(),
+        targets.len()
+    )
+}
+
+/// Why a specific action is unavailable, beyond the reasons that block all of them.
+///
+/// Separate from [`action_disabled_reason`] because these depend on the kind and on
+/// what is ticked: the remediation actions need a configured script *and* a ticked
+/// patch of their own family, and an operator who has ticked only software rows
+/// needs to be told that, not left with a button that looks broken.
+pub(crate) fn kind_disabled_reason(
+    kind: ActionKind,
+    script_configured: bool,
+    matching_targets: usize,
+) -> Option<String> {
+    if !kind.is_remediation() {
+        return None;
+    }
+    let family = if kind.is_os_family() {
+        "OS"
+    } else {
+        "software"
+    };
+    if !script_configured {
+        return Some(format!(
+            "No {family} remediation script configured. NinjaOne has no per-patch apply endpoint, \
+             so installing specific patches needs a library script that accepts a target list — \
+             add its id in Settings → Patch actions."
+        ));
+    }
+    if matching_targets == 0 {
+        return Some(format!(
+            "No {family} patches selected. Tick the {family} patch rows to install."
+        ));
+    }
+    None
 }
 
 /// Why the patch-action affordances are unavailable, or `None` when they're live.
@@ -1785,5 +1918,158 @@ mod tests {
         forged.kb = None;
         forged.name = "KB1\u{1f}Update".into();
         assert_ne!(patch_key(&real), patch_key(&forged));
+    }
+
+    use super::super::state::SelectedPatch;
+
+    fn selection(patches: Vec<SelectedPatch>) -> DeviceSelection {
+        DeviceSelection {
+            name: "srv".into(),
+            organization: "Org".into(),
+            offline: false,
+            patches: patches
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| (format!("k{i}"), p))
+                .collect(),
+        }
+    }
+
+    fn os(kb: &str) -> SelectedPatch {
+        SelectedPatch {
+            kb: Some(kb.into()),
+            name: "Cumulative Update".into(),
+            is_os: true,
+        }
+    }
+
+    fn sw(name: &str) -> SelectedPatch {
+        SelectedPatch {
+            kb: None,
+            name: name.into(),
+            is_os: false,
+        }
+    }
+
+    /// The whole point of the remediation kinds: each device is told to install the
+    /// patches ticked *on it*, and only from its own family.
+    #[test]
+    fn remediation_targets_are_per_device_and_per_family() {
+        let selected = BTreeMap::from([
+            (1, selection(vec![os("KB5040434"), os("KB5041580")])),
+            (2, selection(vec![os("KB5041580"), sw("Google Chrome")])),
+            (3, selection(vec![sw("7-Zip")])),
+        ]);
+
+        let os_targets = remediation_targets(&selected, ActionKind::OsPatchRemediate);
+        assert_eq!(
+            os_targets,
+            BTreeMap::from([
+                (1, vec!["KB5040434".to_string(), "KB5041580".into()]),
+                (2, vec!["KB5041580".to_string()]),
+            ]),
+            "device 3 has no OS rows ticked, so it must not be dispatched to at all"
+        );
+
+        let sw_targets = remediation_targets(&selected, ActionKind::SoftwarePatchRemediate);
+        assert_eq!(
+            sw_targets,
+            BTreeMap::from([
+                (2, vec!["Google Chrome".to_string()]),
+                (3, vec!["7-Zip".to_string()]),
+            ]),
+            "software is targeted by product title, since it carries no KB"
+        );
+
+        // A third-party row ticked under an OS remediation contributes nothing —
+        // it has no KB, so it cannot be named in a kbAllowList.
+        let only_software = BTreeMap::from([(1, selection(vec![sw("Google Chrome")]))]);
+        assert!(remediation_targets(&only_software, ActionKind::OsPatchRemediate).is_empty());
+
+        // ...and the native kinds have no target list at all.
+        assert!(remediation_targets(&selected, ActionKind::OsPatchApply).is_empty());
+
+        // The hand-picked script's "Target only the selected KBs" goes through the
+        // same function, so it cannot drift back to a batch-wide union.
+        assert_eq!(targets_by_device(&selected, true), os_targets);
+    }
+
+    /// An OS row with no KB (rare, but the feed allows it) cannot be targeted, and
+    /// must not become an empty entry that dispatches an install of nothing.
+    #[test]
+    fn remediation_targets_drop_untargetable_rows() {
+        let blank = SelectedPatch {
+            kb: Some("   ".into()),
+            name: "Unnamed".into(),
+            is_os: true,
+        };
+        let missing = SelectedPatch {
+            kb: None,
+            name: "Unnamed".into(),
+            is_os: true,
+        };
+        let selected = BTreeMap::from([
+            (1, selection(vec![blank, missing])),
+            (2, selection(vec![os("KB1")])),
+        ]);
+        assert_eq!(
+            remediation_targets(&selected, ActionKind::OsPatchRemediate),
+            BTreeMap::from([(2, vec!["KB1".to_string()])])
+        );
+    }
+
+    #[test]
+    fn remediation_summary_counts_distinct_patches_not_dispatches() {
+        // One KB ticked on three devices is one patch, not three.
+        let targets = BTreeMap::from([
+            (1, vec!["KB1".to_string()]),
+            (2, vec!["KB1".to_string()]),
+            (3, vec!["KB1".to_string(), "KB2".into()]),
+        ]);
+        assert_eq!(
+            remediation_summary(ActionKind::OsPatchRemediate, &targets).as_deref(),
+            Some("OS: 2 patch(es) on 3 device(s)")
+        );
+        assert_eq!(
+            remediation_summary(ActionKind::SoftwarePatchRemediate, &BTreeMap::new()),
+            None,
+            "a family with nothing ticked renders no chip"
+        );
+    }
+
+    #[test]
+    fn kb_targeting_summary_says_per_device() {
+        let targets = BTreeMap::from([
+            (1, vec!["KB1".to_string(), "KB2".into()]),
+            (2, vec!["KB2".to_string()]),
+        ]);
+        let s = kb_targeting_summary(&targets);
+        assert!(s.contains("only its own KBs"), "{s}");
+        assert!(s.contains("2 distinct KB(s) across 2 device(s)"), "{s}");
+
+        assert!(kb_targeting_summary(&BTreeMap::new()).contains("empty allow list"));
+    }
+
+    #[test]
+    fn kind_disabled_reason_distinguishes_no_script_from_no_selection() {
+        // Unconfigured wins: it is the one the operator must fix first, and it is
+        // true regardless of what they tick.
+        let why = kind_disabled_reason(ActionKind::OsPatchRemediate, false, 3).unwrap();
+        assert!(why.contains("No OS remediation script configured"), "{why}");
+        assert!(why.contains("Settings → Patch actions"), "{why}");
+
+        let why = kind_disabled_reason(ActionKind::SoftwarePatchRemediate, true, 0).unwrap();
+        assert!(why.contains("No software patches selected"), "{why}");
+
+        assert_eq!(
+            kind_disabled_reason(ActionKind::OsPatchRemediate, true, 1),
+            None
+        );
+        // The native kinds are never gated on either.
+        assert_eq!(
+            kind_disabled_reason(ActionKind::OsPatchApply, false, 0),
+            None
+        );
+        assert_eq!(kind_disabled_reason(ActionKind::Reboot, false, 0), None);
     }
 }

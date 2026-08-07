@@ -7,6 +7,8 @@
 //! fails if the backend drops/renames a key the mirrors below read — so drift is
 //! caught in CI rather than as a silently blank column at runtime.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -402,6 +404,8 @@ pub enum ActionKind {
     SoftwarePatchScan,
     OsPatchApply,
     SoftwarePatchApply,
+    OsPatchRemediate,
+    SoftwarePatchRemediate,
     Reboot,
     Script,
 }
@@ -411,8 +415,10 @@ impl ActionKind {
         match self {
             Self::OsPatchScan => "Scan for OS patches",
             Self::SoftwarePatchScan => "Scan for software patches",
-            Self::OsPatchApply => "Apply OS patches",
-            Self::SoftwarePatchApply => "Apply software patches",
+            Self::OsPatchApply => "Apply all OS patches",
+            Self::SoftwarePatchApply => "Apply all software patches",
+            Self::OsPatchRemediate => "Apply selected OS patches",
+            Self::SoftwarePatchRemediate => "Apply selected software patches",
             Self::Reboot => "Reboot",
             Self::Script => "Run script",
         }
@@ -426,9 +432,28 @@ impl ActionKind {
 
     /// Whether this action can restart the device as a side effect.
     pub fn can_reboot(self) -> bool {
+        !matches!(self, Self::OsPatchScan | Self::SoftwarePatchScan)
+    }
+
+    /// Whether this installs *only* the ticked patches, via the remediation script
+    /// configured for its family. Mirrors the backend; see `actions::ActionKind`.
+    pub fn is_remediation(self) -> bool {
+        matches!(self, Self::OsPatchRemediate | Self::SoftwarePatchRemediate)
+    }
+
+    /// Whether this dispatches a library script rather than a native endpoint.
+    pub fn runs_a_script(self) -> bool {
         matches!(
             self,
-            Self::Reboot | Self::OsPatchApply | Self::SoftwarePatchApply | Self::Script
+            Self::Script | Self::OsPatchRemediate | Self::SoftwarePatchRemediate
+        )
+    }
+
+    /// Whether this targets the OS patch family (vs third-party software).
+    pub fn is_os_family(self) -> bool {
+        matches!(
+            self,
+            Self::OsPatchScan | Self::OsPatchApply | Self::OsPatchRemediate
         )
     }
 }
@@ -593,7 +618,10 @@ pub struct RunAsOptions {
 pub struct ActionRequest {
     pub kind: ActionKind,
     pub device_ids: Vec<i64>,
-    pub targets: Vec<String>,
+    /// Device id → the ticked KBs (OS) or product titles (software) that device
+    /// should install. Serialized with string keys because JSON object keys are
+    /// strings; the backend's `HashMap<i64, _>` deserializes them.
+    pub device_targets: BTreeMap<i64, Vec<String>>,
     pub script_id: Option<i64>,
     pub script_uid: Option<String>,
     pub script_name: Option<String>,
@@ -613,7 +641,7 @@ impl ActionRequest {
         Self {
             kind,
             device_ids,
-            targets: Vec::new(),
+            device_targets: BTreeMap::new(),
             script_id: None,
             script_uid: None,
             script_name: None,

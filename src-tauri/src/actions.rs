@@ -32,6 +32,11 @@ pub enum ActionKind {
     SoftwarePatchScan,
     OsPatchApply,
     SoftwarePatchApply,
+    /// Install *only* the selected patches, via the configured OS remediation
+    /// script. See [`ActionKind::is_remediation`] for why this is a kind of its own
+    /// rather than a [`Self::Script`] with a preselected library entry.
+    OsPatchRemediate,
+    SoftwarePatchRemediate,
     Reboot,
     Script,
 }
@@ -41,8 +46,13 @@ impl ActionKind {
         match self {
             Self::OsPatchScan => "Scan for OS patches",
             Self::SoftwarePatchScan => "Scan for software patches",
-            Self::OsPatchApply => "Apply OS patches",
-            Self::SoftwarePatchApply => "Apply software patches",
+            // "all" vs "selected" is the whole distinction between these two pairs,
+            // and it is the one the operator cannot recover from afterwards, so it
+            // is in the label rather than in help text next to it.
+            Self::OsPatchApply => "Apply all OS patches",
+            Self::SoftwarePatchApply => "Apply all software patches",
+            Self::OsPatchRemediate => "Apply selected OS patches",
+            Self::SoftwarePatchRemediate => "Apply selected software patches",
             Self::Reboot => "Reboot",
             Self::Script => "Run script",
         }
@@ -59,7 +69,61 @@ impl ActionKind {
     /// script does (via its own `dryRun` parameter); the native endpoints have no
     /// preview mode at all, so a "dry run" of them dispatches nothing.
     pub fn supports_dry_run(self) -> bool {
-        matches!(self, Self::Script)
+        self.runs_a_script()
+    }
+
+    /// Whether this dispatches a library script rather than a native endpoint.
+    pub fn runs_a_script(self) -> bool {
+        matches!(
+            self,
+            Self::Script | Self::OsPatchRemediate | Self::SoftwarePatchRemediate
+        )
+    }
+
+    /// Whether this is a *targeted* apply — a remediation script that receives the
+    /// specific patches the operator ticked.
+    ///
+    /// This is a kind rather than a preselected [`Self::Script`] for three reasons,
+    /// each of which was a real defect in the script-only design: the kind is what
+    /// selects the parameter encoding (`kbAllowList` vs `productAllowListB64`, which
+    /// the software path never reached), it is what the Jobs tab and the audit log
+    /// record (they said "Run script", not what was installed), and it is what lets
+    /// the guardrails demand a target list at all.
+    pub fn is_remediation(self) -> bool {
+        matches!(self, Self::OsPatchRemediate | Self::SoftwarePatchRemediate)
+    }
+
+    /// The native apply that installs the device's *whole* approved backlog for the
+    /// same patch family — the other half of the pair, named for the warning and
+    /// tooltip that point between them.
+    pub fn untargeted_counterpart(self) -> Option<Self> {
+        match self {
+            Self::OsPatchRemediate => Some(Self::OsPatchApply),
+            Self::SoftwarePatchRemediate => Some(Self::SoftwarePatchApply),
+            _ => None,
+        }
+    }
+
+    /// The targeted counterpart of a native apply, if this is one.
+    pub fn targeted_counterpart(self) -> Option<Self> {
+        match self {
+            Self::OsPatchApply => Some(Self::OsPatchRemediate),
+            Self::SoftwarePatchApply => Some(Self::SoftwarePatchRemediate),
+            _ => None,
+        }
+    }
+}
+
+/// The library script id configured for a remediation kind, if any.
+///
+/// NinjaOne has no script-upload API, so these are added to the library by hand and
+/// their numeric ids pasted into Settings → Patch actions. An unset id is what makes
+/// the corresponding action unavailable rather than silently no-op.
+pub fn remediation_script_id(kind: ActionKind, s: &ActionSettings) -> Option<i64> {
+    match kind {
+        ActionKind::OsPatchRemediate => s.os_patch_script_id,
+        ActionKind::SoftwarePatchRemediate => s.software_patch_script_id,
+        _ => None,
     }
 }
 
@@ -228,7 +292,13 @@ pub struct PlanInput<'a> {
     pub include_offline: bool,
     pub override_window: bool,
     pub reboot_mode: Option<RebootMode>,
+    /// Whether a dispatched *script* will restart the device when it finishes.
+    /// Distinct from `reboot_mode`, which addresses the reboot endpoint.
+    pub reboot: RebootChoice,
     pub dry_run: bool,
+    /// How many patches the operator ticked, in total. Only the remediation kinds
+    /// read it — they have nothing to install without one.
+    pub target_count: usize,
     /// Injected so the maintenance-window check is testable.
     pub now: DateTime<Local>,
 }
@@ -334,11 +404,74 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
         ));
     }
 
+    // The native apply endpoints (`/device/{id}/patch/{os,software}/apply`) have no
+    // per-patch variant — they install everything approved on the device, and the
+    // ticked rows only chose *which devices* to dispatch to. Grouping the table
+    // "By patch" and ticking one row makes the opposite reading the obvious one, so
+    // say it outright rather than leaving it to a code comment.
+    if let Some(targeted) = input.kind.targeted_counterpart() {
+        let family = match input.kind {
+            ActionKind::SoftwarePatchApply => "software",
+            _ => "OS",
+        };
+        warnings.push(format!(
+            "Installs every approved {family} patch on each device, not just the selected rows — \
+             NinjaOne has no per-patch apply endpoint. The selection only chose the {} device(s) \
+             below. {}",
+            eligible.len(),
+            if remediation_script_id(targeted, s).is_some() {
+                format!(
+                    "To install only the selected patches, use \"{}\".",
+                    targeted.label()
+                )
+            } else {
+                format!(
+                    "To install only the selected patches, configure a remediation script in \
+                     Settings → Patch actions and use \"{}\".",
+                    targeted.label()
+                )
+            }
+        ));
+    }
+
+    // The targeted half of the pair. Both blockers describe a request that cannot
+    // install anything, so they fail closed rather than dispatching a script with an
+    // empty allow list — which reads in NinjaOne's activity feed exactly like a
+    // successful run that installed nothing.
+    if input.kind.is_remediation() {
+        let untargeted = input.kind.untargeted_counterpart();
+        if remediation_script_id(input.kind, s).is_none() {
+            blockers.push(format!(
+                "No remediation script configured for this patch family. NinjaOne has no per-patch \
+                 apply endpoint, so targeting specific patches needs a library script that accepts \
+                 a target list — add one, then paste its id into Settings → Patch actions.{}",
+                untargeted
+                    .map(|k| format!(
+                        " To install the full approved backlog instead, use \"{}\".",
+                        k.label()
+                    ))
+                    .unwrap_or_default()
+            ));
+        }
+        if input.target_count == 0 {
+            blockers.push(format!(
+                "No patches selected — this would run the remediation script with an empty target \
+                 list and install nothing. Tick the patch rows to install.{}",
+                untargeted
+                    .map(|k| format!(
+                        " To install everything approved instead, use \"{}\".",
+                        k.label()
+                    ))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+
     let reboot_expected = !dry_run
-        && matches!(
+        && (matches!(
             input.kind,
             ActionKind::Reboot | ActionKind::OsPatchApply | ActionKind::SoftwarePatchApply
-        );
+        ) || (input.kind.runs_a_script() && input.reboot == RebootChoice::Auto));
     if reboot_expected {
         warnings.push(match input.reboot_mode {
             Some(RebootMode::Forced) => format!(
@@ -427,6 +560,12 @@ fn window_label(s: &ActionSettings) -> String {
 /// "Google Chrome") cannot be sent literally. OS patches are KB numbers and are
 /// safe as a bare comma list; software targets are base64-encoded into a single
 /// space-free token that the script decodes and splits on `|`.
+///
+/// The software arm is reached via [`ActionKind::SoftwarePatchRemediate`]. Before
+/// that kind existed it was **dead code**: the only caller composed parameters for
+/// `ActionKind::Script`, which falls to the `kbAllowList` arm, so a software
+/// remediation script was handed a KB list — and third-party patches carry no KB at
+/// all, so the list was always empty.
 pub fn build_parameters(
     kind: ActionKind,
     targets: &[String],
@@ -436,7 +575,9 @@ pub fn build_parameters(
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let reboot = reboot.script_value();
     match kind {
-        ActionKind::SoftwarePatchApply | ActionKind::SoftwarePatchScan => {
+        ActionKind::SoftwarePatchApply
+        | ActionKind::SoftwarePatchScan
+        | ActionKind::SoftwarePatchRemediate => {
             let encoded = STANDARD.encode(targets.join("|"));
             format!("productAllowListB64={encoded} rebootBehavior={reboot} dryRun={dry_run}")
         }
@@ -567,8 +708,22 @@ mod tests {
             include_offline: false,
             override_window: false,
             reboot_mode: None,
+            reboot: RebootChoice::Never,
             dry_run: false,
+            // Enough that the remediation kinds aren't blocked for an empty
+            // selection; the tests that care about that set it explicitly.
+            target_count: 1,
             now: inside_window(),
+        }
+    }
+
+    /// Settings with both remediation scripts configured, so the remediation kinds
+    /// are available.
+    fn with_scripts() -> ActionSettings {
+        ActionSettings {
+            os_patch_script_id: Some(42),
+            software_patch_script_id: Some(43),
+            ..ActionSettings::default()
         }
     }
 
@@ -750,6 +905,181 @@ mod tests {
             &s,
             Local.with_ymd_and_hms(2026, 7, 29, 12, 0, 0).unwrap()
         ));
+    }
+
+    /// The one thing an operator cannot deduce from the UI: ticking a single row
+    /// under "By patch" grouping and pressing Apply installs the device's whole
+    /// approved backlog, because the endpoint has no per-patch variant.
+    #[test]
+    fn apply_warns_that_it_is_not_limited_to_the_selected_patches() {
+        let devices = vec![device(1, "srv-a", 1, false)];
+        let ids = [1];
+        let names = orgs();
+        let settings = ActionSettings::default();
+
+        for (kind, what) in [
+            (ActionKind::OsPatchApply, "OS"),
+            (ActionKind::SoftwarePatchApply, "software"),
+        ] {
+            let p = plan(input(kind, &ids, &devices, &names, &settings));
+            let w = p
+                .warnings
+                .iter()
+                .find(|w| w.contains("every approved"))
+                .unwrap_or_else(|| panic!("{kind:?} must warn that it is not per-patch"));
+            assert!(w.contains(what), "{w}");
+            assert!(
+                w.contains("configure a remediation script"),
+                "with no script configured, point at the setting that enables the other path: {w}"
+            );
+        }
+
+        // Once a remediation script exists, the warning names the action that would
+        // honor the selection rather than telling the operator to go configure one.
+        let p = plan(input(
+            ActionKind::OsPatchApply,
+            &ids,
+            &devices,
+            &names,
+            &with_scripts(),
+        ));
+        let w = p
+            .warnings
+            .iter()
+            .find(|w| w.contains("every approved"))
+            .expect("warning");
+        assert!(w.contains(ActionKind::OsPatchRemediate.label()), "{w}");
+        assert!(!w.contains("configure a remediation script"), "{w}");
+
+        // A scan installs nothing, so the warning would be noise.
+        let p = plan(input(
+            ActionKind::OsPatchScan,
+            &ids,
+            &devices,
+            &names,
+            &settings,
+        ));
+        assert!(!p.warnings.iter().any(|w| w.contains("every approved")));
+    }
+
+    /// The targeted half of each pair fails closed in the two ways that would
+    /// otherwise produce a NinjaOne activity indistinguishable from a successful
+    /// install of nothing.
+    #[test]
+    fn remediation_is_blocked_without_a_script_or_without_targets() {
+        let devices = vec![device(1, "srv-a", 1, false)];
+        let ids = [1];
+        let names = orgs();
+
+        for kind in [
+            ActionKind::OsPatchRemediate,
+            ActionKind::SoftwarePatchRemediate,
+        ] {
+            // No script id configured for this family.
+            let bare = ActionSettings::default();
+            let p = plan(input(kind, &ids, &devices, &names, &bare));
+            assert!(
+                p.blockers
+                    .iter()
+                    .any(|b| b.contains("No remediation script configured")),
+                "{kind:?}: {:?}",
+                p.blockers
+            );
+            // ...and it points at the native apply as the way to proceed today.
+            assert!(
+                p.blockers
+                    .iter()
+                    .any(|b| b.contains(kind.untargeted_counterpart().unwrap().label())),
+                "{kind:?}: {:?}",
+                p.blockers
+            );
+
+            // Script configured, but nothing ticked.
+            let configured = with_scripts();
+            let p = plan(PlanInput {
+                target_count: 0,
+                ..input(kind, &ids, &devices, &names, &configured)
+            });
+            assert!(
+                p.blockers.iter().any(|b| b.contains("No patches selected")),
+                "{kind:?}: {:?}",
+                p.blockers
+            );
+
+            // Both satisfied — the action is available.
+            let p = plan(input(kind, &ids, &devices, &names, &configured));
+            assert!(!p.is_blocked(), "{kind:?}: {:?}", p.blockers);
+            assert!(
+                !p.warnings.iter().any(|w| w.contains("every approved")),
+                "{kind:?} installs only what was selected, so the all-patches warning is wrong"
+            );
+        }
+    }
+
+    /// A script that restarts the device when it finishes is as consequential as the
+    /// native apply, so the dialog must flag it the same way.
+    #[test]
+    fn a_script_that_reboots_is_flagged_as_rebooting() {
+        let devices = vec![device(1, "srv-a", 1, false)];
+        let ids = [1];
+        let names = orgs();
+        let settings = with_scripts();
+
+        for kind in [
+            ActionKind::Script,
+            ActionKind::OsPatchRemediate,
+            ActionKind::SoftwarePatchRemediate,
+        ] {
+            let p = plan(input(kind, &ids, &devices, &names, &settings));
+            assert!(!p.reboot_expected, "{kind:?} with rebootBehavior=Never");
+
+            let p = plan(PlanInput {
+                reboot: RebootChoice::Auto,
+                ..input(kind, &ids, &devices, &names, &settings)
+            });
+            assert!(p.reboot_expected, "{kind:?} with rebootBehavior=Auto");
+
+            // ...but a preview restarts nothing.
+            let p = plan(PlanInput {
+                reboot: RebootChoice::Auto,
+                dry_run: true,
+                ..input(kind, &ids, &devices, &names, &settings)
+            });
+            assert!(!p.reboot_expected, "{kind:?} dry run");
+        }
+    }
+
+    /// Software targets can contain spaces ("Google Chrome"), which NinjaOne would
+    /// split into separate `key=value` tokens — hence the base64 encoding. This arm
+    /// was unreachable until `SoftwarePatchRemediate` existed.
+    #[test]
+    fn software_targets_are_encoded_and_os_targets_are_a_kb_list() {
+        let os = build_parameters(
+            ActionKind::OsPatchRemediate,
+            &["KB5040434".into(), "5041580".into()],
+            RebootChoice::Never,
+            false,
+        );
+        assert_eq!(
+            os,
+            "kbAllowList=5040434,5041580 rebootBehavior=Never dryRun=false"
+        );
+
+        let sw = build_parameters(
+            ActionKind::SoftwarePatchRemediate,
+            &["Google Chrome".into(), "7-Zip".into()],
+            RebootChoice::Auto,
+            true,
+        );
+        assert!(
+            sw.starts_with("productAllowListB64="),
+            "software targets must not be sent as a bare list: {sw}"
+        );
+        assert!(
+            !sw.split(' ').next().unwrap().contains(' '),
+            "the encoded token must be space-free: {sw}"
+        );
+        assert!(sw.ends_with(" rebootBehavior=Auto dryRun=true"), "{sw}");
     }
 
     #[test]

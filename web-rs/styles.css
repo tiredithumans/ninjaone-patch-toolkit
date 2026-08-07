@@ -1168,7 +1168,46 @@ tbody tr:hover {
   gap: 6px;
 }
 
-.action-bar-reboot {
+/* Each group is one mechanism, labelled. "Install all approved" and "Install only
+   the selected" are different endpoints with different blast radii, and the label
+   above the pair is what distinguishes them — the buttons themselves only say
+   which patch family. */
+.action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* Own line, so the buttons below it read as a pair belonging to it. */
+.action-group-label {
+  flex: 1 1 100%;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.action-bar-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1 1 100%;
+  font-size: 12px;
+}
+
+.action-target-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+/* One row per scope. Each carries a label saying which actions it reaches, because
+   "Dry run" next to a native Apply reads as protection that endpoint cannot give. */
+.action-bar-options {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
@@ -1178,14 +1217,37 @@ tbody tr:hover {
   color: var(--muted);
 }
 
-.action-bar-reboot label {
+.action-bar-options label {
   display: flex;
   flex-direction: column;
   gap: 3px;
 }
 
+.action-options-label {
+  flex: 1 1 100%;
+  font-size: 11px;
+  opacity: 0.85;
+}
+
 .action-bar-reason {
   flex: 1 1 240px;
+}
+
+.action-bar-runas {
+  flex: 0 1 180px;
+}
+
+/* Collapsed by default: the two "Install only the selected patches" buttons cover
+   the common case, and this is the escape hatch for any other library script. */
+.action-bar-script {
+  flex: 1 1 100%;
+  font-size: 12px;
+}
+
+.action-bar-script > summary {
+  cursor: pointer;
+  color: var(--muted);
+  padding: 2px 0;
 }
 
 .action-bar-blocked {
@@ -1256,6 +1318,10 @@ tbody tr:hover {
   font-size: 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* One line per device for a targeted install, so a batch at the 25-device cap
+     must not push the Confirm button off-screen. */
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 .modal-targets,
@@ -1294,17 +1360,18 @@ tbody tr:hover {
   flex-wrap: wrap;
   align-items: flex-end;
   gap: 10px;
-  margin-bottom: 14px;
+  margin: 8px 0 4px;
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 13px;
 }
 
-.script-picker legend {
-  padding: 0 6px;
-  color: var(--muted);
+.script-picker-targets {
+  flex: 1 1 100%;
+  margin: 0;
   font-size: 12px;
+  color: var(--muted);
 }
 
 .script-picker label {
