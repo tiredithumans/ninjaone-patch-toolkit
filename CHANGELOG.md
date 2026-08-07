@@ -11,6 +11,54 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **"Install only the selected patches" is now a real action.** The action bar splits the apply
+  buttons into two labelled groups — *Install all approved patches* and *Install only the selected
+  patches* — for OS and software each. The second runs the remediation script configured in
+  Settings → Patch actions and sends each device only the patches ticked **on that device**; a chip
+  under the bar shows how many distinct patches would go to how many devices. Previously the only
+  way to install specific patches was to pick a script by hand in the Jobs tab, which sent every
+  device the same combined list.
+- **The OS and Software remediation script IDs in Settings now do something.** They were persisted
+  and editable but read by nothing. They gate the two new actions, and the settings help explains
+  what the script must accept (`kbAllowList` for OS, `productAllowListB64` for software).
+
+### Changed
+
+- **Everything now dispatches from one place.** The script picker moved out of the Jobs tab and
+  into the action bar on the Patches tab, collapsed behind "Run a library script…", so actions are
+  launched next to the selection they target. The Jobs tab is now purely history. "Run as",
+  "Restart the device after installing" and "Dry run" are shown once and apply to any script-driven
+  action; each options row says which actions it reaches, since the native apply/scan/reboot
+  endpoints ignore all three.
+
+### Fixed
+
+- **"Apply patches" no longer looks like it applies only the patches you selected.** NinjaOne's
+  apply endpoint installs everything approved on the device and cannot be told which patches to
+  install — so with the table grouped *By patch*, ticking one row and pressing Apply installed that
+  device's whole approved backlog. The buttons are now named "Apply all …", and the confirmation
+  dialog says so outright and points at the targeted action instead.
+- **Software patches can now actually be targeted individually.** The software remediation path
+  composed a `kbAllowList` parameter, but third-party patches carry no KB number, so the list was
+  always empty and the script installed nothing. Software targets are now sent as
+  `productAllowListB64` — base64-encoded, because NinjaOne splits parameters on spaces and product
+  titles ("Google Chrome") contain them.
+- **A script that restarts the device when it finishes is now flagged in the confirmation dialog**,
+  the same way the native apply and reboot actions are.
+- **"Dry run" and "Restart after installing" no longer change meaning behind your back.** Both had
+  a second copy of their checkbox in the Jobs tab bound to the same setting, so toggling one
+  silently changed what the other tab's buttons would do. There is now one of each.
+- **"Target only the selected KBs" now sends each device its own KBs.** It previously sent every
+  device the combined list from the whole selection, so a machine was told to install patches it
+  did not have. The confirmation dialog lists the parameters per device, and warns when a selected
+  device would be sent an empty list.
+- **A hand-typed script parameter can no longer collide with another dispatch's approval.** The
+  confirmation fingerprint now length-prefixes each device's parameter string; a string containing
+  the internal separator could previously produce the same fingerprint as a different set of
+  devices and patches.
+
 ## [0.11.3] - 2026-08-07
 
 ### Fixed

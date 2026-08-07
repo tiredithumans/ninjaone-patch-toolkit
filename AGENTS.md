@@ -81,7 +81,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ├── src/app.rs                   # module decls, shared consts, App root + startup wiring
 ├── src/app/                     # state + view components as descendant modules of `app`
 │   ├── state.rs                 # AppState wrapper (single context) + 9 Copy sub-structs grouped by concern (session/lookups/filters/query/run/settings/updates/ui/actions) + Tab/AppliedFilters/Toast/Progress/DeviceSelection
-│   ├── actions.rs               # ActionBar (device selection), ConfirmActionModal, ScriptPicker, JobsTable
+│   ├── actions.rs               # ActionBar (the one dispatch surface: selection + ACTION_GROUPS + shared run options + folded-in ScriptPicker), ConfirmActionModal, RunAsRoles, JobsTable (history only)
 │   ├── header.rs                # Header (sign-in/out, settings toggle)
 │   ├── controls.rs              # RunControls + PresetRow (run/refresh cadence, exports, presets)
 │   ├── filters.rs               # Filters panel
@@ -125,8 +125,11 @@ scripts/                         # dev/CI tooling (not shipped)
   2. Add a variant to `actions::ActionKind` and make `is_mutating()` / `supports_dry_run()`
      answer correctly — those two decide whether the confirm gate, the blast-radius cap, the
      org-span cap and the maintenance window apply.
-  3. Dispatch it from the `match kind` in `commands::actions::run_action`.
-  4. Add the button to `web-rs/src/app/actions.rs::ACTION_BUTTONS`.
+  3. Dispatch it from the `match kind` in `commands::actions::send_action`.
+  4. Add the button to `web-rs/src/app/actions.rs::ACTION_GROUPS`, under the heading that names
+     its *mechanism* — the group label is what tells the operator how wide the blast radius is.
+  Mirror the variant in `web-rs/src/types.rs::ActionKind` (labels, `is_mutating`, `can_reboot`,
+  `is_remediation`, `runs_a_script`, `is_os_family`) — the frontend has its own copy.
 
 - **New filter facet** — an identity/scope facet (matched against a cached device) extends
   `FilterParams::device_allowed` (+ `has_identity_scope`) and, if the install-history `df` honors it,
@@ -363,33 +366,87 @@ secrets are **not** stored there — see below).
 - **Write path (patch actions) — load-bearing rules.** The feature is opt-in
   (`settings.actions.enabled`, default false) and every command re-checks
   `require_actions_enabled` — a stale frontend must not be able to widen the blast radius.
-  - **There is no per-KB apply endpoint.** `/device/{id}/patch/{os,software}/apply` installs
-    everything approved on the device. Targeting specific KBs is possible **only** via a
-    library script declaring a `kbAllowList` variable (`AutomationScript::accepts_kb_allow_list`
-    gates whether the UI may offer it).
-  - **Selection is per patch row; dispatch is per device (load-bearing).**
-    `DeviceSelection.patches` maps each ticked row's `patch_key` → its KB, and a device
-    enters the selection with its first ticked row and leaves with its last. Ticking a row
-    must **not** tick the device's other rows: it once did, which swept every KB on the
-    device into `kbAllowList` and made the one path capable of per-patch targeting unable to
-    receive a subset. What Apply then does on those devices is still all-or-nothing — that's
-    the endpoint, not the selection model — so don't "fix" the gap by widening selection
-    again. Third-party patches carry no KB (the software feed has no `kbNumber`), so they can
-    never be targeted individually on either path.
+  - **There is no per-KB apply endpoint, so there are two apply paths and the UI names both
+    (load-bearing).** `/device/{id}/patch/{os,software}/apply` installs everything approved on
+    the device and cannot be told which patches to install. Targeting specific patches is
+    possible **only** via a library script that accepts a target list. Those are different
+    mechanisms with different blast radii, so they are different `ActionKind`s —
+    `OsPatchApply`/`SoftwarePatchApply` ("Apply all …") vs
+    `OsPatchRemediate`/`SoftwarePatchRemediate` ("Apply selected …") — grouped under separate
+    headings in `ACTION_GROUPS` (`web-rs/src/app/actions.rs`). Presenting them as one "Apply"
+    button was a real hazard: ticking one row under *By patch* grouping and pressing Apply
+    installs the device's whole approved backlog, and nothing said so. `plan()` now warns on the
+    native kinds and names the targeted counterpart (`untargeted_counterpart` /
+    `targeted_counterpart`). Don't collapse the pairs back into one action.
+    - The remediation script ids live in `settings.actions.{os,software}_patch_script_id` and are
+      resolved **backend-side** from Settings (`actions::remediation_script_id`), never taken from
+      the request — the kind carries guardrails a hand-picked `Script` doesn't. An unset id is a
+      `plan()` blocker, and so is an empty target list (a script with an empty allow list reports
+      success having installed nothing). `AutomationScript::accepts_kb_allow_list` still gates the
+      per-KB checkbox on the hand-driven `ScriptPicker` path.
+    - **The parameter encoding is chosen by kind.** `build_parameters` sends `kbAllowList=`
+      (comma-separated KBs) for OS and `productAllowListB64=` (base64 of titles joined by `|`)
+      for software, because NinjaOne splits `parameters` on **spaces** and product titles contain
+      them. The software arm was dead code until `SoftwarePatchRemediate` existed: the only caller
+      composed for `ActionKind::Script`, which falls to the `kbAllowList` arm, so a software
+      remediation script was handed a KB list — and third-party patches carry no KB, so it was
+      always empty.
+  - **Selection is per patch row; dispatch is per device, with per-device targets
+    (load-bearing).** `DeviceSelection.patches` maps each ticked row's `patch_key` → a
+    `SelectedPatch { kb, name, is_os }`, and a device enters the selection with its first ticked
+    row and leaves with its last. Ticking a row must **not** tick the device's other rows: it once
+    did, which swept every KB on the device into `kbAllowList` and made the one path capable of
+    per-patch targeting unable to receive a subset.
+    - A dispatch sends each device **only the patches ticked on it**
+      (`util::targets_by_device` → `ActionRequest.device_targets` →
+      `commands::actions::per_device_parameters`, a `BTreeMap<i64, String>` carried on
+      `DispatchContext`). This covers **every** path that sends an allow list — both remediation
+      kinds *and* the script picker's "Target only the selected KBs". There is no batch-wide
+      `targets` field any more: it handed every device the union of the selection, which is
+      invisible in a dialog showing one parameter string. Don't reintroduce one; a genuinely
+      uniform string is what the verbatim `parameters` field is for, and it is honored only on the
+      `Script` path where the operator can actually type it.
+    - Devices with nothing ticked *of that family* are dropped from a remediation's `device_ids`
+      entirely rather than dispatched with an empty list. A hand-picked `Script` keeps them (the
+      operator chose them and the script may not need a list), and `build_plan` warns, naming them
+      via `untargeted_names` / `summarize_names`.
+    - What the *native* Apply does on those devices is still all-or-nothing — that's the endpoint,
+      not the selection model — so don't "fix" that gap by widening selection again.
+    - Third-party patches carry no KB (the software feed has no `kbNumber`), so they are targeted
+      by **product title** instead; an OS remediation silently skips them and vice versa, mirroring
+      the asymmetry of the two feeds.
   - **`ReplaySafety::ActOnce` on every POST.** `request_raw`'s timeout arm would otherwise
     replay the body and re-run the action; 429/401 still replay (the gateway rejected before
     the device queue). A timed-out dispatch becomes `JobState::Unknown` — polled, never
     auto-retried.
   - **Confirm tokens are payload-bound and single-use.** `plan_action` hashes **everything that
-    reaches NinjaOne or that the guardrails read** — kind ‖ sorted device ids ‖ targets ‖ script
-    ref ‖ effective parameters ‖ run_as ‖ reboot choice ‖ reboot mode ‖ include_offline ‖
-    override_window ‖ dry_run — into a 5-minute token; `run_action` re-plans from scratch and
-    re-checks the hash. Editing the selection after the dialog opened invalidates the approval
+    reaches NinjaOne or that the guardrails read** — kind ‖ sorted device ids ‖ script ref ‖
+    **resolved** script ‖ per-device parameters ‖ run_as ‖ reboot choice ‖ reboot mode ‖
+    include_offline ‖ override_window ‖ dry_run — into a 5-minute token; `run_action` re-plans
+    from scratch and re-checks the hash. The parameters are hashed as
+    `canonical_parameters` — every device's own string, bound to its id — so re-ticking one row on
+    one device invalidates the approval; and the *resolved* script is hashed separately because
+    for a remediation kind it comes from Settings rather than from the request, so an id edited
+    while the dialog is open would otherwise run a different script under the same approval.
+    `canonical_parameters` **length-prefixes each value**. The `0x1f` separator discipline below is
+    enough for fields the toolkit composes, but a parameter string can be *typed by hand* in the
+    script picker, so `{1: "a\u{1e}2=b"}` rendered identically to `{1: "a", 2: "b"}` — two
+    different dispatches sharing one approval. Editing the selection after the dialog opened invalidates the approval
     rather than widening it. `request_hash` **destructures `ActionRequest` exhaustively**, so a new
     field is a compile error there rather than a silent omission — which is exactly how
     `include_offline`, `override_window` and `run_as` came to be missing (the first two gate
     `plan()`'s offline warning and maintenance-window blocker; the third is the execution identity).
     Fields are separated by `0x1f` so two different requests can't concatenate to one hash input.
+  - **There is one dispatch surface, and the run options are shared (load-bearing).** Everything
+    dispatches from the `ActionBar` on the Patches tab, next to the selection it targets; the
+    `ScriptPicker` is folded into it behind a `<details>` and the Jobs tab is history only.
+    `Run as`, `Restart the device after installing` and `Dry run` are rendered **once** and reach
+    every `runs_a_script()` kind — they mean the same thing for a remediation install and a
+    hand-picked script, and duplicating the controls across two tabs while they wrote the same
+    signals meant ticking "Dry run" in the Jobs tab silently changed what an Apply button did.
+    Each options row carries a label naming the actions it reaches: the native endpoints take no
+    parameters, have no preview mode and run as NinjaOne's agent, so an unlabelled "Dry run" beside
+    them reads as protection they cannot give.
   - **Guardrails live in `actions::plan`**, which is pure with an injected clock. Adding one
     means extending `blockers`/`warnings` there, not adding a dialog. The one exception is the
     `dry_run` check, which is *also* asserted at the dispatch site in `run_action` — defense in
