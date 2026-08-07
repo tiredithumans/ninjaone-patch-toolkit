@@ -255,6 +255,12 @@ pub struct SettingsView {
     pub auto_check_updates: bool,
     #[serde(default)]
     pub actions: ActionSettings,
+    /// Set by `save_settings` when the save switched instance or client id. The
+    /// backend has already dropped its cached result at that point, so anything
+    /// still on screen belongs to a tenant this session can no longer page or
+    /// export. `get_settings` always sends `false`.
+    #[serde(default)]
+    pub tenant_changed: bool,
 }
 
 /// Mirror of the backend `settings::ActionSettings`. Round-trips unchanged through

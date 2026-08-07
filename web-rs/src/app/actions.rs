@@ -25,39 +25,22 @@ pub(crate) fn ActionBar() -> impl IntoView {
     let any = move || counts().0 > 0;
 
     // One disabled reason for every button, so the tooltip always explains itself.
-    let disabled_reason = move || {
-        if let Some(reason) = blocked() {
-            Some(reason)
-        } else if !any() {
-            Some("Select at least one device first".to_string())
-        } else if busy() {
-            Some("An action is already being dispatched".to_string())
-        } else {
-            None
-        }
-    };
+    let disabled_reason = move || action_disabled_reason(blocked(), counts().0, busy());
 
     view! {
         <div class="action-bar">
             <div class="action-bar-summary">
                 {move || {
                     let (devices, rows, offline) = counts();
-                    if devices == 0 {
-                        view! {
+                    let Some(text) = selection_summary(devices, rows, offline) else {
+                        return view! {
                             <span class="action-bar-hint">
                                 "Select patch rows to act on their devices."
                             </span>
                         }
-                            .into_any()
-                    } else {
-                        let mut text = format!(
-                            "{} device(s) selected · {} patch row(s)",
-                            group_thousands(devices),
-                            group_thousands(rows),
-                        );
-                        if offline > 0 {
-                            text.push_str(&format!(" · {offline} offline"));
-                        }
+                            .into_any();
+                    };
+                    {
                         view! {
                             <>
                                 <strong>{text}</strong>
@@ -432,8 +415,13 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
             return;
         };
         leptos::task::spawn_local(async move {
-            if let Ok(opts) = api::list_run_as_options(device_id).await {
-                run_as_roles.set(opts.roles);
+            match api::list_run_as_options(device_id).await {
+                Ok(opts) => run_as_roles.set(opts.roles),
+                // Every other call in this file routes failures through a Toast.
+                // Swallowing this one left an empty "Run as" datalist that looked
+                // exactly like a device with no configured credentials, so the
+                // operator had no way to tell a failed lookup from a real answer.
+                Err(e) => state.notify(Toast::err(e)),
             }
         });
     });

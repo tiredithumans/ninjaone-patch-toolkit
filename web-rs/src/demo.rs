@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::app::util::date_to_epoch;
 use crate::types::QueryResult;
 use crate::types::{
     AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams, GroupBy, Location,
@@ -282,41 +283,45 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
 /// computation in a real deployment; the demo keeps it static (and, unlike the
 /// per-org rollups, does not narrow it by organization — the sample carries no
 /// per-org OS split).
-fn sample_compliance_by_os() -> Vec<OsCompliance> {
-    vec![
-        OsCompliance {
-            os: "Windows Server 2022".to_string(),
-            devices_total: 16,
-            devices_compliant: 12,
-            compliance_pct: 75.0,
-            pending_critical: 5,
-            aged_critical: 2,
-        },
-        OsCompliance {
-            os: "Windows 11 Pro".to_string(),
-            devices_total: 14,
-            devices_compliant: 11,
-            compliance_pct: 78.6,
-            pending_critical: 3,
-            aged_critical: 1,
-        },
-        OsCompliance {
-            os: "Windows 10 Pro".to_string(),
-            devices_total: 8,
-            devices_compliant: 6,
-            compliance_pct: 75.0,
-            pending_critical: 2,
-            aged_critical: 1,
-        },
-        OsCompliance {
-            os: "Ubuntu 22.04 LTS".to_string(),
-            devices_total: 4,
-            devices_compliant: 4,
-            compliance_pct: 100.0,
-            pending_critical: 0,
-            aged_critical: 0,
-        },
-    ]
+/// Per-OS compliance over the rows actually on screen. A device counts as
+/// compliant when none of its visible rows is a pending patch, mirroring the
+/// backend's `build_compliance_by_os`, which likewise derives from the scoped set
+/// rather than from a fixed table.
+fn scoped_compliance_by_os(rows: &[PatchRow]) -> Vec<OsCompliance> {
+    // os -> (all devices, devices with a pending row, pending critical/important)
+    let mut by_os: BTreeMap<String, (BTreeSet<i64>, BTreeSet<i64>, usize)> = BTreeMap::new();
+    for r in rows {
+        let os = r.os_name.clone().unwrap_or_else(|| "(unknown)".to_string());
+        let e = by_os.entry(os).or_default();
+        e.0.insert(r.device_id);
+        if r.status == "PENDING" {
+            e.1.insert(r.device_id);
+            if matches!(r.severity.as_str(), "Critical" | "Important") {
+                e.2 += 1;
+            }
+        }
+    }
+    by_os
+        .into_iter()
+        .map(|(os, (devices, pending, critical))| {
+            let total = devices.len();
+            let compliant = total - pending.len();
+            OsCompliance {
+                os,
+                devices_total: total,
+                devices_compliant: compliant,
+                compliance_pct: if total == 0 {
+                    100.0
+                } else {
+                    compliant as f64 / total as f64 * 100.0
+                },
+                pending_critical: critical,
+                // The sample carries no SLA breach detail; the real backend
+                // computes this from first-seen age.
+                aged_critical: 0,
+            }
+        })
+        .collect()
 }
 
 fn sample_reboot() -> Vec<DeviceSummary> {
@@ -445,27 +450,46 @@ fn sample_severity_by_org() -> Vec<OrgSeverity> {
 /// Representative fleet-wide pending-patch age histogram. The labels match the
 /// backend's fixed buckets (`build_age_buckets`), oldest last, with the
 /// undated bucket after it.
-fn sample_age_buckets() -> Vec<AgeBucket> {
-    [
-        ("0-30 days", 13),
-        ("31-60 days", 6),
-        ("61-90 days", 4),
-        ("91-180 days", 3),
-        ("180+ days", 2),
-        ("Unknown", 1),
-    ]
-    .into_iter()
-    .map(|(label, count)| AgeBucket {
-        label: label.to_string(),
-        count,
-    })
-    .collect()
+/// Pending-patch age histogram over the rows on screen, bucketed by how long ago
+/// each was first seen. Mirrors the backend's `build_age_buckets`, including its
+/// `Unknown` bucket for undated patches — which exists so they cannot silently
+/// inflate `180+ days`.
+fn scoped_age_buckets(rows: &[PatchRow]) -> Vec<AgeBucket> {
+    const LABELS: [&str; 6] = [
+        "0-30 days",
+        "31-60 days",
+        "61-90 days",
+        "91-180 days",
+        "180+ days",
+        "Unknown",
+    ];
+    let mut counts = [0usize; LABELS.len()];
+    for r in rows.iter().filter(|r| r.status == "PENDING") {
+        let idx = match r.first_seen_date.as_deref().and_then(date_to_epoch) {
+            Some(seen) => {
+                let days = (SAMPLE_NOW_EPOCH - seen) / 86_400;
+                match days {
+                    d if d <= 30 => 0,
+                    d if d <= 60 => 1,
+                    d if d <= 90 => 2,
+                    d if d <= 180 => 3,
+                    _ => 4,
+                }
+            }
+            None => 5,
+        };
+        counts[idx] += 1;
+    }
+    LABELS
+        .iter()
+        .zip(counts)
+        .map(|(label, count)| AgeBucket {
+            label: (*label).to_string(),
+            count,
+        })
+        .collect()
 }
 
-/// The sample filtered like a real query: device facets (org/location/role/OS-type/
-/// OS-name) and patch facets (type/status/severity/search/release-window/install-
-/// window) applied to the rows, with the row count recomputed. Compliance / reboot
-/// stay representative, narrowed only by the organization facet for consistency.
 pub fn filtered_result(
     filter: &FilterParams,
     patch_type: &str,
@@ -515,15 +539,22 @@ fn assemble(rows: Vec<PatchRow>, org_filter: Option<i64>) -> QueryResult {
                 )
             }
         };
+    // Both of these used to ship whole-fleet regardless of the facet, so with an
+    // organization selected the Compliance tab's by-OS chart and the age histogram
+    // described a fleet the rest of the screen — and `devices_total` beside them —
+    // no longer showed. They are derived from the scoped rows instead, which also
+    // means they react to every other facet rather than just this one.
+    let compliance_by_os = scoped_compliance_by_os(&rows);
+    let age_buckets = scoped_age_buckets(&rows);
     QueryResult {
         rows_total: rows.len(),
         rows,
         reboot_devices,
         compliance,
-        compliance_by_os: sample_compliance_by_os(),
+        compliance_by_os,
         failures,
         severity_by_org,
-        age_buckets: sample_age_buckets(),
+        age_buckets,
         devices_total,
         generated_at: GENERATED_AT.to_string(),
         data_fetched_at: GENERATED_AT.to_string(),
@@ -573,7 +604,7 @@ fn search_matches(row: &PatchRow, query: &str) -> bool {
 }
 
 fn first_seen_in_window(row: &PatchRow, f: &FilterParams) -> bool {
-    let Some(released) = row.first_seen_date.as_deref().and_then(ymd_to_epoch) else {
+    let Some(released) = row.first_seen_date.as_deref().and_then(date_to_epoch) else {
         // No release date can't satisfy a date window; pass only when none is set.
         return f.detected_within_days.is_none()
             && f.detected_after.is_none()
@@ -604,7 +635,7 @@ fn install_in_window(row: &PatchRow, install_after_days: Option<i64>) -> bool {
     let Some(days) = install_after_days.filter(|_| is_history) else {
         return true;
     };
-    match row.installed_date.as_deref().and_then(ymd_to_epoch) {
+    match row.installed_date.as_deref().and_then(date_to_epoch) {
         Some(installed) => installed >= SAMPLE_NOW_EPOCH - days * 86_400,
         None => false,
     }
@@ -618,29 +649,6 @@ fn contains_ci(haystack: &str, needle: &str) -> bool {
 
 /// Parses a `YYYY-MM-DD` date to Unix seconds at UTC midnight (Howard Hinnant's
 /// civil-from-days algorithm), or `None`. Pure, so the date filters host-test.
-fn ymd_to_epoch(s: &str) -> Option<i64> {
-    let mut parts = s.trim().split('-');
-    let y: i64 = parts.next()?.parse().ok()?;
-    let m: i64 = parts.next()?.parse().ok()?;
-    let d: i64 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
-    Some(days_from_civil(y, m, d) * 86_400)
-}
-
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = (if y >= 0 { y } else { y - 399 }) / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// Identity of a group a row belongs to. Mirrors the backend's `rows::group_key`
-/// exactly — the demo has no backend, so this is the one place the two must be
-/// kept in step by hand.
 pub fn group_key(row: &PatchRow, group_by: GroupBy) -> String {
     match group_by {
         GroupBy::Device => row.device_id.to_string(),
@@ -772,11 +780,11 @@ mod tests {
     }
 
     #[test]
-    fn ymd_to_epoch_matches_known_dates() {
-        assert_eq!(ymd_to_epoch("2026-01-01"), Some(1_767_225_600));
-        assert_eq!(ymd_to_epoch("2026-06-26"), Some(1_782_432_000));
-        assert_eq!(ymd_to_epoch("nonsense"), None);
-        assert_eq!(ymd_to_epoch("2026-13-01"), None);
+    fn date_to_epoch_matches_known_dates() {
+        assert_eq!(date_to_epoch("2026-01-01"), Some(1_767_225_600));
+        assert_eq!(date_to_epoch("2026-06-26"), Some(1_782_432_000));
+        assert_eq!(date_to_epoch("nonsense"), None);
+        assert_eq!(date_to_epoch("2026-13-01"), None);
     }
 
     #[test]
@@ -856,6 +864,56 @@ mod tests {
             r.age_buckets.len(),
             6,
             "fixed six-bucket histogram (five ages + unknown)"
+        );
+    }
+
+    /// The module's contract is that the rollups are "narrowed only by the
+    /// organization facet" — but `compliance_by_os` and `age_buckets` were shipped
+    /// whole-fleet regardless, so with an org selected the Compliance tab's by-OS
+    /// chart and the age histogram described a fleet that `devices_total` beside
+    /// them no longer showed.
+    #[test]
+    fn the_by_os_and_age_rollups_narrow_with_the_org_facet() {
+        let all = filtered_result(&filter(), "ALL", &all_statuses(), Some(3650));
+        let scoped = filtered_result(
+            &FilterParams {
+                organization_id: Some(1),
+                ..filter()
+            },
+            "ALL",
+            &all_statuses(),
+            Some(3650),
+        );
+
+        let all_os_devices: usize = all.compliance_by_os.iter().map(|o| o.devices_total).sum();
+        let scoped_os_devices: usize = scoped
+            .compliance_by_os
+            .iter()
+            .map(|o| o.devices_total)
+            .sum();
+        assert!(
+            scoped_os_devices < all_os_devices,
+            "the by-OS chart must shrink with the org facet ({scoped_os_devices} vs {all_os_devices})"
+        );
+
+        let all_aged: usize = all.age_buckets.iter().map(|b| b.count).sum();
+        let scoped_aged: usize = scoped.age_buckets.iter().map(|b| b.count).sum();
+        assert!(
+            scoped_aged < all_aged,
+            "the age histogram must shrink with the org facet ({scoped_aged} vs {all_aged})"
+        );
+        assert_eq!(scoped.age_buckets.len(), 6, "the bucket set stays fixed");
+    }
+
+    /// The age histogram counts pending patches only, so a query that asks for
+    /// install history must not populate it.
+    #[test]
+    fn the_age_histogram_counts_only_pending_patches() {
+        let installed = filtered_result(&filter(), "ALL", &["INSTALLED".to_string()], Some(3650));
+        assert_eq!(
+            installed.age_buckets.iter().map(|b| b.count).sum::<usize>(),
+            0,
+            "installed patches are not pending backlog"
         );
     }
 

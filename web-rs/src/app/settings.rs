@@ -133,10 +133,13 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                         max="65535"
                         prop:value=move || state.settings.f_port.get().to_string()
                         on:change=move |ev| {
-                            let v = event_target_value(&ev)
-                                .parse::<u16>()
-                                .unwrap_or_else(|_| state.settings.f_port.get_untracked());
-                            state.settings.f_port.set(v.clamp(1024, 65535));
+                            let v = parse_clamped(
+                                &event_target_value(&ev),
+                                state.settings.f_port.get_untracked(),
+                                1024,
+                                65535,
+                            );
+                            state.settings.f_port.set(v);
                         }
                     />
                 </label>
@@ -148,10 +151,13 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                         max="3650"
                         prop:value=move || state.settings.f_install_days.get().to_string()
                         on:change=move |ev| {
-                            let v = event_target_value(&ev)
-                                .parse::<i64>()
-                                .unwrap_or_else(|_| state.settings.f_install_days.get_untracked());
-                            state.settings.f_install_days.set(v.clamp(1, 3650));
+                            let v = parse_clamped(
+                                &event_target_value(&ev),
+                                state.settings.f_install_days.get_untracked(),
+                                1,
+                                3650,
+                            );
+                            state.settings.f_install_days.set(v);
                         }
                     />
                 </label>
@@ -163,10 +169,13 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                         max="3650"
                         prop:value=move || state.settings.f_sla.get().to_string()
                         on:change=move |ev| {
-                            let v = event_target_value(&ev)
-                                .parse::<i64>()
-                                .unwrap_or_else(|_| state.settings.f_sla.get_untracked());
-                            state.settings.f_sla.set(v.clamp(1, 3650));
+                            let v = parse_clamped(
+                                &event_target_value(&ev),
+                                state.settings.f_sla.get_untracked(),
+                                1,
+                                3650,
+                            );
+                            state.settings.f_sla.set(v);
                         }
                     />
                 </label>
@@ -272,9 +281,11 @@ fn ActionSettingsFields() -> impl IntoView {
                         prop:disabled=move || !enabled()
                         prop:value=move || a.with(|s| s.max_devices_per_action).to_string()
                         on:change=move |ev| {
-                            if let Ok(v) = event_target_value(&ev).parse::<usize>() {
-                                a.update(|s| s.max_devices_per_action = v.clamp(1, 500));
-                            }
+                            let raw = event_target_value(&ev);
+                            a.update(|s| {
+                                s.max_devices_per_action =
+                                    parse_clamped(&raw, s.max_devices_per_action, 1, 500)
+                            });
                         }
                     />
                 </label>
@@ -287,9 +298,11 @@ fn ActionSettingsFields() -> impl IntoView {
                         prop:disabled=move || !enabled()
                         prop:value=move || a.with(|s| s.max_orgs_per_action).to_string()
                         on:change=move |ev| {
-                            if let Ok(v) = event_target_value(&ev).parse::<usize>() {
-                                a.update(|s| s.max_orgs_per_action = v.max(1));
-                            }
+                            let raw = event_target_value(&ev);
+                            a.update(|s| {
+                                s.max_orgs_per_action =
+                                    parse_clamped(&raw, s.max_orgs_per_action, 1, 50)
+                            });
                         }
                     />
                 </label>
@@ -302,9 +315,8 @@ fn ActionSettingsFields() -> impl IntoView {
                         prop:disabled=move || !enabled()
                         prop:value=move || a.with(|s| s.concurrency).to_string()
                         on:change=move |ev| {
-                            if let Ok(v) = event_target_value(&ev).parse::<usize>() {
-                                a.update(|s| s.concurrency = v.clamp(1, 16));
-                            }
+                            let raw = event_target_value(&ev);
+                            a.update(|s| s.concurrency = parse_clamped(&raw, s.concurrency, 1, 16));
                         }
                     />
                 </label>
@@ -335,8 +347,10 @@ fn ActionSettingsFields() -> impl IntoView {
                             a.with(|s| s.os_patch_script_id).map(|v| v.to_string()).unwrap_or_default()
                         }
                         on:change=move |ev| {
-                            let v = event_target_value(&ev).parse::<i64>().ok();
-                            a.update(|s| s.os_patch_script_id = v);
+                            let raw = event_target_value(&ev);
+                            a.update(|s| {
+                                s.os_patch_script_id = parse_optional_id(&raw, s.os_patch_script_id)
+                            });
                         }
                     />
                 </label>
@@ -352,8 +366,11 @@ fn ActionSettingsFields() -> impl IntoView {
                                 .unwrap_or_default()
                         }
                         on:change=move |ev| {
-                            let v = event_target_value(&ev).parse::<i64>().ok();
-                            a.update(|s| s.software_patch_script_id = v);
+                            let raw = event_target_value(&ev);
+                            a.update(|s| {
+                                s.software_patch_script_id =
+                                    parse_optional_id(&raw, s.software_patch_script_id)
+                            });
                         }
                     />
                 </label>

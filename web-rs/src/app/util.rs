@@ -1,12 +1,15 @@
 //! Small, standalone view helpers shared across the app components: option/date
 //! parsing, number formatting, and CSS-class pickers. They touch no `AppState`, so
-//! they live here rather than bloating `app.rs`. Most are JS-free and unit-test on
-//! the host target; the two `js_sys::Date` helpers are the exception (browser only).
+//! they live here rather than bloating `app.rs`. Every helper here is JS-free and
+//! unit-tests on the host target — the date pair used to reach for `js_sys::Date`
+//! and so could not be tested at all; it is now plain arithmetic.
 
 use std::cmp::Ordering;
 
 use super::{AppliedFilters, Tab};
-use crate::types::{ActionKind, AuthStatus, JobReport, PatchRow, RebootMode, RowSort, RowSortKey};
+use crate::types::{
+    ActionKind, AuthStatus, FilterParams, JobReport, PatchRow, RebootMode, RowSort, RowSortKey,
+};
 
 /// Identity of a patch *within a device's selection*.
 ///
@@ -75,18 +78,24 @@ pub(crate) fn parse_opt(s: &str) -> Option<i64> {
     s.trim().parse().ok()
 }
 
-/// Parses a `yyyy-mm-dd` date string to Unix seconds (UTC midnight), or `None`.
+/// Parses a `yyyy-mm-dd` date (the only shape an `<input type="date">` produces)
+/// to Unix seconds at UTC midnight. `None` for empty or malformed input.
+///
+/// Deliberately arithmetic rather than `js_sys::Date::parse`. Two things follow.
+/// It host-tests, which is what lets `filter_params` — the mapping behind *every*
+/// query — be tested at all. And it is now the only civil-date implementation in
+/// the crate: `demo.rs` carried a second, byte-identical one because its own
+/// filtering had to run in the browser demo, so the two could disagree about a
+/// month or leap boundary with nothing to catch it.
 pub(crate) fn date_to_epoch(date: &str) -> Option<i64> {
-    let trimmed = date.trim();
-    if trimmed.is_empty() {
+    let mut parts = date.trim().split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return None;
     }
-    let ms = js_sys::Date::parse(trimmed);
-    if ms.is_nan() {
-        None
-    } else {
-        Some((ms / 1000.0) as i64)
-    }
+    Some(days_from_civil(y, m, d) * 86_400)
 }
 
 /// Formats Unix seconds back to a `yyyy-mm-dd` date string (UTC), or "" for `None`.
@@ -94,11 +103,182 @@ pub(crate) fn epoch_to_date(epoch: Option<i64>) -> String {
     let Some(e) = epoch else {
         return String::new();
     };
-    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64((e * 1000) as f64));
-    d.to_iso_string()
-        .as_string()
-        .map(|s| s.chars().take(10).collect())
-        .unwrap_or_default()
+    // Floor-divide so pre-1970 epochs land on the right day rather than rounding
+    // toward zero into the next one.
+    let days = e.div_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
+/// `days_from_civil`).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The inverse of [`days_from_civil`], as `(year, month, day)`.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// The filter panel's fields as plain values, lifted out of the signals holding
+/// them so the mapping below can be tested without a reactive runtime.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FilterInputs {
+    pub organization_id: Option<i64>,
+    pub location_id: Option<i64>,
+    pub role_id: Option<i64>,
+    pub node_classes: Vec<String>,
+    pub severities: Vec<String>,
+    pub os_name: String,
+    pub search: String,
+    /// "" (any), "1"/"7"/"30"/"90" (last N days), or "custom".
+    pub detected_window: String,
+    pub detected_after: String,
+    pub detected_before: String,
+}
+
+/// Builds the `FilterParams` sent over IPC for a query.
+///
+/// Extracted from `FilterState::current_filter`, which built it inline in
+/// `state.rs` — a file with no test module at all. This is the mapping behind
+/// *every* query the app runs, and until now the only thing exercising it was the
+/// type checker. The date-window branch in particular is easy to get quietly
+/// wrong: the three outputs are mutually exclusive, an unrecognized window must
+/// clear all of them rather than fall through to the custom dates, and the
+/// "before" bound has to cover the whole selected day.
+pub(crate) fn filter_params(i: FilterInputs) -> FilterParams {
+    let (detected_within_days, detected_after, detected_before) = match i.detected_window.as_str() {
+        "1" | "7" | "30" | "90" => (i.detected_window.parse::<i64>().ok(), None, None),
+        "custom" => (
+            None,
+            date_to_epoch(&i.detected_after),
+            // Include the whole "before" day: the picker yields midnight, so
+            // without this a patch first seen at 09:00 on the chosen day falls
+            // outside a window the operator believes includes it.
+            date_to_epoch(&i.detected_before).map(|e| e + 86_399),
+        ),
+        _ => (None, None, None),
+    };
+    FilterParams {
+        organization_id: i.organization_id,
+        location_id: i.location_id,
+        role_id: i.role_id,
+        node_classes: i.node_classes,
+        os_name_contains: non_empty(i.os_name),
+        search: non_empty(i.search),
+        severities: i.severities,
+        detected_within_days,
+        detected_after,
+        detected_before,
+    }
+}
+
+/// Parses a settings number field, clamping to `[min, max]` and falling back to
+/// `current` when the field does not parse.
+///
+/// `<input type="number">` does not stop a user typing `0`, `abc` or pasting
+/// `999999` — `min`/`max` are advisory in the DOM — so every one of these fields
+/// carried its own inline `.parse().unwrap_or_else(...).clamp(..)` chain inside an
+/// `on:change` closure in `settings.rs`, a file with no tests, where a component
+/// body can only ever be compile-checked. The clamp bounds are the interesting
+/// part: the backend re-validates them, so a frontend that clamps to the wrong
+/// range turns a typo into a rejected save with no field-level explanation.
+/// Parsing goes through `i64` rather than through `T` so a number that overflows
+/// the field's own type still clamps. Typing `99999` into the port box used to
+/// fail `parse::<u16>()` and revert the field to its previous value — indis-
+/// tinguishable, to the operator, from the input being ignored. It now lands on
+/// 65535, which is what `max` already promises.
+pub(crate) fn parse_clamped<T>(raw: &str, current: T, min: T, max: T) -> T
+where
+    T: Copy + TryFrom<i64> + TryInto<i64>,
+{
+    let (Ok(lo), Ok(hi)): (Result<i64, _>, Result<i64, _>) = (min.try_into(), max.try_into())
+    else {
+        return current;
+    };
+    match raw.trim().parse::<i64>() {
+        Ok(v) => T::try_from(v.clamp(lo, hi)).unwrap_or(current),
+        Err(_) => current,
+    }
+}
+
+/// Parses an optional numeric settings field: blank clears it, a bad value keeps
+/// what was there. Used for the two remediation script IDs, where "unset" is a
+/// meaningful state (the action is simply not offered) and must stay reachable by
+/// clearing the box.
+pub(crate) fn parse_optional_id(raw: &str, current: Option<i64>) -> Option<i64> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    // A script id is a positive integer from the library URL; 0 and negatives are
+    // not addressable, so treat them as "leave it alone" rather than storing an id
+    // that can only ever 404 at dispatch time.
+    match t.parse::<i64>() {
+        Ok(v) if v > 0 => Some(v),
+        _ => current,
+    }
+}
+
+/// Why every action button is disabled, or `None` when they are live.
+///
+/// The precedence is the point and is why this is not inline: the tooltip must
+/// name the most *fundamental* obstacle, so "sign in" outranks "select a device",
+/// which outranks "an action is already running". Reordering these silently tells
+/// an operator to pick devices when the real problem is that they are signed out.
+/// `blocked` is [`action_blocked_reason`]'s verdict.
+pub(crate) fn action_disabled_reason(
+    blocked: Option<String>,
+    selected_devices: usize,
+    dispatching: bool,
+) -> Option<String> {
+    if blocked.is_some() {
+        return blocked;
+    }
+    if selected_devices == 0 {
+        return Some("Select at least one device first".to_string());
+    }
+    if dispatching {
+        return Some("An action is already being dispatched".to_string());
+    }
+    None
+}
+
+/// The action bar's selection summary. `None` when nothing is selected, so the
+/// caller renders the hint instead.
+///
+/// The offline clause is load-bearing for the operator's expectations: an action
+/// against an offline device is *queued*, not run, so the count has to be visible
+/// before they confirm — but only when it is non-zero, or every selection carries
+/// a distracting "0 offline".
+pub(crate) fn selection_summary(devices: usize, rows: usize, offline: usize) -> Option<String> {
+    if devices == 0 {
+        return None;
+    }
+    let mut text = format!(
+        "{} device(s) selected · {} patch row(s)",
+        group_thousands(devices),
+        group_thousands(rows),
+    );
+    if offline > 0 {
+        text.push_str(&format!(" · {offline} offline"));
+    }
+    Some(text)
 }
 
 /// Formats a count with thousands separators (e.g. `12300` → `12,300`).
@@ -942,6 +1122,252 @@ mod tests {
             );
         }
         assert_eq!(severity_raw("Nonexistent"), None);
+    }
+
+    /// Severity styling lives in three independent CSS rule families plus the
+    /// custom-property palette they read, and CSS cannot produce a compile error
+    /// for a missing rule. This is the substitute: the stylesheet is compiled in
+    /// and every band is checked for all four definitions.
+    ///
+    /// It exists because each omission has already shipped. `.chart .seg-*` sets
+    /// `fill` and is scoped to `.chart`, so it does nothing for a legend `<span>` —
+    /// Security and Recommended had bar fills but no `.chart-swatch` rule and
+    /// painted transparent holes next to their counts. Separately,
+    /// `.sev-optional`/`.sev-unknown` were missing and both collapsed into
+    /// `.sev-none`, rendering "low priority" and "unmapped" identically.
+    fn inputs(window: &str, after: &str, before: &str) -> FilterInputs {
+        FilterInputs {
+            detected_window: window.into(),
+            detected_after: after.into(),
+            detected_before: before.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The three date outputs are mutually exclusive — a relative window and an
+    /// explicit range must never both reach the backend, which would narrow the
+    /// query twice over.
+    #[test]
+    fn a_relative_window_sets_days_and_clears_the_explicit_range() {
+        for days in ["1", "7", "30", "90"] {
+            let f = filter_params(inputs(days, "2026-01-01", "2026-02-01"));
+            assert_eq!(f.detected_within_days, days.parse::<i64>().ok());
+            assert_eq!(
+                (f.detected_after, f.detected_before),
+                (None, None),
+                "a relative window must not also send the custom dates that are still \
+                 sitting in the (hidden) date fields"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_window_sends_the_range_and_no_day_count() {
+        let f = filter_params(inputs("custom", "2026-01-01", "2026-01-31"));
+        assert_eq!(f.detected_within_days, None);
+        assert_eq!(f.detected_after, Some(1_767_225_600));
+        // The whole "before" day is included: midnight + 86_399.
+        assert_eq!(f.detected_before, Some(1_769_903_999));
+    }
+
+    /// An unrecognized window must clear every date bound rather than fall through
+    /// to whatever the custom fields happen to hold — otherwise clearing the
+    /// dropdown silently keeps filtering.
+    #[test]
+    fn an_empty_or_unknown_window_clears_every_date_bound() {
+        for window in ["", "nonsense", "365"] {
+            let f = filter_params(inputs(window, "2026-01-01", "2026-02-01"));
+            assert_eq!(
+                (f.detected_within_days, f.detected_after, f.detected_before),
+                (None, None, None),
+                "window {window:?} must not filter by date at all"
+            );
+        }
+    }
+
+    /// A half-filled custom range is legitimate ("everything since March"), so one
+    /// blank bound must not discard the other.
+    #[test]
+    fn a_custom_window_tolerates_one_open_end() {
+        let f = filter_params(inputs("custom", "2026-03-01", ""));
+        assert!(f.detected_after.is_some());
+        assert_eq!(f.detected_before, None);
+
+        let f = filter_params(inputs("custom", "", "2026-03-01"));
+        assert_eq!(f.detected_after, None);
+        assert!(f.detected_before.is_some());
+    }
+
+    #[test]
+    fn identity_and_text_facets_pass_through_with_blanks_dropped() {
+        let f = filter_params(FilterInputs {
+            organization_id: Some(7),
+            location_id: Some(8),
+            role_id: Some(9),
+            node_classes: vec!["WINDOWS_SERVER".into()],
+            severities: vec!["CRITICAL".into()],
+            os_name: "  Windows 11  ".into(),
+            search: "   ".into(),
+            ..Default::default()
+        });
+        assert_eq!(f.organization_id, Some(7));
+        assert_eq!(f.location_id, Some(8));
+        assert_eq!(f.role_id, Some(9));
+        assert_eq!(f.node_classes, vec!["WINDOWS_SERVER".to_string()]);
+        assert_eq!(f.severities, vec!["CRITICAL".to_string()]);
+        // Trimmed, and a whitespace-only box is "no filter" rather than a search
+        // for spaces that would match nothing.
+        assert_eq!(f.os_name_contains.as_deref(), Some("Windows 11"));
+        assert_eq!(f.search, None);
+    }
+
+    #[test]
+    fn dates_round_trip_through_epoch_including_leap_days() {
+        for date in [
+            "1970-01-01",
+            "2000-02-29",
+            "2024-02-29",
+            "2026-12-31",
+            "2100-03-01",
+        ] {
+            let epoch = date_to_epoch(date).expect("parses");
+            assert_eq!(epoch_to_date(Some(epoch)), date, "round trip for {date}");
+        }
+        assert_eq!(epoch_to_date(None), "");
+        assert_eq!(date_to_epoch(""), None);
+        assert_eq!(date_to_epoch("2026-13-01"), None);
+        assert_eq!(date_to_epoch("2026-01-32"), None);
+        assert_eq!(date_to_epoch("2026-01-01-01"), None);
+    }
+
+    /// `<input type="number">` treats `min`/`max` as advisory — a user can type or
+    /// paste anything — so the clamp is the real guard, and a value that does not
+    /// parse must leave the field as it was rather than resetting it to a bound.
+    #[test]
+    fn settings_numbers_clamp_and_keep_the_old_value_on_garbage() {
+        assert_eq!(parse_clamped("8080", 11434u16, 1024, 65535), 8080);
+        assert_eq!(
+            parse_clamped("80", 11434u16, 1024, 65535),
+            1024,
+            "below min"
+        );
+        assert_eq!(parse_clamped("99999", 11434u16, 1024, 65535), 65535);
+        assert_eq!(
+            parse_clamped("abc", 11434u16, 1024, 65535),
+            11434,
+            "unparseable input must not silently rewrite the field"
+        );
+        assert_eq!(parse_clamped("", 30i64, 1, 3650), 30);
+        assert_eq!(parse_clamped("  45  ", 30i64, 1, 3650), 45);
+        assert_eq!(parse_clamped("0", 8usize, 1, 16), 1);
+    }
+
+    /// Clearing the box is how an operator un-sets a remediation script, so blank
+    /// must reach `None`; a typo must not, or the action would be offered against
+    /// an id that can only 404 at dispatch.
+    #[test]
+    fn an_optional_script_id_clears_on_blank_and_holds_on_garbage() {
+        assert_eq!(parse_optional_id("123", None), Some(123));
+        assert_eq!(parse_optional_id("", Some(123)), None);
+        assert_eq!(parse_optional_id("   ", Some(123)), None);
+        assert_eq!(parse_optional_id("abc", Some(123)), Some(123));
+        assert_eq!(parse_optional_id("0", Some(123)), Some(123));
+        assert_eq!(parse_optional_id("-4", Some(123)), Some(123));
+    }
+
+    /// Precedence, not just presence: telling a signed-out operator to "select a
+    /// device" sends them to fix the wrong thing.
+    #[test]
+    fn the_disabled_reason_names_the_most_fundamental_obstacle_first() {
+        let blocked = Some("Sign in to run patch actions.".to_string());
+        assert_eq!(
+            action_disabled_reason(blocked.clone(), 0, true).as_deref(),
+            Some("Sign in to run patch actions."),
+            "auth outranks both selection and dispatch state"
+        );
+        assert_eq!(
+            action_disabled_reason(None, 0, true).as_deref(),
+            Some("Select at least one device first"),
+            "an empty selection outranks an in-flight dispatch"
+        );
+        assert_eq!(
+            action_disabled_reason(None, 3, true).as_deref(),
+            Some("An action is already being dispatched")
+        );
+        assert_eq!(action_disabled_reason(None, 3, false), None);
+    }
+
+    #[test]
+    fn the_selection_summary_counts_and_mentions_offline_only_when_present() {
+        assert_eq!(selection_summary(0, 0, 0), None);
+        assert_eq!(
+            selection_summary(2, 5, 0).as_deref(),
+            Some("2 device(s) selected · 5 patch row(s)"),
+            "a zero offline count must not clutter every selection"
+        );
+        assert_eq!(
+            selection_summary(2, 5, 1).as_deref(),
+            Some("2 device(s) selected · 5 patch row(s) · 1 offline")
+        );
+        // An action against an offline device is queued rather than run, so the
+        // counts stay legible at fleet scale.
+        assert_eq!(
+            selection_summary(1200, 34500, 7).as_deref(),
+            Some("1,200 device(s) selected · 34,500 patch row(s) · 7 offline")
+        );
+    }
+
+    #[test]
+    fn severity_css_defines_every_band() {
+        const CSS: &str = include_str!("../../styles.css");
+
+        for (raw, display) in super::super::SEVERITY_OPTIONS {
+            let slug = raw.to_ascii_lowercase();
+            for required in [
+                format!("--sev-{slug}:"),
+                format!("--sev-{slug}-fg:"),
+                format!(".sev-{slug} {{"),
+                format!(".chart .seg-{slug} {{"),
+                format!(".chart-swatch.seg-{slug} {{"),
+            ] {
+                assert!(
+                    CSS.contains(&required),
+                    "severity band {display} ({raw}) is missing `{required}` in styles.css"
+                );
+            }
+        }
+    }
+
+    /// The palette is the single source of the eight band colors; the three rule
+    /// families must read it rather than re-stating hex values, which is what let
+    /// the bar fill and the legend swatch drift apart in the first place.
+    #[test]
+    fn severity_rules_read_the_palette_instead_of_restating_colors() {
+        const CSS: &str = include_str!("../../styles.css");
+
+        for (raw, _) in super::super::SEVERITY_OPTIONS {
+            let slug = raw.to_ascii_lowercase();
+            for (rule, expected) in [
+                (
+                    format!(".chart .seg-{slug} {{"),
+                    format!("var(--sev-{slug})"),
+                ),
+                (
+                    format!(".chart-swatch.seg-{slug} {{"),
+                    format!("var(--sev-{slug})"),
+                ),
+            ] {
+                let body = CSS
+                    .split_once(&rule)
+                    .and_then(|(_, rest)| rest.split_once('}'))
+                    .map(|(body, _)| body)
+                    .unwrap_or_else(|| panic!("no rule body for `{rule}`"));
+                assert!(
+                    body.contains(&expected),
+                    "`{rule}` should use {expected} rather than its own copy of the color"
+                );
+            }
+        }
     }
 
     #[test]
