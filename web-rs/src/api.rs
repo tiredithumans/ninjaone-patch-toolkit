@@ -75,151 +75,88 @@ fn no_args() -> JsValue {
     JsValue::from(js_sys::Object::new())
 }
 
+/// Declares a typed IPC wrapper.
+///
+/// Every wrapper was the same five lines — a private `Args`/`Wrap` struct, its
+/// `#[serde(rename_all = "camelCase")]`, and the `invoke` call — restated per
+/// command. Beyond the repetition, writing it out by hand left two things free to
+/// drift that must not: the argument keys have to equal the Rust handler's
+/// parameter names in camelCase, and the invoked string has to name a registered
+/// command. Here the struct fields *are* the wrapper's parameters, and the command
+/// name defaults to the wrapper's own name, so both hold by construction.
+///
+/// The two commands whose wrapper reads better under a shorter name
+/// (`export_patches` → `export_patches_xlsx`) spell the target out with `as`.
+macro_rules! ipc {
+    // Zero-argument command, named after the wrapper.
+    ($(#[$meta:meta])* $name:ident() -> $ret:ty) => {
+        ipc!($(#[$meta])* $name as stringify!($name), () -> $ret);
+    };
+    // Zero-argument command under an explicit backend name.
+    ($(#[$meta:meta])* $name:ident as $cmd:expr, () -> $ret:ty) => {
+        $(#[$meta])*
+        pub async fn $name() -> Result<$ret, String> {
+            invoke($cmd, no_args()).await
+        }
+    };
+    ($(#[$meta:meta])* $name:ident as $cmd:expr, ($($arg:ident: $ty:ty),+ $(,)?) -> $ret:ty) => {
+        $(#[$meta])*
+        pub async fn $name($($arg: $ty),+) -> Result<$ret, String> {
+            #[derive(Serialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args { $($arg: $ty),+ }
+            invoke($cmd, args_of(&Args { $($arg),+ })).await
+        }
+    };
+    // Command taking one or more arguments, named after the wrapper.
+    ($(#[$meta:meta])* $name:ident($($arg:ident: $ty:ty),+ $(,)?) -> $ret:ty) => {
+        ipc!($(#[$meta])* $name as stringify!($name), ($($arg: $ty),+) -> $ret);
+    };
+}
+
 // --- Auth --------------------------------------------------------------------
 
-pub async fn auth_status() -> Result<AuthStatus, String> {
-    invoke("auth_status", no_args()).await
-}
-
-pub async fn sign_in() -> Result<(), String> {
-    invoke("sign_in", no_args()).await
-}
-
-pub async fn sign_out() -> Result<(), String> {
-    invoke("sign_out", no_args()).await
-}
+ipc!(auth_status() -> AuthStatus);
+ipc!(sign_in() -> ());
+ipc!(sign_out() -> ());
 
 // --- Lookups -----------------------------------------------------------------
 
-pub async fn list_orgs() -> Result<Vec<Organization>, String> {
-    invoke("list_orgs", no_args()).await
-}
-
-pub async fn list_locations(org_id: i64) -> Result<Vec<Location>, String> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Args {
-        org_id: i64,
-    }
-    invoke("list_locations", args_of(&Args { org_id })).await
-}
-
-pub async fn list_roles() -> Result<Vec<Role>, String> {
-    invoke("list_roles", no_args()).await
-}
-
-pub async fn list_node_classes() -> Result<Vec<NodeClass>, String> {
-    invoke("list_node_classes", no_args()).await
-}
+ipc!(list_orgs() -> Vec<Organization>);
+ipc!(list_locations(org_id: i64) -> Vec<Location>);
+ipc!(list_roles() -> Vec<Role>);
+ipc!(list_node_classes() -> Vec<NodeClass>);
 
 // --- Patches + export --------------------------------------------------------
 
-/// Runs a patch query. `force_refresh` (an auto-refresh tick or the manual ↻) tells
-/// the backend to refetch the whole-fleet patch data; a normal Run query / re-filter
-/// leaves it `false` so the cached fleet is re-scoped client-side with no round trip.
-pub async fn query_patches(
-    args: PatchQueryArgs,
-    query_id: u64,
-    force_refresh: bool,
-) -> Result<QueryResult, String> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Wrap {
-        args: PatchQueryArgs,
-        query_id: u64,
-        force_refresh: bool,
-    }
-    invoke(
-        "query_patches",
-        args_of(&Wrap {
-            args,
-            query_id,
-            force_refresh,
-        }),
-    )
-    .await
-}
+ipc!(
+    /// Runs a patch query. `force_refresh` (an auto-refresh tick or the manual ↻) tells
+    /// the backend to refetch the whole-fleet patch data; a normal Run query / re-filter
+    /// leaves it `false` so the cached fleet is re-scoped client-side with no round trip.
+    query_patches(args: PatchQueryArgs, query_id: u64, force_refresh: bool) -> QueryResult
+);
 
-/// Fetches one page of detail rows from the backend's cached query result. The
-/// full row set lives in the backend cache (not shipped over IPC), so the table
-/// pages a large fleet by requesting just the visible window. `sort` re-orders
-/// the paged view backend-side; `None` is the canonical cache order.
-pub async fn get_patch_rows(
-    offset: usize,
-    limit: usize,
-    sort: Option<RowSort>,
-) -> Result<Vec<PatchRow>, String> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Wrap {
-        offset: usize,
-        limit: usize,
-        sort: Option<RowSort>,
-    }
-    invoke(
-        "get_patch_rows",
-        args_of(&Wrap {
-            offset,
-            limit,
-            sort,
-        }),
-    )
-    .await
-}
+ipc!(
+    /// Fetches one page of detail rows from the backend's cached query result. The
+    /// full row set lives in the backend cache (not shipped over IPC), so the table
+    /// pages a large fleet by requesting just the visible window. `sort` re-orders
+    /// the paged view backend-side; `None` is the canonical cache order.
+    get_patch_rows(offset: usize, limit: usize, sort: Option<RowSort>) -> Vec<PatchRow>
+);
 
-/// Fetches one page of **group headers** over the backend's cached rows. Grouping
-/// happens backend-side for the same reason paging does: the frontend only ever
-/// holds one page, so it cannot group a fleet it has never seen.
-pub async fn get_patch_groups(
-    group_by: GroupBy,
-    offset: usize,
-    limit: usize,
-) -> Result<GroupPage, String> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Wrap {
-        group_by: GroupBy,
-        offset: usize,
-        limit: usize,
-    }
-    invoke(
-        "get_patch_groups",
-        args_of(&Wrap {
-            group_by,
-            offset,
-            limit,
-        }),
-    )
-    .await
-}
+ipc!(
+    /// Fetches one page of **group headers** over the backend's cached rows. Grouping
+    /// happens backend-side for the same reason paging does: the frontend only ever
+    /// holds one page, so it cannot group a fleet it has never seen.
+    get_patch_groups(group_by: GroupBy, offset: usize, limit: usize) -> GroupPage
+);
 
-/// Fetches one page of a single group's member rows. `key` is the opaque
-/// `PatchGroup.key` the backend handed out, so an expand costs no extra state.
-pub async fn get_patch_group_members(
-    group_by: GroupBy,
-    key: String,
-    offset: usize,
-    limit: usize,
-) -> Result<Vec<PatchRow>, String> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Wrap {
-        group_by: GroupBy,
-        key: String,
-        offset: usize,
-        limit: usize,
-    }
-    invoke(
-        "get_patch_group_members",
-        args_of(&Wrap {
-            group_by,
-            key,
-            offset,
-            limit,
-        }),
-    )
-    .await
-}
+ipc!(
+    /// Fetches one page of a single group's member rows. `key` is the opaque
+    /// `PatchGroup.key` the backend handed out, so an expand costs no extra state.
+    get_patch_group_members(group_by: GroupBy, key: String, offset: usize, limit: usize)
+        -> Vec<PatchRow>
+);
 
 /// Subscribes to backend `query:progress` events for the lifetime of the app,
 /// decoding each event's payload and handing it to `handler`. The Tauri unlisten
@@ -241,70 +178,42 @@ pub fn on_query_progress(mut handler: impl FnMut(QueryProgressEvent) + 'static) 
     cb.forget();
 }
 
-pub async fn export_patches() -> Result<Option<String>, String> {
-    invoke("export_patches_xlsx", no_args()).await
-}
+ipc!(export_patches as "export_patches_xlsx", () -> Option<String>);
 
-/// Writes the cached query result as a self-contained HTML executive report
-/// (compliance/severity/age charts + failure & reboot tables) the operator can
-/// print to PDF. Like the Excel export, backend-only — inert in browser/demo mode.
-pub async fn export_report() -> Result<Option<String>, String> {
-    invoke("export_report_html", no_args()).await
-}
+ipc!(
+    /// Writes the cached query result as a self-contained HTML executive report
+    /// (compliance/severity/age charts + failure & reboot tables) the operator can
+    /// print to PDF. Like the Excel export, backend-only — inert in browser/demo mode.
+    export_report as "export_report_html", () -> Option<String>
+);
 
 // --- Device actions ----------------------------------------------------------
 
-/// Forces a fresh OAuth consent so the grant can pick up the `management` scope.
-/// The refresh grant never re-sends `scope`, so an install that signed in before
-/// patch actions were enabled keeps its read-only grant until this runs.
-pub async fn reauthorize() -> Result<(), String> {
-    invoke("reauthorize", no_args()).await
-}
+ipc!(
+    /// Forces a fresh OAuth consent so the grant can pick up the `management` scope.
+    /// The refresh grant never re-sends `scope`, so an install that signed in before
+    /// patch actions were enabled keeps its read-only grant until this runs.
+    reauthorize() -> ()
+);
 
-/// Reports what an action would do — eligible/skipped devices, warnings, hard
-/// blockers, the literal parameter string — and issues a confirmation token bound
-/// to exactly this request.
-pub async fn plan_action(request: ActionRequest) -> Result<ActionPlan, String> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Args {
-        request: ActionRequest,
-    }
-    invoke("plan_action", args_of(&Args { request })).await
-}
+ipc!(
+    /// Reports what an action would do — eligible/skipped devices, warnings, hard
+    /// blockers, the literal parameter string — and issues a confirmation token bound
+    /// to exactly this request.
+    plan_action(request: ActionRequest) -> ActionPlan
+);
 
-/// Dispatches the action. The backend re-plans and re-checks every guardrail, so a
-/// request that skipped `plan_action` (or whose selection changed since) is
-/// refused rather than trusted.
-pub async fn run_action(request: ActionRequest) -> Result<ActionBatch, String> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Args {
-        request: ActionRequest,
-    }
-    invoke("run_action", args_of(&Args { request })).await
-}
+ipc!(
+    /// Dispatches the action. The backend re-plans and re-checks every guardrail, so a
+    /// request that skipped `plan_action` (or whose selection changed since) is
+    /// refused rather than trusted.
+    run_action(request: ActionRequest) -> ActionBatch
+);
 
-pub async fn list_jobs() -> Result<Vec<JobReport>, String> {
-    invoke("list_jobs", no_args()).await
-}
-
-pub async fn clear_jobs() -> Result<Vec<JobReport>, String> {
-    invoke("clear_jobs", no_args()).await
-}
-
-pub async fn list_scripts() -> Result<Vec<ScriptSummary>, String> {
-    invoke("list_scripts", no_args()).await
-}
-
-pub async fn list_run_as_options(device_id: i64) -> Result<RunAsOptions, String> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Args {
-        device_id: i64,
-    }
-    invoke("list_run_as_options", args_of(&Args { device_id })).await
-}
+ipc!(list_jobs() -> Vec<JobReport>);
+ipc!(clear_jobs() -> Vec<JobReport>);
+ipc!(list_scripts() -> Vec<ScriptSummary>);
+ipc!(list_run_as_options(device_id: i64) -> RunAsOptions);
 
 /// Subscribes to backend `action:progress` events. Same lifetime and browser-mode
 /// handling as [`on_query_progress`].
@@ -325,40 +234,12 @@ pub fn on_action_progress(mut handler: impl FnMut(ActionProgressEvent) + 'static
 
 // --- Updates -----------------------------------------------------------------
 
-pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
-    invoke("check_for_update", no_args()).await
-}
-
-pub async fn install_update() -> Result<(), String> {
-    invoke("install_update", no_args()).await
-}
+ipc!(check_for_update() -> Option<UpdateInfo>);
+ipc!(install_update() -> ());
 
 // --- Settings + presets ------------------------------------------------------
 
-pub async fn get_settings() -> Result<SettingsView, String> {
-    invoke("get_settings", no_args()).await
-}
-
-pub async fn save_settings(args: SaveSettingsArgs) -> Result<SettingsView, String> {
-    #[derive(Serialize)]
-    struct Wrap {
-        args: SaveSettingsArgs,
-    }
-    invoke("save_settings", args_of(&Wrap { args })).await
-}
-
-pub async fn save_preset(preset: Preset) -> Result<Vec<Preset>, String> {
-    #[derive(Serialize)]
-    struct Wrap {
-        preset: Preset,
-    }
-    invoke("save_preset", args_of(&Wrap { preset })).await
-}
-
-pub async fn delete_preset(name: String) -> Result<Vec<Preset>, String> {
-    #[derive(Serialize)]
-    struct Wrap {
-        name: String,
-    }
-    invoke("delete_preset", args_of(&Wrap { name })).await
-}
+ipc!(get_settings() -> SettingsView);
+ipc!(save_settings(args: SaveSettingsArgs) -> SettingsView);
+ipc!(save_preset(preset: Preset) -> Vec<Preset>);
+ipc!(delete_preset(name: String) -> Vec<Preset>);

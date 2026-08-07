@@ -19,6 +19,15 @@ pub struct SettingsView {
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
     pub actions: ActionSettings,
+    /// Whether this save switched tenant (instance or client id), so the frontend
+    /// knows to drop the results still on screen.
+    ///
+    /// The backend already clears `last_result` on a tenant switch, so without this
+    /// the previous tenant's rows stayed rendered while paging, export and the HTML
+    /// report all read the miss — the same divergence `query_patches` refuses a
+    /// drifted summary for, one layer up. Always `false` from `get_settings`, which
+    /// changes nothing.
+    pub tenant_changed: bool,
 }
 
 fn view(state: &AppState) -> SettingsView {
@@ -33,6 +42,7 @@ fn view(state: &AppState) -> SettingsView {
         presets: s.presets,
         auto_check_updates: s.auto_check_updates,
         actions: s.actions,
+        tenant_changed: false,
     }
 }
 
@@ -164,19 +174,24 @@ pub fn save_settings(
     require_https_instance(&instance_base_url)?;
     validate_settings_input(&args)?;
 
-    let instance_changed;
+    let tenant_changed;
     let actions_changed;
     let snapshot = {
         let mut guard = state
             .settings
             .lock()
             .map_err(|_| UiError::new("settings state poisoned"))?;
-        instance_changed = guard.instance_base_url != instance_base_url;
-        guard.instance_base_url = instance_base_url;
-        guard.client_id = args
+        let client_id = args
             .client_id
             .map(|c| c.trim().to_string())
             .filter(|c| !c.is_empty());
+        // Both halves of the cache's tenant key, not just the instance: pointing the
+        // same instance at a different client id is as much a tenant switch as
+        // changing the host, and the caches key on the pair.
+        tenant_changed =
+            guard.instance_base_url != instance_base_url || guard.client_id != client_id;
+        guard.instance_base_url = instance_base_url;
+        guard.client_id = client_id;
         // Already range-checked by validate_settings_input above.
         guard.callback_port = args.callback_port;
         guard.install_window_days = args.install_window_days;
@@ -199,7 +214,7 @@ pub fn save_settings(
     // doesn't inherit stale org/location/role names, and drop the cached query
     // result so an export can't write the previous tenant's rows.
     state.clear_lookups_cache();
-    if instance_changed {
+    if tenant_changed {
         state.clear_last_result();
         state.clear_jobs();
     }
@@ -226,7 +241,10 @@ pub fn save_settings(
         _ => {}
     }
 
-    Ok(view(&state))
+    Ok(SettingsView {
+        tenant_changed,
+        ..view(&state)
+    })
 }
 
 #[tauri::command]

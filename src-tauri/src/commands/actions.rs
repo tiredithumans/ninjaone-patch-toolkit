@@ -12,6 +12,7 @@
 //! radius than Settings allows.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Local, Utc};
@@ -24,9 +25,11 @@ use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 use crate::actions::{
-    ActionKind, ActionPlan, JobReport, JobState, PlanInput, RebootChoice, audit, fmt_ts, plan,
+    ActionKind, ActionPlan, JobReport, JobState, PlanInput, PlannedTarget, RebootChoice, audit,
+    fmt_ts, plan,
 };
-use crate::api::actions::ScriptRef;
+use crate::api::NinjaApiClient;
+use crate::api::actions::{ScriptDispatch, ScriptRef};
 use crate::error::UiError;
 use crate::model::{AutomationScript, Device, PatchType, RebootMode};
 use crate::state::AppState;
@@ -382,163 +385,37 @@ pub async fn run_action(
         },
     );
 
-    let permits = settings.actions.concurrency.clamp(1, 16);
-    let sem = std::sync::Arc::new(Semaphore::new(permits));
-    let mut set: JoinSet<(usize, JobReport)> = JoinSet::new();
-
-    for (index, target) in p.eligible.iter().enumerate() {
-        let api = state.api.clone();
-        let sem = sem.clone();
-        let kind = request.kind;
-        let script = script.clone();
-        let run_as = run_as.clone();
-        let parameters = parameters.clone();
-        let reason = request.reason.clone().unwrap_or_default();
-        let reboot_mode = request.reboot_mode.unwrap_or(RebootMode::Normal);
-        let dry_run = request.dry_run;
-        let detail = detail.clone();
-        let target = target.clone();
-        let instance = settings.instance_base_url.clone();
-        let client_id = settings.client_id.clone();
-        let confirm_prefix = request
+    // Everything that does not vary per device is built once and shared, so a
+    // 25-device batch stops re-cloning the script ref, run-as identity, parameter
+    // string, detail line, instance URL and client id 25 times over.
+    let ctx = Arc::new(DispatchContext {
+        api: state.api.clone(),
+        kind: request.kind,
+        script,
+        run_as,
+        parameters: parameters.clone(),
+        reason: request.reason.clone().unwrap_or_default(),
+        reboot_mode: request.reboot_mode.unwrap_or(RebootMode::Normal),
+        dry_run: request.dry_run,
+        detail: detail.clone(),
+        instance: settings.instance_base_url.clone(),
+        client_id: settings.client_id.clone(),
+        confirm_prefix: request
             .confirm_token
             .as_deref()
-            .map(|t| t.chars().take(8).collect::<String>());
+            .map(|t| t.chars().take(8).collect::<String>()),
+        batch_id,
+        id_base,
+    });
 
-        set.spawn(async move {
-            let dispatched_at = Utc::now();
-            let mut job = JobReport {
-                id: id_base + index as u64,
-                batch_id,
-                device_id: target.device_id,
-                device_name: target.device_name.clone(),
-                organization: target.organization.clone(),
-                kind,
-                detail: detail.clone(),
-                dry_run,
-                state: JobState::Queued,
-                dispatched_at: fmt_ts(dispatched_at),
-                dispatched_ts: dispatched_at.timestamp(),
-                finished_at: None,
-                duration_seconds: None,
-                activity_id: None,
-                series_uid: None,
-                exit_code: None,
-            };
-
-            // Written before the request goes out, so a crash mid-batch still
-            // leaves evidence of what was attempted.
-            audit::record(&audit::AuditEntry {
-                timestamp: audit::now_stamp(),
-                instance,
-                client_id,
-                batch_id,
-                job_id: job.id,
-                kind,
-                device_id: target.device_id,
-                device_name: target.device_name.clone(),
-                organization: target.organization.clone(),
-                detail,
-                parameters: (!parameters.is_empty()).then(|| audit::redact_parameters(&parameters)),
-                dry_run,
-                confirm_token_prefix: confirm_prefix,
-                outcome: "dispatching".into(),
-                activity_id: None,
-                series_uid: None,
-                exit_code: None,
-            });
-
-            let _permit = sem.acquire().await;
-            // Defense in depth: `plan()` already blocks a dry run on a kind with no
-            // preview mode, and `run_action` refuses a blocked plan — but that put
-            // the "a dry run never mutates a device" property two files away from
-            // the POSTs that would do the mutating, resting entirely on
-            // `supports_dry_run()` being right. A new `ActionKind` that answers it
-            // wrongly would otherwise dispatch for real while the UI said "Dry run".
-            let outcome = if dry_run && !kind.supports_dry_run() {
-                Err(anyhow::anyhow!(
-                    "refusing to dispatch \"{}\" as a dry run: it has no preview mode",
-                    kind.label()
-                ))
-            } else {
-                match kind {
-                    ActionKind::OsPatchScan => api
-                        .device_patch_scan(target.device_id, PatchType::Os)
-                        .await
-                        .map(|_| None),
-                    ActionKind::SoftwarePatchScan => api
-                        .device_patch_scan(target.device_id, PatchType::Software)
-                        .await
-                        .map(|_| None),
-                    ActionKind::OsPatchApply => api
-                        .device_patch_apply(target.device_id, PatchType::Os)
-                        .await
-                        .map(|_| None),
-                    ActionKind::SoftwarePatchApply => api
-                        .device_patch_apply(target.device_id, PatchType::Software)
-                        .await
-                        .map(|_| None),
-                    ActionKind::Reboot => api
-                        .device_reboot(target.device_id, reboot_mode, &reason)
-                        .await
-                        .map(|_| None),
-                    ActionKind::Script => match script {
-                        Some(ref s) => api
-                            .run_script(target.device_id, s, &parameters, &run_as)
-                            .await
-                            .map(Some),
-                        None => Err(anyhow::anyhow!("no script selected")),
-                    },
-                }
-            };
-
-            match outcome {
-                Ok(dispatch) => {
-                    if let Some(d) = dispatch {
-                        job.activity_id = d.any_id();
-                        job.series_uid = d.series_uid.clone();
-                    }
-                    job.state = JobState::Running;
-                }
-                Err(err) => {
-                    let msg = err.to_string();
-                    // A timed-out POST may already be queued on the device, so it
-                    // is recorded as Unknown — polled, but never auto-retried.
-                    job.state = if msg.contains("may already") {
-                        JobState::Unknown(msg)
-                    } else {
-                        let failed = JobState::Failed(msg);
-                        job.finish(failed.clone(), Utc::now());
-                        failed
-                    };
-                }
-            }
-            (index, job)
-        });
-    }
-
-    let mut dispatched: Vec<Option<JobReport>> = vec![None; p.eligible.len()];
-    let mut done = 0usize;
-    while let Some(res) = set.join_next().await {
-        match res {
-            Ok((index, job)) => {
-                done += 1;
-                emit_progress(
-                    &app,
-                    ActionProgressEvent {
-                        batch_id,
-                        stage: "dispatching",
-                        dispatched: done,
-                        total: dispatched.len(),
-                        jobs: vec![job.clone()],
-                    },
-                );
-                dispatched[index] = Some(job);
-            }
-            Err(err) => warn!(?err, "a dispatch task panicked"),
-        }
-    }
-    jobs.extend(dispatched.into_iter().flatten());
+    let dispatched = dispatch_batch(
+        &app,
+        ctx,
+        &p.eligible,
+        settings.actions.concurrency.clamp(1, 16),
+    )
+    .await;
+    jobs.extend(dispatched);
 
     let live = jobs
         .iter()
@@ -584,6 +461,217 @@ pub async fn run_action(
         skipped: p.skipped.len(),
         jobs,
     })
+}
+
+/// The part of a dispatch that is identical for every device in a batch.
+///
+/// Held behind one `Arc` and shared with each spawned task. The loop used to clone
+/// all of this per device — six `String`/`Option` clones plus the `PlannedTarget`
+/// — which scales with fleet size on every batch for data that cannot differ
+/// within one.
+struct DispatchContext {
+    api: NinjaApiClient,
+    kind: ActionKind,
+    script: Option<ScriptRef>,
+    run_as: String,
+    parameters: String,
+    reason: String,
+    reboot_mode: RebootMode,
+    dry_run: bool,
+    detail: String,
+    instance: String,
+    client_id: Option<String>,
+    confirm_prefix: Option<String>,
+    batch_id: u64,
+    id_base: u64,
+}
+
+/// Dispatches every eligible target concurrently (bounded by `permits`), emitting
+/// progress as each completes, and returns the jobs in the plan's order.
+///
+/// Extracted from `run_action`, which had grown to 278 lines fusing seven
+/// responsibilities. This is the safety-critical stretch — it is what actually
+/// reaches a device — so it is worth reading on its own rather than as the middle
+/// third of a command handler.
+async fn dispatch_batch(
+    app: &AppHandle,
+    ctx: Arc<DispatchContext>,
+    eligible: &[PlannedTarget],
+    permits: usize,
+) -> Vec<JobReport> {
+    emit_progress(
+        app,
+        ActionProgressEvent {
+            batch_id: ctx.batch_id,
+            stage: "dispatching",
+            dispatched: 0,
+            total: eligible.len(),
+            jobs: Vec::new(),
+        },
+    );
+
+    let sem = Arc::new(Semaphore::new(permits));
+    let mut set: JoinSet<(usize, JobReport)> = JoinSet::new();
+    for (index, target) in eligible.iter().enumerate() {
+        let ctx = ctx.clone();
+        let sem = sem.clone();
+        let target = target.clone();
+        set.spawn(async move { (index, dispatch_one(&ctx, &target, index, &sem).await) });
+    }
+
+    let mut dispatched: Vec<Option<JobReport>> = vec![None; eligible.len()];
+    let mut done = 0usize;
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok((index, job)) => {
+                done += 1;
+                emit_progress(
+                    app,
+                    ActionProgressEvent {
+                        batch_id: ctx.batch_id,
+                        stage: "dispatching",
+                        dispatched: done,
+                        total: dispatched.len(),
+                        jobs: vec![job.clone()],
+                    },
+                );
+                dispatched[index] = Some(job);
+            }
+            Err(err) => warn!(?err, "a dispatch task panicked"),
+        }
+    }
+    dispatched.into_iter().flatten().collect()
+}
+
+/// Audits, dispatches and records the outcome for a single device.
+async fn dispatch_one(
+    ctx: &DispatchContext,
+    target: &PlannedTarget,
+    index: usize,
+    sem: &Semaphore,
+) -> JobReport {
+    let dispatched_at = Utc::now();
+    let mut job = JobReport {
+        id: ctx.id_base + index as u64,
+        batch_id: ctx.batch_id,
+        device_id: target.device_id,
+        device_name: target.device_name.clone(),
+        organization: target.organization.clone(),
+        kind: ctx.kind,
+        detail: ctx.detail.clone(),
+        dry_run: ctx.dry_run,
+        state: JobState::Queued,
+        dispatched_at: fmt_ts(dispatched_at),
+        dispatched_ts: dispatched_at.timestamp(),
+        finished_at: None,
+        duration_seconds: None,
+        activity_id: None,
+        series_uid: None,
+        exit_code: None,
+    };
+
+    // Written before the request goes out, so a crash mid-batch still leaves
+    // evidence of what was attempted.
+    audit::record(&audit::AuditEntry {
+        timestamp: audit::now_stamp(),
+        instance: ctx.instance.clone(),
+        client_id: ctx.client_id.clone(),
+        batch_id: ctx.batch_id,
+        job_id: job.id,
+        kind: ctx.kind,
+        device_id: target.device_id,
+        device_name: target.device_name.clone(),
+        organization: target.organization.clone(),
+        detail: ctx.detail.clone(),
+        parameters: (!ctx.parameters.is_empty()).then(|| audit::redact_parameters(&ctx.parameters)),
+        dry_run: ctx.dry_run,
+        confirm_token_prefix: ctx.confirm_prefix.clone(),
+        outcome: "dispatching".into(),
+        activity_id: None,
+        series_uid: None,
+        exit_code: None,
+    });
+
+    let _permit = sem.acquire().await;
+    let outcome = send_action(ctx, target.device_id).await;
+
+    match outcome {
+        Ok(dispatch) => {
+            if let Some(d) = dispatch {
+                job.activity_id = d.any_id();
+                job.series_uid = d.series_uid.clone();
+            }
+            job.state = JobState::Running;
+        }
+        Err(err) => {
+            let msg = err.to_string();
+            // A timed-out POST may already be queued on the device, so it is
+            // recorded as Unknown — polled, but never auto-retried.
+            job.state = if msg.contains("may already") {
+                JobState::Unknown(msg)
+            } else {
+                let failed = JobState::Failed(msg);
+                job.finish(failed.clone(), Utc::now());
+                failed
+            };
+        }
+    }
+    job
+}
+
+/// The POST itself, per [`ActionKind`].
+///
+/// The dry-run refusal stays here, at the dispatch site, rather than only in
+/// `plan()`. `plan()` already blocks a dry run on a kind with no preview mode and
+/// `run_action` refuses a blocked plan — but that put "a dry run never mutates a
+/// device" two files away from the POSTs that would do the mutating, resting
+/// entirely on `supports_dry_run()` being right. A new `ActionKind` that answers
+/// it wrongly would otherwise dispatch for real while the UI said "Dry run".
+async fn send_action(
+    ctx: &DispatchContext,
+    device_id: i64,
+) -> anyhow::Result<Option<ScriptDispatch>> {
+    if ctx.dry_run && !ctx.kind.supports_dry_run() {
+        return Err(anyhow::anyhow!(
+            "refusing to dispatch \"{}\" as a dry run: it has no preview mode",
+            ctx.kind.label()
+        ));
+    }
+    match ctx.kind {
+        ActionKind::OsPatchScan => ctx
+            .api
+            .device_patch_scan(device_id, PatchType::Os)
+            .await
+            .map(|_| None),
+        ActionKind::SoftwarePatchScan => ctx
+            .api
+            .device_patch_scan(device_id, PatchType::Software)
+            .await
+            .map(|_| None),
+        ActionKind::OsPatchApply => ctx
+            .api
+            .device_patch_apply(device_id, PatchType::Os)
+            .await
+            .map(|_| None),
+        ActionKind::SoftwarePatchApply => ctx
+            .api
+            .device_patch_apply(device_id, PatchType::Software)
+            .await
+            .map(|_| None),
+        ActionKind::Reboot => ctx
+            .api
+            .device_reboot(device_id, ctx.reboot_mode, &ctx.reason)
+            .await
+            .map(|_| None),
+        ActionKind::Script => match ctx.script {
+            Some(ref sref) => ctx
+                .api
+                .run_script(device_id, sref, &ctx.parameters, &ctx.run_as)
+                .await
+                .map(Some),
+            None => Err(anyhow::anyhow!("no script selected")),
+        },
+    }
 }
 
 fn action_detail(req: &ActionRequest) -> String {

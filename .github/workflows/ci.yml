@@ -144,8 +144,17 @@ jobs:
         with:
           tool: just,trunk
       # web-rs is a separate wasm32 crate the backend `rust` job's clippy never
-      # reaches — lint it here (wasm target, -D warnings), then prove it builds
-      # through Trunk (the `before*Command` path Tauri uses).
+      # reaches — run the same gates `just verify` runs, in the same order, then
+      # additionally prove it builds through Trunk (the `before*Command` path Tauri
+      # uses, which `just verify` does not cover).
+      #
+      # `web-check` is listed explicitly even though `web-build` subsumes it: the
+      # justfile and AGENTS.md both name it as part of the canonical chain, and a
+      # CI sequence that quietly differs from the documented one is how the two
+      # drift. It is also the faster failure — a type error surfaces here rather
+      # than after Trunk's bundling.
+      - name: check
+        run: just web-check
       - name: clippy
         run: just web-clippy
       - name: build
@@ -205,6 +214,34 @@ jobs:
           name: coverage-lcov
           path: src-tauri/target/lcov.info
           if-no-files-found: error
+
+  versions:
+    name: Manifest versions agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The two crates deliberately share no workspace (native vs wasm32 targets),
+      # so the version lives in three files that are bumped by hand in lockstep.
+      # release.yml already guards this — but only under
+      # `if: startsWith(github.ref, 'refs/tags/')`, i.e. after the tag and its
+      # irreversible release run have been pushed, which is the expensive place to
+      # find out. Checking mutual agreement here needs no tag and catches the
+      # mistake in review instead.
+      #
+      # Worth a job of its own: src-tauri/Cargo.toml co-changes with
+      # web-rs/Cargo.toml in 23 of the last 300 commits and with tauri.conf.json in
+      # 22, so this is a path the repo takes constantly.
+      - name: Check the three manifests carry the same version
+        run: |
+          conf=$(jq -r '.version' src-tauri/tauri.conf.json)
+          cargo_v=$(grep -m1 -E '^version = ' src-tauri/Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')
+          web_v=$(grep -m1 -E '^version = ' web-rs/Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')
+          echo "tauri.conf.json=$conf src-tauri=$cargo_v web-rs=$web_v"
+          if [ "$conf" != "$cargo_v" ] || [ "$conf" != "$web_v" ]; then
+            echo "::error::version mismatch — src-tauri/tauri.conf.json, src-tauri/Cargo.toml and web-rs/Cargo.toml must all carry the same version"
+            exit 1
+          fi
+          echo "all three manifests agree on v$conf — ok"
 
   actionlint:
     name: actionlint

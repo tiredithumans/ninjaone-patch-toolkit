@@ -192,30 +192,22 @@ impl FilterState {
         });
     }
 
+    /// Reads the panel's signals and hands them to the pure [`filter_params`]
+    /// mapping. Everything below the signal reads is testable there; this method
+    /// stays a lift so it has nothing left to get wrong.
     pub(super) fn current_filter(self) -> FilterParams {
-        let window = self.detected_window.get_untracked();
-        let (detected_within_days, detected_after, detected_before) = match window.as_str() {
-            "1" | "7" | "30" | "90" => (window.parse::<i64>().ok(), None, None),
-            "custom" => (
-                None,
-                date_to_epoch(&self.detected_after_date.get_untracked()),
-                // Include the whole "before" day (end of day in UTC).
-                date_to_epoch(&self.detected_before_date.get_untracked()).map(|e| e + 86_399),
-            ),
-            _ => (None, None, None),
-        };
-        FilterParams {
+        filter_params(FilterInputs {
             organization_id: self.org_id.get_untracked(),
             location_id: self.loc_id.get_untracked(),
             role_id: self.role_id.get_untracked(),
             node_classes: self.selected_classes.get_untracked(),
-            os_name_contains: non_empty(self.os_name.get_untracked()),
-            search: non_empty(self.search.get_untracked()),
             severities: self.selected_severities.get_untracked(),
-            detected_within_days,
-            detected_after,
-            detected_before,
-        }
+            os_name: self.os_name.get_untracked(),
+            search: self.search.get_untracked(),
+            detected_window: self.detected_window.get_untracked(),
+            detected_after: self.detected_after_date.get_untracked(),
+            detected_before: self.detected_before_date.get_untracked(),
+        })
     }
 }
 
@@ -1121,6 +1113,31 @@ impl AppState {
         self.settings.f_actions.set(v.actions);
         self.filters.install_days.set(v.install_window_days);
         self.settings.presets.set(v.presets);
+        // The backend dropped its cached result when the tenant changed, so whatever
+        // is on screen can no longer be paged, sorted, grouped or exported — every
+        // one of those re-reads that cache and would now find the miss. Clearing is
+        // the honest end of the same rule `query_patches` enforces for a query that
+        // spans the switch.
+        if v.tenant_changed {
+            self.clear_results();
+        }
+    }
+
+    /// Drops everything derived from the last query: the summary, the current page,
+    /// grouping state, the applied-filter chips and any device selection made
+    /// against those rows.
+    pub(super) fn clear_results(self) {
+        self.query.result.set(None);
+        self.query.page_rows.set(Vec::new());
+        self.query.patches_page.set(0);
+        self.query.patches_sort.set(None);
+        self.query.groups.set(Vec::new());
+        self.query.expanded.update(|e| e.clear());
+        self.query.members.update(|m| m.clear());
+        self.query.applied_filters.set(None);
+        self.query.query_error.set(None);
+        self.clear_selection();
+        self.actions.results_stale.set(false);
     }
 
     pub(super) fn apply_preset(self, p: Preset) {

@@ -11,6 +11,45 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Switching instance mid-query no longer shows the previous tenant's patch data.** A query that
+  spanned an instance change had its cached rows correctly discarded, but still handed the summary
+  back to the window — so the table painted the old tenant's rows and rollups while paging, sorting,
+  export and the HTML report all read the (correctly empty) new tenant's cache. The query now fails
+  with an explanation and asks you to re-run. Saving a settings change that switches instance **or**
+  client id also clears the results still on screen, for the same reason.
+- **A patch action's effect is no longer hidden for up to two minutes by an in-flight refresh.**
+  Applying patches or rebooting drops the cached patch state so the next query reads post-action
+  data. If a whole-fleet fetch happened to be running at that moment, it wrote its *pre-action* rows
+  back afterwards and the two-minute cache lifetime restarted on them.
+- **A transient keychain problem no longer signs you out.** If the OS keychain refused a write while
+  a token was being refreshed, the app discarded the freshly issued session and the next attempt
+  presented an already-spent token, which forces a full interactive sign-in. The session is now kept
+  and only its persistence across a restart is lost.
+- **Sign-in no longer hangs when something else touches the callback port.** The loopback listener
+  handled exactly one connection, so a browser preconnect, a favicon request or a local port scan
+  could consume the sign-in and leave it waiting for the full three minutes. It now ignores
+  non-callback connections and keeps waiting for the real one.
+- **A fleet fetch that meets an unrecognized paging cursor now reports an error instead of stopping
+  early.** Previously it ended quietly mid-fleet and returned a partial result that looked complete,
+  which understates every compliance figure derived from it.
+- **The HTML report's Needs Reboot table matches the Excel export again** — its column headings had
+  drifted ("Role" vs "Device Role", "Pending patches" vs "Pending Patches").
+- **The "Run as" list in the script picker reports lookup failures.** A failed fetch left the list
+  empty, which looked identical to a device with no configured credentials.
+- **Web demo:** with an organization selected, the Compliance tab's by-OS chart and the patch-age
+  histogram now narrow with it instead of continuing to describe the whole sample fleet.
+- **Settings:** a number typed above a field's maximum (for example a callback port over 65535) now
+  clamps to that maximum rather than silently reverting to the previous value.
+
+### Changed
+
+- Concurrent queries on a cold cache now share one fleet fetch instead of each downloading the
+  device inventory and third-party patch feed independently.
+- Dispatching an action to many devices no longer re-copies the script, parameters and run-as
+  identity per device.
+
 ## [0.11.2] - 2026-08-03
 
 Maintenance only — **no user-facing changes**. If you are on 0.11.1 there is nothing new to see in

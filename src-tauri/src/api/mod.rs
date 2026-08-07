@@ -131,73 +131,37 @@ impl NinjaApiClient {
             };
 
             let status = resp.status();
-            if status == StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES {
-                attempt += 1;
-                let wait = resp
-                    .headers()
-                    .get("Retry-After")
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(5);
-                warn!(attempt, wait, "429 rate limited, backing off");
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-                continue;
+            match retry_for(status, replay, attempt, retry_after_secs(&resp)) {
+                Retry::Wait(delay) => {
+                    attempt += 1;
+                    warn!(%method, %url, %status, attempt, ?delay, "retrying");
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Retry::Reauth => {
+                    // The token was rejected server-side. Staleness is time-based,
+                    // so invalidate the cached token to force access_token() to
+                    // refresh on the next attempt instead of resending the same
+                    // dead token.
+                    //
+                    // Named explicitly: a query fans out many concurrent requests,
+                    // so this 401 may be answering a token that a sibling's refresh
+                    // has already replaced. Only the token *this* request actually
+                    // sent is invalidated, so a burst of lagging 401s can't chain
+                    // into a run of redundant grants.
+                    self.auth.invalidate_access_token(&token);
+                    attempt += 1;
+                    continue;
+                }
+                Retry::No => {}
             }
-            if status == StatusCode::UNAUTHORIZED && attempt < MAX_RETRIES {
-                // The token was rejected server-side. Staleness is time-based, so
-                // invalidate the cached token to force access_token() to refresh
-                // on the next attempt instead of resending the same dead token.
-                self.auth.invalidate_access_token();
-                attempt += 1;
-                continue;
-            }
-            // A 5xx is the gateway or the reporting backend failing to produce this
-            // page, not a rejection of what we asked for — and it is the *most*
-            // common transient failure on the long reporting pulls, where a
-            // six-figure feed gives dozens of sequential chances to hit one.
-            // Without this arm a single 502 on page 63 of 80 discards every page
-            // already accumulated by `get_paginated_reporting` and the operator
-            // re-runs the whole fetch from scratch.
-            //
-            // Reads only: a 5xx on an acting POST is exactly the ambiguous case
-            // `ReplaySafety::ActOnce` exists for — the gateway may have failed
-            // *after* handing the job to the device queue, so the dispatch stays
-            // `JobState::Unknown` and is polled rather than replayed.
-            if status.is_server_error()
-                && attempt < MAX_RETRIES
-                && replay == ReplaySafety::Idempotent
-            {
-                attempt += 1;
-                warn!(%method, %url, %status, attempt, "server error, retrying");
-                tokio::time::sleep(backoff(attempt)).await;
-                continue;
-            }
+
             if !status.is_success() {
                 let text = truncate_body(&resp.text().await.unwrap_or_default());
                 warn!(%method, %url, %status, body = %text, "http error");
                 bail!("{method} {url} failed ({status}): {text}");
             }
-
-            if status == StatusCode::NO_CONTENT {
-                return Ok(Value::Null);
-            }
-
-            let ctype = resp
-                .headers()
-                .get("Content-Type")
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-
-            if ctype.contains("application/json") {
-                return resp.json().await.context("decode json body");
-            }
-
-            let text = resp.text().await.context("read body")?;
-            if text.is_empty() {
-                return Ok(Value::Null);
-            }
-            return Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)));
+            return decode_response(resp).await;
         }
     }
 
@@ -337,12 +301,17 @@ impl NinjaApiClient {
                     if let Some(report) = on_progress {
                         report(all.len());
                     }
-                    let next = next_cursor(obj.get("cursor"));
-                    match next {
-                        // No rows on this page means the cursor is exhausted even if
-                        // the server echoes a stale token — stop to avoid a loop.
-                        Some(c) if page_len > 0 => cursor = Some(c),
-                        _ => return Ok(all),
+                    // No rows on this page means the cursor is exhausted even if the
+                    // server echoes a stale token — stop to avoid a loop. Checked
+                    // *before* the cursor is interpreted, so a terminal
+                    // `{"cursor": {}}` ends the fetch rather than tripping the
+                    // malformed-shape error below.
+                    if page_len == 0 {
+                        return Ok(all);
+                    }
+                    match next_cursor(obj.get("cursor"))? {
+                        Some(c) => cursor = Some(c),
+                        None => return Ok(all),
                     }
                 }
                 Value::Null => return Ok(all),
@@ -353,6 +322,84 @@ impl NinjaApiClient {
             }
         }
     }
+}
+
+/// What to do about a response status before its body is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retry {
+    /// Give up retrying; the caller reports success or the error status.
+    No,
+    /// Sleep this long, then re-issue the request.
+    Wait(Duration),
+    /// Force a token refresh and re-issue immediately.
+    Reauth,
+}
+
+/// The retry policy, as a pure decision so it can be tested without a server.
+///
+/// The `Idempotent`-only guard on 5xx is the load-bearing part and the reason this
+/// is worth reading on its own. A reporting pull is dozens of *sequential* cursor
+/// pages, so a gateway 502 on a late page used to discard every page already
+/// accumulated — 5xx is by far the most common transient failure on that path. But
+/// a 5xx on an acting POST is exactly the ambiguity [`ReplaySafety::ActOnce`]
+/// exists for: the gateway may have failed *after* the job reached the device
+/// queue, so writes fail through to `JobState::Unknown` and are polled rather than
+/// replayed. 429 and 401 stay retryable for both — the gateway rejected the
+/// request before it could reach a device.
+fn retry_for(
+    status: StatusCode,
+    replay: ReplaySafety,
+    attempt: u8,
+    retry_after: Option<u64>,
+) -> Retry {
+    if attempt >= MAX_RETRIES {
+        return Retry::No;
+    }
+    match status {
+        // The server tells us how long to wait; second-guessing it is how a client
+        // turns a soft rate limit into a hard one.
+        StatusCode::TOO_MANY_REQUESTS => Retry::Wait(Duration::from_secs(retry_after.unwrap_or(5))),
+        StatusCode::UNAUTHORIZED => Retry::Reauth,
+        s if s.is_server_error() && replay == ReplaySafety::Idempotent => {
+            Retry::Wait(backoff(attempt + 1))
+        }
+        _ => Retry::No,
+    }
+}
+
+/// The `Retry-After` header in seconds, if the server sent a usable one.
+fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
+    resp.headers()
+        .get("Retry-After")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// Reads a successful response into a `Value`.
+///
+/// NinjaOne is inconsistent about what a success body looks like: `204` and an
+/// empty body both mean "nothing to report", and some endpoints return JSON
+/// without a JSON content type. A plain string that doesn't parse is preserved
+/// as `Value::String` rather than discarded, so an unexpected body still reaches
+/// the caller's error message.
+async fn decode_response(resp: reqwest::Response) -> Result<Value> {
+    if resp.status() == StatusCode::NO_CONTENT {
+        return Ok(Value::Null);
+    }
+    let ctype = resp
+        .headers()
+        .get("Content-Type")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if ctype.contains("application/json") {
+        return resp.json().await.context("decode json body");
+    }
+    let text = resp.text().await.context("read body")?;
+    if text.is_empty() {
+        return Ok(Value::Null);
+    }
+    Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
 }
 
 /// Exponential backoff for a retryable *transport* or 5xx failure: 2s, 4s, 8s.
@@ -366,15 +413,37 @@ fn backoff(attempt: u8) -> Duration {
 
 /// Extracts the next-page token from a `cursor` field that may be a string or an
 /// object `{ "name": "...", "offset": N }`.
-fn next_cursor(value: Option<&Value>) -> Option<String> {
-    match value? {
-        Value::String(s) => Some(s.clone()).filter(|s| !s.is_empty()),
-        Value::Object(obj) => obj
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty()),
-        _ => None,
+///
+/// `Ok(None)` means "no more pages"; `Err` means the cursor is a shape we cannot
+/// interpret. The distinction matters because this is only consulted after a page
+/// that *did* return rows, so an uninterpretable cursor is a fetch that stops
+/// early — and the caller has no way to tell a truncated fleet from a complete
+/// one. Reporting a partial fleet as complete understates every compliance number
+/// derived from it. The sibling `results` handling already bails loudly on a
+/// malformed envelope for exactly this reason; this arm used to return `None` and
+/// stop silently.
+fn next_cursor(value: Option<&Value>) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        Value::Null => Ok(None),
+        Value::String(s) => Ok(Some(s.clone()).filter(|s| !s.is_empty())),
+        Value::Object(obj) => match obj.get("name") {
+            Some(Value::String(s)) => Ok(Some(s.clone()).filter(|s| !s.is_empty())),
+            // An object cursor whose `name` is absent or not a string is not
+            // "finished" — it is a shape this client does not understand.
+            other => bail!(
+                "cursor object has no usable `name`: {}",
+                truncate_body(
+                    &serde_json::to_string(other.unwrap_or(&Value::Null)).unwrap_or_default()
+                )
+            ),
+        },
+        other => bail!(
+            "unexpected cursor shape: {}",
+            truncate_body(&other.to_string())
+        ),
     }
 }
 
@@ -383,22 +452,153 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The `Idempotent`-only guard on 5xx is what keeps an acting POST from being
+    /// replayed into a second reboot or script run: the gateway may have failed
+    /// *after* the job reached the device queue. 429 and 401 are safe for both —
+    /// the request was rejected before it could reach a device.
+    #[test]
+    fn a_5xx_is_retried_for_reads_but_never_for_writes() {
+        for status in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(
+                matches!(
+                    retry_for(status, ReplaySafety::Idempotent, 0, None),
+                    Retry::Wait(_)
+                ),
+                "{status} should be retried for a read"
+            );
+            assert_eq!(
+                retry_for(status, ReplaySafety::ActOnce, 0, None),
+                Retry::No,
+                "{status} must not replay an action that may already be queued"
+            );
+        }
+    }
+
+    #[test]
+    fn rate_limiting_honors_retry_after_and_applies_to_writes_too() {
+        assert_eq!(
+            retry_for(
+                StatusCode::TOO_MANY_REQUESTS,
+                ReplaySafety::ActOnce,
+                0,
+                Some(30)
+            ),
+            Retry::Wait(Duration::from_secs(30)),
+            "the server's own backoff is honored verbatim — second-guessing it turns \
+             a soft rate limit into a hard one"
+        );
+        // No usable header: fall back rather than hammering.
+        assert_eq!(
+            retry_for(
+                StatusCode::TOO_MANY_REQUESTS,
+                ReplaySafety::Idempotent,
+                0,
+                None
+            ),
+            Retry::Wait(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn a_401_forces_a_token_refresh_rather_than_a_plain_retry() {
+        assert_eq!(
+            retry_for(StatusCode::UNAUTHORIZED, ReplaySafety::ActOnce, 0, None),
+            Retry::Reauth
+        );
+    }
+
+    /// A client error that is not 401/429 is the server rejecting *what we asked
+    /// for*; retrying it just repeats the same rejection.
+    #[test]
+    fn ordinary_client_errors_and_successes_are_not_retried() {
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::OK,
+            StatusCode::NO_CONTENT,
+        ] {
+            assert_eq!(
+                retry_for(status, ReplaySafety::Idempotent, 0, None),
+                Retry::No,
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_retry_budget_is_finite() {
+        assert_eq!(
+            retry_for(
+                StatusCode::TOO_MANY_REQUESTS,
+                ReplaySafety::Idempotent,
+                MAX_RETRIES,
+                Some(1)
+            ),
+            Retry::No,
+            "a server that always 429s must not loop forever"
+        );
+        assert_eq!(
+            retry_for(
+                StatusCode::UNAUTHORIZED,
+                ReplaySafety::Idempotent,
+                MAX_RETRIES,
+                None
+            ),
+            Retry::No
+        );
+    }
+
     #[test]
     fn next_cursor_reads_string() {
-        assert_eq!(next_cursor(Some(&json!("abc"))), Some("abc".to_string()));
-        assert_eq!(next_cursor(Some(&json!(""))), None);
+        assert_eq!(
+            next_cursor(Some(&json!("abc"))).unwrap(),
+            Some("abc".to_string())
+        );
+        assert_eq!(next_cursor(Some(&json!(""))).unwrap(), None);
     }
 
     #[test]
     fn next_cursor_reads_object_name() {
         let v = json!({ "name": "tok-42", "offset": 500, "count": 500 });
-        assert_eq!(next_cursor(Some(&v)), Some("tok-42".to_string()));
+        assert_eq!(next_cursor(Some(&v)).unwrap(), Some("tok-42".to_string()));
+        // An explicitly empty name is a real end-of-pages signal.
+        let done = json!({ "name": "", "offset": 1000 });
+        assert_eq!(next_cursor(Some(&done)).unwrap(), None);
     }
 
     #[test]
-    fn next_cursor_none_when_missing() {
-        assert_eq!(next_cursor(None), None);
-        assert_eq!(next_cursor(Some(&json!({ "offset": 0 }))), None);
+    fn next_cursor_none_when_absent() {
+        assert_eq!(next_cursor(None).unwrap(), None);
+        assert_eq!(next_cursor(Some(&json!(null))).unwrap(), None);
+    }
+
+    /// A cursor shape this client cannot read is not "finished".
+    ///
+    /// `next_cursor` is only consulted after a page that returned rows (the
+    /// caller stops on an empty page first), so treating an unreadable cursor as
+    /// end-of-pages ended the fetch mid-fleet and handed back a partial result
+    /// that looked complete — every compliance percentage computed from it would
+    /// be wrong, with nothing to indicate why. The sibling `results` handling has
+    /// always bailed loudly on a malformed envelope; this now matches it.
+    #[test]
+    fn an_unreadable_cursor_is_an_error_not_a_silent_end_of_pages() {
+        for shape in [
+            json!({ "offset": 0 }),
+            json!({ "name": 42 }),
+            json!(7),
+            json!([]),
+            json!(true),
+        ] {
+            assert!(
+                next_cursor(Some(&shape)).is_err(),
+                "cursor {shape} should be reported, not read as end-of-pages"
+            );
+        }
     }
 
     #[tokio::test]

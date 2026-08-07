@@ -17,7 +17,7 @@ use crate::rows::{
     pending_counts,
 };
 use crate::settings::MAX_WINDOW_DAYS;
-use crate::state::{AppState, CurrentPatches};
+use crate::state::{AppState, CurrentPatches, StoreOutcome};
 
 /// The org/location/role lookups a query joins against, each shared behind `Arc`
 /// so a cache hit hands out a cheap refcount bump instead of a deep clone.
@@ -129,17 +129,56 @@ pub async fn query_patches(
     // Hand the frontend a lightweight summary (first page + rollups) and keep the
     // full result in the tenant-stamped cache for paging (`get_patch_rows`) and
     // export — moving it in rather than cloning every row.
-    //
-    // The write is dropped if a newer query started, or if the operator switched
-    // tenant, while this one was in flight. The summary is still returned: the
-    // frontend applies only its own newest run (`query_seq`), so a superseded
-    // response is discarded there rather than surfaced as an error the operator
-    // never caused.
     let summary = QuerySummary::from_result(&result, FIRST_PAGE_ROWS);
-    if !state.store_last_result_if_current(token, result) {
-        tracing::debug!(qid, "query superseded before its result could be cached");
+    summary_for(
+        state.store_last_result_if_current(token, result),
+        summary,
+        qid,
+    )
+}
+
+/// Decides what a query hands back once its cache write has been adjudicated.
+///
+/// Free and pure so the branch can be tested — the `query_patches` wrapper around
+/// it needs a Tauri `State`/`AppHandle` and so had no test at all, which is
+/// precisely where the tenant-drift bug lived.
+///
+/// The rule: return the summary only when the rows behind it are readable. Every
+/// other path that shows those rows (`get_patch_rows`, the group pages, the Excel
+/// export, the HTML report) reads the cache, so returning a summary whose write was
+/// dropped puts rows on screen that none of them can reach.
+fn summary_for(
+    outcome: StoreOutcome,
+    summary: QuerySummary,
+    qid: u64,
+) -> Result<QuerySummary, UiError> {
+    match outcome {
+        StoreOutcome::Stored => Ok(summary),
+        // The frontend already drops this itself — it applies only its own newest
+        // `query_seq` — so surfacing an error would blame the operator for a race
+        // they neither caused nor can see.
+        StoreOutcome::Superseded => {
+            tracing::debug!(qid, "query superseded before its result could be cached");
+            Ok(summary)
+        }
+        // No such frontend guard exists here: `query_seq` counts runs the frontend
+        // *starts*, and switching instance never bumps it, so returning the summary
+        // painted the previous tenant's rows and rollups over the new tenant's empty
+        // cache. Fail instead — the operator did just change instance, so the
+        // message explains itself and re-running is the obvious next step.
+        StoreOutcome::TenantChanged => {
+            tracing::info!(qid, "instance changed mid-query; discarding the result");
+            Err(UiError::new(
+                "The instance changed while this query was running, so its results were discarded. Run the query again.",
+            ))
+        }
+        // Same shape as tenant drift: the rows would be on screen while paging and
+        // export fail. `with_current_result` reports the poisoning to those callers;
+        // report it here too rather than letting the table imply all is well.
+        StoreOutcome::Poisoned => Err(UiError::new(
+            "The result cache is unusable after an internal error. Restart the app to run queries again.",
+        )),
     }
-    Ok(summary)
 }
 
 /// The fetch→scope→join→rollup core of [`query_patches`], split out so it can be
@@ -154,6 +193,120 @@ pub async fn query_patches(
 /// identity facets **client-side** (so a re-filter needs no refetch). `progress` (the
 /// UI sink, keyed by stage) and `now` (the clock, for the release/install windows, SLA
 /// aging, and `generated_at`) are injected so the caller owns both.
+/// The routing decisions a query makes *before* it fetches anything: which feeds
+/// to hit, which statuses narrow which source, and the absolute time bounds.
+///
+/// Pure, so it can be tested directly. These decisions were inline in `run_query`
+/// and reachable only through a wiremock round trip, which asserts on rows rather
+/// than on what was actually requested — and getting one wrong is silent: the
+/// query simply returns the wrong set. The `Installed`/`Failed` routing in
+/// particular was a real bug (a FAILED query returned nothing, because FAILED
+/// never appears in the current feed).
+struct QueryPlan {
+    filter: FilterParams,
+    /// Server-side `df` for the install-history endpoints, which are fetched fresh
+    /// per query. The whole-fleet caches are scoped client-side instead.
+    patch_df: Option<String>,
+    /// Whether any requested status is an install *result*, i.e. needs the history
+    /// endpoints at all.
+    want_installs: bool,
+    /// Statuses that narrow the current feed (MANUAL/APPROVED/REJECTED).
+    current_status_set: HashSet<&'static str>,
+    /// Install statuses the operator asked for (INSTALLED and/or FAILED).
+    install_status_set: HashSet<&'static str>,
+    /// Pushed to the history endpoints only when exactly one install status is
+    /// requested — see [`QueryPlan::build`].
+    install_status: Option<&'static str>,
+    include_os: bool,
+    include_sw: bool,
+    /// Lower bound of the install-history lookback, as Unix seconds.
+    installed_after: i64,
+}
+
+impl QueryPlan {
+    fn build(args: PatchQueryArgs, install_window_days: i64, now: DateTime<Utc>) -> Self {
+        let mut filter = args.filter;
+        // Resolve the relative first-seen window into an absolute lower bound; the
+        // filter is applied client-side in build_rows, which has no clock.
+        if let Some(days) = filter.detected_within_days {
+            filter.detected_after =
+                Some((now - Duration::days(days.clamp(0, MAX_WINDOW_DAYS))).timestamp());
+        }
+        let patch_df = filter.patch_filter();
+
+        // Install *results* ("Installed" and "Failed") route to the
+        // `*-patch-installs` history endpoints; the rest (MANUAL/APPROVED/REJECTED)
+        // narrow the current-patch feed for display. A FAILED patch is one whose
+        // install was attempted and failed, so it never appears in the current feed
+        // ("patches for which there were no installation attempts") — only in the
+        // install history.
+        let want_installs = args.statuses.iter().any(|s| s.is_install_history());
+        let current_status_set: HashSet<&'static str> = args
+            .statuses
+            .iter()
+            .filter(|s| !s.is_install_history())
+            .map(|s| s.api_value())
+            .collect();
+        let install_status_set: HashSet<&'static str> = args
+            .statuses
+            .iter()
+            .filter(|s| s.is_install_history())
+            .map(|s| s.api_value())
+            .collect();
+        // When exactly one install status is requested, push it to the history
+        // endpoints server-side so a FAILED-only query (the failure dashboard)
+        // doesn't download every successful install just to drop it. With both
+        // requested we need both records, so leave it unset; the client-side
+        // `install_status_set` filter in build_rows stays as a backstop either way.
+        let install_status: Option<&'static str> = match install_status_set.len() {
+            1 => install_status_set.iter().copied().next(),
+            _ => None,
+        };
+
+        // The configured window is validated 1..=MAX_WINDOW_DAYS in save_settings;
+        // clamp the optional per-query override the same way so a 0/negative
+        // lookback can't invert into a future `after` bound that would match no
+        // install history. The upper bound is load-bearing too: `Duration::days`
+        // panics on an out-of-range day count, and a settings.json written before
+        // that validation existed (or edited by hand) can still carry one.
+        let days = args
+            .install_after_days
+            .unwrap_or(install_window_days)
+            .clamp(1, MAX_WINDOW_DAYS);
+
+        Self {
+            filter,
+            patch_df,
+            want_installs,
+            current_status_set,
+            install_status_set,
+            install_status,
+            include_os: args.patch_type.includes_os(),
+            include_sw: args.patch_type.includes_software(),
+            installed_after: (now - Duration::days(days)).timestamp(),
+        }
+    }
+}
+
+/// Everything a query fetched, before scoping and joining.
+struct FetchedSources {
+    devices: Arc<Vec<Device>>,
+    current: CurrentPatches,
+    orgs: Arc<Vec<Organization>>,
+    locations: Arc<Vec<Location>>,
+    roles: Arc<Vec<Role>>,
+    os_installs: Vec<Patch>,
+    sw_installs: Vec<Patch>,
+}
+
+/// The fetch→scope→join→rollup core of [`query_patches`], split out so it can be
+/// driven in tests against a mock NinjaOne server without a Tauri `AppHandle`/`State`.
+///
+/// `lookups`, `devices_fut`, and `current_fut` are taken as *futures* (not resolved
+/// values) so the cached-or-fetched org/location/role lookups, the whole-fleet device
+/// inventory, and the whole-fleet current patches all resolve concurrently with the
+/// per-query install-history fetch — a cache hit resolves its future instantly.
+/// `query_patches` passes the `AppState` cache accessors; a test passes ready values.
 #[allow(clippy::too_many_arguments)]
 async fn run_query<L, D, C>(
     api: &NinjaApiClient,
@@ -171,80 +324,26 @@ where
     D: std::future::Future<Output = anyhow::Result<Arc<Vec<Device>>>>,
     C: std::future::Future<Output = anyhow::Result<CurrentPatches>>,
 {
-    let mut filter = args.filter;
-    // Resolve the relative first-seen window into an absolute lower bound; the
-    // filter is applied client-side in build_rows, which has no clock.
-    if let Some(days) = filter.detected_within_days {
-        filter.detected_after =
-            Some((now - Duration::days(days.clamp(0, MAX_WINDOW_DAYS))).timestamp());
-    }
-    // Install-history queries are fetched fresh per query and narrowed server-side by
-    // identity (org/location/role) via the patch `df`; the node-class facet and the
-    // cached whole-fleet device/current-patch sets are scoped client-side below.
-    let patch_df = filter.patch_filter();
-    let patch_df_ref = patch_df.as_deref();
+    let plan = QueryPlan::build(args, install_window_days, now);
 
-    // 1. Classify the requested statuses. Install *results* ("Installed" and
-    // "Failed") route to the `*-patch-installs` history endpoints; the rest
-    // (MANUAL/APPROVED/REJECTED) narrow the current-patch feed for display. A
-    // FAILED patch is one whose install was attempted and failed, so it never
-    // appears in the current feed ("patches for which there were no installation
-    // attempts") — only in the install history (status FAILED/INSTALLED).
-    let want_installs = args.statuses.iter().any(|s| s.is_install_history());
-    let current_status_set: HashSet<&'static str> = args
-        .statuses
-        .iter()
-        .filter(|s| !s.is_install_history())
-        .map(|s| s.api_value())
-        .collect();
-    // The install-history statuses the operator asked for (INSTALLED and/or
-    // FAILED); the install sources are narrowed to these client-side.
-    let install_status_set: HashSet<&'static str> = args
-        .statuses
-        .iter()
-        .filter(|s| s.is_install_history())
-        .map(|s| s.api_value())
-        .collect();
-    // When exactly one install status is requested, push it to the history
-    // endpoints server-side so a FAILED-only query (the failure dashboard) doesn't
-    // download every successful install just to drop it. With both requested we
-    // need both records, so leave it unset; the client-side `install_status_set`
-    // filter in build_rows stays as a harmless backstop either way.
-    let install_status: Option<&'static str> = match install_status_set.len() {
-        1 => install_status_set.iter().copied().next(),
-        _ => None,
-    };
-    let include_os = args.patch_type.includes_os();
-    let include_sw = args.patch_type.includes_software();
-    // The configured window is validated 1..=MAX_WINDOW_DAYS in save_settings; clamp
-    // the optional per-query override the same way so a 0/negative lookback can't
-    // invert into a future `after` bound that would match no install history. The
-    // upper bound is load-bearing too: `Duration::days` panics on an out-of-range day
-    // count, and a settings.json written before that validation existed (or edited by
-    // hand) can still carry one.
-    let days = args
-        .install_after_days
-        .unwrap_or(install_window_days)
-        .clamp(1, MAX_WINDOW_DAYS);
-    let after = (now - Duration::days(days)).timestamp();
-
-    // 2. The cached whole-fleet devices/current-patches (futures), the lookups, and
-    // the per-query install history are all independent — resolve them concurrently
-    // so latency is the slowest call, not the sum. The install fetch resolves to
-    // empty when no install status / matching family is requested.
+    // The cached whole-fleet devices/current-patches (futures), the lookups, and the
+    // per-query install history are all independent — resolve them concurrently so
+    // latency is the slowest call, not the sum. The install fetch resolves to empty
+    // when no install status / matching family is requested.
     let p_os_inst = |n: usize| progress("osInstalls", n);
     let p_sw_inst = |n: usize| progress("swInstalls", n);
+    let patch_df_ref = plan.patch_df.as_deref();
 
     let (devices, current, (orgs, locations, roles), os_installs, sw_installs) = tokio::try_join!(
         devices_fut,
         current_fut,
         lookups,
         async {
-            if want_installs && include_os {
+            if plan.want_installs && plan.include_os {
                 api.fleet_os_patch_installs(
                     patch_df_ref,
-                    install_status,
-                    after,
+                    plan.install_status,
+                    plan.installed_after,
                     None,
                     Some(&p_os_inst as &ProgressFn),
                 )
@@ -254,11 +353,11 @@ where
             }
         },
         async {
-            if want_installs && include_sw {
+            if plan.want_installs && plan.include_sw {
                 api.fleet_software_patch_installs(
                     patch_df_ref,
-                    install_status,
-                    after,
+                    plan.install_status,
+                    plan.installed_after,
                     None,
                     Some(&p_sw_inst as &ProgressFn),
                 )
@@ -271,17 +370,41 @@ where
 
     // Fetches done; the rest is the in-memory scope + join/rollup.
     progress("joining", 0);
+    Ok(assemble_result(
+        &plan,
+        FetchedSources {
+            devices,
+            current,
+            orgs,
+            locations,
+            roles,
+            os_installs,
+            sw_installs,
+        },
+        sla_days,
+        now,
+    ))
+}
 
-    let maps = LookupMaps::build(&orgs, &locations, &roles);
+/// Scopes the whole-fleet caches client-side, joins devices to patches, and
+/// computes every rollup. No I/O — everything it needs has already been fetched.
+fn assemble_result(
+    plan: &QueryPlan,
+    src: FetchedSources,
+    sla_days: i64,
+    now: DateTime<Utc>,
+) -> QueryResult {
+    let maps = LookupMaps::build(&src.orgs, &src.locations, &src.roles);
 
-    // 3. Scope the whole-fleet caches to the selected identity facets (org/location/
+    // Scope the whole-fleet caches to the selected identity facets (org/location/
     // role/class) client-side — this is what makes a re-filter a no-refetch
     // operation, replacing the old per-query device/patch `df`. `devices_by_id` then
     // holds only in-scope devices, so every downstream rollup is scoped through it.
-    let has_scope = filter.has_identity_scope();
-    let scoped_devices: Vec<&Device> = devices
+    let has_scope = plan.filter.has_identity_scope();
+    let scoped_devices: Vec<&Device> = src
+        .devices
         .iter()
-        .filter(|d| filter.device_allowed(d))
+        .filter(|d| plan.filter.device_allowed(d))
         .collect();
     let devices_by_id: HashMap<i64, &Device> = scoped_devices.iter().map(|d| (d.id, *d)).collect();
 
@@ -299,38 +422,38 @@ where
             || p.device_id
                 .is_some_and(|id| devices_by_id.contains_key(&id))
     };
-    let scoped_os_current: Vec<&Patch> = if include_os {
-        current.os.iter().filter(|p| in_scope(p)).collect()
+    let scoped_os_current: Vec<&Patch> = if plan.include_os {
+        src.current.os.iter().filter(|p| in_scope(p)).collect()
     } else {
         Vec::new()
     };
-    let scoped_sw_current: Vec<&Patch> = if include_sw {
-        current.sw.iter().filter(|p| in_scope(p)).collect()
+    let scoped_sw_current: Vec<&Patch> = if plan.include_sw {
+        src.current.sw.iter().filter(|p| in_scope(p)).collect()
     } else {
         Vec::new()
     };
 
-    // 4. Build detail rows from the scoped current families plus the install history.
+    // Build detail rows from the scoped current families plus the install history.
     // The install sets are owned by this call, so they're borrowed into the same
     // `&[&Patch]` shape the scoped current families use.
-    let os_install_refs: Vec<&Patch> = os_installs.iter().collect();
-    let sw_install_refs: Vec<&Patch> = sw_installs.iter().collect();
+    let os_install_refs: Vec<&Patch> = src.os_installs.iter().collect();
+    let sw_install_refs: Vec<&Patch> = src.sw_installs.iter().collect();
     let mut rows = {
         let mut sources = vec![
             PatchSource {
                 patches: &scoped_os_current,
                 type_label: "OS",
                 status_override: None,
-                status_filter: Some(&current_status_set),
+                status_filter: Some(&plan.current_status_set),
             },
             PatchSource {
                 patches: &scoped_sw_current,
                 type_label: "SOFTWARE",
                 status_override: None,
-                status_filter: Some(&current_status_set),
+                status_filter: Some(&plan.current_status_set),
             },
         ];
-        if want_installs {
+        if plan.want_installs {
             // The install endpoints return both successful and failed records, so
             // narrow each to the requested install statuses; the override labels a
             // record that omits its own status (defaulting it to INSTALLED).
@@ -338,16 +461,16 @@ where
                 patches: &os_install_refs,
                 type_label: "OS",
                 status_override: Some("INSTALLED"),
-                status_filter: Some(&install_status_set),
+                status_filter: Some(&plan.install_status_set),
             });
             sources.push(PatchSource {
                 patches: &sw_install_refs,
                 type_label: "SOFTWARE",
                 status_override: Some("INSTALLED"),
-                status_filter: Some(&install_status_set),
+                status_filter: Some(&plan.install_status_set),
             });
         }
-        build_rows(&devices_by_id, &maps, &sources, &filter)
+        build_rows(&devices_by_id, &maps, &sources, &plan.filter)
     };
     // Highest severity first, then organization, then device — case-insensitive.
     // sort_by_cached_key lowercases each field once instead of on every compare.
@@ -359,8 +482,8 @@ where
         )
     });
 
-    // 5. Compliance + reboot rollups from the scoped current set. Concatenating the
-    // two families copies pointers, not patches.
+    // Compliance + reboot rollups from the scoped current set. Concatenating the two
+    // families copies pointers, not patches.
     let all_current: Vec<&Patch> = scoped_os_current
         .iter()
         .chain(&scoped_sw_current)
@@ -379,14 +502,14 @@ where
     let compliance_by_os =
         build_compliance_by_os(&summaries, &all_current, &devices_by_id, sla_days, now);
 
-    // 6. Dashboard/failure rollups. Failures are derived from the FAILED rows already
+    // Dashboard/failure rollups. Failures are derived from the FAILED rows already
     // joined (present only when the FAILED status was requested — no extra fetch);
     // the severity/age distributions come from the current pending backlog.
     let failures = build_failures(&rows);
     let severity_by_org = build_severity_by_org(&all_current, &devices_by_id, &maps);
     let age_buckets = build_age_buckets(&all_current, now);
 
-    Ok(QueryResult {
+    QueryResult {
         rows,
         devices: summaries,
         compliance,
@@ -396,11 +519,12 @@ where
         age_buckets,
         devices_total: scoped_devices.len(),
         generated_at: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-        data_fetched_at: current
+        data_fetched_at: src
+            .current
             .fetched_at
             .format("%Y-%m-%d %H:%M:%S UTC")
             .to_string(),
-    })
+    }
 }
 
 /// Serves one page of detail rows from the cached query result so the frontend can
@@ -480,6 +604,221 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn empty_summary() -> QuerySummary {
+        QuerySummary::from_result(
+            &QueryResult {
+                rows: Vec::new(),
+                devices: Vec::new(),
+                compliance: Vec::new(),
+                compliance_by_os: Vec::new(),
+                failures: Vec::new(),
+                severity_by_org: Vec::new(),
+                age_buckets: Vec::new(),
+                devices_total: 0,
+                generated_at: "2026-01-01 00:00:00 UTC".into(),
+                data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
+            },
+            FIRST_PAGE_ROWS,
+        )
+    }
+
+    /// The frontend discards a superseded response itself (it applies only its own
+    /// newest `query_seq`), so this must not become an error the operator never
+    /// caused — a manual Run overtaken by an auto-refresh tick is routine.
+    #[test]
+    fn a_superseded_query_still_returns_its_summary() {
+        assert!(summary_for(StoreOutcome::Superseded, empty_summary(), 7).is_ok());
+        assert!(summary_for(StoreOutcome::Stored, empty_summary(), 7).is_ok());
+    }
+
+    /// The frontend has no guard for this: `query_seq` counts runs it *starts*, and
+    /// switching instance never bumps it, so a returned summary was rendered — the
+    /// previous tenant's rows and rollups over the new tenant's empty cache, while
+    /// paging and export read the miss. Returning the summary here is the bug.
+    #[test]
+    fn a_tenant_switch_mid_query_refuses_to_hand_back_a_renderable_summary() {
+        let err = summary_for(StoreOutcome::TenantChanged, empty_summary(), 7)
+            .expect_err("a result the cache refused must not be rendered");
+        assert!(
+            err.message.contains("instance changed"),
+            "the operator just switched instance; say so instead of a generic failure: {}",
+            err.message
+        );
+    }
+
+    /// Same shape: the rows would be on screen while every path that re-reads them
+    /// (paging, export, the HTML report) fails.
+    #[test]
+    fn a_poisoned_cache_refuses_to_hand_back_a_renderable_summary() {
+        assert!(summary_for(StoreOutcome::Poisoned, empty_summary(), 7).is_err());
+    }
+
+    /// `FIRST_PAGE_ROWS` and the frontend's `PATCHES_PAGE_SIZE` must agree: the
+    /// summary seeds page 0 inline, and the frontend renders that seed directly
+    /// rather than fetching it. If the backend sends more rows than a page holds,
+    /// the surplus is invisible until the operator pages away and back; if it sends
+    /// fewer, page 0 is short while `rows_total` promises more.
+    ///
+    /// The two crates share no code (native vs wasm32 targets), so the only thing
+    /// linking them was a doc comment saying "must match". This reads the frontend's
+    /// declaration and fails on drift.
+    #[test]
+    fn the_seeded_first_page_matches_the_frontend_page_size() {
+        const FRONTEND_APP_RS: &str = include_str!("../../../web-rs/src/app.rs");
+
+        let declared = FRONTEND_APP_RS
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("const PATCHES_PAGE_SIZE: usize = "))
+            .and_then(|v| v.trim_end_matches(';').parse::<usize>().ok())
+            .expect("web-rs/src/app.rs must declare `const PATCHES_PAGE_SIZE: usize = N;`");
+
+        assert_eq!(
+            FIRST_PAGE_ROWS, declared,
+            "FIRST_PAGE_ROWS ({FIRST_PAGE_ROWS}) and the frontend's PATCHES_PAGE_SIZE \
+             ({declared}) must be the same number"
+        );
+    }
+
+    fn args_with(statuses: Vec<PatchStatus>, patch_type: PatchType) -> PatchQueryArgs {
+        PatchQueryArgs {
+            filter: FilterParams::default(),
+            patch_type,
+            statuses,
+            install_after_days: None,
+        }
+    }
+
+    /// Both `Installed` *and* `Failed` are install results and must route to the
+    /// history endpoints. Routing `Failed` to the current feed was a real bug — it
+    /// never appears there ("patches for which there were no installation
+    /// attempts"), so a FAILED query returned nothing at all.
+    #[test]
+    fn install_results_route_to_history_and_the_rest_narrow_the_current_feed() {
+        let history = QueryPlan::build(
+            args_with(vec![PatchStatus::Failed], PatchType::All),
+            30,
+            fixed_now(),
+        );
+        assert!(history.want_installs);
+        assert!(
+            history.current_status_set.is_empty(),
+            "a FAILED-only query must not narrow the current feed to FAILED, which \
+             would starve the compliance and severity rollups"
+        );
+
+        let pending = QueryPlan::build(
+            args_with(vec![PatchStatus::Pending], PatchType::All),
+            30,
+            fixed_now(),
+        );
+        assert!(
+            !pending.want_installs,
+            "no history fetch for a pending query"
+        );
+        assert!(!pending.current_status_set.is_empty());
+    }
+
+    /// The pushdown is what keeps the failure dashboard from downloading the
+    /// window's successful installs just to drop them — but with both statuses
+    /// requested it must be absent, or the other kind of record never arrives.
+    #[test]
+    fn a_single_install_status_is_pushed_down_and_two_are_not() {
+        let one = QueryPlan::build(
+            args_with(vec![PatchStatus::Failed], PatchType::All),
+            30,
+            fixed_now(),
+        );
+        assert_eq!(one.install_status, Some("FAILED"));
+
+        let both = QueryPlan::build(
+            args_with(
+                vec![PatchStatus::Failed, PatchStatus::Installed],
+                PatchType::All,
+            ),
+            30,
+            fixed_now(),
+        );
+        assert_eq!(both.install_status, None);
+        assert_eq!(both.install_status_set.len(), 2);
+    }
+
+    /// `Duration::days` panics on an out-of-range count, and a settings.json
+    /// predating the range validation (or edited by hand) can still carry one. A
+    /// zero or negative lookback is worse than useless: it inverts into a *future*
+    /// lower bound that matches no install history at all.
+    #[test]
+    fn the_install_window_is_clamped_against_hand_edited_settings() {
+        let now = fixed_now();
+        for (requested, expect_days) in [(Some(0), 1), (Some(-5), 1), (Some(7), 7)] {
+            let plan = QueryPlan::build(
+                PatchQueryArgs {
+                    install_after_days: requested,
+                    ..args_with(vec![PatchStatus::Installed], PatchType::All)
+                },
+                30,
+                now,
+            );
+            assert_eq!(
+                plan.installed_after,
+                (now - Duration::days(expect_days)).timestamp(),
+                "requested {requested:?} should clamp to {expect_days} day(s)"
+            );
+        }
+        // An absurd stored window must not reach `Duration::days` unclamped.
+        let huge = QueryPlan::build(
+            PatchQueryArgs {
+                install_after_days: Some(i64::MAX),
+                ..args_with(vec![PatchStatus::Installed], PatchType::All)
+            },
+            30,
+            now,
+        );
+        assert_eq!(
+            huge.installed_after,
+            (now - Duration::days(MAX_WINDOW_DAYS)).timestamp()
+        );
+    }
+
+    /// The relative first-seen window is resolved to an absolute bound here because
+    /// `build_rows`, which applies it, has no clock.
+    #[test]
+    fn a_relative_detection_window_becomes_an_absolute_lower_bound() {
+        let now = fixed_now();
+        let plan = QueryPlan::build(
+            PatchQueryArgs {
+                filter: FilterParams {
+                    detected_within_days: Some(7),
+                    ..FilterParams::default()
+                },
+                ..args_with(vec![PatchStatus::Pending], PatchType::All)
+            },
+            30,
+            now,
+        );
+        assert_eq!(
+            plan.filter.detected_after,
+            Some((now - Duration::days(7)).timestamp())
+        );
+    }
+
+    /// A family the query cannot display is never worth a whole-fleet page-through.
+    #[test]
+    fn the_requested_patch_type_decides_which_families_are_fetched() {
+        let os = QueryPlan::build(
+            args_with(vec![PatchStatus::Pending], PatchType::Os),
+            30,
+            fixed_now(),
+        );
+        assert!(os.include_os && !os.include_sw);
+
+        let all = QueryPlan::build(
+            args_with(vec![PatchStatus::Pending], PatchType::All),
+            30,
+            fixed_now(),
+        );
+        assert!(all.include_os && all.include_sw);
+    }
 
     /// A fixed clock so the release/install windows, SLA aging, and `generated_at`
     /// are deterministic regardless of when the test runs.

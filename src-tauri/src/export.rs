@@ -2,56 +2,54 @@ use anyhow::{Context, Result};
 use rust_xlsxwriter::{Color, Format, Workbook};
 
 use crate::model::PatchRow;
-use crate::rows::{ComplianceBucket, DeviceSummary, FailureCell, FailureGroup, OsCompliance};
+use crate::rows::{
+    ComplianceBucket, DeviceSummary, FailureGroup, OsCompliance, TableCell, TableColumn,
+};
 
-const DETAIL_HEADERS: [&str; 14] = [
-    "Organization",
-    "Location",
-    "Device Role",
-    "Device",
-    "OS",
-    "Node Class",
-    "Patch Type",
-    "KB",
-    "Patch",
-    "Severity",
-    "Status",
-    "Needs Reboot",
-    "First Seen",
-    "Installed Date",
+/// The Patches detail-sheet columns. Only the workbook renders this table, so it
+/// lives here rather than on `PatchRow` — but it is declared the same way as the
+/// shared ones so header and value stay a single declaration.
+const DETAIL_COLUMNS: [TableColumn<PatchRow>; 14] = [
+    ("Organization", |r| TableCell::Text(r.organization.clone())),
+    ("Location", |r| {
+        TableCell::Text(r.location.clone().unwrap_or_default())
+    }),
+    ("Device Role", |r| {
+        TableCell::Text(r.device_role.clone().unwrap_or_default())
+    }),
+    ("Device", |r| TableCell::Text(r.device_name.clone())),
+    ("OS", |r| {
+        TableCell::Text(r.os_name.clone().unwrap_or_default())
+    }),
+    ("Node Class", |r| {
+        TableCell::Text(r.node_class.clone().unwrap_or_default())
+    }),
+    ("Patch Type", |r| TableCell::Text(r.patch_type.clone())),
+    ("KB", |r| TableCell::Text(r.kb.clone().unwrap_or_default())),
+    ("Patch", |r| TableCell::Text(r.name.clone())),
+    ("Severity", |r| TableCell::Text(r.severity.clone())),
+    ("Status", |r| TableCell::Text(r.status.clone())),
+    ("Needs Reboot", |r| {
+        TableCell::Text(if r.needs_reboot { "Yes" } else { "No" }.to_string())
+    }),
+    ("First Seen", |r| {
+        TableCell::Text(r.first_seen_date.clone().unwrap_or_default())
+    }),
+    ("Installed Date", |r| {
+        TableCell::Text(r.installed_date.clone().unwrap_or_default())
+    }),
 ];
 
-const SUMMARY_HEADERS: [&str; 6] = [
-    "Organization",
-    "Devices",
-    "Compliant",
-    "Compliance %",
-    "Pending Critical/Important",
-    "Aged (past SLA)",
+// Column widths, positionally paired with each sheet's column table. Tying every
+// array's length to `COLUMNS.len()` makes a new column without a width a compile
+// error — previously the widths were an unchecked `&[f64]` literal passed inline,
+// so a column added at one site and not the other silently misaligned the sheet.
+const DETAIL_WIDTHS: [f64; DETAIL_COLUMNS.len()] = [
+    24.0, 18.0, 18.0, 22.0, 26.0, 18.0, 11.0, 12.0, 40.0, 11.0, 11.0, 13.0, 20.0, 20.0,
 ];
-
-const OS_SUMMARY_HEADERS: [&str; 6] = [
-    "OS",
-    "Devices",
-    "Compliant",
-    "Compliance %",
-    "Pending Critical/Important",
-    "Aged (past SLA)",
-];
-
-const REBOOT_HEADERS: [&str; 6] = [
-    "Organization",
-    "Location",
-    "Device Role",
-    "Device",
-    "OS",
-    "Pending Patches",
-];
-
-/// Column widths for the Patch Failures sheet, positionally paired with
-/// [`FailureGroup::COLUMNS`] — which is where the headers and cell values live, so
-/// the workbook and the HTML report render the same columns. Tying the length to
-/// `COLUMNS.len()` makes a new column without a width a compile error.
+const SUMMARY_WIDTHS: [f64; ComplianceBucket::COLUMNS.len()] = [28.0, 10.0, 11.0, 14.0, 24.0, 16.0];
+const OS_SUMMARY_WIDTHS: [f64; OsCompliance::COLUMNS.len()] = [28.0, 10.0, 11.0, 14.0, 24.0, 16.0];
+const REBOOT_WIDTHS: [f64; DeviceSummary::COLUMNS.len()] = [24.0, 18.0, 18.0, 22.0, 26.0, 14.0];
 const FAILURE_WIDTHS: [f64; FailureGroup::COLUMNS.len()] =
     [11.0, 11.0, 12.0, 40.0, 16.0, 20.0, 60.0];
 
@@ -77,197 +75,112 @@ pub fn write_workbook(
     let mut workbook = Workbook::new();
     let header = header_format();
 
-    write_detail_sheet(&mut workbook, &header, rows)?;
+    // The detail sheet is always written (even empty) so the workbook always opens
+    // on the table the operator asked for; it is also the only sheet with an
+    // autofilter, being the only one meant to be sliced by hand.
+    write_sheet(
+        &mut workbook,
+        &header,
+        "Patches",
+        &DETAIL_COLUMNS,
+        &DETAIL_WIDTHS,
+        rows,
+        true,
+    )?;
     if !compliance.is_empty() {
-        write_summary_sheet(&mut workbook, &header, compliance)?;
+        write_sheet(
+            &mut workbook,
+            &header,
+            "Compliance",
+            &ComplianceBucket::COLUMNS,
+            &SUMMARY_WIDTHS,
+            compliance,
+            false,
+        )?;
     }
     if !compliance_by_os.is_empty() {
-        write_os_summary_sheet(&mut workbook, &header, compliance_by_os)?;
+        write_sheet(
+            &mut workbook,
+            &header,
+            "Compliance by OS",
+            &OsCompliance::COLUMNS,
+            &OS_SUMMARY_WIDTHS,
+            compliance_by_os,
+            false,
+        )?;
     }
     if !reboot_devices.is_empty() {
-        write_reboot_sheet(&mut workbook, &header, reboot_devices)?;
+        write_sheet(
+            &mut workbook,
+            &header,
+            "Needs Reboot",
+            &DeviceSummary::COLUMNS,
+            &REBOOT_WIDTHS,
+            reboot_devices,
+            false,
+        )?;
     }
     if !failures.is_empty() {
-        write_failures_sheet(&mut workbook, &header, failures)?;
+        write_sheet(
+            &mut workbook,
+            &header,
+            "Patch Failures",
+            &FailureGroup::COLUMNS,
+            &FAILURE_WIDTHS,
+            failures,
+            false,
+        )?;
     }
 
     workbook.save(path).context("save workbook")?;
     Ok(())
 }
 
-fn write_detail_sheet(workbook: &mut Workbook, header: &Format, rows: &[PatchRow]) -> Result<()> {
-    let sheet = workbook.add_worksheet();
-    sheet.set_name("Patches").context("name detail sheet")?;
-
-    for (col, title) in DETAIL_HEADERS.iter().enumerate() {
-        sheet
-            .write_string_with_format(0, col as u16, *title, header)
-            .context("write header")?;
-    }
-
-    for (i, r) in rows.iter().enumerate() {
-        let row = (i + 1) as u32;
-        // Write each cell from a borrow rather than cloning all 14 fields into a
-        // temporary array first (this runs once per exported row).
-        let cells: [&str; 14] = [
-            &r.organization,
-            r.location.as_deref().unwrap_or_default(),
-            r.device_role.as_deref().unwrap_or_default(),
-            &r.device_name,
-            r.os_name.as_deref().unwrap_or_default(),
-            r.node_class.as_deref().unwrap_or_default(),
-            &r.patch_type,
-            r.kb.as_deref().unwrap_or_default(),
-            &r.name,
-            &r.severity,
-            &r.status,
-            if r.needs_reboot { "Yes" } else { "No" },
-            r.first_seen_date.as_deref().unwrap_or_default(),
-            r.installed_date.as_deref().unwrap_or_default(),
-        ];
-        for (col, value) in cells.iter().enumerate() {
-            sheet
-                .write_string(row, col as u16, *value)
-                .context("write cell")?;
-        }
-    }
-
-    sheet.set_freeze_panes(1, 0).context("freeze header")?;
-    let last_row = rows.len() as u32; // header row 0 + data rows
-    sheet
-        .autofilter(0, 0, last_row.max(1), (DETAIL_HEADERS.len() - 1) as u16)
-        .context("autofilter")?;
-    apply_widths(
-        sheet,
-        &[
-            24.0, 18.0, 18.0, 22.0, 26.0, 18.0, 11.0, 12.0, 40.0, 11.0, 11.0, 13.0, 20.0, 20.0,
-        ],
-    )?;
-    Ok(())
-}
-
-fn write_summary_sheet(
+/// Writes one sheet from a column table: headers, then every row's cells through
+/// the same accessors that produced those headers.
+///
+/// One function for all five sheets. They were five near-identical bodies, each
+/// re-deriving the header loop, the per-cell writes and the width application by
+/// hand — which is exactly how the failures table came to be headed one way in the
+/// workbook and another in the report.
+fn write_sheet<T>(
     workbook: &mut Workbook,
     header: &Format,
-    compliance: &[ComplianceBucket],
+    name: &str,
+    columns: &[TableColumn<T>],
+    widths: &[f64],
+    rows: &[T],
+    autofilter: bool,
 ) -> Result<()> {
     let sheet = workbook.add_worksheet();
-    sheet.set_name("Compliance").context("name summary sheet")?;
+    sheet.set_name(name).context("name sheet")?;
 
-    for (col, title) in SUMMARY_HEADERS.iter().enumerate() {
+    for (col, (title, _)) in columns.iter().enumerate() {
         sheet
             .write_string_with_format(0, col as u16, *title, header)
             .context("write header")?;
     }
 
-    for (i, b) in compliance.iter().enumerate() {
+    for (i, item) in rows.iter().enumerate() {
         let row = (i + 1) as u32;
-        sheet.write_string(row, 0, &b.organization)?;
-        sheet.write_number(row, 1, b.devices_total as f64)?;
-        sheet.write_number(row, 2, b.devices_compliant as f64)?;
-        sheet.write_number(row, 3, (b.compliance_pct * 10.0).round() / 10.0)?;
-        sheet.write_number(row, 4, b.pending_critical as f64)?;
-        sheet.write_number(row, 5, b.aged_critical as f64)?;
-    }
-
-    sheet.set_freeze_panes(1, 0).context("freeze header")?;
-    apply_widths(sheet, &[28.0, 10.0, 11.0, 14.0, 24.0, 16.0])?;
-    Ok(())
-}
-
-fn write_os_summary_sheet(
-    workbook: &mut Workbook,
-    header: &Format,
-    compliance_by_os: &[OsCompliance],
-) -> Result<()> {
-    let sheet = workbook.add_worksheet();
-    sheet
-        .set_name("Compliance by OS")
-        .context("name OS summary sheet")?;
-
-    for (col, title) in OS_SUMMARY_HEADERS.iter().enumerate() {
-        sheet
-            .write_string_with_format(0, col as u16, *title, header)
-            .context("write header")?;
-    }
-
-    for (i, b) in compliance_by_os.iter().enumerate() {
-        let row = (i + 1) as u32;
-        sheet.write_string(row, 0, &b.os)?;
-        sheet.write_number(row, 1, b.devices_total as f64)?;
-        sheet.write_number(row, 2, b.devices_compliant as f64)?;
-        sheet.write_number(row, 3, (b.compliance_pct * 10.0).round() / 10.0)?;
-        sheet.write_number(row, 4, b.pending_critical as f64)?;
-        sheet.write_number(row, 5, b.aged_critical as f64)?;
-    }
-
-    sheet.set_freeze_panes(1, 0).context("freeze header")?;
-    apply_widths(sheet, &[28.0, 10.0, 11.0, 14.0, 24.0, 16.0])?;
-    Ok(())
-}
-
-fn write_reboot_sheet(
-    workbook: &mut Workbook,
-    header: &Format,
-    devices: &[DeviceSummary],
-) -> Result<()> {
-    let sheet = workbook.add_worksheet();
-    sheet
-        .set_name("Needs Reboot")
-        .context("name reboot sheet")?;
-
-    for (col, title) in REBOOT_HEADERS.iter().enumerate() {
-        sheet
-            .write_string_with_format(0, col as u16, *title, header)
-            .context("write header")?;
-    }
-
-    for (i, d) in devices.iter().enumerate() {
-        let row = (i + 1) as u32;
-        sheet.write_string(row, 0, &d.organization)?;
-        sheet.write_string(row, 1, d.location.as_deref().unwrap_or_default())?;
-        sheet.write_string(row, 2, d.device_role.as_deref().unwrap_or_default())?;
-        sheet.write_string(row, 3, &d.device_name)?;
-        sheet.write_string(row, 4, d.os_name.as_deref().unwrap_or_default())?;
-        sheet.write_number(row, 5, d.pending_count as f64)?;
-    }
-
-    sheet.set_freeze_panes(1, 0).context("freeze header")?;
-    apply_widths(sheet, &[24.0, 18.0, 18.0, 22.0, 26.0, 14.0])?;
-    Ok(())
-}
-
-fn write_failures_sheet(
-    workbook: &mut Workbook,
-    header: &Format,
-    failures: &[FailureGroup],
-) -> Result<()> {
-    let sheet = workbook.add_worksheet();
-    sheet
-        .set_name("Patch Failures")
-        .context("name failures sheet")?;
-
-    for (col, (title, _)) in FailureGroup::COLUMNS.iter().enumerate() {
-        sheet
-            .write_string_with_format(0, col as u16, *title, header)
-            .context("write header")?;
-    }
-
-    // Cells are written from the same accessor list that produced the headers, so a
-    // column can no longer be headed one thing and filled with another.
-    for (i, f) in failures.iter().enumerate() {
-        let row = (i + 1) as u32;
-        for (col, (_, value)) in FailureGroup::COLUMNS.iter().enumerate() {
+        for (col, (_, value)) in columns.iter().enumerate() {
             let col = col as u16;
-            match value(f) {
-                FailureCell::Text(s) => sheet.write_string(row, col, &s)?,
-                FailureCell::Count(n) => sheet.write_number(row, col, n as f64)?,
+            match value(item) {
+                TableCell::Text(s) => sheet.write_string(row, col, &s)?,
+                TableCell::Count(n) => sheet.write_number(row, col, n as f64)?,
+                TableCell::Number(n) => sheet.write_number(row, col, n)?,
             };
         }
     }
 
     sheet.set_freeze_panes(1, 0).context("freeze header")?;
-    apply_widths(sheet, &FAILURE_WIDTHS)?;
+    if autofilter {
+        let last_row = rows.len() as u32; // header row 0 + data rows
+        sheet
+            .autofilter(0, 0, last_row.max(1), (columns.len() - 1) as u16)
+            .context("autofilter")?;
+    }
+    apply_widths(sheet, widths)?;
     Ok(())
 }
 

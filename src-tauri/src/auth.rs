@@ -228,6 +228,13 @@ impl AuthState {
     /// so the old narrow grant persists silently). `None` — the token carries no
     /// readable scope, treated as not-granted for gating but worded differently so
     /// the operator isn't told their consent was wrong when we simply can't tell.
+    ///
+    /// A poisoned lock and an absent token set also read as `None`, which is
+    /// correct for both: neither lets us observe the grant. That is not a
+    /// conflation the callers can be hurt by — `action_blocked_reason` checks
+    /// `authenticated` before it ever looks at the grant, so the "couldn't confirm"
+    /// wording cannot reach a signed-out operator, and `require_actions_enabled`
+    /// denies the action on `None` either way.
     pub fn management_grant(&self) -> Option<bool> {
         let scope = self
             .inner
@@ -373,13 +380,32 @@ impl AuthState {
             expires_at,
             granted_scope,
         };
-        if let Some(ref rt) = parsed.refresh_token {
-            save_keyring(KEYRING_USER_REFRESH, rt)?;
-        }
+        // In-memory first, persistence second — the order is load-bearing.
+        //
+        // The server has already rotated the grant by the time we get here: the old
+        // refresh token is spent whether or not we manage to write the new one. So a
+        // keyring failure must not propagate out of `refresh()` and discard a token
+        // set that is perfectly valid. It used to: a locked keychain or a Secret
+        // Service outage returned `Err`, the fresh access *and* refresh tokens were
+        // dropped, and the next attempt replayed the consumed refresh token into the
+        // `invalid_grant` arm above — which deletes the credential. A transient OS
+        // fault became a forced interactive sign-in.
+        //
+        // Degrading to "no persistence this session" is the honest failure: the
+        // access token is in-memory only by design anyway, so the session continues
+        // and only survival across a restart is lost.
         self.inner
             .write()
             .map_err(|_| anyhow!("auth state poisoned"))?
             .tokens = Some(token_set.clone());
+        if let Some(ref rt) = parsed.refresh_token
+            && let Err(e) = save_keyring(KEYRING_USER_REFRESH, rt)
+        {
+            warn!(
+                error = %e,
+                "could not persist the refresh token; this session stays signed in but a restart will require signing in again"
+            );
+        }
         Ok(token_set)
     }
 
@@ -394,9 +420,16 @@ impl AuthState {
     /// otherwise-unexpired token (revoked/invalidated server-side): staleness is
     /// purely time-based, so without this the same dead token would be resent on
     /// every retry until the budget is exhausted.
-    pub fn invalidate_access_token(&self) {
+    /// `stale` identifies the token that actually got the 401. Only that token is
+    /// invalidated: a query fans out many concurrent requests, so a 401 issued
+    /// against the *old* token routinely lands after the single-flight refresh has
+    /// already stored a new one. Stamping unconditionally marked that fresh token
+    /// stale, and a burst of in-flight 401s turned into a chain of redundant
+    /// grants — the refresh lock serializes them but cannot suppress them.
+    pub fn invalidate_access_token(&self, stale: &str) {
         if let Ok(mut inner) = self.inner.write()
             && let Some(tokens) = inner.tokens.as_mut()
+            && tokens.access_token == stale
         {
             tokens.expires_at = Utc::now() - Duration::seconds(1);
         }
@@ -652,13 +685,49 @@ struct CallbackResult {
     error: Option<String>,
 }
 
-async fn wait_for_callback(listener: TcpListener) -> Result<CallbackResult> {
-    let (mut sock, _peer) = listener.accept().await.context("callback accept failed")?;
+/// How long one connection gets to send its request line before it is abandoned.
+/// A browser preconnect that opens a socket and sends nothing must not hold the
+/// flow hostage for the caller's full three-minute budget.
+const CALLBACK_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Waits for the browser's redirect back to the loopback listener.
+///
+/// This **loops over connections** rather than taking the first one. The port is
+/// an ordinary localhost port: browsers speculatively preconnect to it, favicon
+/// requests arrive on it, extensions and local scanners probe it. Handling exactly
+/// one accept meant any of those consumed the sign-in — either failing outright on
+/// an empty read, or pinning the flow until the outer 180 s timeout fired, which is
+/// the "a hung sign-in usually means the callback never arrived" symptom. A
+/// connection that carries no `code`, `state` or `error` is answered with 404 and
+/// the loop keeps waiting for the real redirect.
+async fn wait_for_callback(listener: TcpListener) -> Result<CallbackResult> {
+    loop {
+        let (sock, _peer) = listener.accept().await.context("callback accept failed")?;
+        match handle_callback_conn(sock).await {
+            Ok(Some(result)) => return Ok(result),
+            // Not the redirect — keep listening.
+            Ok(None) => continue,
+            // One bad connection (timeout, oversized body, truncated request) is not
+            // a reason to fail the sign-in; the browser may still be about to arrive.
+            Err(e) => {
+                debug!(error = %e, "ignoring a non-callback connection on the loopback port");
+                continue;
+            }
+        }
+    }
+}
+
+/// Reads one connection and, if it is the OAuth redirect, answers the browser and
+/// returns the parsed parameters. `Ok(None)` means "this was some other client" —
+/// it is answered with a 404 and the caller keeps waiting.
+async fn handle_callback_conn(mut sock: tokio::net::TcpStream) -> Result<Option<CallbackResult>> {
     let mut buf = [0u8; 4096];
     let mut total = Vec::new();
     loop {
-        let n = sock.read(&mut buf).await.context("callback read failed")?;
+        let n = timeout(CALLBACK_SOCKET_TIMEOUT, sock.read(&mut buf))
+            .await
+            .map_err(|_| anyhow!("callback connection idle for 10s"))?
+            .context("callback read failed")?;
         if n == 0 {
             break;
         }
@@ -699,6 +768,24 @@ async fn wait_for_callback(listener: TcpListener) -> Result<CallbackResult> {
         }
     }
 
+    // A redirect always carries `state`, and either `code` or `error` (RFC 6749
+    // §4.1.2 / §4.1.2.1). Anything else is a preconnect, a favicon fetch or a
+    // probe — send it away without ending the wait.
+    if state.is_none() && code.is_none() && error.is_none() {
+        let body = "<html><body><h1>Not found</h1></body></html>";
+        let _ = sock
+            .write_all(
+                format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await;
+        let _ = sock.shutdown().await;
+        return Ok(None);
+    }
+
     let (status, body) = if error.is_some() {
         (
             400,
@@ -721,11 +808,11 @@ async fn wait_for_callback(listener: TcpListener) -> Result<CallbackResult> {
     let _ = sock.write_all(response.as_bytes()).await;
     let _ = sock.shutdown().await;
 
-    Ok(CallbackResult {
+    Ok(Some(CallbackResult {
         code,
         state: state.unwrap_or_default(),
         error,
-    })
+    }))
 }
 
 // --- Keyring wrappers ---------------------------------------------------------
@@ -960,6 +1047,140 @@ mod tests {
         let _ = client.read_to_end(&mut resp).await;
 
         server.await.unwrap().expect("callback parsed")
+    }
+
+    /// The loopback port is an ordinary localhost port: browsers preconnect to it,
+    /// extensions and scanners probe it. Handling exactly one accept meant the first
+    /// such connection consumed the sign-in and the real redirect was never read —
+    /// the documented "hung sign-in" symptom.
+    #[tokio::test]
+    async fn a_stray_connection_does_not_consume_the_sign_in() {
+        use tokio::net::TcpStream;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(wait_for_callback(listener));
+
+        // A probe that is not the redirect — no code, no state, no error.
+        let mut probe = TcpStream::connect(addr).await.unwrap();
+        probe
+            .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut drained = Vec::new();
+        let _ = probe.read_to_end(&mut drained).await;
+        assert!(
+            String::from_utf8_lossy(&drained).contains("404"),
+            "a non-callback request should be turned away, not treated as the redirect"
+        );
+
+        // The browser then arrives, and must still be served.
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                b"GET /?code=abc123&state=xyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        let _ = client.read_to_end(&mut resp).await;
+
+        let r = server.await.unwrap().expect("callback parsed");
+        assert_eq!(r.code.as_deref(), Some("abc123"));
+        assert_eq!(r.state, "xyz");
+    }
+
+    /// A connection that opens and says nothing must not pin the sign-in: it is
+    /// abandoned on its own timeout and the wait continues.
+    #[tokio::test]
+    async fn a_silent_connection_does_not_pin_the_sign_in() {
+        use tokio::net::TcpStream;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(wait_for_callback(listener));
+
+        // Connect and immediately drop without sending anything — the read returns
+        // 0 bytes, which used to `bail!("empty callback request")` out of the whole
+        // sign-in.
+        drop(TcpStream::connect(addr).await.unwrap());
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                b"GET /?code=ok&state=s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        let _ = client.read_to_end(&mut resp).await;
+
+        assert_eq!(
+            server
+                .await
+                .unwrap()
+                .expect("callback parsed")
+                .code
+                .as_deref(),
+            Some("ok")
+        );
+    }
+
+    /// The server has already rotated the grant by the time `store_tokens` runs, so
+    /// the old refresh token is spent either way. A keyring outage must therefore
+    /// degrade to "no persistence", not throw away a valid session — the next
+    /// attempt would otherwise replay a consumed token into `invalid_grant`, which
+    /// clears the credential and forces an interactive sign-in.
+    #[test]
+    fn a_keyring_failure_keeps_the_session_it_just_obtained() {
+        let http = reqwest::Client::new();
+        let auth = AuthState::new(http, "https://x".into(), 0, None, true);
+
+        // KEYRING_SERVICE is a real keyring on a dev box and may or may not accept
+        // the write; either way the in-memory assignment must have happened.
+        auth.store_tokens(TokenResponse {
+            access_token: "fresh-access".into(),
+            refresh_token: Some("fresh-refresh".into()),
+            expires_in: 3600,
+            scope: Some("monitoring management offline_access".into()),
+        })
+        .expect("a keyring problem must not fail the store");
+
+        assert!(
+            auth.is_authenticated(),
+            "the session must survive a keyring write that did not land"
+        );
+        assert_eq!(auth.management_grant(), Some(true));
+    }
+
+    /// A query fans out many concurrent requests, so a 401 answering the *old*
+    /// token routinely lands after the single-flight refresh stored a new one.
+    /// Stamping unconditionally marked the fresh token stale and turned a burst of
+    /// lagging 401s into a chain of redundant grants.
+    #[test]
+    fn a_late_401_does_not_invalidate_a_token_that_replaced_it() {
+        let http = reqwest::Client::new();
+        let auth = AuthState::new(http, "https://x".into(), 0, None, true);
+
+        auth.store_tokens(TokenResponse {
+            access_token: "new-token".into(),
+            refresh_token: None,
+            expires_in: 3600,
+            scope: None,
+        })
+        .expect("store");
+        assert!(auth.is_authenticated());
+
+        // The 401 was provoked by the token this one replaced.
+        auth.invalidate_access_token("old-token");
+        assert!(
+            auth.is_authenticated(),
+            "a 401 for a superseded token must leave the current one alone"
+        );
+
+        // The 401 that really does name the live token still invalidates it.
+        auth.invalidate_access_token("new-token");
+        assert!(!auth.is_authenticated());
     }
 
     #[tokio::test]

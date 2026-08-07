@@ -15,7 +15,9 @@ mod state;
 mod tables;
 mod toaster;
 mod update;
-mod util;
+// `pub(crate)` so `demo.rs` can share the civil-date helpers rather than keeping
+// its own copy — the browser demo does its own date-window filtering.
+pub(crate) mod util;
 
 use actions::{ActionBar, ConfirmActionModal, JobsTable};
 use charts::{ComplianceByOsBars, ComplianceCharts};
@@ -28,10 +30,11 @@ use tables::Results;
 use toaster::Toaster;
 use update::UpdateSplash;
 use util::{
-    MdBlock, MdSpan, SummaryCounts, action_blocked_reason, aged_badge, aria_sort, date_to_epoch,
-    epoch_to_date, filter_chips, format_duration, group_thousands, is_fleet_tab, job_mode_label,
-    next_sort, non_empty, parse_changelog, parse_opt, patch_key, sev_class, sort_glyph,
-    sort_patch_rows, status_class, summary_line, tab_class,
+    FilterInputs, MdBlock, MdSpan, SummaryCounts, action_blocked_reason, action_disabled_reason,
+    aged_badge, aria_sort, epoch_to_date, filter_chips, filter_params, format_duration,
+    group_thousands, is_fleet_tab, job_mode_label, next_sort, non_empty, parse_changelog,
+    parse_clamped, parse_opt, parse_optional_id, patch_key, selection_summary, sev_class,
+    sort_glyph, sort_patch_rows, status_class, summary_line, tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;

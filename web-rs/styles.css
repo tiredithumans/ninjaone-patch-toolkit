@@ -13,6 +13,36 @@
   --accent-2: #5eead4;
   --danger: #f87171;
   --warn: #fbbf24;
+
+  /* Severity palette — ONE definition per band, referenced by all three rule
+     families below (`.sev-*` badges, `.chart .seg-*` bar fills, `.chart-swatch.seg-*`
+     legend squares). The three families used to carry their own copies of these
+     hex values, which is how the legend swatches for Security and Recommended went
+     missing entirely (their bar fills existed, but `.chart .seg-*` sets `fill` and
+     is scoped to `.chart`, so it does nothing for a legend `<span>`).
+
+     `-fg` is the badge's text tint; the badge background is derived from the solid
+     color at 16-18% so a new band needs two values, not six.
+
+     Adding a band means: a `--sev-x` / `--sev-x-fg` pair here, plus one line in
+     each of the three families. `severity_css_defines_every_band` (util.rs) reads
+     this file and fails if any of the four is missing. */
+  --sev-critical: #f87171;
+  --sev-critical-fg: #fca5a5;
+  --sev-important: #fb923c;
+  --sev-important-fg: #fdba74;
+  --sev-security: #e879f9;
+  --sev-security-fg: #f0abfc;
+  --sev-moderate: #fbbf24;
+  --sev-moderate-fg: #fcd34d;
+  --sev-recommended: #22d3ee;
+  --sev-recommended-fg: #67e8f9;
+  --sev-low: #60a5fa;
+  --sev-low-fg: #93c5fd;
+  --sev-optional: #94a3b8;
+  --sev-optional-fg: #cbd5e1;
+  --sev-unknown: #6b7280;
+  --sev-unknown-fg: #9ca3af;
 }
 
 * {
@@ -483,46 +513,46 @@ tbody tr:hover {
 }
 
 .sev-critical {
-  background: rgba(248, 113, 113, 0.18);
-  color: #fca5a5;
+  background: color-mix(in srgb, var(--sev-critical) 18%, transparent);
+  color: var(--sev-critical-fg);
 }
 
 .sev-important {
-  background: rgba(251, 146, 60, 0.18);
-  color: #fdba74;
+  background: color-mix(in srgb, var(--sev-important) 18%, transparent);
+  color: var(--sev-important-fg);
 }
 
 .sev-security {
-  background: rgba(232, 121, 249, 0.16);
-  color: #f0abfc;
+  background: color-mix(in srgb, var(--sev-security) 16%, transparent);
+  color: var(--sev-security-fg);
 }
 
 .sev-moderate {
-  background: rgba(251, 191, 36, 0.16);
-  color: #fcd34d;
+  background: color-mix(in srgb, var(--sev-moderate) 16%, transparent);
+  color: var(--sev-moderate-fg);
 }
 
 .sev-recommended {
-  background: rgba(34, 211, 238, 0.16);
-  color: #67e8f9;
+  background: color-mix(in srgb, var(--sev-recommended) 16%, transparent);
+  color: var(--sev-recommended-fg);
 }
 
 .sev-low {
-  background: rgba(96, 165, 250, 0.16);
-  color: #93c5fd;
+  background: color-mix(in srgb, var(--sev-low) 16%, transparent);
+  color: var(--sev-low-fg);
 }
 
 /* Optional is a real NinjaOne severity and Unknown is one it sent that we couldn't
    map — both used to fall through to `.sev-none`, rendering "low priority" and
    "unidentified" identically in the Patches table. */
 .sev-optional {
-  background: rgba(148, 163, 184, 0.16);
-  color: #cbd5e1;
+  background: color-mix(in srgb, var(--sev-optional) 16%, transparent);
+  color: var(--sev-optional-fg);
 }
 
 .sev-unknown {
-  background: rgba(107, 114, 128, 0.2);
-  color: #9ca3af;
+  background: color-mix(in srgb, var(--sev-unknown) 20%, transparent);
+  color: var(--sev-unknown-fg);
   font-style: italic;
 }
 
@@ -939,37 +969,38 @@ tbody tr:hover {
   fill: var(--danger);
 }
 
-/* Severity segment fills (stacked bar) — solid variants of the .sev-* badges. */
+/* Severity segment fills (stacked bar) — solid variants of the .sev-* badges,
+   from the same custom properties so the two can no longer disagree. */
 .chart .seg-critical {
-  fill: #f87171;
+  fill: var(--sev-critical);
 }
 
 .chart .seg-important {
-  fill: #fb923c;
+  fill: var(--sev-important);
 }
 
 .chart .seg-security {
-  fill: #e879f9;
+  fill: var(--sev-security);
 }
 
 .chart .seg-moderate {
-  fill: #fbbf24;
+  fill: var(--sev-moderate);
 }
 
 .chart .seg-recommended {
-  fill: #22d3ee;
+  fill: var(--sev-recommended);
 }
 
 .chart .seg-low {
-  fill: #60a5fa;
+  fill: var(--sev-low);
 }
 
 .chart .seg-optional {
-  fill: var(--muted);
+  fill: var(--sev-optional);
 }
 
 .chart .seg-unknown {
-  fill: #6b7280;
+  fill: var(--sev-unknown);
 }
 
 .chart-legend {
@@ -1030,41 +1061,40 @@ tbody tr:hover {
   display: inline-block;
 }
 
+/* Legend squares. A separate family from `.chart .seg-*` because those set `fill`
+   and are scoped to `.chart`, which does nothing to a legend `<span>` — Security and
+   Recommended once had bar fills but no swatch, painting a transparent hole next to
+   their counts. On third-party patches those are the *common* bands. */
 .chart-swatch.seg-critical {
-  background: #f87171;
+  background: var(--sev-critical);
 }
 
 .chart-swatch.seg-important {
-  background: #fb923c;
+  background: var(--sev-important);
 }
 
-/* Security and Recommended need swatches like every other band. The bar fills for
-   both exist as `.chart .seg-*` rules, but those are scoped to `.chart` and set
-   `fill`, which does nothing to a legend `<span>` — so these two legend rows painted
-   a transparent 12px hole next to their counts, leaving the magenta and cyan
-   segments with no key at all. On third-party patches these are the *common* bands. */
 .chart-swatch.seg-security {
-  background: #e879f9;
+  background: var(--sev-security);
 }
 
 .chart-swatch.seg-moderate {
-  background: #fbbf24;
+  background: var(--sev-moderate);
 }
 
 .chart-swatch.seg-recommended {
-  background: #22d3ee;
+  background: var(--sev-recommended);
 }
 
 .chart-swatch.seg-low {
-  background: #60a5fa;
+  background: var(--sev-low);
 }
 
 .chart-swatch.seg-optional {
-  background: var(--muted);
+  background: var(--sev-optional);
 }
 
 .chart-swatch.seg-unknown {
-  background: #6b7280;
+  background: var(--sev-unknown);
 }
 
 /* --- Mobile / narrow viewports --- */
