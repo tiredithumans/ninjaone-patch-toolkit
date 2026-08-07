@@ -482,6 +482,35 @@ pub struct DeviceScriptingOptions {
 mod tests {
     use super::*;
 
+    /// A device with every optional field absent — the shape the feed actually
+    /// sends for a sparsely-populated record.
+    fn device() -> Device {
+        Device {
+            id: 1,
+            system_name: None,
+            display_name: None,
+            organization_id: None,
+            location_id: None,
+            node_role_id: None,
+            node_class: None,
+            offline: None,
+            os: None,
+        }
+    }
+
+    fn script() -> AutomationScript {
+        AutomationScript {
+            id: 1,
+            name: None,
+            description: None,
+            active: None,
+            language: None,
+            operating_systems: Vec::new(),
+            script_parameters: Vec::new(),
+            script_variables: Vec::new(),
+        }
+    }
+
     #[test]
     fn patch_type_includes() {
         assert!(PatchType::All.includes_os() && PatchType::All.includes_software());
@@ -508,6 +537,130 @@ mod tests {
         assert_eq!(Severity::from_raw("Critical"), Severity::Critical);
         assert_eq!(Severity::from_raw("important"), Severity::Important);
         assert_eq!(Severity::from_raw("garbage"), Severity::Unknown);
+    }
+
+    /// `HIGH`, `MEDIUM` and `NONE` are aliases the doc comment above `from_raw`
+    /// never mentions, so nothing recorded that they were deliberate. They matter:
+    /// an alias that stops mapping falls to `Unknown` (rank 0), which both sinks
+    /// those patches below every other row and makes them unreachable from the
+    /// severity facet — the failure mode reads as "those patches don't exist".
+    #[test]
+    fn severity_from_raw_maps_every_documented_alias() {
+        for (raw, expected) in [
+            ("HIGH", Severity::Important),
+            ("high", Severity::Important),
+            ("MEDIUM", Severity::Moderate),
+            ("medium", Severity::Moderate),
+            ("NONE", Severity::Optional),
+            ("none", Severity::Optional),
+        ] {
+            assert_eq!(Severity::from_raw(raw), expected, "alias {raw}");
+        }
+    }
+
+    /// Every value the frontend can offer in its severity facet must map to a
+    /// distinct variant, or ticking it filters to nothing.
+    #[test]
+    fn every_facet_value_maps_to_its_own_severity() {
+        for raw in [
+            "CRITICAL",
+            "IMPORTANT",
+            "SECURITY",
+            "MODERATE",
+            "RECOMMENDED",
+            "LOW",
+            "OPTIONAL",
+        ] {
+            let sev = Severity::from_raw(raw);
+            assert_ne!(
+                sev,
+                Severity::Unknown,
+                "{raw} is offered as a facet value but maps to Unknown"
+            );
+            assert_eq!(
+                sev.label().to_ascii_uppercase(),
+                raw,
+                "{raw} must round-trip through its label"
+            );
+        }
+    }
+
+    #[test]
+    fn device_labels_prefer_display_name_and_degrade_to_a_placeholder() {
+        let with_both = Device {
+            display_name: Some("web-01.corp".into()),
+            system_name: Some("WEB01".into()),
+            ..device()
+        };
+        assert_eq!(with_both.label(), "web-01.corp");
+
+        let system_only = Device {
+            display_name: None,
+            system_name: Some("WEB01".into()),
+            ..device()
+        };
+        assert_eq!(system_only.label(), "WEB01");
+
+        // Never blank: a nameless row is still actionable by id, and an empty cell
+        // in the export reads as a broken join.
+        assert_eq!(device().label(), "(unnamed)");
+    }
+
+    /// Both default to "no" on absent data. A missing `os.needsReboot` must not
+    /// sweep a device into the reboot rollup, and a missing `offline` must not
+    /// mark a reachable device as queued-only.
+    #[test]
+    fn device_flags_default_to_false_when_the_feed_omits_them() {
+        assert!(!device().needs_reboot());
+        assert!(!device().is_offline());
+        assert_eq!(device().os_name(), None);
+        assert_eq!(device().os_name_str(), None);
+
+        let d = Device {
+            offline: Some(true),
+            os: Some(OsInfo {
+                name: Some("Windows Server 2022".into()),
+                needs_reboot: Some(true),
+            }),
+            ..device()
+        };
+        assert!(d.needs_reboot());
+        assert!(d.is_offline());
+        assert_eq!(d.os_name_str(), Some("Windows Server 2022"));
+    }
+
+    /// Per-KB targeting is possible *only* through a script declaring a
+    /// `kbAllowList`; offering it for a script that doesn't would misrepresent what
+    /// the run actually installs. The match is case- and whitespace-insensitive
+    /// because the variable name is typed by hand in the NinjaOne library.
+    #[test]
+    fn kb_allow_list_is_detected_from_variables_or_parameters() {
+        let via_variable = AutomationScript {
+            script_variables: vec![ScriptVariable {
+                name: Some("  KBAllowList ".into()),
+            }],
+            ..script()
+        };
+        assert!(via_variable.accepts_kb_allow_list());
+
+        let via_parameter = AutomationScript {
+            script_parameters: vec!["-kbAllowList $kbs".into()],
+            ..script()
+        };
+        assert!(via_parameter.accepts_kb_allow_list());
+
+        assert!(
+            !script().accepts_kb_allow_list(),
+            "a script declaring nothing must not be offered per-KB targeting"
+        );
+        let unrelated = AutomationScript {
+            script_parameters: vec!["-Force".into()],
+            script_variables: vec![ScriptVariable {
+                name: Some("RebootAfter".into()),
+            }],
+            ..script()
+        };
+        assert!(!unrelated.accepts_kb_allow_list());
     }
 
     #[test]
