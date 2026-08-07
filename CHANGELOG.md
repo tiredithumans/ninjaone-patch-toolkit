@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-07
+
 ### Added
 
 - **"Install only the selected patches" is now a real action.** The action bar splits the apply
