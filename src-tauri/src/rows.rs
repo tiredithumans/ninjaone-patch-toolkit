@@ -458,38 +458,95 @@ pub struct FailureGroup {
     pub latest_failure_ts: Option<i64>,
 }
 
-/// One rendered cell of a failure-table row. `Count` is written as a number by the
+/// One rendered cell of a table row. `Count`/`Number` are written as numbers by the
 /// Excel exporter and right-aligned by the HTML report; `Text` is written as-is
 /// (and HTML-escaped by the report).
-pub enum FailureCell {
+pub enum TableCell {
     Text(String),
     Count(usize),
+    Number(f64),
 }
 
-/// One failure-table column: its header and how to read that cell off a group.
-pub type FailureColumn = (&'static str, fn(&FailureGroup) -> FailureCell);
+/// One table column: its header and how to read that cell off a row.
+///
+/// Every table rendered from a cached [`QueryResult`] is defined as an array of
+/// these, so a column's header and its value are one declaration rather than two
+/// lists that agree by convention. That convention had already failed twice — the
+/// HTML report dropped `Patch Type` from the failures table the workbook wrote,
+/// and the reboot table's headers drifted to "Role" against the workbook's "Device
+/// Role" — which is why the definitions now live here, next to the data, instead
+/// of once per renderer.
+pub type TableColumn<T> = (&'static str, fn(&T) -> TableCell);
 
 impl FailureGroup {
-    /// The failure-table columns as (header, accessor), in display order.
-    ///
-    /// Shared by the Excel exporter and the HTML report so the two cannot disagree
-    /// about what a failure row contains — they previously did: the workbook wrote
-    /// seven columns while the report rendered six, having silently dropped
-    /// `Patch Type`, so the same cached result exported two different tables.
-    pub const COLUMNS: [FailureColumn; 7] = [
-        ("Severity", |f| FailureCell::Text(f.severity.clone())),
-        ("Patch Type", |f| FailureCell::Text(f.patch_type.clone())),
-        ("KB", |f| {
-            FailureCell::Text(f.kb.clone().unwrap_or_default())
-        }),
-        ("Patch", |f| FailureCell::Text(f.name.clone())),
-        ("Affected Devices", |f| {
-            FailureCell::Count(f.affected_devices)
-        }),
+    /// The failure-table columns as (header, accessor), in display order. Shared by
+    /// the Excel exporter and the HTML report.
+    pub const COLUMNS: [TableColumn<FailureGroup>; 7] = [
+        ("Severity", |f| TableCell::Text(f.severity.clone())),
+        ("Patch Type", |f| TableCell::Text(f.patch_type.clone())),
+        ("KB", |f| TableCell::Text(f.kb.clone().unwrap_or_default())),
+        ("Patch", |f| TableCell::Text(f.name.clone())),
+        ("Affected Devices", |f| TableCell::Count(f.affected_devices)),
         ("Latest Failure", |f| {
-            FailureCell::Text(f.latest_failure.clone().unwrap_or_default())
+            TableCell::Text(f.latest_failure.clone().unwrap_or_default())
         }),
-        ("Devices", |f| FailureCell::Text(f.device_names.join(", "))),
+        ("Devices", |f| TableCell::Text(f.device_names.join(", "))),
+    ];
+}
+
+impl DeviceSummary {
+    /// The needs-reboot table columns. Shared by the Excel exporter and the HTML
+    /// report, which previously hardcoded its own `<th>` row and had already
+    /// diverged in wording ("Role" vs "Device Role", "Pending patches" vs "Pending
+    /// Patches") from the workbook it is meant to mirror.
+    pub const COLUMNS: [TableColumn<DeviceSummary>; 6] = [
+        ("Organization", |d| TableCell::Text(d.organization.clone())),
+        ("Location", |d| {
+            TableCell::Text(d.location.clone().unwrap_or_default())
+        }),
+        ("Device Role", |d| {
+            TableCell::Text(d.device_role.clone().unwrap_or_default())
+        }),
+        ("Device", |d| TableCell::Text(d.device_name.clone())),
+        ("OS", |d| {
+            TableCell::Text(d.os_name.clone().unwrap_or_default())
+        }),
+        ("Pending Patches", |d| TableCell::Count(d.pending_count)),
+    ];
+}
+
+/// Rounds a percentage to one decimal for display, so the workbook and the report
+/// cannot disagree about precision.
+fn pct_cell(pct: f64) -> TableCell {
+    TableCell::Number((pct * 10.0).round() / 10.0)
+}
+
+impl ComplianceBucket {
+    /// The per-organization compliance columns.
+    pub const COLUMNS: [TableColumn<ComplianceBucket>; 6] = [
+        ("Organization", |b| TableCell::Text(b.organization.clone())),
+        ("Devices", |b| TableCell::Count(b.devices_total)),
+        ("Compliant", |b| TableCell::Count(b.devices_compliant)),
+        ("Compliance %", |b| pct_cell(b.compliance_pct)),
+        ("Pending Critical/Important", |b| {
+            TableCell::Count(b.pending_critical)
+        }),
+        ("Aged (past SLA)", |b| TableCell::Count(b.aged_critical)),
+    ];
+}
+
+impl OsCompliance {
+    /// The per-OS compliance columns. Same shape as [`ComplianceBucket::COLUMNS`]
+    /// apart from the leading identity column.
+    pub const COLUMNS: [TableColumn<OsCompliance>; 6] = [
+        ("OS", |b| TableCell::Text(b.os.clone())),
+        ("Devices", |b| TableCell::Count(b.devices_total)),
+        ("Compliant", |b| TableCell::Count(b.devices_compliant)),
+        ("Compliance %", |b| pct_cell(b.compliance_pct)),
+        ("Pending Critical/Important", |b| {
+            TableCell::Count(b.pending_critical)
+        }),
+        ("Aged (past SLA)", |b| TableCell::Count(b.aged_critical)),
     ];
 }
 

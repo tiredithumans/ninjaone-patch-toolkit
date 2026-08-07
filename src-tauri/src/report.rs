@@ -7,8 +7,8 @@
 use std::fmt::Write;
 
 use crate::rows::{
-    AgeBucket, ComplianceBucket, DeviceSummary, FailureCell, FailureGroup, OrgSeverity,
-    OsCompliance, QueryResult, SeverityCounts,
+    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, OrgSeverity, OsCompliance,
+    QueryResult, SeverityCounts, TableCell, TableColumn,
 };
 
 /// At most this many table rows are rendered per section; a fleet-scale failure or
@@ -296,6 +296,40 @@ fn write_age_chart(buf: &mut String, buckets: &[AgeBucket]) {
     buf.push_str("</svg>");
 }
 
+/// Renders one table from a shared column definition: headers and cells both come
+/// from the same list the Excel exporter writes, so the two renderings of one
+/// cached result cannot disagree about the columns. They previously did — this
+/// report omitted `Patch Type` from the failures table entirely, and headed the
+/// reboot table "Role"/"Pending patches" against the workbook's "Device
+/// Role"/"Pending Patches".
+fn write_table<T>(buf: &mut String, columns: &[TableColumn<T>], rows: &[&T]) {
+    buf.push_str("<table><thead><tr>");
+    for (title, _) in columns {
+        let _ = write!(buf, "<th>{}</th>", escape_html(title));
+    }
+    buf.push_str("</tr></thead><tbody>");
+    for item in rows.iter().take(MAX_TABLE_ROWS) {
+        buf.push_str("<tr>");
+        for (_, value) in columns {
+            match value(item) {
+                // An em dash reads better than a blank cell in a printed report.
+                TableCell::Text(s) if s.is_empty() => buf.push_str("<td>\u{2014}</td>"),
+                TableCell::Text(s) => {
+                    let _ = write!(buf, "<td>{}</td>", escape_html(&s));
+                }
+                TableCell::Count(n) => {
+                    let _ = write!(buf, "<td class=\"num\">{n}</td>");
+                }
+                TableCell::Number(n) => {
+                    let _ = write!(buf, "<td class=\"num\">{n}</td>");
+                }
+            }
+        }
+        buf.push_str("</tr>");
+    }
+    buf.push_str("</tbody></table>");
+}
+
 fn write_failures_table(buf: &mut String, failures: &[FailureGroup]) {
     if failures.is_empty() {
         buf.push_str(
@@ -304,31 +338,8 @@ fn write_failures_table(buf: &mut String, failures: &[FailureGroup]) {
         );
         return;
     }
-    // Headers and cells both come from `FailureGroup::COLUMNS`, the same list the
-    // Excel exporter writes, so the two renderings of one cached result cannot
-    // disagree about the columns — this table used to omit `Patch Type` entirely.
-    buf.push_str("<table><thead><tr>");
-    for (title, _) in FailureGroup::COLUMNS {
-        let _ = write!(buf, "<th>{}</th>", escape_html(title));
-    }
-    buf.push_str("</tr></thead><tbody>");
-    for f in failures.iter().take(MAX_TABLE_ROWS) {
-        buf.push_str("<tr>");
-        for (_, value) in FailureGroup::COLUMNS {
-            match value(f) {
-                // An em dash reads better than a blank cell in a printed report.
-                FailureCell::Text(s) if s.is_empty() => buf.push_str("<td>\u{2014}</td>"),
-                FailureCell::Text(s) => {
-                    let _ = write!(buf, "<td>{}</td>", escape_html(&s));
-                }
-                FailureCell::Count(n) => {
-                    let _ = write!(buf, "<td class=\"num\">{n}</td>");
-                }
-            }
-        }
-        buf.push_str("</tr>");
-    }
-    buf.push_str("</tbody></table>");
+    let rows: Vec<&FailureGroup> = failures.iter().collect();
+    write_table(buf, &FailureGroup::COLUMNS, &rows);
     if failures.len() > MAX_TABLE_ROWS {
         let _ = write!(
             buf,
@@ -344,24 +355,7 @@ fn write_reboot_table(buf: &mut String, devices: &[DeviceSummary]) {
         buf.push_str("<p class=\"empty\">No devices are waiting on a reboot.</p>");
         return;
     }
-    buf.push_str(
-        "<table><thead><tr><th>Organization</th><th>Location</th><th>Role</th>\
-         <th>Device</th><th>OS</th><th>Pending patches</th></tr></thead><tbody>",
-    );
-    for d in reboot.iter().take(MAX_TABLE_ROWS) {
-        let org = escape_html(&d.organization);
-        let loc = escape_html(d.location.as_deref().unwrap_or("\u{2014}"));
-        let role = escape_html(d.device_role.as_deref().unwrap_or("\u{2014}"));
-        let dev = escape_html(&d.device_name);
-        let os = escape_html(d.os_name.as_deref().unwrap_or("\u{2014}"));
-        let _ = write!(
-            buf,
-            "<tr><td>{org}</td><td>{loc}</td><td>{role}</td><td>{dev}</td>\
-             <td>{os}</td><td class=\"num\">{n}</td></tr>",
-            n = d.pending_count
-        );
-    }
-    buf.push_str("</tbody></table>");
+    write_table(buf, &DeviceSummary::COLUMNS, &reboot);
     if reboot.len() > MAX_TABLE_ROWS {
         let _ = write!(
             buf,
@@ -416,6 +410,25 @@ mod tests {
         assert!(
             html.contains("<td>OS</td>"),
             "Patch Type's value must be rendered, not just its header"
+        );
+    }
+
+    /// The reboot table had its own hardcoded `<th>` row and had already drifted
+    /// from the workbook it mirrors — "Role" against "Device Role", "Pending
+    /// patches" against "Pending Patches". Both now read `DeviceSummary::COLUMNS`,
+    /// so this fails if either renderer starts inventing its own headings again.
+    #[test]
+    fn the_reboot_table_renders_every_shared_column() {
+        let html = render_report(&sample_result());
+        for (title, _) in DeviceSummary::COLUMNS {
+            assert!(
+                html.contains(&format!("<th>{title}</th>")),
+                "reboot table is missing the {title:?} column"
+            );
+        }
+        assert!(
+            !html.contains("<th>Role</th>") && !html.contains("<th>Pending patches</th>"),
+            "the old divergent headings must be gone, not merely joined by the shared ones"
         );
     }
 

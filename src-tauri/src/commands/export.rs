@@ -29,6 +29,39 @@ fn cached_result(state: &AppState) -> Result<QueryResult, UiError> {
         .ok_or_else(|| UiError::new("Run a query before exporting."))
 }
 
+/// The default file name for an export, stamped so successive exports don't
+/// silently overwrite each other.
+fn default_name(stem: &str, ext: &str) -> String {
+    format!("{stem}-{}.{ext}", Utc::now().format("%Y%m%dT%H%M%S"))
+}
+
+/// Runs the save dialog and returns the chosen path, or `None` if the operator
+/// cancelled.
+///
+/// Both exports open the same dialog with the same filter/name/extract sequence;
+/// keeping it in one place means the two cannot drift in how they name files or
+/// handle a cancel. `blocking_save_file` needs the main thread free to pump its
+/// event loop, which is why both callers are `async`.
+fn save_dialog(
+    app: &tauri::AppHandle,
+    filter_label: &str,
+    ext: &str,
+    stem: &str,
+) -> Result<Option<std::path::PathBuf>, UiError> {
+    let Some(file) = app
+        .dialog()
+        .file()
+        .add_filter(filter_label, &[ext])
+        .set_file_name(default_name(stem, ext))
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    file.into_path()
+        .map(Some)
+        .map_err(|e| UiError::new(format!("invalid save path: {e}")))
+}
+
 /// Opens a save dialog and writes the most recent query result to an `.xlsx`
 /// workbook (Patches + Compliance + Needs Reboot sheets). Returns the saved path,
 /// or `None` if the operator cancelled the dialog.
@@ -45,24 +78,9 @@ pub async fn export_patches_xlsx(
     // committed (a cancelled dialog copies nothing).
     require_cached_result(&state)?;
 
-    let default_name = format!(
-        "ninjaone-patches-{}.xlsx",
-        Utc::now().format("%Y%m%dT%H%M%S")
-    );
-
-    let Some(file) = app
-        .dialog()
-        .file()
-        .add_filter("Excel Workbook", &["xlsx"])
-        .set_file_name(&default_name)
-        .blocking_save_file()
-    else {
+    let Some(path) = save_dialog(&app, "Excel Workbook", "xlsx", "ninjaone-patches")? else {
         return Ok(None);
     };
-
-    let path = file
-        .into_path()
-        .map_err(|e| UiError::new(format!("invalid save path: {e}")))?;
     let path_str = path.to_string_lossy().to_string();
 
     // The clone is owned, so the reboot subset is a move-filter, not a re-clone.
@@ -104,28 +122,35 @@ pub async fn export_report_html(
     // Same probe-then-clone-after-dialog flow as the Excel export above.
     require_cached_result(&state)?;
 
-    let default_name = format!(
-        "ninjaone-report-{}.html",
-        Utc::now().format("%Y%m%dT%H%M%S")
-    );
-
-    let Some(file) = app
-        .dialog()
-        .file()
-        .add_filter("HTML Report", &["html"])
-        .set_file_name(&default_name)
-        .blocking_save_file()
-    else {
+    let Some(path) = save_dialog(&app, "HTML Report", "html", "ninjaone-report")? else {
         return Ok(None);
     };
-
-    let path = file
-        .into_path()
-        .map_err(|e| UiError::new(format!("invalid save path: {e}")))?;
     let path_str = path.to_string_lossy().to_string();
 
     let result = cached_result(&state)?;
     std::fs::write(&path, crate::report::render_report(&result))
         .map_err(|e| UiError::new(format!("write report: {e}")))?;
     Ok(Some(path_str))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both exports stamp their default name, so a second export in the same
+    /// session proposes a new file instead of silently overwriting the first.
+    #[test]
+    fn default_names_carry_the_stem_extension_and_a_timestamp() {
+        let xlsx = default_name("ninjaone-patches", "xlsx");
+        assert!(xlsx.starts_with("ninjaone-patches-"), "{xlsx}");
+        assert!(xlsx.ends_with(".xlsx"), "{xlsx}");
+        // stem + '-' + %Y%m%dT%H%M%S (15 chars) + ".xlsx"
+        assert_eq!(xlsx.len(), "ninjaone-patches-".len() + 15 + ".xlsx".len());
+
+        let html = default_name("ninjaone-report", "html");
+        assert!(
+            html.starts_with("ninjaone-report-") && html.ends_with(".html"),
+            "{html}"
+        );
+    }
 }
