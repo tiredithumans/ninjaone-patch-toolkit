@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-08-07
+
 ### Fixed
 
 - **Switching instance mid-query no longer shows the previous tenant's patch data.** A query that
