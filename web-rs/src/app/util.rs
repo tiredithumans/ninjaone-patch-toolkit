@@ -324,6 +324,12 @@ pub(crate) fn date_to_epoch(date: &str) -> Option<i64> {
     if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return None;
     }
+    // `1..=31` alone accepts dates that do not exist — 2026-02-31, 2026-04-31 — and
+    // `days_from_civil` is happy to convert them, silently landing on a day in the
+    // *next* month. That reaches the query as a date bound the operator never chose.
+    if d > days_in_month(y, m) {
+        return None;
+    }
     Some(days_from_civil(y, m, d) * 86_400)
 }
 
@@ -337,6 +343,18 @@ pub(crate) fn epoch_to_date(epoch: Option<i64>) -> String {
     let days = e.div_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Length of `m` in `y`, proleptic Gregorian. Only used to reject impossible civil
+/// dates before they reach [`days_from_civil`], which normalises rather than fails.
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        2 => 28,
+        _ => 0,
+    }
 }
 
 /// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
@@ -1441,6 +1459,37 @@ mod tests {
         let a = sel_row(9, "ghost", Some("KB1"), "Update", "OS");
         apply_row_selection(&mut sel, &a, false);
         assert!(sel.is_empty());
+    }
+
+    /// `days_from_civil` normalises rather than fails, so 2026-02-31 silently became
+    /// a day in March and reached the query as a bound the operator never chose.
+    #[test]
+    fn impossible_civil_dates_are_rejected() {
+        assert_eq!(date_to_epoch("2026-02-31"), None, "February has no 31st");
+        assert_eq!(date_to_epoch("2026-04-31"), None, "April has no 31st");
+        assert_eq!(date_to_epoch("2026-02-29"), None, "2026 is not a leap year");
+        assert_eq!(date_to_epoch("2026-13-01"), None, "no thirteenth month");
+        assert_eq!(date_to_epoch("2026-00-10"), None, "no zeroth month");
+
+        // Real dates still parse, including the leap-year cases the rule must not
+        // over-reject.
+        assert!(date_to_epoch("2026-02-28").is_some());
+        assert!(date_to_epoch("2024-02-29").is_some(), "2024 is a leap year");
+        assert!(
+            date_to_epoch("2000-02-29").is_some(),
+            "400-divisible is leap"
+        );
+        assert_eq!(date_to_epoch("1900-02-29"), None, "100-divisible is not");
+        assert!(date_to_epoch("2026-12-31").is_some());
+    }
+
+    /// A date that parses must round-trip, or a bound the operator set comes back as
+    /// a different day in the control.
+    #[test]
+    fn valid_dates_round_trip_through_the_epoch() {
+        for d in ["2026-01-01", "2024-02-29", "2026-06-15", "2026-12-31"] {
+            assert_eq!(epoch_to_date(date_to_epoch(d)), d, "round trip for {d}");
+        }
     }
 
     #[test]
