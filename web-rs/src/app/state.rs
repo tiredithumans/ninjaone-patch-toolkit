@@ -705,26 +705,34 @@ impl AppState {
     }
 
     pub(super) fn run_query_inner(self, silent: bool, force: bool) {
-        if self.run.busy.get_untracked() || self.run.refreshing.get_untracked() {
-            return;
-        }
-        // In demo mode there is no backend to query — filter the sample locally.
-        if self.session.demo.get_untracked() {
-            self.run_demo_query(silent);
-            return;
-        }
-        if !self.is_authed() {
-            if !silent {
-                self.notify(Toast::err("Sign in first"));
-            }
-            return;
-        }
         let statuses = self.filters.statuses.get_untracked();
-        if statuses.is_empty() {
-            if !silent {
-                self.notify(Toast::err("Select at least one status"));
+        // The guard chain lives in `util::run_decision` so its ordering is testable;
+        // this method only carries out the decision.
+        match util::run_decision(
+            self.run.busy.get_untracked(),
+            self.run.refreshing.get_untracked(),
+            self.session.demo.get_untracked(),
+            self.is_authed(),
+            statuses.is_empty(),
+        ) {
+            util::RunDecision::AlreadyRunning => return,
+            util::RunDecision::Demo => {
+                self.run_demo_query(silent);
+                return;
             }
-            return;
+            util::RunDecision::NotSignedIn => {
+                if !silent {
+                    self.notify(Toast::err("Sign in first"));
+                }
+                return;
+            }
+            util::RunDecision::NoStatusSelected => {
+                if !silent {
+                    self.notify(Toast::err("Select at least one status"));
+                }
+                return;
+            }
+            util::RunDecision::Run => {}
         }
         let args = PatchQueryArgs {
             filter: self.current_filter(),
@@ -737,7 +745,7 @@ impl AppState {
         let snapshot = self.snapshot_filters();
         // Stamp this run so progress events from a superseded run are ignored, and
         // clear the previous run's counts.
-        let seq = self.run.query_seq.get_untracked().wrapping_add(1);
+        let seq = util::next_query_seq(self.run.query_seq.get_untracked());
         self.run.query_seq.set(seq);
         self.run.progress.set(Progress::default());
         let flag = if silent {
@@ -760,7 +768,7 @@ impl AppState {
             // Not an early return: this run still owns the busy/refreshing flag it
             // set, and a manual Run superseded by a refresh tick would otherwise
             // leave `busy` stuck on forever.
-            let superseded = self.run.query_seq.get_untracked() != seq;
+            let superseded = util::is_superseded(self.run.query_seq.get_untracked(), seq);
             if superseded {
                 flag.set(false);
                 return;
@@ -1236,32 +1244,9 @@ impl AppState {
     /// is still all-or-nothing (there is no per-KB apply endpoint); the per-row
     /// detail is what lets a `kbAllowList` script receive the actual subset.
     pub(super) fn toggle_row_selection(self, row: &PatchRow, checked: bool) {
-        let key = patch_key(row);
-        self.actions.selected.update(|sel| {
-            if checked {
-                sel.entry(row.device_id)
-                    .or_insert_with(|| DeviceSelection {
-                        name: row.device_name.clone(),
-                        organization: row.organization.clone(),
-                        offline: row.offline,
-                        patches: BTreeMap::new(),
-                    })
-                    .patches
-                    .insert(
-                        key,
-                        SelectedPatch {
-                            kb: row.kb.clone().filter(|k| !k.is_empty()),
-                            name: row.name.clone(),
-                            is_os: row.patch_type.eq_ignore_ascii_case("OS"),
-                        },
-                    );
-            } else if let Some(entry) = sel.get_mut(&row.device_id) {
-                entry.patches.remove(&key);
-                if entry.patches.is_empty() {
-                    sel.remove(&row.device_id);
-                }
-            }
-        });
+        self.actions
+            .selected
+            .update(|sel| util::apply_row_selection(sel, row, checked));
     }
 
     /// Whether every row on the current page is selected. Used for the header

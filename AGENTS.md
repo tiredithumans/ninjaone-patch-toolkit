@@ -180,6 +180,12 @@ which is not a component file: `filter_params` (the `FilterParams` mapping behin
 lifted out of `FilterState::current_filter`), `parse_clamped` / `parse_optional_id` (the settings
 number fields — `<input type="number">` treats `min`/`max` as advisory, so the clamp is the real
 guard), and `action_disabled_reason` / `selection_summary` all live in `util.rs` for this reason.
+The same lift now covers the pieces of `state.rs` that decide *what happens*: `run_decision` (the
+Run guard chain, whose **order** is load-bearing — demo before auth, busy before both),
+`next_query_seq`/`is_superseded` (the overlapping-run stamp), and `apply_row_selection` (the
+selection model — a device enters with its first ticked row and leaves with its last, and ticking
+one row must not tick the device's others). `state.rs` still has no test module; the rule is that
+anything in it worth asserting moves to `util.rs` rather than staying unreachable.
 `date_to_epoch` / `epoch_to_date` are plain civil-date arithmetic rather than `js_sys::Date`, so
 they host-test too — and `demo.rs` shares them instead of keeping the second copy it used to. A `#[component]` can only be
 compile-checked, so arithmetic written inline inside one is unreachable by any test. The pager

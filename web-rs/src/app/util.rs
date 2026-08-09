@@ -7,11 +7,107 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::state::DeviceSelection;
+use super::state::{DeviceSelection, SelectedPatch};
 use super::{AppliedFilters, Tab};
 use crate::types::{
     ActionKind, AuthStatus, FilterParams, JobReport, PatchRow, RebootMode, RowSort, RowSortKey,
 };
+
+/// What [`AppState::run_query_inner`] should do, decided from the flags alone.
+///
+/// Lifted out of the component-adjacent method so the guard chain is reachable by a
+/// test: `state.rs` has no test module, and this ordering is load-bearing — a demo
+/// run must be checked *before* the auth guard (the demo has no session and would
+/// otherwise be told to sign in), and the busy guard before both (an auto-refresh
+/// tick firing during a manual Run must not start a second one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunDecision {
+    /// A run is already in flight; do nothing.
+    AlreadyRunning,
+    /// No backend — filter the sample locally.
+    Demo,
+    NotSignedIn,
+    NoStatusSelected,
+    Run,
+}
+
+pub(crate) fn run_decision(
+    busy: bool,
+    refreshing: bool,
+    demo: bool,
+    authed: bool,
+    statuses_empty: bool,
+) -> RunDecision {
+    if busy || refreshing {
+        RunDecision::AlreadyRunning
+    } else if demo {
+        RunDecision::Demo
+    } else if !authed {
+        RunDecision::NotSignedIn
+    } else if statuses_empty {
+        RunDecision::NoStatusSelected
+    } else {
+        RunDecision::Run
+    }
+}
+
+/// The stamp identifying one run. Wrapping on purpose: only equality is ever asked
+/// of it, so an overflow after 2^64 runs is harmless, whereas a plain `+ 1` would
+/// panic in debug.
+pub(crate) fn next_query_seq(current: u64) -> u64 {
+    current.wrapping_add(1)
+}
+
+/// Whether a completed run has been overtaken by a newer one and must not paint.
+///
+/// Queries overlap routinely — an auto-refresh tick fires while a manual Run is
+/// still paging the fleet — and they do not resolve in start order, so without this
+/// a superseded response could overwrite a newer one on screen while the backend,
+/// which drops the superseded *cache* write, kept the newer rows.
+pub(crate) fn is_superseded(current_seq: u64, my_seq: u64) -> bool {
+    current_seq != my_seq
+}
+
+/// Applies one row's checkbox to the selection map.
+///
+/// Pure map surgery, lifted out of the signal closure so it can be tested: this is
+/// the load-bearing half of the selection model. A device enters the selection with
+/// its first ticked row and leaves with its last, and ticking one row must affect
+/// **only** that row — an earlier shape swept every KB on the device into the
+/// selection, which made the one path capable of per-patch targeting unable to
+/// receive a subset.
+pub(crate) fn apply_row_selection(
+    sel: &mut BTreeMap<i64, DeviceSelection>,
+    row: &PatchRow,
+    checked: bool,
+) {
+    let key = patch_key(row);
+    if checked {
+        sel.entry(row.device_id)
+            .or_insert_with(|| DeviceSelection {
+                name: row.device_name.clone(),
+                organization: row.organization.clone(),
+                offline: row.offline,
+                patches: BTreeMap::new(),
+            })
+            .patches
+            .insert(
+                key,
+                SelectedPatch {
+                    kb: row.kb.clone().filter(|k| !k.is_empty()),
+                    name: row.name.clone(),
+                    is_os: row.patch_type.eq_ignore_ascii_case("OS"),
+                },
+            );
+    } else if let Some(entry) = sel.get_mut(&row.device_id) {
+        entry.patches.remove(&key);
+        // The device leaves with its last ticked row, so a device with nothing
+        // ticked is never dispatched against.
+        if entry.patches.is_empty() {
+            sel.remove(&row.device_id);
+        }
+    }
+}
 
 /// Identity of a patch *within a device's selection*.
 ///
@@ -1211,6 +1307,140 @@ mod tests {
             first_seen_date: None,
             installed_date: installed.map(Into::into),
         }
+    }
+
+    fn sel_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, ty: &str) -> PatchRow {
+        PatchRow {
+            device_id,
+            device_name: device.into(),
+            organization: "Org".into(),
+            location: None,
+            device_role: None,
+            os_name: None,
+            offline: false,
+            patch_type: ty.into(),
+            kb: kb.map(Into::into),
+            name: name.into(),
+            severity: "Critical".into(),
+            status: "PENDING".into(),
+            first_seen_date: None,
+            installed_date: None,
+        }
+    }
+
+    /// The guard chain's *order* is load-bearing and was only reachable by reading
+    /// `run_query_inner`: a demo run must be decided before the auth guard (the demo
+    /// has no session and would otherwise be told to sign in), and the busy guard
+    /// before both (an auto-refresh tick during a manual Run must not start a second).
+    #[test]
+    fn run_decision_orders_its_guards() {
+        use RunDecision::*;
+
+        // Busy wins over everything, including demo.
+        assert_eq!(run_decision(true, false, true, true, false), AlreadyRunning);
+        assert_eq!(run_decision(false, true, true, true, false), AlreadyRunning);
+
+        // Demo beats the auth and status guards — it needs neither.
+        assert_eq!(run_decision(false, false, true, false, true), Demo);
+
+        assert_eq!(run_decision(false, false, false, false, false), NotSignedIn);
+        assert_eq!(
+            run_decision(false, false, false, true, true),
+            NoStatusSelected
+        );
+        assert_eq!(run_decision(false, false, false, true, false), Run);
+    }
+
+    /// Only equality is ever asked of the stamp, so wrapping is safe — and a plain
+    /// `+ 1` would panic in debug at the boundary.
+    #[test]
+    fn query_seq_wraps_and_compares_by_equality() {
+        assert_eq!(next_query_seq(0), 1);
+        assert_eq!(next_query_seq(u64::MAX), 0, "wraps rather than panicking");
+
+        assert!(!is_superseded(7, 7), "my own run is not superseded");
+        assert!(is_superseded(8, 7), "a newer run supersedes mine");
+        // Across the wrap the comparison still behaves.
+        let mine = u64::MAX;
+        assert!(is_superseded(next_query_seq(mine), mine));
+    }
+
+    /// The load-bearing half of the selection model. Ticking one row must affect
+    /// only that row: an earlier shape swept every KB on the device into the
+    /// selection, which made the one path capable of per-patch targeting unable to
+    /// receive a subset.
+    #[test]
+    fn ticking_one_row_does_not_tick_the_devices_other_rows() {
+        let mut sel = BTreeMap::new();
+        let a = sel_row(1, "web-01", Some("KB1"), "Cumulative Update", "OS");
+        let b = sel_row(1, "web-01", Some("KB2"), "Security Update", "OS");
+
+        apply_row_selection(&mut sel, &a, true);
+
+        assert_eq!(sel.len(), 1, "the device entered the selection");
+        let device = sel.get(&1).expect("device present");
+        assert_eq!(device.patches.len(), 1, "only the ticked row");
+        assert!(!device.patches.contains_key(&patch_key(&b)));
+    }
+
+    /// A device enters with its first ticked row and leaves with its last, so a
+    /// device with nothing ticked is never dispatched against.
+    #[test]
+    fn a_device_leaves_the_selection_with_its_last_row() {
+        let mut sel = BTreeMap::new();
+        let a = sel_row(1, "web-01", Some("KB1"), "Cumulative Update", "OS");
+        let b = sel_row(1, "web-01", Some("KB2"), "Security Update", "OS");
+
+        apply_row_selection(&mut sel, &a, true);
+        apply_row_selection(&mut sel, &b, true);
+        assert_eq!(sel[&1].patches.len(), 2);
+
+        apply_row_selection(&mut sel, &a, false);
+        assert_eq!(sel[&1].patches.len(), 1, "device stays while a row remains");
+
+        apply_row_selection(&mut sel, &b, false);
+        assert!(
+            sel.is_empty(),
+            "the device leaves with its last row, so it is never dispatched empty"
+        );
+    }
+
+    /// The two families are targeted differently — OS by KB, software by product
+    /// title — so a row has to remember which it is. Keying only by KB made software
+    /// rows indistinguishable from OS rows that happen to lack one.
+    #[test]
+    fn selection_records_the_patch_family_and_drops_an_empty_kb() {
+        let mut sel = BTreeMap::new();
+        let os = sel_row(1, "web-01", Some("KB1"), "Cumulative Update", "OS");
+        let sw = sel_row(1, "web-01", None, "Google Chrome 138", "SOFTWARE");
+        let blank_kb = sel_row(2, "web-02", Some(""), "Firefox 130", "SOFTWARE");
+
+        apply_row_selection(&mut sel, &os, true);
+        apply_row_selection(&mut sel, &sw, true);
+        apply_row_selection(&mut sel, &blank_kb, true);
+
+        let d1 = &sel[&1].patches;
+        assert_eq!(d1.len(), 2, "both families coexist on one device");
+        assert!(d1[&patch_key(&os)].is_os);
+        assert_eq!(d1[&patch_key(&os)].kb.as_deref(), Some("KB1"));
+        assert!(!d1[&patch_key(&sw)].is_os);
+        assert_eq!(d1[&patch_key(&sw)].kb, None, "software carries no KB");
+
+        assert_eq!(
+            sel[&2].patches[&patch_key(&blank_kb)].kb,
+            None,
+            "an empty KB string is not a KB"
+        );
+    }
+
+    /// Unticking a row on a device that was never selected must not panic or create
+    /// an entry.
+    #[test]
+    fn unticking_an_unselected_row_is_a_no_op() {
+        let mut sel = BTreeMap::new();
+        let a = sel_row(9, "ghost", Some("KB1"), "Update", "OS");
+        apply_row_selection(&mut sel, &a, false);
+        assert!(sel.is_empty());
     }
 
     #[test]
