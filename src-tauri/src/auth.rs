@@ -24,9 +24,16 @@ const SCOPE_WITH_ACTIONS: &str = "monitoring management offline_access";
 /// The scope token that distinguishes a write-capable grant.
 const MANAGEMENT_SCOPE: &str = "management";
 
+/// Only the real backend names a service; the test backend is an in-process map.
+#[cfg(not(test))]
 const KEYRING_SERVICE: &str = "NinjaOnePatchToolkit";
-const KEYRING_USER_SECRET: &str = "client_secret";
-const KEYRING_USER_REFRESH: &str = "refresh_token";
+/// Pre-tenant-scoping entry names. Still read once, by [`load_tenant_keyring`], so an
+/// existing sign-in survives the upgrade; never written again.
+const LEGACY_KEYRING_USER_SECRET: &str = "client_secret";
+const LEGACY_KEYRING_USER_REFRESH: &str = "refresh_token";
+/// Prefixes for the tenant-scoped entries — see [`tenant_entry`].
+const KEYRING_SECRET_PREFIX: &str = "client_secret";
+const KEYRING_REFRESH_PREFIX: &str = "refresh_token";
 
 /// The scope to request at sign-in. Split out so the choice is testable without
 /// standing up an authorize flow.
@@ -166,18 +173,45 @@ impl AuthState {
         client_id: Option<String>,
         request_management: bool,
     ) -> Self {
+        let client_secret = load_tenant_keyring(
+            KEYRING_SECRET_PREFIX,
+            LEGACY_KEYRING_USER_SECRET,
+            &base_url,
+            client_id.as_deref(),
+        )
+        .unwrap_or_default();
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 base_url,
                 callback_port,
                 client_id,
-                client_secret: load_keyring(KEYRING_USER_SECRET).ok(),
+                client_secret,
                 tokens: None,
                 request_management,
             })),
             http,
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Keyring entry holding the refresh token for the currently configured tenant.
+    fn refresh_entry(&self) -> String {
+        let (base_url, client_id) = self
+            .inner
+            .read()
+            .map(|g| (g.base_url.clone(), g.client_id.clone()))
+            .unwrap_or_default();
+        tenant_entry(KEYRING_REFRESH_PREFIX, &base_url, client_id.as_deref())
+    }
+
+    /// Keyring entry holding the client secret for the currently configured tenant.
+    fn secret_entry(&self) -> String {
+        let (base_url, client_id) = self
+            .inner
+            .read()
+            .map(|g| (g.base_url.clone(), g.client_id.clone()))
+            .unwrap_or_default();
+        tenant_entry(KEYRING_SECRET_PREFIX, &base_url, client_id.as_deref())
     }
 
     pub fn base_url(&self) -> String {
@@ -204,20 +238,50 @@ impl AuthState {
 
     /// Applies non-secret connection settings (instance URL, client ID, callback
     /// port, and whether to request `management`). Persisting these to
-    /// `settings.json` is the caller's responsibility.
+    /// `settings.json` is the caller's responsibility. Returns whether the *tenant*
+    /// changed, so the caller can drop the caches keyed by it.
+    ///
+    /// A tenant switch drops the in-memory grant, and this is load-bearing rather
+    /// than tidiness. Left in place, `is_authenticated()` stayed true across the
+    /// switch, `access_token()` handed the previous tenant's token to the new host,
+    /// and the resulting 401 drove a refresh that POSTed the old `refresh_token` to
+    /// the **new** `/ws/oauth/token` with the **new** `client_id`. That is a textbook
+    /// `invalid_grant` — the one arm that deletes the stored credential — so merely
+    /// pointing the app at another instance destroyed the sign-in of the instance you
+    /// came from. The keyring entries are tenant-scoped, so the previous tenant's
+    /// refresh token stays on disk under its own name and switching back finds it.
+    ///
+    /// Clearing here rather than in the caller keeps it atomic with the change that
+    /// invalidates it: the old value cannot be observed under the new tenant, and no
+    /// future caller can forget the pairing.
     pub fn apply_settings(
         &self,
         base_url: String,
         client_id: Option<String>,
         callback_port: u16,
         request_management: bool,
-    ) {
-        if let Ok(mut inner) = self.inner.write() {
-            inner.base_url = base_url;
-            inner.client_id = client_id;
-            inner.callback_port = callback_port;
-            inner.request_management = request_management;
+    ) -> bool {
+        let Ok(mut inner) = self.inner.write() else {
+            return false;
+        };
+        let tenant_changed = inner.base_url != base_url || inner.client_id != client_id;
+        inner.base_url = base_url;
+        inner.client_id = client_id;
+        inner.callback_port = callback_port;
+        inner.request_management = request_management;
+        if tenant_changed {
+            inner.tokens = None;
+            // The secret is per-tenant too, so re-read it for the tenant now in
+            // effect instead of carrying the previous one's over.
+            inner.client_secret = load_tenant_keyring(
+                KEYRING_SECRET_PREFIX,
+                LEGACY_KEYRING_USER_SECRET,
+                &inner.base_url,
+                inner.client_id.as_deref(),
+            )
+            .unwrap_or_default();
         }
+        tenant_changed
     }
 
     /// Whether the *current* grant carries the `management` scope.
@@ -248,9 +312,10 @@ impl AuthState {
     }
 
     pub fn set_client_secret(&self, secret: Option<String>) -> Result<()> {
+        let entry = self.secret_entry();
         match &secret {
-            Some(s) => save_keyring(KEYRING_USER_SECRET, s)?,
-            None => delete_keyring(KEYRING_USER_SECRET)?,
+            Some(s) => save_keyring(&entry, s)?,
+            None => delete_keyring(&entry)?,
         }
         self.inner
             .write()
@@ -302,11 +367,26 @@ impl AuthState {
             return self.refresh(&refresh).await;
         }
 
-        if let Ok(refresh) = load_keyring(KEYRING_USER_REFRESH) {
-            return self.refresh(&refresh).await;
+        // A keyring *fault* is not a signed-out install, and conflating them sent the
+        // operator to re-run a sign-in that could not have helped. `Ok(None)` is the
+        // genuinely-absent case; an error (locked keychain, no Secret Service running)
+        // says so, because the stored credential may well still be intact.
+        let (base_url, client_id) = self
+            .inner
+            .read()
+            .map(|g| (g.base_url.clone(), g.client_id.clone()))
+            .unwrap_or_default();
+        match load_tenant_keyring(
+            KEYRING_REFRESH_PREFIX,
+            LEGACY_KEYRING_USER_REFRESH,
+            &base_url,
+            client_id.as_deref(),
+        ) {
+            Ok(Some(refresh)) => self.refresh(&refresh).await,
+            Ok(None) => bail!("not authenticated"),
+            Err(e) => Err(e)
+                .context("could not read the saved sign-in from the OS keyring; it may be locked"),
         }
-
-        bail!("not authenticated");
     }
 
     /// The cached access token, if one is present and not within the staleness
@@ -353,7 +433,7 @@ impl AuthState {
             // dead. A transient failure (429, 5xx, proxy error page) leaves it in
             // place so the next attempt can succeed without an interactive login.
             if refresh_grant_is_dead(status, &raw) {
-                let _ = delete_keyring(KEYRING_USER_REFRESH);
+                let _ = delete_keyring(&self.refresh_entry());
                 self.clear_tokens_locked();
             } else {
                 debug!(%status, "refresh failed transiently; keeping stored credential");
@@ -374,9 +454,22 @@ impl AuthState {
             .scope
             .filter(|s| !s.trim().is_empty())
             .or_else(|| scope_claim_from_jwt(&parsed.access_token));
+        // RFC 6749 §6 lets the server omit `refresh_token` when it does not rotate
+        // the grant, in which case the existing one stays valid. Taking the response
+        // at face value dropped it, leaving the session dependent on the keyring copy
+        // — and that copy is explicitly allowed not to exist, since a keyring write
+        // failure is downgraded to a warning below. The two together turned a
+        // non-rotating server plus a locked keychain into "not authenticated"
+        // mid-session, which is exactly the forced re-login this function exists to
+        // prevent.
+        let previous_refresh = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|g| g.tokens.as_ref().and_then(|t| t.refresh_token.clone()));
         let token_set = TokenSet {
             access_token: parsed.access_token,
-            refresh_token: parsed.refresh_token.clone(),
+            refresh_token: parsed.refresh_token.clone().or(previous_refresh),
             expires_at,
             granted_scope,
         };
@@ -399,7 +492,7 @@ impl AuthState {
             .map_err(|_| anyhow!("auth state poisoned"))?
             .tokens = Some(token_set.clone());
         if let Some(ref rt) = parsed.refresh_token
-            && let Err(e) = save_keyring(KEYRING_USER_REFRESH, rt)
+            && let Err(e) = save_keyring(&self.refresh_entry(), rt)
         {
             warn!(
                 error = %e,
@@ -436,7 +529,10 @@ impl AuthState {
     }
 
     pub fn logout(&self) -> Result<()> {
-        let _ = delete_keyring(KEYRING_USER_REFRESH);
+        let _ = delete_keyring(&self.refresh_entry());
+        // Signing out of an install that still holds a pre-tenant-scoping entry must
+        // clear that too, or the next `access_token()` migrates it straight back in.
+        let _ = delete_keyring(LEGACY_KEYRING_USER_REFRESH);
         self.clear_tokens_locked();
         Ok(())
     }
@@ -817,6 +913,72 @@ async fn handle_callback_conn(mut sock: tokio::net::TcpStream) -> Result<Option<
 
 // --- Keyring wrappers ---------------------------------------------------------
 
+/// Entry name holding `prefix`'s credential for one tenant.
+///
+/// Both entries used to be bare constants shared by every tenant, so signing into a
+/// second instance or client id overwrote the first one's credential, and
+/// [`AuthState::access_token`]'s keyring fallback replayed whatever was stored
+/// against whatever host happened to be configured. `last_result`, the job store and
+/// the whole-fleet caches are all tenant-stamped; the credential was the one place
+/// that was not.
+///
+/// The tenant is hashed rather than interpolated so the entry name stays a bounded
+/// ASCII string — Windows Credential Manager and the Secret Service each have their
+/// own limits on length and encoding — and so an instance URL never becomes a
+/// keychain label. Truncating to 8 bytes is ample: this only has to distinguish the
+/// handful of tenants one operator uses, and a collision would merely reuse an entry
+/// the same way the old global name did.
+fn tenant_entry(prefix: &str, base_url: &str, client_id: Option<&str>) -> String {
+    use std::fmt::Write as _;
+
+    let mut hasher = Sha256::new();
+    hasher.update(base_url.trim_end_matches('/').as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(client_id.unwrap_or_default().as_bytes());
+    let digest = hasher.finalize();
+
+    let mut name = String::with_capacity(prefix.len() + 17);
+    name.push_str(prefix);
+    name.push('.');
+    for byte in &digest[..8] {
+        let _ = write!(name, "{byte:02x}");
+    }
+    name
+}
+
+/// Reads this tenant's credential, adopting a pre-tenant-scoped one on first use.
+///
+/// An install that predates tenant scoping has a single global entry. Which tenant
+/// wrote it is unknowable, but a one-tenant install is the overwhelming case, so it
+/// is adopted by the tenant configured now and the global entry removed. A
+/// multi-tenant install loses at most one stored sign-in, once — and only has to
+/// sign in again, since nothing else depends on it.
+fn load_tenant_keyring(
+    prefix: &str,
+    legacy: &str,
+    base_url: &str,
+    client_id: Option<&str>,
+) -> Result<Option<String>> {
+    let name = tenant_entry(prefix, base_url, client_id);
+    if let Some(value) = load_keyring(&name)? {
+        return Ok(Some(value));
+    }
+    let Some(value) = load_keyring(legacy)? else {
+        return Ok(None);
+    };
+    match save_keyring(&name, &value) {
+        // Only drop the global entry once the scoped one is safely written.
+        Ok(()) => {
+            let _ = delete_keyring(legacy);
+        }
+        Err(e) => {
+            warn!(error = %e, "could not migrate the stored credential to a tenant-scoped entry")
+        }
+    }
+    Ok(Some(value))
+}
+
+#[cfg(not(test))]
 fn save_keyring(user: &str, value: &str) -> Result<()> {
     keyring::Entry::new(KEYRING_SERVICE, user)
         .context("open keyring entry")?
@@ -824,13 +986,21 @@ fn save_keyring(user: &str, value: &str) -> Result<()> {
         .context("keyring write")
 }
 
-fn load_keyring(user: &str) -> Result<String> {
-    keyring::Entry::new(KEYRING_SERVICE, user)
-        .context("open keyring entry")?
-        .get_password()
-        .context("keyring read")
+/// `Ok(None)` means "no such entry" — a signed-out install, not a fault. `Err` is a
+/// real keyring failure (locked keychain, no Secret Service), which callers must be
+/// able to tell apart: reporting both as "not authenticated" sent the operator to
+/// re-run a sign-in that could not have helped.
+#[cfg(not(test))]
+fn load_keyring(user: &str) -> Result<Option<String>> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, user).context("open keyring entry")?;
+    match entry.get_password() {
+        Ok(v) => Ok(Some(v)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e).context("keyring read"),
+    }
 }
 
+#[cfg(not(test))]
 fn delete_keyring(user: &str) -> Result<()> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, user).context("open keyring entry")?;
     match entry.delete_credential() {
@@ -838,6 +1008,54 @@ fn delete_keyring(user: &str) -> Result<()> {
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e).context("keyring delete"),
     }
+}
+
+/// In-process stand-in for the OS keyring, used by unit tests only.
+///
+/// A unit test must never touch the operator's real keychain. `AuthState::new` reads
+/// the client secret on construction, so *every* test that builds one used to reach
+/// the live keyring: on a desktop with a GUI that raises an OS permission dialog and
+/// the entire `just test` run blocks on it indefinitely. CI never caught it because
+/// headless runners return an error instead of prompting — the failure mode was
+/// exclusive to developer machines. As a bonus this makes the round-trip assertions
+/// mean something, where against the real keyring they could only be written as
+/// "may or may not have been accepted".
+#[cfg(test)]
+mod test_keyring {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    pub(super) fn store() -> &'static Mutex<HashMap<String, String>> {
+        static STORE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+        STORE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+}
+
+#[cfg(test)]
+fn save_keyring(user: &str, value: &str) -> Result<()> {
+    test_keyring::store()
+        .lock()
+        .map_err(|_| anyhow!("test keyring poisoned"))?
+        .insert(user.to_string(), value.to_string());
+    Ok(())
+}
+
+#[cfg(test)]
+fn load_keyring(user: &str) -> Result<Option<String>> {
+    Ok(test_keyring::store()
+        .lock()
+        .map_err(|_| anyhow!("test keyring poisoned"))?
+        .get(user)
+        .cloned())
+}
+
+#[cfg(test)]
+fn delete_keyring(user: &str) -> Result<()> {
+    test_keyring::store()
+        .lock()
+        .map_err(|_| anyhow!("test keyring poisoned"))?
+        .remove(user);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -893,6 +1111,161 @@ mod tests {
         let digest = Sha256::digest(verifier.as_bytes());
         let challenge = URL_SAFE_NO_PAD.encode(digest);
         assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    }
+
+    fn token_response(refresh: Option<&str>) -> TokenResponse {
+        TokenResponse {
+            access_token: "access".into(),
+            refresh_token: refresh.map(str::to_string),
+            expires_in: 3600,
+            scope: Some("monitoring offline_access".into()),
+        }
+    }
+
+    /// The sev-4 case. A tenant switch left the previous tenant's grant in place, so
+    /// `is_authenticated()` stayed true, the old token went to the new host, and the
+    /// resulting `invalid_grant` deleted the credential of the tenant switched away
+    /// from.
+    #[test]
+    fn switching_tenant_drops_the_previous_grant() {
+        let auth = AuthState::new(
+            reqwest::Client::new(),
+            "https://us2.example.com".into(),
+            11434,
+            Some("client-a".into()),
+            false,
+        );
+        auth.store_tokens(token_response(Some("refresh-a")))
+            .expect("store");
+        assert!(auth.is_authenticated());
+
+        let changed = auth.apply_settings(
+            "https://eu.example.com".into(),
+            Some("client-b".into()),
+            11434,
+            false,
+        );
+
+        assert!(changed, "instance + client id both moved");
+        assert!(
+            !auth.is_authenticated(),
+            "the old tenant's token must not be presented to the new host"
+        );
+    }
+
+    /// Changing a non-tenant setting must not sign the operator out.
+    #[test]
+    fn a_non_tenant_settings_change_keeps_the_session() {
+        let auth = AuthState::new(
+            reqwest::Client::new(),
+            "https://us2.example.com".into(),
+            11434,
+            Some("client-a".into()),
+            false,
+        );
+        auth.store_tokens(token_response(Some("refresh-a")))
+            .expect("store");
+
+        let changed = auth.apply_settings(
+            "https://us2.example.com".into(),
+            Some("client-a".into()),
+            9999,
+            true,
+        );
+
+        assert!(!changed, "only the port and the scope wish changed");
+        assert!(auth.is_authenticated());
+    }
+
+    /// Each tenant's refresh token lives under its own entry, so signing into a
+    /// second instance cannot overwrite the first one's credential — and switching
+    /// back finds it again.
+    #[test]
+    fn each_tenant_stores_its_refresh_token_separately() {
+        let a = tenant_entry(
+            KEYRING_REFRESH_PREFIX,
+            "https://us2.example.com",
+            Some("client-a"),
+        );
+        let b = tenant_entry(
+            KEYRING_REFRESH_PREFIX,
+            "https://eu.example.com",
+            Some("client-a"),
+        );
+        let c = tenant_entry(
+            KEYRING_REFRESH_PREFIX,
+            "https://us2.example.com",
+            Some("client-b"),
+        );
+
+        assert_ne!(a, b, "a different instance is a different tenant");
+        assert_ne!(a, c, "so is a different client id on the same instance");
+        assert_eq!(
+            a,
+            tenant_entry(
+                KEYRING_REFRESH_PREFIX,
+                "https://us2.example.com/",
+                Some("client-a")
+            ),
+            "a trailing slash is the same tenant"
+        );
+    }
+
+    /// An install that predates tenant scoping keeps its sign-in: the global entry is
+    /// adopted by the configured tenant on first read, then removed.
+    #[test]
+    fn a_legacy_global_credential_is_migrated_once() {
+        save_keyring(LEGACY_KEYRING_USER_REFRESH, "legacy-refresh").expect("seed legacy");
+
+        let got = load_tenant_keyring(
+            KEYRING_REFRESH_PREFIX,
+            LEGACY_KEYRING_USER_REFRESH,
+            "https://migrate.example.com",
+            Some("client-m"),
+        )
+        .expect("migrate");
+
+        assert_eq!(got.as_deref(), Some("legacy-refresh"));
+        assert_eq!(
+            load_keyring(LEGACY_KEYRING_USER_REFRESH).expect("read legacy"),
+            None,
+            "the global entry is removed once the scoped one is written"
+        );
+        let scoped = tenant_entry(
+            KEYRING_REFRESH_PREFIX,
+            "https://migrate.example.com",
+            Some("client-m"),
+        );
+        assert_eq!(
+            load_keyring(&scoped).expect("read scoped").as_deref(),
+            Some("legacy-refresh")
+        );
+    }
+
+    /// RFC 6749 §6 lets a server omit `refresh_token` when it does not rotate the
+    /// grant. Taking that at face value dropped the token and left the session
+    /// dependent on a keyring copy that is explicitly allowed not to exist.
+    #[test]
+    fn a_non_rotating_refresh_keeps_the_existing_token() {
+        let auth = AuthState::new(
+            reqwest::Client::new(),
+            "https://keep.example.com".into(),
+            11434,
+            Some("client-k".into()),
+            false,
+        );
+        auth.store_tokens(token_response(Some("original-refresh")))
+            .expect("first store");
+
+        let set = auth
+            .store_tokens(token_response(None))
+            .expect("second store, server declined to rotate");
+
+        assert_eq!(
+            set.refresh_token.as_deref(),
+            Some("original-refresh"),
+            "a session must not lose its refresh token to a non-rotating response"
+        );
     }
 
     #[test]
@@ -1136,8 +1509,8 @@ mod tests {
         let http = reqwest::Client::new();
         let auth = AuthState::new(http, "https://x".into(), 0, None, true);
 
-        // KEYRING_SERVICE is a real keyring on a dev box and may or may not accept
-        // the write; either way the in-memory assignment must have happened.
+        // Backed by the in-process test keyring, so the write does land and this
+        // asserts the in-memory assignment rather than tolerating either outcome.
         auth.store_tokens(TokenResponse {
             access_token: "fresh-access".into(),
             refresh_token: Some("fresh-refresh".into()),

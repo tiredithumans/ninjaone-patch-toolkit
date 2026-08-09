@@ -11,7 +11,26 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Security
+
+- **Switching instance or client ID no longer destroys the sign-in you switched away from.** The
+  change dropped every cache but kept the previous tenant's tokens, so the app still believed it was
+  signed in, sent the old token to the new host, and the resulting rejection was treated as "this
+  grant is dead" — which deletes the stored credential. The grant is now cleared as part of the
+  switch.
+- **Each instance keeps its own saved sign-in.** The refresh token and client secret were stored
+  under one name shared by every tenant, so signing into a second instance overwrote the first one's
+  credential. They are now stored per instance + client ID, and switching back finds the earlier
+  sign-in still there. Existing saved credentials are migrated automatically on first launch — you
+  will not be signed out by this change.
+
 ### Fixed
+
+- **A sign-in no longer ends because the server chose not to reissue a refresh token.** Servers may
+  legitimately omit it and keep the existing one valid; the app discarded it, which left the session
+  relying on the copy in the OS keychain — and that copy is explicitly allowed to be missing.
+- **A locked keychain now says so.** It was reported as "not authenticated", which sent you to
+  re-run a sign-in that could not have fixed it.
 
 - **Job polling can no longer stop for the rest of the session.** The single-poller slot was
   released at exactly one place in the loop, so if anything else ended that task — an unexpected
