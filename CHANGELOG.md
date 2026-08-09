@@ -13,6 +13,11 @@ version and start a fresh `[Unreleased]`.
 
 ### Changed
 
+- **The HTML report's "Compliance by OS" table now matches the Excel export.** Its heading read
+  "Compliance" against the workbook's "Compliance %", and it rounded percentages to whole numbers
+  where every other table shows one decimal — the last table still rendering its own columns instead
+  of the shared definition. It also silently dropped rows past the display cap; it now says so, like
+  the failures and reboot tables do.
 - **The install-history window is now shown, and adjustable, for failures too.** The "Installed
   within (days)" control appeared only when *Installed* was selected, but the window bounds the
   whole install-history pull — so a *Failed*-only query (the failure view) was silently truncated to

@@ -195,24 +195,25 @@ fn write_os_compliance(buf: &mut String, by_os: &[OsCompliance]) {
     if by_os.is_empty() {
         return;
     }
-    buf.push_str(
-        "<table><thead><tr><th>OS</th><th>Devices</th><th>Compliant</th><th>Compliance</th>\
-         <th>Pending Critical/Important</th><th>Aged (past SLA)</th></tr></thead><tbody>",
-    );
-    for b in by_os.iter().take(MAX_TABLE_ROWS) {
-        let os = escape_html(&b.os);
+    // Through the shared columns, like the failures and reboot tables. Hand-rolled,
+    // this had already drifted from `OsCompliance::COLUMNS` in two ways the workbook
+    // did not share: the header read "Compliance" against the canonical
+    // "Compliance %", and the value was `{:.0}%` — a literal percent sign at zero
+    // decimals — where `pct_cell` emits a number rounded to one. The same refactor
+    // that unified the other tables skipped this one, so it kept the exact defect
+    // class that refactor existed to remove.
+    let rows: Vec<&OsCompliance> = by_os.iter().collect();
+    write_table(buf, &OsCompliance::COLUMNS, &rows);
+    // The failures and reboot tables both disclose truncation; this one silently
+    // dropped everything past the cap, so a fleet with more than MAX_TABLE_ROWS
+    // distinct OS versions read as complete.
+    if by_os.len() > MAX_TABLE_ROWS {
         let _ = write!(
             buf,
-            "<tr><td>{os}</td><td>{dt}</td><td>{dc}</td><td>{pct:.0}%</td>\
-             <td>{pc}</td><td>{ac}</td></tr>",
-            dt = b.devices_total,
-            dc = b.devices_compliant,
-            pct = b.compliance_pct,
-            pc = b.pending_critical,
-            ac = b.aged_critical
+            "<p class=\"empty\">Showing the top {MAX_TABLE_ROWS} of {} operating systems.</p>",
+            by_os.len()
         );
     }
-    buf.push_str("</tbody></table>");
 }
 
 fn write_severity_chart(buf: &mut String, total: &SeverityCounts) {
@@ -429,6 +430,25 @@ mod tests {
         assert!(
             !html.contains("<th>Role</th>") && !html.contains("<th>Pending patches</th>"),
             "the old divergent headings must be gone, not merely joined by the shared ones"
+        );
+    }
+
+    /// The by-OS compliance table was the one table the shared-column refactor
+    /// skipped, and it had already drifted: "Compliance" against the canonical
+    /// "Compliance %", and `{:.0}%` against `pct_cell`'s one-decimal number. This is
+    /// the same guard the failures and reboot tables carry.
+    #[test]
+    fn the_os_compliance_table_renders_every_shared_column() {
+        let html = render_report(&sample_result());
+        for (title, _) in OsCompliance::COLUMNS {
+            assert!(
+                html.contains(&format!("<th>{title}</th>")),
+                "by-OS compliance table is missing the {title:?} column"
+            );
+        }
+        assert!(
+            !html.contains("<th>Compliance</th>"),
+            "the old divergent heading must be gone, not merely joined by the shared one"
         );
     }
 
