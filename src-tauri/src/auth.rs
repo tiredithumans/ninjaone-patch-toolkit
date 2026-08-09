@@ -150,6 +150,11 @@ pub struct AuthState {
     http: reqwest::Client,
     /// Serializes the refresh grant. See `access_token`.
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Held for the duration of an interactive sign-in, so a second one is refused
+    /// with an explanation instead of failing at `bind` with "Is another instance of
+    /// this app running?" — which blames the wrong thing, since the port is in fact
+    /// held by *this* process's own in-flight flow.
+    login_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct Inner {
@@ -191,6 +196,7 @@ impl AuthState {
             })),
             http,
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            login_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -540,6 +546,20 @@ impl AuthState {
     /// Interactive PKCE login: opens the browser and waits up to 3 minutes for the
     /// callback, then exchanges the code for tokens.
     pub async fn login_pkce(&self) -> Result<()> {
+        // One interactive flow at a time. Without this, a second sign-in (a
+        // double-click on Sign in, or a retry while the first browser tab is still
+        // open) raced to `bind` the same callback port and failed with "could not
+        // bind … Is another instance of this app running?" — which sends the
+        // operator hunting for a second copy of the app that does not exist, when
+        // the port is held by this process's own in-flight flow. `try_lock` rather
+        // than `lock`: queueing a second browser window behind a three-minute wait
+        // is not what the operator asked for.
+        let _login = self.login_gate.try_lock().map_err(|_| {
+            anyhow!(
+                "a sign-in is already in progress — finish or close the browser tab that opened, \
+                 then try again"
+            )
+        })?;
         let (client_id, base_url, port, request_management) = {
             let inner = self
                 .inner
@@ -616,11 +636,16 @@ impl AuthState {
 
         let callback = timeout(
             std::time::Duration::from_secs(180),
-            wait_for_callback(listener),
+            wait_for_callback(listener, &state),
         )
         .await
         .map_err(|_| anyhow!("login timed out — no callback received within 3 minutes"))??;
 
+        // Defense in depth. `wait_for_callback` only returns a redirect whose state
+        // already matched, so this is unreachable — kept deliberately, in the same
+        // spirit as the dry-run check being asserted at both the plan and the
+        // dispatch site: a future change to the listener's filter must not silently
+        // remove the state check from the flow.
         if callback.state != state {
             bail!("state mismatch — possible CSRF");
         }
@@ -695,6 +720,7 @@ impl AuthState {
             inner: Arc::new(RwLock::new(inner)),
             http,
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            login_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -724,6 +750,7 @@ impl AuthState {
             inner: Arc::new(RwLock::new(inner)),
             http,
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            login_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -796,10 +823,20 @@ const CALLBACK_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// the "a hung sign-in usually means the callback never arrived" symptom. A
 /// connection that carries no `code`, `state` or `error` is answered with 404 and
 /// the loop keeps waiting for the real redirect.
-async fn wait_for_callback(listener: TcpListener) -> Result<CallbackResult> {
+async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<CallbackResult> {
     loop {
         let (sock, _peer) = listener.accept().await.context("callback accept failed")?;
-        match handle_callback_conn(sock).await {
+        // One deadline for the whole connection, not per read. The inner timeout is
+        // rearmed on every successful read, so a client dribbling a byte every few
+        // seconds could hold this serial listener open indefinitely and the real
+        // redirect would queue behind it until the outer 3-minute budget expired.
+        match timeout(
+            CALLBACK_SOCKET_TIMEOUT,
+            handle_callback_conn(sock, expected_state),
+        )
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("callback connection exceeded its deadline")))
+        {
             Ok(Some(result)) => return Ok(result),
             // Not the redirect — keep listening.
             Ok(None) => continue,
@@ -816,7 +853,10 @@ async fn wait_for_callback(listener: TcpListener) -> Result<CallbackResult> {
 /// Reads one connection and, if it is the OAuth redirect, answers the browser and
 /// returns the parsed parameters. `Ok(None)` means "this was some other client" —
 /// it is answered with a 404 and the caller keeps waiting.
-async fn handle_callback_conn(mut sock: tokio::net::TcpStream) -> Result<Option<CallbackResult>> {
+async fn handle_callback_conn(
+    mut sock: tokio::net::TcpStream,
+    expected_state: &str,
+) -> Result<Option<CallbackResult>> {
     let mut buf = [0u8; 4096];
     let mut total = Vec::new();
     loop {
@@ -867,7 +907,27 @@ async fn handle_callback_conn(mut sock: tokio::net::TcpStream) -> Result<Option<
     // A redirect always carries `state`, and either `code` or `error` (RFC 6749
     // §4.1.2 / §4.1.2.1). Anything else is a preconnect, a favicon fetch or a
     // probe — send it away without ending the wait.
-    if state.is_none() && code.is_none() && error.is_none() {
+    //
+    // Two conditions, both required, and both are what stop a third party ending
+    // the sign-in:
+    //
+    // * `code` or `error` must be present. A request carrying only `state` used to
+    //   satisfy the old "any one of the three" test and end the wait, after which
+    //   `login_pkce` aborted the whole flow with "state mismatch — possible CSRF".
+    //   Any local process could therefore kill an in-progress sign-in by fetching
+    //   `http://127.0.0.1:<port>/?state=x`, and the operator saw a security error
+    //   for what was really a stray request.
+    // * `state` must equal the value this flow generated. RFC 6749 §4.1.2 requires
+    //   the server to echo it, so the genuine redirect always carries it. Checking
+    //   it *here* turns it from an abort into a filter: a request that does not
+    //   know the state is answered with a 404 and the listener keeps waiting for
+    //   the real one, instead of the flow failing closed on someone else's traffic.
+    let is_redirect = (code.is_some() || error.is_some())
+        && state.as_deref().is_some_and(|s| s == expected_state);
+    if !is_redirect {
+        if code.is_some() || error.is_some() {
+            debug!("ignoring a callback-shaped request whose state did not match this flow");
+        }
         let body = "<html><body><h1>Not found</h1></body></html>";
         let _ = sock
             .write_all(
@@ -1404,11 +1464,20 @@ mod tests {
     /// Drives `wait_for_callback` end-to-end: binds a loopback listener, connects a
     /// client, sends a single raw HTTP request line, and returns the parsed result.
     async fn drive_callback(request_target: &str) -> CallbackResult {
+        drive_callback_with_state(request_target, "xyz").await
+    }
+
+    /// As [`drive_callback`], but lets a test choose the state this flow expects —
+    /// the listener now filters on it rather than aborting the sign-in on a mismatch.
+    async fn drive_callback_with_state(
+        request_target: &str,
+        expected_state: &'static str,
+    ) -> CallbackResult {
         use tokio::net::TcpStream;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(wait_for_callback(listener));
+        let server = tokio::spawn(async move { wait_for_callback(listener, expected_state).await });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
         let req = format!(
@@ -1432,7 +1501,7 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(wait_for_callback(listener));
+        let server = tokio::spawn(async move { wait_for_callback(listener, "xyz").await });
 
         // A probe that is not the redirect — no code, no state, no error.
         let mut probe = TcpStream::connect(addr).await.unwrap();
@@ -1471,7 +1540,7 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(wait_for_callback(listener));
+        let server = tokio::spawn(async move { wait_for_callback(listener, "s").await });
 
         // Connect and immediately drop without sending anything — the read returns
         // 0 bytes, which used to `bail!("empty callback request")` out of the whole
@@ -1573,18 +1642,93 @@ mod tests {
 
     #[tokio::test]
     async fn callback_url_decodes_percent_encoded_values() {
-        let r = drive_callback("/?code=a%20b&state=s%2Fx").await;
+        let r = drive_callback_with_state("/?code=a%20b&state=s%2Fx", "s/x").await;
         assert_eq!(r.code.as_deref(), Some("a b"));
         assert_eq!(r.state, "s/x");
     }
 
+    /// A request carrying only `state` is not the redirect and must not end the
+    /// wait. It used to satisfy the old "any one of code/state/error" test, so any
+    /// local process could kill an in-progress sign-in by fetching
+    /// `http://127.0.0.1:<port>/?state=x` — and the operator was shown
+    /// "state mismatch — possible CSRF" for what was really a stray request.
     #[tokio::test]
-    async fn callback_without_code_or_error_yields_neither() {
-        // The "missing code" 400 path — the caller treats this as a failed sign-in.
-        let r = drive_callback("/?state=xyz").await;
-        assert!(r.code.is_none());
-        assert!(r.error.is_none());
-        assert_eq!(r.state, "xyz");
+    async fn a_bare_state_is_not_the_redirect() {
+        use tokio::net::TcpStream;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { wait_for_callback(listener, "xyz").await });
+
+        let mut probe = TcpStream::connect(addr).await.unwrap();
+        probe
+            .write_all(b"GET /?state=xyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut drained = Vec::new();
+        let _ = probe.read_to_end(&mut drained).await;
+        assert!(
+            String::from_utf8_lossy(&drained).contains("404"),
+            "a bare state carries no authorization result, so it is not the redirect"
+        );
+
+        // The real redirect still lands.
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                b"GET /?code=real&state=xyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        let _ = client.read_to_end(&mut resp).await;
+
+        let r = server.await.unwrap().expect("callback parsed");
+        assert_eq!(r.code.as_deref(), Some("real"));
+    }
+
+    /// A `code` whose `state` belongs to some other flow must be ignored rather than
+    /// aborting this one. Checking state in the listener turns it from an abort into
+    /// a filter: an attacker who cannot guess the state cannot end the sign-in, which
+    /// was previously a trivial local denial of service against it.
+    #[tokio::test]
+    async fn a_code_with_the_wrong_state_does_not_end_the_wait() {
+        use tokio::net::TcpStream;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { wait_for_callback(listener, "expected").await });
+
+        let mut attacker = TcpStream::connect(addr).await.unwrap();
+        attacker
+            .write_all(
+                b"GET /?code=injected&state=wrong HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut drained = Vec::new();
+        let _ = attacker.read_to_end(&mut drained).await;
+        assert!(
+            String::from_utf8_lossy(&drained).contains("404"),
+            "a mismatched state is turned away"
+        );
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                b"GET /?code=genuine&state=expected HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        let _ = client.read_to_end(&mut resp).await;
+
+        let r = server.await.unwrap().expect("callback parsed");
+        assert_eq!(
+            r.code.as_deref(),
+            Some("genuine"),
+            "the injected code must never be the one exchanged"
+        );
     }
 
     #[tokio::test]
