@@ -28,8 +28,10 @@ lists individual patches per server, and exports to Excel.
 - **Per‑server patch listing** by **type** (All / OS / Software) and **status**
   (Pending / Approved / Rejected / Installed, plus Failed). Installed patches are pulled
   from the patch‑install history endpoints over a configurable window.
-- **Excel export** (`.xlsx`) — Patches detail sheet + Compliance summary + Needs‑Reboot
-  sheet, with frozen headers and autofilter.
+- **Excel export** (`.xlsx`) — a **Patches** detail sheet plus **Compliance**, **Compliance by
+  OS**, **Needs Reboot** and **Patch Failures** summary sheets. Every sheet freezes its header
+  row; the detail sheet also gets an autofilter, being the only one meant to be sliced by hand.
+  A summary sheet is written only when it has rows.
 - **Patching‑ops extras**
   - Install‑history export (what actually installed / failed) over a date window.
   - Reboot & failure views (devices pending reboot; `FAILED` patches).
@@ -133,23 +135,66 @@ the read‑only scope.
    re‑sends `scope`, so an existing sign‑in keeps its read‑only grant until you consent
    again.
 
-**What you can do.** Tick patch rows in the **Patches** tab, then use the action bar. Note
-that ticking a row selects that row's **device** — NinjaOne's API has no per‑patch apply
-endpoint, so `Apply OS patches` installs everything approved for the device.
+**What you can do.** Tick patch rows in the **Patches** tab, then use the action bar. Ticking
+a row selects both that row's **patch** and its **device** — which of the two an action acts on
+is the single most important thing to know here, so read
+[Install all vs install only the selected](#install-all-vs-install-only-the-selected) before
+using either.
 
-| Action | Endpoint | Notes |
+The action bar groups the buttons by **mechanism**, because that is what decides the blast radius:
+
+| Action bar group | Action | Endpoint | Notes |
+|---|---|---|---|
+| **Scan** | OS / Software | `POST /device/{id}/patch/{os,software}/scan` | Read‑only on the device; no confirmation needed. |
+| **Install all approved patches** | OS / Software | `POST /device/{id}/patch/{os,software}/apply` | Installs **every approved patch** on the device, not just the ones you ticked. |
+| **Install only the selected patches** | OS / Software | `POST /device/{id}/script/run` (remediation script) | Installs only the patches ticked **on that device**. Needs a configured script ID. |
+| *(not grouped)* | Reboot | `POST /device/{id}/reboot/{mode}` | Requires a reason, recorded in NinjaOne's activity feed. `FORCED` needs a typed confirmation. |
+| *(not grouped)* | Run script | `POST /device/{id}/script/run` | Any script in the tenant's automation library. |
+
+Confirmation dialogs, the Jobs tab and the audit log name these more precisely — *Apply all OS
+patches* vs *Apply selected OS patches*, and so on for software.
+
+### Install all vs install only the selected
+
+NinjaOne's API has **no per‑patch apply endpoint**. `/patch/{os,software}/apply` installs
+everything approved on the device and cannot be told which patches to install — so ticking one
+row and pressing **Apply all OS patches** installs that device's entire approved backlog.
+
+Installing a specific subset is possible only by running a library script that takes a target
+list. Because those are different mechanisms with different blast radii, they are separate
+actions under separate headings in the action bar, and the toolkit warns when you pick the
+untargeted one while holding a partial selection:
+
+- **Install all approved patches** — native endpoint, whole approved backlog, no preview, runs
+  as NinjaOne's agent (the shared *Run as* / *Dry run* options do not reach it).
+- **Install only the selected patches** — remediation script, only the ticked patches, and each
+  device receives only *its own* ticked patches rather than the union of the selection.
+
+A device with nothing ticked of that patch family is dropped from a targeted apply rather than
+being sent an empty list.
+
+### Setting up the remediation scripts
+
+NinjaOne has **no script‑upload API**, so add the scripts by hand under **Administration →
+Library → Automation**, then paste each numeric ID (from the script's URL) into **Settings →
+Patch actions**. Two IDs are configured separately, because the two patch families are targeted
+differently:
+
+| Setting | Script variables it must declare | How targets are passed |
 |---|---|---|
-| Scan OS / software | `POST /device/{id}/patch/*/scan` | Read‑only on the device; no confirmation needed. |
-| Apply OS / software patches | `POST /device/{id}/patch/*/apply` | Installs every approved patch on the device. |
-| Reboot | `POST /device/{id}/reboot/{mode}` | Requires a reason, recorded in NinjaOne's activity feed. `FORCED` needs a typed confirmation. |
-| Run script | `POST /device/{id}/script/run` | Any script in the tenant's automation library. |
+| **OS patch script ID** | `kbAllowList`, `rebootBehavior`, `dryRun` (String/Overridable) | `kbAllowList=5034123,5034567` — comma‑separated KB numbers |
+| **Software patch script ID** | `productAllowListB64`, `rebootBehavior`, `dryRun` | `productAllowListB64=<base64>` — titles joined by `\|`, then base64‑encoded |
 
-**Targeting specific KBs** needs a library script that accepts a `kbAllowList` variable —
-the toolkit detects this from `/automation/scripts` and only offers per‑KB targeting for
-scripts that declare it. NinjaOne has **no script‑upload API**, so add the script by hand
-under **Administration → Library → Automation**, give it String/Overridable `kbAllowList`,
-`rebootBehavior` and `dryRun` variables, and paste the numeric ID from its URL into
-Settings.
+Third‑party patches carry no KB number, which is why software targets are matched by **product
+title** and base64‑encoded: NinjaOne splits the `parameters` string on spaces, and product
+titles contain spaces. An OS remediation therefore skips third‑party patches and vice versa.
+
+An unset script ID is a hard blocker on the corresponding action, not a silent no‑op, and the
+IDs are resolved from Settings in the backend — never taken from the request.
+
+**Targeting KBs from the generic Run script action** works too: the toolkit reads
+`/automation/scripts` and offers per‑KB targeting only for scripts that declare a
+`kbAllowList` variable.
 
 **Guardrails**, all enforced in the Rust backend rather than the UI:
 
