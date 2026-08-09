@@ -10,7 +10,7 @@ use crate::actions::{JobReport, MAX_JOBS};
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::auth::AuthState;
 use crate::model::{Device, Location, Organization, Patch, Role};
-use crate::rows::QueryResult;
+use crate::rows::{GroupBy, PatchGroup, QueryResult, build_groups};
 use crate::settings::Settings;
 
 /// How long a confirmation token issued by `plan_action` stays usable. Short
@@ -130,6 +130,20 @@ pub struct QueryToken {
     tenant: TenantKey,
 }
 
+/// The cached query result plus a memo of the grouping most recently asked for.
+///
+/// `group_page` rebuilt the entire grouping — a HashMap accumulation plus a sort
+/// over every row — on *every* paging request, so clicking through a grouped view
+/// re-grouped the whole fleet per click, under the same lock the export takes. The
+/// memo lives inside the slot rather than beside it deliberately: it is derived from
+/// exactly these rows, so replacing or clearing the result drops it in the same
+/// operation and no second staleness protocol exists to get wrong.
+struct CachedResult {
+    tenant: TenantKey,
+    result: QueryResult,
+    groups: Option<(GroupBy, Arc<Vec<PatchGroup>>)>,
+}
+
 struct LookupCache {
     at: Instant,
     tenant: TenantKey,
@@ -199,7 +213,7 @@ pub struct AppState {
     /// Private on purpose: all access goes through `store_last_result` /
     /// `with_current_result`, which enforce the tenant check — a tenant switch reads
     /// as a miss, so a forgotten clear can't serve the previous tenant's rows.
-    last_result: Mutex<Option<(TenantKey, QueryResult)>>,
+    last_result: Mutex<Option<CachedResult>>,
     /// Near-static lookups (orgs/locations/roles) cached with a short TTL.
     lookups_cache: Mutex<Option<LookupCache>>,
     /// Whole-fleet device inventory cached with a long TTL ([`DEVICE_TTL`]).
@@ -657,7 +671,14 @@ impl AppState {
                 if self.query_generation.load(Ordering::SeqCst) != token.generation {
                     return StoreOutcome::Superseded;
                 }
-                *slot = Some((token.tenant, result));
+                *slot = Some(CachedResult {
+                    tenant: token.tenant,
+                    result,
+                    // Built on first request, not here: most queries are never
+                    // grouped, and grouping the whole fleet eagerly would pay for a
+                    // view the operator may not open.
+                    groups: None,
+                });
                 StoreOutcome::Stored
             }
             // Once poisoned the slot stays poisoned: `with_current_result` returns
@@ -682,9 +703,44 @@ impl AppState {
         let key = self.tenant_key();
         let guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
         Ok(match guard.as_ref() {
-            Some((t, r)) if *t == key => Some(f(r)),
+            Some(c) if c.tenant == key => Some(f(&c.result)),
             _ => None,
         })
+    }
+
+    /// Runs `f` against one page of group headers, building the grouping only when
+    /// the memo does not already hold this `group_by`.
+    ///
+    /// Same tenant check and same lock as [`Self::with_current_result`]; the memo is
+    /// stored inside the result, so replacing or clearing the result discards it
+    /// automatically. Switching between *By device* and *By patch* rebuilds once and
+    /// then pages freely, which is the access pattern the Patches tab actually has.
+    pub fn with_grouped_result<T>(
+        &self,
+        group_by: GroupBy,
+        f: impl FnOnce(&[PatchGroup]) -> T,
+    ) -> Result<Option<T>, CachePoisoned> {
+        let key = self.tenant_key();
+        let mut guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
+        let Some(cached) = guard.as_mut() else {
+            return Ok(None);
+        };
+        if cached.tenant != key {
+            return Ok(None);
+        }
+        let fresh = matches!(&cached.groups, Some((g, _)) if *g == group_by);
+        if !fresh {
+            cached.groups = Some((
+                group_by,
+                Arc::new(build_groups(&cached.result.rows, group_by)),
+            ));
+        }
+        let groups = cached
+            .groups
+            .as_ref()
+            .map(|(_, g)| Arc::clone(g))
+            .expect("just populated");
+        Ok(Some(f(&groups)))
     }
 
     /// Drops the cached query result after sign-out or an instance change. The tenant

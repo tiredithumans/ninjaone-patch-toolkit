@@ -1065,12 +1065,16 @@ pub struct GroupPage {
     pub total: usize,
 }
 
-/// Slices `build_groups` into one page.
-pub fn group_page(rows: &[PatchRow], group_by: GroupBy, offset: usize, limit: usize) -> GroupPage {
-    let all = build_groups(rows, group_by);
+/// Slices an already-built grouping into one page.
+///
+/// Split from the building so the caller can memoize the expensive half: this used
+/// to be `group_page`, which rebuilt the whole grouping on every paging request. The
+/// arithmetic stays here, where it is unit-testable, rather than inline in the
+/// command.
+pub fn slice_groups(all: &[PatchGroup], offset: usize, limit: usize) -> GroupPage {
     GroupPage {
         total: all.len(),
-        groups: all.into_iter().skip(offset).take(limit).collect(),
+        groups: all.iter().skip(offset).take(limit).cloned().collect(),
     }
 }
 
@@ -1084,12 +1088,66 @@ pub fn group_member_page(
     offset: usize,
     limit: usize,
 ) -> Vec<PatchRow> {
+    // The key is parsed once and each row compared field-by-field. Building
+    // `group_key(r, group_by)` per row allocated a `format!`ed String for every row
+    // in the cache on every expand and every page of a group — a whole-fleet
+    // allocation to serve twenty rows.
+    let matcher = GroupKeyMatcher::new(group_by, key);
     rows.iter()
-        .filter(|r| group_key(r, group_by) == key)
+        .filter(|r| matcher.matches(r))
         .skip(offset)
         .take(limit)
         .cloned()
         .collect()
+}
+
+/// A parsed [`group_key`], so membership is an equality check rather than a fresh
+/// `String` per row. Mirrors `group_key`'s encoding exactly — a change to one is a
+/// change to the other, which `group_key_and_matcher_agree` pins.
+enum GroupKeyMatcher<'a> {
+    Device(Option<i64>),
+    Patch {
+        patch_type: &'a str,
+        kb: &'a str,
+        name: &'a str,
+    },
+    /// A key that does not parse matches nothing, exactly as a non-equal string did.
+    None,
+}
+
+impl<'a> GroupKeyMatcher<'a> {
+    fn new(group_by: GroupBy, key: &'a str) -> Self {
+        match group_by {
+            GroupBy::Device => Self::Device(key.parse().ok()),
+            GroupBy::Patch => {
+                let mut parts = key.split(GROUP_KEY_SEP);
+                match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                    (Some(patch_type), Some(kb), Some(name), None) => Self::Patch {
+                        patch_type,
+                        kb,
+                        name,
+                    },
+                    _ => Self::None,
+                }
+            }
+        }
+    }
+
+    fn matches(&self, row: &PatchRow) -> bool {
+        match self {
+            Self::Device(Some(id)) => row.device_id == *id,
+            Self::Device(None) | Self::None => false,
+            Self::Patch {
+                patch_type,
+                kb,
+                name,
+            } => {
+                row.patch_type == *patch_type
+                    && row.kb.as_deref().unwrap_or("") == *kb
+                    && row.name == *name
+            }
+        }
+    }
 }
 
 /// Serves one page of the cached detail rows, optionally re-ordered by `sort`.
@@ -1979,6 +2037,55 @@ mod tests {
         assert_eq!(groups[1].device_id, None, "a patch group spans devices");
     }
 
+    /// The matcher reimplements `group_key`'s encoding, so the two must agree for
+    /// every row and both groupings — otherwise expanding a group silently returns
+    /// the wrong members (or none).
+    #[test]
+    fn group_key_and_matcher_agree() {
+        let rows = vec![
+            group_row(1, "web-01", Some("KB1"), "Cumulative Update", 5),
+            group_row(2, "web-02", Some("KB1"), "Cumulative Update", 5),
+            group_row(1, "web-01", None, "Google Chrome 138", 3),
+            group_row(3, "db-01", Some("KB2"), "Security Update", 7),
+        ];
+        for group_by in [GroupBy::Device, GroupBy::Patch] {
+            for row in &rows {
+                let key = group_key(row, group_by);
+                let matcher = GroupKeyMatcher::new(group_by, &key);
+                for other in &rows {
+                    assert_eq!(
+                        matcher.matches(other),
+                        group_key(other, group_by) == key,
+                        "matcher disagreed with group_key for {:?} on {:?}",
+                        other.name,
+                        group_by
+                    );
+                }
+            }
+        }
+    }
+
+    /// A key the frontend echoed back from a previous result must match nothing
+    /// rather than panicking or matching everything.
+    #[test]
+    fn an_unparseable_group_key_matches_nothing() {
+        let rows = [
+            group_row(1, "web-01", Some("KB1"), "Cumulative Update", 5),
+            group_row(2, "web-02", None, "Google Chrome 138", 3),
+        ];
+        for (group_by, key) in [
+            (GroupBy::Device, "not-a-number"),
+            (GroupBy::Patch, "too\u{1f}few"),
+            (GroupBy::Patch, "a\u{1f}b\u{1f}c\u{1f}d"),
+        ] {
+            let matcher = GroupKeyMatcher::new(group_by, key);
+            assert!(
+                !rows.iter().any(|r| matcher.matches(r)),
+                "{key:?} must match nothing under {group_by:?}"
+            );
+        }
+    }
+
     #[test]
     fn group_members_returns_only_that_groups_rows() {
         let rows = vec![
@@ -2020,10 +2127,19 @@ mod tests {
         let rows: Vec<PatchRow> = (1..=5)
             .map(|i| group_row(i, &format!("srv{i}"), Some("KB1"), "Cumulative Update", 5))
             .collect();
-        let page = group_page(&rows, GroupBy::Device, 2, 2);
+        let all = build_groups(&rows, GroupBy::Device);
+        let page = slice_groups(&all, 2, 2);
         assert_eq!(page.total, 5, "total counts every group, not the page");
         assert_eq!(page.groups.len(), 2);
-        assert!(group_page(&rows, GroupBy::Device, 99, 2).groups.is_empty());
+        assert!(
+            slice_groups(&all, 99, 2).groups.is_empty(),
+            "an offset past the end is an empty page, not a panic"
+        );
+        assert_eq!(
+            slice_groups(&all, 99, 2).total,
+            5,
+            "and the total still describes the whole grouping"
+        );
     }
 
     #[test]

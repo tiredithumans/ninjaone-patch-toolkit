@@ -13,6 +13,11 @@ version and start a fresh `[Unreleased]`.
 
 ### Changed
 
+- **Paging through grouped patches is no longer re-grouped from scratch on every click.** Each page
+  of *By device* / *By patch* rebuilt the entire grouping — every row, hashed and sorted — while
+  holding the same lock the Excel export takes. The grouping is now built once per result and
+  reused, and expanding a group no longer scans the whole cache building a key string per row.
+
 - **The HTML report's "Compliance by OS" table now matches the Excel export.** Its heading read
   "Compliance" against the workbook's "Compliance %", and it rounded percentages to whole numbers
   where every other table shows one decimal — the last table still rendering its own columns instead
