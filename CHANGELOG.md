@@ -17,12 +17,14 @@ version and start a fresh `[Unreleased]`.
   of *By device* / *By patch* rebuilt the entire grouping — every row, hashed and sorted — while
   holding the same lock the Excel export takes. The grouping is now built once per result and
   reused, and expanding a group no longer scans the whole cache building a key string per row.
-
 - **The HTML report's "Compliance by OS" table now matches the Excel export.** Its heading read
   "Compliance" against the workbook's "Compliance %", and it rounded percentages to whole numbers
   where every other table shows one decimal — the last table still rendering its own columns instead
   of the shared definition. It also silently dropped rows past the display cap; it now says so, like
   the failures and reboot tables do.
+- **Web demo:** the Patches tab's group headers now show the offline and needs-reboot badges the
+  sample data actually carries — they were hardcoded off, so those badges were unreachable in the
+  demo — and its search now strips a `KB` prefix from either side, matching the app.
 - **The install-history window is now shown, and adjustable, for failures too.** The "Installed
   within (days)" control appeared only when *Installed* was selected, but the window bounds the
   whole install-history pull — so a *Failed*-only query (the failure view) was silently truncated to
@@ -49,6 +51,10 @@ version and start a fresh `[Unreleased]`.
   will not be signed out by this change.
 
 ### Fixed
+
+- **An impossible date typed into a date filter is now rejected instead of silently moving.**
+  `2026-02-31` was accepted and became a day in March, so the query ran against a bound nobody
+  chose.
 
 - **A sign-in no longer ends because the server chose not to reissue a refresh token.** Servers may
   legitimately omit it and keep the existing one valid; the app discarded it, which left the session
