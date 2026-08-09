@@ -96,6 +96,31 @@ pub enum StoreOutcome {
     Poisoned,
 }
 
+/// RAII claim on the single job-poller slot, issued by
+/// [`AppState::try_claim_job_poller`].
+///
+/// Dropping it releases the slot, so **every** exit from the poller task frees the
+/// claim — a panic in `advance_job`/`audit::record`/`emit_progress`, a runtime
+/// shutdown dropping the task, or an early `return`. The flag used to be a bare
+/// `AtomicBool` cleared only inside `release_job_poller_if_idle`, reached from the
+/// single "no pending jobs" arm of the loop; any other exit leaked the claim
+/// permanently, after which every later `spawn_job_poller` returned immediately and
+/// **no dispatched job was polled again for the life of the process** — jobs simply
+/// sat at Queued while the operator watched.
+///
+/// [`AppState::release_job_poller_if_idle`] takes the claim by value so the release
+/// can happen under the jobs lock; it hands the claim back when work is still
+/// pending.
+pub struct JobPollerClaim {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for JobPollerClaim {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
 /// Opaque claim on a query run, issued by [`AppState::begin_query`] and redeemed by
 /// [`AppState::store_last_result_if_current`]. Carries the generation that orders
 /// overlapping queries and the tenant the run started under, so neither can be
@@ -224,8 +249,9 @@ pub struct AppState {
     os_fetch_lock: tokio::sync::Mutex<()>,
     sw_fetch_lock: tokio::sync::Mutex<()>,
     /// At most one poller at a time, so a burst of batches doesn't spawn N tasks
-    /// all hammering `/activities`.
-    job_poller_running: AtomicBool,
+    /// all hammering `/activities`. Held behind an [`Arc`] so [`JobPollerClaim`] can
+    /// own a handle and clear it on drop.
+    job_poller_running: Arc<AtomicBool>,
     /// Single-slot confirmation gate — one dialog is open at a time.
     pending_confirm: Mutex<Option<PendingConfirm>>,
 }
@@ -269,7 +295,7 @@ impl AppState {
             devices_fetch_lock: tokio::sync::Mutex::new(()),
             os_fetch_lock: tokio::sync::Mutex::new(()),
             sw_fetch_lock: tokio::sync::Mutex::new(()),
-            job_poller_running: AtomicBool::new(false),
+            job_poller_running: Arc::new(AtomicBool::new(false)),
             pending_confirm: Mutex::new(None),
         })
     }
@@ -760,21 +786,28 @@ impl AppState {
         }
     }
 
-    /// Claims the single poller slot. `false` means one is already running and the
+    /// Claims the single poller slot. `None` means one is already running and the
     /// caller should just let it pick up the new batch.
-    pub fn try_claim_job_poller(&self) -> bool {
+    ///
+    /// The claim is an RAII guard: dropping it releases the slot. That is what makes
+    /// the flag safe to hold across a long-running task — see [`JobPollerClaim`].
+    pub fn try_claim_job_poller(&self) -> Option<JobPollerClaim> {
         self.job_poller_running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+            .then(|| JobPollerClaim {
+                flag: Arc::clone(&self.job_poller_running),
+            })
     }
 
     /// Releases the poller claim **only if** no unresolved job remains. Returns
-    /// `true` when the claim was released and the caller should stop polling, and
-    /// `false` when work appeared and it must keep going.
+    /// `None` when the claim was released and the caller should stop polling, and
+    /// `Some(claim)` — the claim handed back — when work appeared and it must keep
+    /// going.
     ///
     /// Closes a lost-wakeup race. The poller used to break out of its loop on an
     /// empty pending set and release the claim afterwards; a batch dispatched in
-    /// that gap recorded its jobs, then found `try_claim_job_poller` still `false`
+    /// that gap recorded its jobs, then found `try_claim_job_poller` still taken
     /// because the flag had not been cleared yet — so nothing polled it, and those
     /// jobs sat unresolved until some later dispatch happened to start a new poller.
     ///
@@ -782,23 +815,25 @@ impl AppState {
     /// its jobs before calling `try_claim_job_poller`. A concurrent dispatch is
     /// therefore either visible here (we keep polling) or strictly after the release
     /// (its own claim succeeds). There is no order in which it is neither.
-    pub fn release_job_poller_if_idle(&self) -> bool {
+    pub fn release_job_poller_if_idle(&self, claim: JobPollerClaim) -> Option<JobPollerClaim> {
         let Ok(guard) = self.jobs.lock() else {
             // A poisoned job store cannot be polled meaningfully; release so a
             // later dispatch can at least try.
-            self.job_poller_running.store(false, Ordering::Release);
-            return true;
+            drop(claim);
+            return None;
         };
         let key = self.tenant_key();
         let has_pending = guard.as_ref().is_some_and(|(tenant, jobs)| {
             *tenant == key && jobs.iter().any(|j| !j.state.is_terminal())
         });
         if has_pending {
-            return false;
+            return Some(claim);
         }
-        self.job_poller_running.store(false, Ordering::Release);
+        // Dropped before `guard`, so the release still happens under the jobs lock —
+        // that ordering is the whole point of the check above.
+        drop(claim);
         drop(guard);
-        true
+        None
     }
 
     /// Records the plan the operator is being asked to confirm, replacing any
@@ -860,7 +895,7 @@ impl AppState {
             devices_fetch_lock: tokio::sync::Mutex::new(()),
             os_fetch_lock: tokio::sync::Mutex::new(()),
             sw_fetch_lock: tokio::sync::Mutex::new(()),
-            job_poller_running: AtomicBool::new(false),
+            job_poller_running: Arc::new(AtomicBool::new(false)),
             pending_confirm: Mutex::new(None),
         }
     }
@@ -1296,14 +1331,48 @@ mod tests {
     #[test]
     fn the_job_poller_slot_admits_only_one_claimant() {
         let state = AppState::new().expect("build state");
-        assert!(state.try_claim_job_poller());
+        let claim = state.try_claim_job_poller().expect("first claim");
         assert!(
-            !state.try_claim_job_poller(),
+            state.try_claim_job_poller().is_none(),
             "a second batch must join the running poller, not spawn another"
         );
         // Idle (no jobs recorded), so the claim is released and re-claimable.
-        assert!(state.release_job_poller_if_idle());
-        assert!(state.try_claim_job_poller());
+        assert!(state.release_job_poller_if_idle(claim).is_none());
+        assert!(state.try_claim_job_poller().is_some());
+    }
+
+    /// Dropping the claim on *any* path releases the slot. The flag used to be
+    /// cleared only inside `release_job_poller_if_idle`, so a panic or a cancelled
+    /// task leaked it permanently and every later poller returned immediately —
+    /// silently ending all job polling for the life of the process.
+    #[test]
+    fn dropping_the_claim_releases_the_slot() {
+        let state = AppState::new().expect("build state");
+        {
+            let _claim = state.try_claim_job_poller().expect("first claim");
+            assert!(state.try_claim_job_poller().is_none(), "held while alive");
+        }
+        assert!(
+            state.try_claim_job_poller().is_some(),
+            "an unwound poller must not strand the slot"
+        );
+    }
+
+    /// The claim outlives a panic, which is the case a plain `store(false)` at one
+    /// call site cannot cover.
+    #[test]
+    fn a_panicking_poller_still_releases_the_slot() {
+        let state = AppState::new().expect("build state");
+        let claim = state.try_claim_job_poller().expect("first claim");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = claim;
+            panic!("advance_job blew up");
+        }));
+        assert!(result.is_err(), "the panic must actually have happened");
+        assert!(
+            state.try_claim_job_poller().is_some(),
+            "unwinding drops the claim, so the next dispatch can poll"
+        );
     }
 
     /// The lost-wakeup race: the poller finds its pending set empty and moves to
@@ -1313,27 +1382,26 @@ mod tests {
     #[test]
     fn the_poller_keeps_its_claim_when_work_arrives_during_release() {
         let state = AppState::new().expect("build state");
-        assert!(state.try_claim_job_poller());
+        let claim = state.try_claim_job_poller().expect("first claim");
 
         // A batch lands: its jobs are recorded before it tries to claim.
         state.append_jobs(vec![sample_job(1, JobState::Running)]);
         assert!(
-            !state.try_claim_job_poller(),
+            state.try_claim_job_poller().is_none(),
             "the running poller still holds the claim"
         );
 
+        let claim = state
+            .release_job_poller_if_idle(claim)
+            .expect("an unresolved job must keep the poller alive rather than orphan it");
         assert!(
-            !state.release_job_poller_if_idle(),
-            "an unresolved job must keep the poller alive rather than orphan it"
-        );
-        assert!(
-            !state.try_claim_job_poller(),
+            state.try_claim_job_poller().is_none(),
             "and the claim must still be held"
         );
 
         // Once the job settles, the poller may retire.
         state.apply_job_updates(vec![sample_job(1, JobState::Completed)]);
-        assert!(state.release_job_poller_if_idle());
-        assert!(state.try_claim_job_poller());
+        assert!(state.release_job_poller_if_idle(claim).is_none());
+        assert!(state.try_claim_job_poller().is_some());
     }
 }

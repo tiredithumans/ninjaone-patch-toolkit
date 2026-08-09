@@ -11,6 +11,24 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Job polling can no longer stop for the rest of the session.** The single-poller slot was
+  released at exactly one place in the loop, so if anything else ended that task — an unexpected
+  error while advancing a job, writing the audit record, or emitting progress — the slot stayed
+  marked as taken. Every later dispatch then declined to start a poller, and jobs sat at "Queued"
+  forever with nothing watching them. The slot now releases on every exit path.
+- **Two actions sent to the same device no longer swap each other's results.** The native scan,
+  apply and reboot endpoints return no job identifier, so those jobs are matched to NinjaOne's
+  activity feed by "the newest matching activity on this device". With two dispatches in flight to
+  one device, both could pick the same activity and report each other's exit code. An activity now
+  belongs to whichever job claimed it first, and each job records its match on the first poll
+  rather than re-guessing on every tick.
+- **A job whose device keeps reporting activity now times out.** The 45-minute timeout was checked
+  only when the activity feed returned nothing, so a job that kept matching a non-terminal activity
+  stayed "Running" indefinitely — which also kept the poller alive and kept the row from ever
+  being cleared out of the Jobs tab.
+
 ## [0.12.0] - 2026-08-07
 
 ### Added

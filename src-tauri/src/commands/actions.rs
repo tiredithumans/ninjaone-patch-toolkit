@@ -11,7 +11,7 @@
 //! modified frontend must not be able to talk the backend into a wider blast
 //! radius than Settings allows.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -925,9 +925,11 @@ fn spawn_job_poller(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         use tauri::Manager;
-        if !app.state::<AppState>().try_claim_job_poller() {
+        // Held for the life of the task: dropping it — on the `return` below, on a
+        // panic anywhere in the loop, or on runtime shutdown — releases the slot.
+        let Some(mut claim) = app.state::<AppState>().try_claim_job_poller() else {
             return;
-        }
+        };
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
 
@@ -939,18 +941,32 @@ fn spawn_job_poller(app: &AppHandle) {
                 // Release and exit only if still idle when checked under the jobs
                 // lock; otherwise a batch dispatched since the snapshot above would
                 // be left with no poller running (see `release_job_poller_if_idle`).
-                if app.state::<AppState>().release_job_poller_if_idle() {
-                    return;
+                match app.state::<AppState>().release_job_poller_if_idle(claim) {
+                    None => return,
+                    Some(held) => {
+                        claim = held;
+                        continue;
+                    }
                 }
-                continue;
             }
 
             let now = Utc::now();
+            // Activity ids already bound to a job, so the third-tier correlation
+            // heuristic can't hand the same activity to two jobs. Seeded from the
+            // whole store rather than just `pending`: a job that already settled
+            // still owns its activity, and the native endpoints return no
+            // correlator at all, so every scan/apply/reboot reaches that tier.
+            let mut claimed: HashSet<i64> = app
+                .state::<AppState>()
+                .jobs_snapshot()
+                .iter()
+                .filter_map(|j| j.activity_id)
+                .collect();
             let mut updates = Vec::new();
             for mut job in pending {
                 let since = job.dispatched_ts - 5;
                 match api.activities(Some(job.device_id), Some(since)).await {
-                    Ok(list) => crate::actions::advance_job(&mut job, &list, now),
+                    Ok(list) => crate::actions::advance_job(&mut job, &list, now, &mut claimed),
                     Err(err) => {
                         // A transient failure to *read* the feed is not a failure
                         // of the job. Hold state and let the timeout decide.
