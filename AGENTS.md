@@ -66,7 +66,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/filter.rs                # FilterParams → install-query df DSL + client-side device_allowed (identity scope) / OS-name / KB-search facets
 ├── src/model.rs                 # domain types (Device, Patch, PatchType, PatchStatus, …)
 ├── src/rows.rs                  # join → PatchRow, compliance %, SLA aging, reboot/pending + failure/severity/age rollups
-├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / Needs-Reboot / Patch Failures)
+├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / Compliance by OS / Needs-Reboot / Patch Failures)
 ├── src/report.rs                # standalone HTML executive report (inline SVG charts) from the cached QueryResult
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets)
 ├── src/error.rs                 # UiError { message } — the IPC error shape
@@ -670,8 +670,12 @@ each gate is also callable independently. Use the recipe flags from `/justfile`;
 6. **Coverage** *(measurement-only; CI `coverage` job)* — `just coverage` (cargo-llvm-cov, backend
    only). No minimum threshold is enforced yet, so a dip never fails the build; the CI job publishes
    `lcov.info` as an artifact and a per-file summary on the run page.
-7. **Dependency audit** *(optional locally)* — `just audit` (RustSec advisories, both lockfiles)
-   + `just deny` / `just web-deny` (licenses + supply-chain sources + bans via `deny.toml`).
+7. **Dependency audit** *(CI-enforced; optional locally)* — `just audit` (RustSec advisories, both
+   lockfiles) + `just deny` / `just web-deny` (licenses + supply-chain sources + bans via
+   `deny.toml`). `ci.yml` runs these as the dedicated `audit` and `deny` jobs, and `cargo-audit` is
+   a **required check** on `main` — so these are gates, not advice. `just verify` deliberately does
+   **not** chain them (they hit the network and the advisory DB moves under you), which is the one
+   way a green local `verify` can still fail CI.
 8. **CodeQL** *(GitHub-side)* — Rust security queries, build-mode `none` (`.github/workflows/codeql.yml`).
 9. **Manifest versions** *(GitHub-side)* — the `versions` job in `ci.yml` checks that
    `tauri.conf.json`, `src-tauri/Cargo.toml` and `web-rs/Cargo.toml` carry the same version on
