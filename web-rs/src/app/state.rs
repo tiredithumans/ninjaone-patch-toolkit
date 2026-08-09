@@ -616,9 +616,15 @@ impl AppState {
     /// (this runs imperatively at Run time, not inside a reactive scope).
     pub(super) fn snapshot_filters(self) -> AppliedFilters {
         let statuses = self.filters.statuses.get_untracked();
+        // The lookback bounds *both* install-history statuses, not just INSTALLED:
+        // `QueryPlan` sets `installed_after` whenever any `is_install_history()`
+        // status is requested, and the query always sends `install_after_days`. Tying
+        // the chip to INSTALLED alone meant a FAILED-only run — the failure dashboard —
+        // was silently truncated to the window with nothing on screen saying so, so an
+        // operator reading "12 failures" had no way to know it meant "12 in 30 days".
         let install_days = statuses
             .iter()
-            .any(|s| s == "INSTALLED")
+            .any(|s| s == "INSTALLED" || s == "FAILED")
             .then(|| self.filters.install_days.get_untracked());
 
         let organization = self.filters.org_id.get_untracked().and_then(|id| {
