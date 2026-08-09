@@ -9,7 +9,7 @@
 //! [`plan`] is deliberately pure — the clock is injected — so every guardrail is
 //! unit-testable without a tenant, a network, or a wall clock.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Datelike, Local, Timelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -599,7 +599,20 @@ pub fn build_parameters(
 /// the activity series uid, then the newest script activity on that device since
 /// dispatch. The middle tier is what makes an id-less dispatch response usable —
 /// several tenants return only a `jobUid`.
-pub fn match_activity<'a>(activities: &'a [Activity], job: &JobReport) -> Option<&'a Activity> {
+///
+/// `claimed` carries the activity ids already bound to *other* jobs, and only the
+/// third tier consults it. That tier is pure heuristic — device + activity type +
+/// a timestamp floor — and the native endpoints (`scan`/`apply`/`reboot`) return no
+/// correlator at all, so every one of those jobs reaches it. Without the exclusion,
+/// two actions dispatched to the same device close together both select the newest
+/// matching activity and swap each other's `exit_code`/`activity_id`. The first two
+/// tiers are exact bindings and are deliberately *not* filtered: a job that already
+/// owns an id must keep resolving to it on every later poll.
+pub fn match_activity<'a>(
+    activities: &'a [Activity],
+    job: &JobReport,
+    claimed: &HashSet<i64>,
+) -> Option<&'a Activity> {
     if let Some(id) = job.activity_id
         && let Some(a) = activities.iter().find(|a| a.id == Some(id))
     {
@@ -624,6 +637,9 @@ pub fn match_activity<'a>(activities: &'a [Activity], job: &JobReport) -> Option
             )
         })
         .filter(|a| a.activity_time.unwrap_or(0.0) >= floor)
+        // An activity with no id cannot be tracked, so it cannot be excluded either;
+        // it stays eligible exactly as before.
+        .filter(|a| a.id.is_none_or(|id| !claimed.contains(&id)))
         .max_by(|a, b| {
             a.activity_time
                 .unwrap_or(0.0)
@@ -635,8 +651,20 @@ pub fn match_activity<'a>(activities: &'a [Activity], job: &JobReport) -> Option
 ///
 /// A poll that returned *no* activities is not a failure — the feed lags behind a
 /// dispatch — so the job holds its state until [`JOB_TIMEOUT_MINUTES`] elapses.
-pub fn advance_job(job: &mut JobReport, activities: &[Activity], now: DateTime<Utc>) {
-    match match_activity(activities, job) {
+///
+/// `claimed` is threaded through a whole poll pass: it is seeded with the ids
+/// already bound to other jobs and gains this job's id as soon as one is bound, so
+/// no two jobs can resolve to the same activity. Correlation is recorded on the
+/// *first* match rather than only on a terminal one — otherwise a long-running job
+/// re-ran the third-tier heuristic on every tick and could land on a different
+/// activity each time.
+pub fn advance_job(
+    job: &mut JobReport,
+    activities: &[Activity],
+    now: DateTime<Utc>,
+    claimed: &mut HashSet<i64>,
+) {
+    match match_activity(activities, job, claimed) {
         Some(a) if a.is_terminal() => {
             let state = match a.status.as_deref() {
                 Some("COMPLETED") => JobState::Completed,
@@ -653,12 +681,32 @@ pub fn advance_job(job: &mut JobReport, activities: &[Activity], now: DateTime<U
             job.exit_code = a.exit_code();
             job.finish(state, now);
         }
-        Some(_) => job.state = JobState::Running,
+        Some(a) => {
+            if job.activity_id.is_none() {
+                job.activity_id = a.id;
+            }
+            if job.series_uid.is_none() {
+                job.series_uid = a.series_uid.clone();
+            }
+            // A device that keeps producing matching non-terminal activities used to
+            // hold this job at Running forever: the timeout lived only in the other
+            // two arms. Such a job pinned the poller (`release_job_poller_if_idle`
+            // keeps it alive while any job is non-terminal) and could never be
+            // evicted by `append_jobs`'s MAX_JOBS trim, which retains non-terminals.
+            if job.is_past_timeout(now) {
+                job.finish(JobState::TimedOut, now);
+            } else {
+                job.state = JobState::Running;
+            }
+        }
         None => {
             if job.is_past_timeout(now) {
                 job.finish(JobState::TimedOut, now);
             }
         }
+    }
+    if let Some(id) = job.activity_id {
+        claimed.insert(id);
     }
 }
 
@@ -1234,7 +1282,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            match_activity(&list, &j).and_then(|a| a.id),
+            match_activity(&list, &j, &HashSet::new()).and_then(|a| a.id),
             Some(1002),
             "the exact id must win over the newer row"
         );
@@ -1251,7 +1299,10 @@ mod tests {
                              "activityTime": (now - 30) as f64 }),
             ),
         ];
-        assert_eq!(match_activity(&list, &j).and_then(|a| a.id), Some(2));
+        assert_eq!(
+            match_activity(&list, &j, &HashSet::new()).and_then(|a| a.id),
+            Some(2)
+        );
     }
 
     #[test]
@@ -1262,7 +1313,7 @@ mod tests {
             json!({ "id": 9, "activityType": "SCRIPT", "activityTime": (now - 600) as f64 }),
         )];
         assert!(
-            match_activity(&stale, &j).is_none(),
+            match_activity(&stale, &j, &HashSet::new()).is_none(),
             "a run from ten minutes ago is not this job"
         );
     }
@@ -1273,12 +1324,12 @@ mod tests {
 
         // Nothing matched yet, but still inside the window: hold state.
         let mut fresh = job(None, None, now.timestamp() - 60);
-        advance_job(&mut fresh, &[], now);
+        advance_job(&mut fresh, &[], now, &mut HashSet::new());
         assert_eq!(fresh.state, JobState::Running);
         assert!(fresh.finished_at.is_none());
 
         let mut old = job(None, None, now.timestamp() - (JOB_TIMEOUT_MINUTES + 1) * 60);
-        advance_job(&mut old, &[], now);
+        advance_job(&mut old, &[], now, &mut HashSet::new());
         assert_eq!(old.state, JobState::TimedOut);
         assert!(old.finished_at.is_some());
     }
@@ -1290,7 +1341,7 @@ mod tests {
     fn an_empty_poll_does_not_fail_the_job() {
         let now = Utc::now();
         let mut j = job(None, None, now.timestamp());
-        advance_job(&mut j, &[], now);
+        advance_job(&mut j, &[], now, &mut HashSet::new());
         assert_eq!(j.state, JobState::Running);
         assert!(!j.state.is_terminal());
     }
@@ -1304,13 +1355,117 @@ mod tests {
             "status": "COMPLETED", "activityTime": now.timestamp() as f64,
             "result": { "exitCode": 2 },
         }))];
-        advance_job(&mut j, &list, now);
+        advance_job(&mut j, &list, now, &mut HashSet::new());
 
         assert_eq!(j.state, JobState::Completed);
         assert_eq!(j.exit_code, Some(2));
         assert_eq!(j.activity_id, Some(77));
         assert_eq!(j.series_uid.as_deref(), Some("uid-z"));
         assert!(j.duration_seconds.is_some());
+    }
+
+    /// A device that keeps producing matching *non-terminal* activities used to hold
+    /// the job at Running forever: only the `None` and poll-error arms checked the
+    /// timeout. Such a row pinned the poller alive and could never be evicted by
+    /// `append_jobs`'s MAX_JOBS trim, which retains non-terminal jobs.
+    #[test]
+    fn a_perpetually_running_activity_still_times_out() {
+        let now = Utc::now();
+        let dispatched = now.timestamp() - (JOB_TIMEOUT_MINUTES + 1) * 60;
+        let mut j = job(None, None, dispatched);
+        let list = vec![activity(json!({
+            "id": 5, "activityType": "SCRIPT", "status": "RUNNING",
+            "activityTime": dispatched as f64,
+        }))];
+
+        advance_job(&mut j, &list, now, &mut HashSet::new());
+
+        assert_eq!(j.state, JobState::TimedOut);
+        assert!(j.state.is_terminal(), "or it pins the poller forever");
+    }
+
+    /// Still inside the window, the same match keeps the job Running — the timeout
+    /// above must not swallow a healthy long run.
+    #[test]
+    fn a_running_activity_inside_the_window_stays_running() {
+        let now = Utc::now();
+        let mut j = job(None, None, now.timestamp() - 60);
+        let list = vec![activity(json!({
+            "id": 5, "activityType": "SCRIPT", "status": "RUNNING",
+            "activityTime": (now.timestamp() - 60) as f64,
+        }))];
+
+        advance_job(&mut j, &list, now, &mut HashSet::new());
+
+        assert_eq!(j.state, JobState::Running);
+        assert_eq!(
+            j.activity_id,
+            Some(5),
+            "correlation is recorded on the first match, so later polls use tier 1 \
+             instead of re-running the heuristic and possibly landing elsewhere"
+        );
+    }
+
+    /// The native endpoints (scan/apply/reboot) return no correlator, so every one of
+    /// those jobs reaches the third-tier "newest matching activity on this device"
+    /// heuristic. Without an exclusion set, two actions dispatched to the same device
+    /// close together both select the newest activity and swap exit codes.
+    #[test]
+    fn two_jobs_on_one_device_cannot_claim_the_same_activity() {
+        let now = Utc::now();
+        let ts = now.timestamp();
+        let list = vec![
+            activity(json!({
+                "id": 200, "activityType": "ACTION", "status": "COMPLETED",
+                "activityTime": ts as f64, "result": { "exitCode": 0 },
+            })),
+            activity(json!({
+                "id": 199, "activityType": "ACTION", "status": "COMPLETED",
+                "activityTime": (ts - 1) as f64, "result": { "exitCode": 3 },
+            })),
+        ];
+
+        let mut claimed = HashSet::new();
+        let mut first = job(None, None, ts - 10);
+        let mut second = job(None, None, ts - 10);
+
+        advance_job(&mut first, &list, now, &mut claimed);
+        advance_job(&mut second, &list, now, &mut claimed);
+
+        assert_eq!(
+            first.activity_id,
+            Some(200),
+            "newest wins for the first job"
+        );
+        assert_eq!(
+            second.activity_id,
+            Some(199),
+            "the second must fall to the next unclaimed activity, not re-take 200"
+        );
+        assert_ne!(
+            first.exit_code, second.exit_code,
+            "distinct activities carry their own exit codes"
+        );
+    }
+
+    /// The exclusion applies only to the heuristic tier. A job that already owns an
+    /// activity id must keep resolving to it on every later poll, even though that id
+    /// is by then in the claimed set.
+    #[test]
+    fn an_exact_id_match_ignores_the_claimed_set() {
+        let now = Utc::now();
+        let j = job(Some(42), None, now.timestamp());
+        let list = vec![activity(json!({
+            "id": 42, "activityType": "SCRIPT", "status": "RUNNING",
+            "activityTime": now.timestamp() as f64,
+        }))];
+        let claimed = HashSet::from([42]);
+
+        assert_eq!(
+            match_activity(&list, &j, &claimed).and_then(|a| a.id),
+            Some(42),
+            "its own claim must not lock a job out of its own activity"
+        );
     }
 
     /// `Unknown` must stay non-terminal: the dispatch may already be running on the
