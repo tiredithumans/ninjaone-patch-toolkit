@@ -324,6 +324,17 @@ fn scoped_compliance_by_os(rows: &[PatchRow]) -> Vec<OsCompliance> {
         .collect()
 }
 
+/// Devices the sample says need a reboot. Single-sourced so the Needs Reboot tab and
+/// the Patches tab's group headers cannot disagree about which machines they are —
+/// the backend derives both from one device inventory, which the demo has none of.
+const REBOOT_DEVICE_NAMES: [&str; 5] = [
+    "SEA-DC01",
+    "DCA-WEB02",
+    "NW-SQL01",
+    "ATX-WKS-2207",
+    "FAB-LNX-WEB1",
+];
+
 fn sample_reboot() -> Vec<DeviceSummary> {
     vec![
         reboot(
@@ -600,7 +611,16 @@ fn type_matches(patch_type: &str, row_type: &str) -> bool {
 }
 
 fn search_matches(row: &PatchRow, query: &str) -> bool {
-    contains_ci(&row.name, query) || contains_ci(row.kb.as_deref().unwrap_or(""), query)
+    // Mirrors `FilterParams::search_allowed`: the `KB` prefix is stripped from BOTH
+    // the needle and the KB before comparing, so "KB5040434" finds a patch stored as
+    // "5040434" and vice versa. A plain substring match only handled one of those
+    // directions, so the demo's search quietly behaved differently from the app's.
+    let kb = row.kb.as_deref().unwrap_or("");
+    let q = query.trim().to_lowercase();
+    let q_bare = q.trim_start_matches("kb").trim().to_string();
+    let kb_lower = kb.to_lowercase();
+    let kb_bare = kb_lower.trim_start_matches("kb").trim();
+    kb_lower.contains(&q) || kb_bare.contains(&q_bare) || row.name.to_lowercase().contains(&q)
 }
 
 fn first_seen_in_window(row: &PatchRow, f: &FilterParams) -> bool {
@@ -665,6 +685,10 @@ pub fn group_key(row: &PatchRow, group_by: GroupBy) -> String {
 /// device groups ordered by worst severity then org/device, patch groups by blast
 /// radius then severity.
 pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
+    // The sample has no device inventory, so the reboot flag comes from the same
+    // list the Needs Reboot tab renders — which is what keeps the two consistent.
+    let reboot_devices: std::collections::HashSet<&str> =
+        REBOOT_DEVICE_NAMES.iter().copied().collect();
     let mut order: Vec<String> = Vec::new();
     let mut acc: BTreeMap<String, PatchGroup> = BTreeMap::new();
     let mut devices: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
@@ -687,8 +711,13 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 devices: 0,
                 severity: r.severity.clone(),
                 severity_rank: rank,
-                offline: false,
-                needs_reboot: false,
+                // Copied from the group's first row, as the backend's `build_groups`
+                // copies them from the first row's device. These were hardcoded
+                // `false`, so a demo group header claimed every device was online and
+                // needed no reboot even when the row said otherwise — the offline
+                // badge and the reboot hint were unreachable in the demo.
+                offline: r.offline,
+                needs_reboot: reboot_devices.contains(r.device_name.as_str()),
             }
         });
         entry.rows += 1;
@@ -753,6 +782,59 @@ mod tests {
 
     fn filter() -> FilterParams {
         FilterParams::default()
+    }
+
+    /// The reboot list and the names the group headers flag must be the same set, or
+    /// the Needs Reboot tab and the Patches tab disagree about which machines they
+    /// are. The backend derives both from one device inventory; the demo has none, so
+    /// this const is the single source and this test is what holds it there.
+    #[test]
+    fn the_reboot_name_list_matches_the_reboot_tab() {
+        let from_tab: Vec<String> = sample_reboot().into_iter().map(|d| d.device_name).collect();
+        assert_eq!(
+            from_tab,
+            REBOOT_DEVICE_NAMES.to_vec(),
+            "REBOOT_DEVICE_NAMES must list exactly the devices sample_reboot() returns"
+        );
+    }
+
+    /// The demo's group headers used to hardcode `offline: false` / `needs_reboot:
+    /// false`, so those badges were unreachable in the demo no matter what the rows
+    /// said. The backend copies both from the group's first row.
+    #[test]
+    fn group_headers_carry_the_reboot_flag_from_the_sample() {
+        let rows = demo_rows()
+            .into_iter()
+            .map(|d| d.row)
+            .collect::<Vec<PatchRow>>();
+        let groups = group_rows(&rows, GroupBy::Device);
+        assert!(
+            groups.iter().any(|g| g.needs_reboot),
+            "at least one sample device needs a reboot, so some group header must say so"
+        );
+    }
+
+    /// Mirrors `FilterParams::search_allowed`, which strips the `KB` prefix from both
+    /// sides. A plain substring match only covered one direction.
+    #[test]
+    fn demo_search_strips_the_kb_prefix_on_either_side() {
+        let rows: Vec<PatchRow> = demo_rows().into_iter().map(|d| d.row).collect();
+        let with_kb = rows
+            .iter()
+            .find(|r| r.kb.as_deref().is_some_and(|k| !k.is_empty()))
+            .expect("the sample has at least one KB-bearing row");
+        let kb = with_kb.kb.clone().unwrap();
+        let bare = kb.trim_start_matches("KB").to_string();
+
+        assert!(search_matches(with_kb, &kb), "exact KB must match");
+        assert!(
+            search_matches(with_kb, &bare),
+            "the bare number must match a KB-prefixed patch"
+        );
+        assert!(
+            search_matches(with_kb, &format!("kb{bare}")),
+            "a lowercase kb-prefixed needle must match too"
+        );
     }
 
     fn all_statuses() -> Vec<String> {
