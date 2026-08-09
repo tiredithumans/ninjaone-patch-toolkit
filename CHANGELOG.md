@@ -31,6 +31,17 @@ version and start a fresh `[Unreleased]`.
   relying on the copy in the OS keychain — and that copy is explicitly allowed to be missing.
 - **A locked keychain now says so.** It was reported as "not authenticated", which sent you to
   re-run a sign-in that could not have fixed it.
+- **A stray request on the callback port can no longer kill a sign-in.** Anything arriving with a
+  `state` value — a bookmark, a probe, another tool on the same port — ended the wait, and the
+  sign-in then failed with "state mismatch — possible CSRF". The listener now recognises the real
+  redirect by requiring both an authorization result and the exact `state` this sign-in generated,
+  and answers everything else with a 404 while it keeps waiting.
+- **A slow client can no longer stall sign-in.** The 10-second limit applied to each read rather
+  than to the connection, so a client trickling a byte at a time held the listener open and the
+  browser's redirect queued behind it until the three-minute timeout.
+- **Starting a second sign-in now explains itself.** It previously failed while claiming the
+  callback port with "Is another instance of this app running?", which pointed at a second copy of
+  the app that did not exist — the port was held by this app's own sign-in, still waiting.
 
 - **Job polling can no longer stop for the rest of the session.** The single-poller slot was
   released at exactly one place in the loop, so if anything else ended that task — an unexpected
