@@ -204,6 +204,9 @@ pub fn save_settings(
         guard.clone()
     };
 
+    // Drops the previous tenant's grant when the tenant actually changed — see
+    // `AuthState::apply_settings` for why leaving it in place destroyed the
+    // credential of the tenant being switched away from.
     state.auth.apply_settings(
         snapshot.instance_base_url.clone(),
         snapshot.client_id.clone(),
