@@ -694,8 +694,11 @@ pub(crate) fn filter_chips(f: &AppliedFilters) -> Vec<FilterChip> {
         });
     }
     if let Some(d) = f.install_days {
+        // Covers FAILED as well as INSTALLED — the backend bounds the whole
+        // install-history pull by this window, so "Installed within" understated
+        // what it applies to on a failures-only run.
         out.push(FilterChip {
-            label: format!("Installed within {d}d"),
+            label: format!("Install history: last {d}d"),
             patch: true,
         });
     }
@@ -1812,7 +1815,7 @@ mod tests {
                 "Severity: Critical",
                 "Search: KB5040434",
                 "First seen: last 7 days",
-                "Installed within 30d",
+                "Install history: last 30d",
             ]
         );
         // The first five facets are device-scope; the rest are patch-tier.

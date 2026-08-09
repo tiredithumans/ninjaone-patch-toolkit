@@ -334,7 +334,15 @@ where
     let p_sw_inst = |n: usize| progress("swInstalls", n);
     let patch_df_ref = plan.patch_df.as_deref();
 
-    let (devices, current, (orgs, locations, roles), os_installs, sw_installs) = tokio::try_join!(
+    // `join!`, not `try_join!`. `try_join!` drops the other futures the moment one
+    // returns `Err`, and the two most expensive legs here — the whole-fleet device
+    // inventory and the whole-fleet current-patch feeds — are the ones that populate
+    // the long-lived caches. A transient failure on the *per-query* install-history
+    // pull therefore cancelled minutes of sequential cursor paging before it could
+    // reach its cache, so the retry started cold and hit exactly the same odds
+    // again. Letting every leg finish means the query still fails (the `?`s below
+    // are unchanged), but the fleet caches are warm for the retry.
+    let (devices, current, lookup_sets, os_installs, sw_installs) = tokio::join!(
         devices_fut,
         current_fut,
         lookups,
@@ -366,7 +374,15 @@ where
                 Ok(Vec::new())
             }
         },
-    )?;
+    );
+    // Surfaced in the same order `try_join!` would have, so the operator sees the
+    // same first error; the difference is only that the siblings were allowed to
+    // finish and cache.
+    let devices = devices?;
+    let current = current?;
+    let (orgs, locations, roles) = lookup_sets?;
+    let os_installs = os_installs?;
+    let sw_installs = sw_installs?;
 
     // Fetches done; the rest is the in-memory scope + join/rollup.
     progress("joining", 0);

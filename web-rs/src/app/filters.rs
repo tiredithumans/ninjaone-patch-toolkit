@@ -5,13 +5,18 @@ use super::*;
 #[component]
 pub(crate) fn Filters() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let installed_selected = move || {
+    // Both install-history statuses are bounded by the lookback window, not just
+    // INSTALLED: the backend sets `installed_after` whenever any `is_install_history()`
+    // status is requested. Gating this control on INSTALLED alone hid the window from
+    // the one view most likely to be truncated by it — a FAILED-only failure dashboard
+    // — so the operator could neither see nor widen the bound narrowing their results.
+    let install_history_selected = move || {
         state
             .filters
             .statuses
             .get()
             .iter()
-            .any(|s| s == "INSTALLED")
+            .any(|s| s == "INSTALLED" || s == "FAILED")
     };
     // Fleet-health tabs (Compliance / Needs Reboot) ignore the patch filters, so hide
     // those controls there rather than imply they'd change the device-scope numbers.
@@ -287,9 +292,9 @@ pub(crate) fn Filters() -> impl IntoView {
                 // Install-window field: only relevant when INSTALLED is selected.
                 // Lives inside `stacked-filters` as a control-group so its label
                 // shares the same aligned column (and row gap) as the rows above.
-                <Show when=installed_selected>
+                <Show when=install_history_selected>
                     <div class="control-group">
-                        <span class="chips-label">"Installed within (days):"</span>
+                        <span class="chips-label">"Install history window (days):"</span>
                         <input
                             type="number"
                             class="narrow"

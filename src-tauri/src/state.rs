@@ -234,6 +234,11 @@ pub struct AppState {
     /// into the slot the invalidation had just cleared — restarting [`DEVICE_TTL`] on
     /// exactly the rows the caller wanted gone. `TenantKey` cannot cover this: it is
     /// the same tenant.
+    /// Bumped by [`AppState::clear_lookups_cache`] before it clears the slot, and
+    /// re-read under the slot lock at the store in [`AppState::lookups`], so a fetch
+    /// already in flight cannot write its pre-invalidation rows back. Mirrors
+    /// `devices_epoch`/`current_epoch`, which the lookups cache was missing.
+    lookups_epoch: AtomicU64,
     devices_epoch: AtomicU64,
     /// The same guard for both current-patch families. Bumped by
     /// [`AppState::invalidate_current_patches`], which a mutating action calls — and
@@ -290,6 +295,7 @@ impl AppState {
             jobs: Mutex::new(None),
             job_seq: AtomicU64::new(1),
             query_generation: AtomicU64::new(0),
+            lookups_epoch: AtomicU64::new(0),
             devices_epoch: AtomicU64::new(0),
             current_epoch: AtomicU64::new(0),
             devices_fetch_lock: tokio::sync::Mutex::new(()),
@@ -346,6 +352,8 @@ impl AppState {
         {
             return Ok((c.orgs.clone(), c.locations.clone(), c.roles.clone()));
         }
+        // Sampled before the fetch and re-checked under the slot lock at the store.
+        let epoch = self.lookups_epoch.load(Ordering::SeqCst);
         let (orgs, locations, roles) = tokio::try_join!(
             self.api.organizations(),
             async {
@@ -364,13 +372,23 @@ impl AppState {
         )?;
         let (orgs, locations, roles) = (Arc::new(orgs), Arc::new(locations), Arc::new(roles));
         if let Ok(mut guard) = self.lookups_cache.lock() {
-            *guard = Some(LookupCache {
-                at: Instant::now(),
-                tenant: key,
-                orgs: orgs.clone(),
-                locations: locations.clone(),
-                roles: roles.clone(),
-            });
+            // Epoch re-check under the slot lock, exactly as `fleet_devices` and
+            // `current_family` do. Storing unconditionally let a fetch that was
+            // already in flight when `clear_lookups_cache` ran write its
+            // pre-invalidation rows straight back and restart LOOKUP_TTL on them —
+            // the tenant stamp cannot catch that, since a same-tenant sign-out is
+            // the case it happens on.
+            if self.lookups_epoch.load(Ordering::SeqCst) == epoch {
+                *guard = Some(LookupCache {
+                    at: Instant::now(),
+                    tenant: key,
+                    orgs: orgs.clone(),
+                    locations: locations.clone(),
+                    roles: roles.clone(),
+                });
+            } else {
+                tracing::debug!("lookups invalidated mid-fetch; not caching");
+            }
         }
         Ok((orgs, locations, roles))
     }
@@ -444,7 +462,13 @@ impl AppState {
 
         // Each family resolves through its own single-flight gate, so an OS-only
         // query never waits on an in-flight third-party fetch it doesn't need.
-        let (os_hit, sw_hit) = tokio::try_join!(
+        //
+        // `join!`, not `try_join!`: the two families are independent and each caches
+        // its own result, so cancelling the sibling on the first error threw away a
+        // whole-fleet feed that had already been paged — the third-party one runs to
+        // six figures and is usually the longest fetch in the query. Both now finish
+        // and cache; the `?` below still fails the call on either error.
+        let (os_hit, sw_hit) = tokio::join!(
             async {
                 match include_os {
                     true => self
@@ -475,7 +499,8 @@ impl AppState {
                     false => Ok(None),
                 }
             },
-        )?;
+        );
+        let (os_hit, sw_hit) = (os_hit?, sw_hit?);
 
         let (os, os_at) = match os_hit {
             Some((rows, at)) => (rows, Some(at)),
@@ -564,6 +589,14 @@ impl AppState {
     /// change) doesn't see stale org/location/role names. Also drops the whole-fleet
     /// device/patch caches, which are likewise tenant-scoped.
     pub fn clear_lookups_cache(&self) {
+        // Bump *before* clearing, so both interleavings lose the racing write: a
+        // fetch that stores before the clear is wiped by it, and one that stores
+        // after sees the new epoch and declines. This slot used to be cleared bare,
+        // which is precisely what the comment below says is wrong for the other two
+        // — an in-flight lookups fetch wrote its rows straight back and restarted
+        // LOOKUP_TTL on them. The tenant stamp cannot catch it, because the case it
+        // happens on (a same-tenant sign-out) has the same stamp.
+        self.lookups_epoch.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut guard) = self.lookups_cache.lock() {
             *guard = None;
         }
@@ -890,6 +923,7 @@ impl AppState {
             jobs: Mutex::new(None),
             job_seq: AtomicU64::new(1),
             query_generation: AtomicU64::new(0),
+            lookups_epoch: AtomicU64::new(0),
             devices_epoch: AtomicU64::new(0),
             current_epoch: AtomicU64::new(0),
             devices_fetch_lock: tokio::sync::Mutex::new(()),
@@ -1077,6 +1111,53 @@ mod tests {
             hits(&server, "/api/v2/queries/os-patches").await,
             2,
             "the query after the action must re-fetch, not be served pre-action rows"
+        );
+    }
+
+    /// Same race, on the lookups slot. `clear_lookups_cache` cleared it bare while
+    /// `lookups()` stored unconditionally after its await, so a fetch already in
+    /// flight wrote its pre-invalidation rows straight back and restarted LOOKUP_TTL
+    /// on them. The tenant stamp cannot catch this: the case it happens on — a
+    /// same-tenant sign-out — carries the same stamp.
+    #[tokio::test]
+    async fn a_lookups_invalidation_during_a_fetch_is_not_undone_by_that_fetch() {
+        use std::time::Duration as StdDuration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for p in [
+            "/api/v2/organizations",
+            "/api/v2/locations",
+            "/api/v2/roles",
+        ] {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!([]))
+                        .set_delay(StdDuration::from_millis(150)),
+                )
+                .mount(&server)
+                .await;
+        }
+        let state = Arc::new(AppState::seeded(server.uri()));
+
+        let fetching = {
+            let state = state.clone();
+            tokio::spawn(async move { state.lookups().await.expect("in-flight lookups") })
+        };
+        // Stand in for a sign-out landing while the lookups fetch is in flight.
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+        state.clear_lookups_cache();
+        fetching.await.expect("join");
+
+        state.lookups().await.expect("post-clear lookups");
+        assert_eq!(
+            hits(&server, "/api/v2/organizations").await,
+            2,
+            "the lookups after the clear must re-fetch, not be served the rows the \
+             in-flight fetch wrote back"
         );
     }
 

@@ -11,6 +11,20 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The install-history window is now shown, and adjustable, for failures too.** The "Installed
+  within (days)" control appeared only when *Installed* was selected, but the window bounds the
+  whole install-history pull — so a *Failed*-only query (the failure view) was silently truncated to
+  it with nothing on screen saying so, and no way to widen it. It is now labelled "Install history
+  window (days)", appears whenever *Installed* or *Failed* is selected, and its applied-filter chip
+  reads "Install history: last Nd".
+- **A failed query no longer throws away the fleet data it already downloaded.** The device
+  inventory, the patch feeds and the install history were fetched together, and the first failure
+  cancelled the rest — so a hiccup on the install-history call discarded minutes of completed
+  whole-fleet paging and the retry started from cold. Every fetch now finishes and caches; the query
+  still reports the error.
+
 ### Security
 
 - **Switching instance or client ID no longer destroys the sign-in you switched away from.** The
