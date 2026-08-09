@@ -13,8 +13,8 @@ use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus,
 use crate::rows::{
     GroupBy, GroupPage, LookupMaps, PatchSource, QueryResult, QuerySummary, RowSort,
     build_age_buckets, build_compliance, build_compliance_by_os, build_device_summaries,
-    build_failures, build_rows, build_severity_by_org, group_member_page, group_page, page_rows,
-    pending_counts,
+    build_failures, build_rows, build_severity_by_org, group_member_page, page_rows,
+    pending_counts, slice_groups,
 };
 use crate::settings::MAX_WINDOW_DAYS;
 use crate::state::{AppState, CurrentPatches, StoreOutcome};
@@ -27,6 +27,21 @@ type Lookups = (Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>);
 /// match the frontend's `PATCHES_PAGE_SIZE` so the seeded page fills the table's
 /// first page exactly (later pages come from `get_patch_rows`).
 const FIRST_PAGE_ROWS: usize = 100;
+
+/// Hard cap on how many rows one paging call may return.
+///
+/// The write path re-checks every guardrail backend-side precisely because a stale
+/// or modified frontend must not be able to widen what it asks for; the read path
+/// took `offset`/`limit` verbatim, so the one cap that existed (`GROUP_MEMBER_LIMIT`)
+/// lived frontend-side and a `limit` of `usize::MAX` cloned the entire cache into a
+/// single IPC response — the exact whole-fleet serialization the paging design
+/// exists to avoid.
+const MAX_PAGE_LIMIT: usize = 1_000;
+
+/// Clamps a requested page window to something the backend is willing to serve.
+fn clamp_page(limit: usize) -> usize {
+    limit.min(MAX_PAGE_LIMIT)
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -567,7 +582,7 @@ pub async fn get_patch_rows(
     // sort is an in-memory, bounded ref-sort — still "locks are brief, never across
     // await".
     let rows = state
-        .with_current_result(|r| page_rows(&r.rows, offset, limit, sort))
+        .with_current_result(|r| page_rows(&r.rows, offset, clamp_page(limit), sort))
         .map_err(|_| UiError::new("result cache poisoned"))?
         .unwrap_or_default();
     Ok(rows)
@@ -588,8 +603,11 @@ pub async fn get_patch_groups(
 ) -> Result<GroupPage, UiError> {
     // Empty on a miss, matching `get_patch_rows` / `get_patch_group_members` — see
     // the note on `get_patch_rows`.
+    // Through the memo rather than `group_page`, which rebuilt the whole grouping on
+    // every request. The slice is the same; only the rebuild is gone.
+    let limit = clamp_page(limit);
     let page = state
-        .with_current_result(|r| group_page(&r.rows, group_by, offset, limit))
+        .with_grouped_result(group_by, |all| slice_groups(all, offset, limit))
         .map_err(|_| UiError::new("result cache poisoned"))?
         .unwrap_or_default();
     Ok(page)
@@ -607,7 +625,9 @@ pub async fn get_patch_group_members(
     limit: usize,
 ) -> Result<Vec<PatchRow>, UiError> {
     let rows = state
-        .with_current_result(|r| group_member_page(&r.rows, group_by, &key, offset, limit))
+        .with_current_result(|r| {
+            group_member_page(&r.rows, group_by, &key, offset, clamp_page(limit))
+        })
         .map_err(|_| UiError::new("result cache poisoned"))?
         .unwrap_or_default();
     Ok(rows)
