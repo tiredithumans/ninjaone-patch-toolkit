@@ -48,21 +48,70 @@ jobs:
       # tagged version has no CHANGELOG.md section — fine for workflow_dispatch,
       # but on a tag it means [Unreleased] was never rolled. Fail fast rather
       # than shipping a release (and in-app update splash) with placeholder
-      # notes. Uses the exact awk the notes steps use, so the guard's pass/fail
-      # matches the fallback condition it protects against.
+      # notes. Calls the same `scripts/changelog-notes.sh` the notes steps use, so
+      # the guard's pass/fail cannot drift from the fallback it protects against.
       - name: Check CHANGELOG has notes for this version
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           version="${GITHUB_REF_NAME#v}"
-          notes=$(awk -v ver="$version" '
-            /^## \[/ { if (c) exit; if (index($0, "## [" ver "]") == 1) c=1; next }
-            c { print }
-          ' CHANGELOG.md | sed '/./,$!d')
+          notes=$(scripts/changelog-notes.sh "$version")
           if [ -z "$(printf %s "$notes" | tr -d '[:space:]')" ]; then
             echo "::error::CHANGELOG.md has no non-empty '## [$version]' section — the release body and in-app update notes would fall back to generic text. Roll [Unreleased] to [$version] before tagging."
             exit 1
           fi
           echo "CHANGELOG.md has notes for v$version — ok"
+
+  # The correctness gate for the *released* commit.
+  #
+  # This workflow used to check only that the tag matched the manifests and that
+  # the CHANGELOG had a section, then hand straight to tauri-action. Nothing tied
+  # a release to ci.yml having passed on that commit — and it cannot be assumed:
+  # a tag can be pushed at any commit (including one that never went through a
+  # PR, or a `main` that went red after its last green run), and this workflow
+  # also accepts `workflow_dispatch` on an arbitrary ref. The result is signed
+  # bundles that the auto-updater then distributes to every install, which is the
+  # least reversible thing this repo can do.
+  #
+  # Runs the same `just verify` recipe CI runs, on one OS rather than the full
+  # matrix: the per-OS legs already ran when the commit was PR'd, and the point
+  # here is to refuse an obviously broken release, not to re-certify every
+  # platform. Cheap relative to three bundle builds, and it fails before the
+  # draft release exists so there is nothing to clean up.
+  verify:
+    name: Verify (gates the release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            src-tauri
+            web-rs
+
+      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+        with:
+          tool: just
+
+      - name: Install system deps (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf
+
+      # `just verify` includes web-check/web-clippy/web-test, and the backend
+      # build needs a dist directory to embed even though we are not bundling.
+      - name: Stub frontend dist
+        run: |
+          mkdir -p web-rs/dist
+          touch web-rs/dist/index.html
+
+      - name: verify
+        run: just verify
 
   # Create the draft release ONCE, up front, so the per-OS build jobs all upload
   # into the same release instead of each running tauri-action's find-or-create
@@ -73,7 +122,7 @@ jobs:
   # that race — the build jobs only ever upload, never (re)create.
   create-release:
     name: Create draft release
-    needs: guard
+    needs: [guard, verify]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     outputs:
@@ -83,18 +132,12 @@ jobs:
 
       # Same CHANGELOG.md extraction the build jobs use — sets the release body
       # here (the build jobs reuse it for latest.json's `notes`). Kept in sync by
-      # being the identical step; see the build job's copy for the rationale.
+      # calling one shared script; see the build job's copy for the rationale.
       - name: Extract changelog notes
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          notes=""
-          if [ -f CHANGELOG.md ]; then
-            notes=$(awk -v ver="$version" '
-              /^## \[/ { if (c) exit; if (index($0, "## [" ver "]") == 1) c=1; next }
-              c { print }
-            ' CHANGELOG.md | sed '/./,$!d')
-          fi
+          notes=$(scripts/changelog-notes.sh "$version")
           if [ -z "$(printf %s "$notes" | tr -d '[:space:]')" ]; then
             notes="See the release notes on GitHub for what's new in v$version."
           fi
@@ -180,13 +223,7 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          notes=""
-          if [ -f CHANGELOG.md ]; then
-            notes=$(awk -v ver="$version" '
-              /^## \[/ { if (c) exit; if (index($0, "## [" ver "]") == 1) c=1; next }
-              c { print }
-            ' CHANGELOG.md | sed '/./,$!d')
-          fi
+          notes=$(scripts/changelog-notes.sh "$version")
           if [ -z "$(printf %s "$notes" | tr -d '[:space:]')" ]; then
             notes="See the release notes on GitHub for what's new in v$version."
           fi

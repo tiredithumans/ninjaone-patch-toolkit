@@ -98,7 +98,8 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 └── Trunk.toml                   # WASM build/serve (127.0.0.1:8080)
 
 scripts/                         # dev/CI tooling (not shipped)
-└── screenshot.mjs               # headless-Chromium capture of the web demo → docs/images/screenshot.png (Playwright)
+├── screenshot.mjs               # headless-Chromium capture of the web demo → docs/images/screenshot.png (Playwright)
+└── changelog-notes.sh           # prints one version's CHANGELOG section; the single source release.yml's guard + both notes steps call
 
 .github/workflows/               # ci.yml · codeql.yml · pages.yml · release.yml · screenshot.yml
 ```
@@ -683,6 +684,13 @@ each gate is also callable independently. Use the recipe flags from `/justfile`;
    `if: startsWith(github.ref, 'refs/tags/')` — i.e. after the tag and its irreversible release run
    have been pushed. The two crates share no workspace, so this is bumped by hand and the manifests
    co-change in ~23 of every 300 commits.
+10. **Release gate** *(GitHub-side)* — `release.yml`'s `verify` job runs `just verify` on the tagged
+    commit and `create-release` `needs:` it, so a release cannot be cut from a commit that fails the
+    gates. This is not redundant with `ci.yml`: a tag can point at any commit — one that never went
+    through a PR, or a `main` that went red since its last green run — and `release.yml` also accepts
+    `workflow_dispatch` on an arbitrary ref. Without it, signed bundles that the **auto-updater
+    distributes to every install** could be built from an unverified commit, which is the least
+    reversible thing in this repo. One OS, not the matrix: the per-OS legs already ran at PR time.
 
 CI runs the same gates in the same order (`ci.yml`'s frontend job runs `web-check`, `web-clippy`,
 `web-build`, `web-test`) — keep it that way; a CI sequence that quietly differs from the documented
