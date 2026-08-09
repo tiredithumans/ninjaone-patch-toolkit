@@ -30,7 +30,13 @@ allow = [
 # Dependency trees legitimately carry duplicate versions (windows-sys, syn, …);
 # warn rather than fail so the gate stays signal, not noise.
 multiple-versions = "warn"
-wildcards = "allow"
+# A `"*"` version requirement accepts whatever the registry serves at build time,
+# which is the one dependency shape this repo's supply-chain guard cannot reason
+# about: `[sources]` below pins *where* crates come from, and the lockfiles pin
+# *which* versions, but a wildcard means the next `cargo update` may pull a
+# semver-major with no signal at all. Nothing in either tree declares one today,
+# so this costs nothing now and refuses the shape rather than discovering it later.
+wildcards = "deny"
 
 [sources]
 # Supply-chain guard: every crate must come from crates.io — no surprise git or
