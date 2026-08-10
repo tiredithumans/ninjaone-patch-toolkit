@@ -11,6 +11,58 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-10
+
+### Security
+
+- **Switching instance or client ID no longer destroys the sign-in you switched away from.** The
+  change dropped every cache but kept the previous tenant's tokens, so the app still believed it was
+  signed in, sent the old token to the new host, and the resulting rejection was treated as "this
+  grant is dead" — which deletes the stored credential. The grant is now cleared as part of the
+  switch.
+- **Each instance keeps its own saved sign-in.** The refresh token and client secret were stored
+  under one name shared by every tenant, so signing into a second instance overwrote the first one's
+  credential. They are now stored per instance + client ID, and switching back finds the earlier
+  sign-in still there. Existing saved credentials are migrated automatically on first launch — you
+  will not be signed out by this change.
+
+### Fixed
+
+- **An impossible date typed into a date filter is now rejected instead of silently moving.**
+  `2026-02-31` was accepted and became a day in March, so the query ran against a bound nobody
+  chose.
+- **A sign-in no longer ends because the server chose not to reissue a refresh token.** Servers may
+  legitimately omit it and keep the existing one valid; the app discarded it, which left the session
+  relying on the copy in the OS keychain — and that copy is explicitly allowed to be missing.
+- **A locked keychain now says so.** It was reported as "not authenticated", which sent you to
+  re-run a sign-in that could not have fixed it.
+- **A stray request on the callback port can no longer kill a sign-in.** Anything arriving with a
+  `state` value — a bookmark, a probe, another tool on the same port — ended the wait, and the
+  sign-in then failed with "state mismatch — possible CSRF". The listener now recognises the real
+  redirect by requiring both an authorization result and the exact `state` this sign-in generated,
+  and answers everything else with a 404 while it keeps waiting.
+- **A slow client can no longer stall sign-in.** The 10-second limit applied to each read rather
+  than to the connection, so a client trickling a byte at a time held the listener open and the
+  browser's redirect queued behind it until the three-minute timeout.
+- **Starting a second sign-in now explains itself.** It previously failed while claiming the
+  callback port with "Is another instance of this app running?", which pointed at a second copy of
+  the app that did not exist — the port was held by this app's own sign-in, still waiting.
+- **Job polling can no longer stop for the rest of the session.** The single-poller slot was
+  released at exactly one place in the loop, so if anything else ended that task — an unexpected
+  error while advancing a job, writing the audit record, or emitting progress — the slot stayed
+  marked as taken. Every later dispatch then declined to start a poller, and jobs sat at "Queued"
+  forever with nothing watching them. The slot now releases on every exit path.
+- **Two actions sent to the same device no longer swap each other's results.** The native scan,
+  apply and reboot endpoints return no job identifier, so those jobs are matched to NinjaOne's
+  activity feed by "the newest matching activity on this device". With two dispatches in flight to
+  one device, both could pick the same activity and report each other's exit code. An activity now
+  belongs to whichever job claimed it first, and each job records its match on the first poll
+  rather than re-guessing on every tick.
+- **A job whose device keeps reporting activity now times out.** The 45-minute timeout was checked
+  only when the activity feed returned nothing, so a job that kept matching a non-terminal activity
+  stayed "Running" indefinitely — which also kept the poller alive and kept the row from ever
+  being cleared out of the Jobs tab.
+
 ### Changed
 
 - **Paging through grouped patches is no longer re-grouped from scratch on every click.** Each page
@@ -36,58 +88,6 @@ version and start a fresh `[Unreleased]`.
   cancelled the rest — so a hiccup on the install-history call discarded minutes of completed
   whole-fleet paging and the retry started from cold. Every fetch now finishes and caches; the query
   still reports the error.
-
-### Security
-
-- **Switching instance or client ID no longer destroys the sign-in you switched away from.** The
-  change dropped every cache but kept the previous tenant's tokens, so the app still believed it was
-  signed in, sent the old token to the new host, and the resulting rejection was treated as "this
-  grant is dead" — which deletes the stored credential. The grant is now cleared as part of the
-  switch.
-- **Each instance keeps its own saved sign-in.** The refresh token and client secret were stored
-  under one name shared by every tenant, so signing into a second instance overwrote the first one's
-  credential. They are now stored per instance + client ID, and switching back finds the earlier
-  sign-in still there. Existing saved credentials are migrated automatically on first launch — you
-  will not be signed out by this change.
-
-### Fixed
-
-- **An impossible date typed into a date filter is now rejected instead of silently moving.**
-  `2026-02-31` was accepted and became a day in March, so the query ran against a bound nobody
-  chose.
-
-- **A sign-in no longer ends because the server chose not to reissue a refresh token.** Servers may
-  legitimately omit it and keep the existing one valid; the app discarded it, which left the session
-  relying on the copy in the OS keychain — and that copy is explicitly allowed to be missing.
-- **A locked keychain now says so.** It was reported as "not authenticated", which sent you to
-  re-run a sign-in that could not have fixed it.
-- **A stray request on the callback port can no longer kill a sign-in.** Anything arriving with a
-  `state` value — a bookmark, a probe, another tool on the same port — ended the wait, and the
-  sign-in then failed with "state mismatch — possible CSRF". The listener now recognises the real
-  redirect by requiring both an authorization result and the exact `state` this sign-in generated,
-  and answers everything else with a 404 while it keeps waiting.
-- **A slow client can no longer stall sign-in.** The 10-second limit applied to each read rather
-  than to the connection, so a client trickling a byte at a time held the listener open and the
-  browser's redirect queued behind it until the three-minute timeout.
-- **Starting a second sign-in now explains itself.** It previously failed while claiming the
-  callback port with "Is another instance of this app running?", which pointed at a second copy of
-  the app that did not exist — the port was held by this app's own sign-in, still waiting.
-
-- **Job polling can no longer stop for the rest of the session.** The single-poller slot was
-  released at exactly one place in the loop, so if anything else ended that task — an unexpected
-  error while advancing a job, writing the audit record, or emitting progress — the slot stayed
-  marked as taken. Every later dispatch then declined to start a poller, and jobs sat at "Queued"
-  forever with nothing watching them. The slot now releases on every exit path.
-- **Two actions sent to the same device no longer swap each other's results.** The native scan,
-  apply and reboot endpoints return no job identifier, so those jobs are matched to NinjaOne's
-  activity feed by "the newest matching activity on this device". With two dispatches in flight to
-  one device, both could pick the same activity and report each other's exit code. An activity now
-  belongs to whichever job claimed it first, and each job records its match on the first poll
-  rather than re-guessing on every tick.
-- **A job whose device keeps reporting activity now times out.** The 45-minute timeout was checked
-  only when the activity feed returned nothing, so a job that kept matching a non-terminal activity
-  stayed "Running" indefinitely — which also kept the poller alive and kept the row from ever
-  being cleared out of the Jobs tab.
 
 ## [0.12.0] - 2026-08-07
 
