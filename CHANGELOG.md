@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-08-11
+
 ### Security
 
 - **Credentials pasted into a script's parameters are redacted from the action audit log no matter
