@@ -10,33 +10,29 @@ use crate::rows::{
 /// lives here rather than on `PatchRow` — but it is declared the same way as the
 /// shared ones so header and value stay a single declaration.
 const DETAIL_COLUMNS: [TableColumn<PatchRow>; 14] = [
-    ("Organization", |r| TableCell::Text(r.organization.clone())),
-    ("Location", |r| {
-        TableCell::Text(r.location.clone().unwrap_or_default())
-    }),
+    ("Organization", |r| TableCell::text(&r.organization)),
+    ("Location", |r| TableCell::opt_text(r.location.as_deref())),
     ("Device Role", |r| {
-        TableCell::Text(r.device_role.clone().unwrap_or_default())
+        TableCell::opt_text(r.device_role.as_deref())
     }),
-    ("Device", |r| TableCell::Text(r.device_name.clone())),
-    ("OS", |r| {
-        TableCell::Text(r.os_name.clone().unwrap_or_default())
-    }),
+    ("Device", |r| TableCell::text(&r.device_name)),
+    ("OS", |r| TableCell::opt_text(r.os_name.as_deref())),
     ("Node Class", |r| {
-        TableCell::Text(r.node_class.clone().unwrap_or_default())
+        TableCell::opt_text(r.node_class.as_deref())
     }),
-    ("Patch Type", |r| TableCell::Text(r.patch_type.clone())),
-    ("KB", |r| TableCell::Text(r.kb.clone().unwrap_or_default())),
-    ("Patch", |r| TableCell::Text(r.name.clone())),
-    ("Severity", |r| TableCell::Text(r.severity.clone())),
-    ("Status", |r| TableCell::Text(r.status.clone())),
+    ("Patch Type", |r| TableCell::text(r.patch_type)),
+    ("KB", |r| TableCell::opt_text(r.kb.as_deref())),
+    ("Patch", |r| TableCell::text(&r.name)),
+    ("Severity", |r| TableCell::text(r.severity)),
+    ("Status", |r| TableCell::text(&r.status)),
     ("Needs Reboot", |r| {
-        TableCell::Text(if r.needs_reboot { "Yes" } else { "No" }.to_string())
+        TableCell::text(if r.needs_reboot { "Yes" } else { "No" })
     }),
     ("First Seen", |r| {
-        TableCell::Text(r.first_seen_date.clone().unwrap_or_default())
+        TableCell::opt_text(r.first_seen_date.as_deref())
     }),
     ("Installed Date", |r| {
-        TableCell::Text(r.installed_date.clone().unwrap_or_default())
+        TableCell::opt_text(r.installed_date.as_deref())
     }),
 ];
 
@@ -208,10 +204,10 @@ mod tests {
             node_class: Some("WINDOWS_SERVER".into()),
             needs_reboot: true,
             offline: false,
-            patch_type: "OS".into(),
+            patch_type: "OS",
             kb: Some("KB5040434".into()),
             name: "Cumulative Update".into(),
-            severity: "Critical".into(),
+            severity: "Critical",
             severity_rank: 5,
             status: "PENDING".into(),
             first_seen_date: Some("2026-05-01 00:00 UTC".into()),
@@ -320,10 +316,10 @@ mod tests {
         let path = std::env::temp_dir().join("npt-export-failures.xlsx");
 
         let failures = vec![FailureGroup {
-            patch_type: "OS".into(),
+            patch_type: "OS",
             kb: Some("KB5040434".into()),
             name: "Cumulative Update".into(),
-            severity: "Critical".into(),
+            severity: "Critical",
             severity_rank: 5,
             affected_devices: 3,
             device_names: vec!["srv01".into(), "srv02".into(), "srv03".into()],
