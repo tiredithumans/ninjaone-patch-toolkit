@@ -40,21 +40,33 @@ fn default_name(stem: &str, ext: &str) -> String {
 ///
 /// Both exports open the same dialog with the same filter/name/extract sequence;
 /// keeping it in one place means the two cannot drift in how they name files or
-/// handle a cancel. `blocking_save_file` needs the main thread free to pump its
-/// event loop, which is why both callers are `async`.
-fn save_dialog(
+/// handle a cancel.
+///
+/// Run on the blocking pool rather than inline. A Tauri `async` command runs on the
+/// tokio runtime, so `blocking_save_file` — which parks until the operator picks a
+/// file, potentially for minutes — was occupying a tokio *worker* thread the whole
+/// time, not just the calling task. `async` moves the work off the UI thread (which
+/// the dialog needs free to pump its event loop); `spawn_blocking` is what keeps it
+/// off the async runtime's workers, where it would otherwise stall unrelated IPC
+/// commands and the job poller.
+async fn save_dialog(
     app: &tauri::AppHandle,
-    filter_label: &str,
-    ext: &str,
-    stem: &str,
+    filter_label: &'static str,
+    ext: &'static str,
+    stem: &'static str,
 ) -> Result<Option<std::path::PathBuf>, UiError> {
-    let Some(file) = app
-        .dialog()
-        .file()
-        .add_filter(filter_label, &[ext])
-        .set_file_name(default_name(stem, ext))
-        .blocking_save_file()
-    else {
+    let app = app.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter(filter_label, &[ext])
+            .set_file_name(default_name(stem, ext))
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| UiError::new(format!("save dialog failed: {e}")))?;
+
+    let Some(file) = picked else {
         return Ok(None);
     };
     file.into_path()
@@ -78,7 +90,7 @@ pub async fn export_patches_xlsx(
     // committed (a cancelled dialog copies nothing).
     require_cached_result(&state)?;
 
-    let Some(path) = save_dialog(&app, "Excel Workbook", "xlsx", "ninjaone-patches")? else {
+    let Some(path) = save_dialog(&app, "Excel Workbook", "xlsx", "ninjaone-patches").await? else {
         return Ok(None);
     };
     let path_str = path.to_string_lossy().to_string();
@@ -94,14 +106,21 @@ pub async fn export_patches_xlsx(
     } = cached_result(&state)?;
     let reboot: Vec<_> = devices.into_iter().filter(|d| d.needs_reboot).collect();
 
-    write_workbook(
-        &path_str,
-        &rows,
-        &compliance,
-        &compliance_by_os,
-        &reboot,
-        &failures,
-    )
+    // Serializing a six-figure row set into a zipped workbook is seconds of pure CPU
+    // plus the file write — both of which would hold a tokio worker for the duration.
+    let written = path_str.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        write_workbook(
+            &written,
+            &rows,
+            &compliance,
+            &compliance_by_os,
+            &reboot,
+            &failures,
+        )
+    })
+    .await
+    .map_err(|e| UiError::new(format!("export task failed: {e}")))?
     .map_err(UiError::from)?;
     Ok(Some(path_str))
 }
@@ -122,14 +141,20 @@ pub async fn export_report_html(
     // Same probe-then-clone-after-dialog flow as the Excel export above.
     require_cached_result(&state)?;
 
-    let Some(path) = save_dialog(&app, "HTML Report", "html", "ninjaone-report")? else {
+    let Some(path) = save_dialog(&app, "HTML Report", "html", "ninjaone-report").await? else {
         return Ok(None);
     };
     let path_str = path.to_string_lossy().to_string();
 
     let result = cached_result(&state)?;
-    std::fs::write(&path, crate::report::render_report(&result))
-        .map_err(|e| UiError::new(format!("write report: {e}")))?;
+    // Same reason as the workbook: rendering the report walks every rollup and
+    // builds one large string, then writes it — CPU and file I/O, not async work.
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::write(&path, crate::report::render_report(&result))
+    })
+    .await
+    .map_err(|e| UiError::new(format!("report task failed: {e}")))?
+    .map_err(|e| UiError::new(format!("write report: {e}")))?;
     Ok(Some(path_str))
 }
 
