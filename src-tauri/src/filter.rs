@@ -186,8 +186,12 @@ impl PreparedFilter {
     pub fn os_name_allowed(&self, os_name: Option<&str>) -> bool {
         match &self.os_name_needle {
             None => true,
+            // Matched without lowercasing the haystack. This runs once per patch
+            // across the whole fleet — a far larger N than `device_allowed`, where
+            // the same per-call `String` was already removed for the same reason —
+            // and the needle is pre-lowered by `prepare`, so the copy bought nothing.
             Some(needle) => os_name
-                .map(|n| n.to_ascii_lowercase().contains(needle.as_str()))
+                .map(|n| contains_ascii_ci(n, needle))
                 .unwrap_or(false),
         }
     }
@@ -199,12 +203,12 @@ impl PreparedFilter {
         let Some(needle) = &self.search else {
             return true;
         };
-        let kb_lower = kb.map(|k| k.to_ascii_lowercase()).unwrap_or_default();
-        let kb_bare = kb_lower.trim_start_matches("kb").trim();
-        let name_lower = name.map(|n| n.to_ascii_lowercase()).unwrap_or_default();
-        kb_lower.contains(needle.q_lower.as_str())
-            || kb_bare.contains(needle.q_bare.as_str())
-            || name_lower.contains(needle.q_lower.as_str())
+        // Two more per-row `String`s removed: the needles are already lowered by
+        // `prepare`, so the haystacks never needed a lowercased copy of their own.
+        let kb = kb.unwrap_or_default();
+        contains_ascii_ci(kb, &needle.q_lower)
+            || contains_ascii_ci(strip_kb_prefix(kb), &needle.q_bare)
+            || contains_ascii_ci(name.unwrap_or_default(), &needle.q_lower)
     }
 
     /// True when the patch severity is among the selected set. An empty selection
@@ -225,6 +229,77 @@ impl PreparedFilter {
             return false;
         };
         self.detected_after.is_none_or(|a| ts >= a) && self.detected_before.is_none_or(|b| ts <= b)
+    }
+}
+
+/// Case-insensitive (ASCII) substring test that allocates nothing.
+///
+/// `needle` must already be lowercase — every caller takes it from
+/// [`FilterParams::prepare`], which lowers it once per query rather than once per
+/// row. An empty needle matches, mirroring `str::contains("")`.
+fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    h.len() >= n.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
+/// A KB value with any leading `KB` removed and trimmed, borrowed from the input.
+///
+/// Mirrors the previous `to_ascii_lowercase().trim_start_matches("kb").trim()`
+/// exactly, including stripping a repeated prefix and only trimming afterwards.
+fn strip_kb_prefix(kb: &str) -> &str {
+    let mut rest = kb;
+    loop {
+        match rest.get(..2) {
+            Some(p) if p.eq_ignore_ascii_case("kb") => rest = &rest[2..],
+            _ => return rest.trim(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    /// The allocation-free matchers must behave exactly like the
+    /// `to_ascii_lowercase().contains(..)` pair they replaced, including the
+    /// boundary cases that only show up on odd data.
+    #[test]
+    fn case_insensitive_contains_matches_the_allocating_form() {
+        for (haystack, needle, want) in [
+            ("Windows Server 2022", "server", true),
+            // The comparison is symmetric, so an un-lowered needle matches too. The
+            // callers still pre-lower theirs in `prepare`, which is what keeps that
+            // work out of the per-row path.
+            ("Windows Server 2022", "SERVER", true),
+            ("Windows", "windows", true),
+            ("Windows Server", "linux", false),
+            ("Win", "windows", false), // needle longer than haystack
+            ("anything", "", true),    // mirrors `str::contains("")`
+            ("", "x", false),
+        ] {
+            assert_eq!(
+                contains_ascii_ci(haystack, needle),
+                want,
+                "{haystack:?} contains {needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_kb_prefix_is_stripped_case_insensitively_and_repeatedly() {
+        assert_eq!(strip_kb_prefix("KB5040434"), "5040434");
+        assert_eq!(strip_kb_prefix("kb5040434"), "5040434");
+        assert_eq!(strip_kb_prefix("5040434"), "5040434");
+        // `trim_start_matches` stripped a repeated prefix; this keeps that.
+        assert_eq!(strip_kb_prefix("KBkb123"), "123");
+        // Trimming happens after stripping, as it did before.
+        assert_eq!(strip_kb_prefix(" KB123 "), "KB123");
+        // A multi-byte leading character must not panic on the 2-byte slice probe.
+        assert_eq!(strip_kb_prefix("é123"), "é123");
+        assert_eq!(strip_kb_prefix(""), "");
     }
 }
 
