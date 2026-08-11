@@ -986,6 +986,13 @@ impl AppState {
     /// Consumes a confirmation token, returning whether it authorizes this exact
     /// request. Single-use: the slot is cleared on any match attempt, so a
     /// double-click can't dispatch twice.
+    ///
+    /// Both secrets are compared in constant time. The realistic threat here is low —
+    /// the slot holds one token at a time, it is single-use, it expires in five
+    /// minutes, and the only party that can present one is the frontend that was
+    /// handed it — but `==` on a `String` returns on the first differing byte, and
+    /// this is the gate standing between a stale or modified frontend and a fleet-wide
+    /// reboot. A comparison that leaks nothing costs nothing here.
     pub fn consume_confirm_token(&self, token: &str, request_hash: &str) -> bool {
         let Ok(mut guard) = self.pending_confirm.lock() else {
             return false;
@@ -993,9 +1000,10 @@ impl AppState {
         let Some(pending) = guard.take() else {
             return false;
         };
-        pending.token == token
-            && pending.request_hash == request_hash
-            && pending.issued_at.elapsed() < CONFIRM_TTL
+        // Not short-circuiting: both comparisons run regardless of the first result.
+        let token_ok = constant_time_eq(pending.token.as_bytes(), token.as_bytes());
+        let hash_ok = constant_time_eq(pending.request_hash.as_bytes(), request_hash.as_bytes());
+        token_ok & hash_ok && pending.issued_at.elapsed() < CONFIRM_TTL
     }
 }
 
@@ -1037,6 +1045,17 @@ impl AppState {
     }
 }
 
+/// Byte-equality that does not return early on the first difference.
+///
+/// The length check is deliberately *not* constant time — the length of a token is
+/// not the secret, and both sides here are fixed-width by construction.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1055,6 +1074,19 @@ mod tests {
             devices_total: 0,
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
+        }
+    }
+
+    #[test]
+    fn constant_time_eq_agrees_with_ordinary_equality() {
+        for (a, b, want) in [
+            (&b"abc"[..], &b"abc"[..], true),
+            (&b"abc"[..], &b"abd"[..], false),
+            (&b"abc"[..], &b"Abc"[..], false), // differs in the first byte
+            (&b"abc"[..], &b"ab"[..], false),  // length mismatch
+            (&b""[..], &b""[..], true),
+        ] {
+            assert_eq!(constant_time_eq(a, b), want, "{a:?} vs {b:?}");
         }
     }
 
