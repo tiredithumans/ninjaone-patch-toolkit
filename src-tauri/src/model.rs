@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Organization {
@@ -222,8 +223,15 @@ impl Patch {
     }
 
     /// Human-friendly patch label combining KB, vendor, name and version.
-    pub fn display_name(&self) -> String {
-        let mut parts: Vec<&str> = Vec::new();
+    /// The operator-facing patch title — KB, vendor, name and version, joined — into
+    /// a caller-owned buffer, which it clears first.
+    ///
+    /// Buffered rather than returning a `String` because the join calls it once per
+    /// patch across the whole fleet purely to produce a key for the row interner, and
+    /// the vast majority of those keys already exist. One reused buffer turns "a
+    /// `String` allocated and dropped per row" into one allocation for the whole join.
+    pub fn write_display_name(&self, buf: &mut String) {
+        buf.clear();
         for field in [
             self.kb_number.as_deref(),
             self.product_vendor.as_deref(),
@@ -233,14 +241,16 @@ impl Patch {
         .into_iter()
         .flatten()
         {
-            if !field.is_empty() {
-                parts.push(field);
+            if field.is_empty() {
+                continue;
             }
+            if !buf.is_empty() {
+                buf.push_str(" · ");
+            }
+            buf.push_str(field);
         }
-        if parts.is_empty() {
-            "(unnamed patch)".to_string()
-        } else {
-            parts.join(" · ")
+        if buf.is_empty() {
+            buf.push_str("(unnamed patch)");
         }
     }
 }
@@ -325,22 +335,25 @@ impl PatchStatus {
 #[serde(rename_all = "camelCase")]
 pub struct PatchRow {
     pub device_id: i64,
-    pub device_name: String,
-    pub organization: String,
-    pub location: Option<String>,
-    pub device_role: Option<String>,
-    pub os_name: Option<String>,
-    pub node_class: Option<String>,
+    pub device_name: Arc<str>,
+    pub organization: Arc<str>,
+    pub location: Option<Arc<str>>,
+    pub device_role: Option<Arc<str>>,
+    pub os_name: Option<Arc<str>>,
+    pub node_class: Option<Arc<str>>,
     pub needs_reboot: bool,
     /// Mirrors `Device::is_offline()`. Carried on the row so the frontend can show
     /// which selected devices an action would be *queued* for rather than run now.
     pub offline: bool,
-    pub patch_type: String,
-    pub kb: Option<String>,
-    pub name: String,
-    pub severity: String,
+    /// One of a two-value vocabulary supplied by the join itself, so it is borrowed
+    /// rather than allocated per row.
+    pub patch_type: &'static str,
+    pub kb: Option<Arc<str>>,
+    pub name: Arc<str>,
+    /// [`Severity::label`] is already `&'static str`; a row does not need its own copy.
+    pub severity: &'static str,
     pub severity_rank: u8,
-    pub status: String,
+    pub status: Arc<str>,
     /// Formatted [`Patch::collected_timestamp`] — when NinjaOne first reported the
     /// patch, not when it was published. See that field for why.
     pub first_seen_date: Option<String>,

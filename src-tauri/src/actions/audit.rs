@@ -60,8 +60,18 @@ impl AuditEntry {
 /// Operators paste script parameters by hand, and a script that takes a service
 /// password would otherwise write it to disk in cleartext.
 pub fn redact_parameters(parameters: &str) -> String {
+    // Split on *any* whitespace, not just `' '`. NinjaOne itself splits `parameters`
+    // on spaces, but this string is typed — and routinely pasted — by hand in the
+    // script picker, and a pasted line carrying a tab or a newline used to leave the
+    // whole run as one unsplittable token: `is_sensitive` never matched it and the
+    // credential reached disk in cleartext.
+    //
+    // This deliberately normalizes runs of whitespace to single spaces. The audit
+    // record is evidence of what was dispatched, not a byte-exact replay of it, and
+    // the alternative is carrying separators through just to reproduce spacing that
+    // NinjaOne collapses anyway.
     parameters
-        .split(' ')
+        .split_whitespace()
         .map(|token| match token.split_once('=') {
             Some((key, _)) if is_sensitive(key) => format!("{key}=<redacted>"),
             _ => token.to_string(),
@@ -101,11 +111,18 @@ pub fn record(entry: &AuditEntry) {
             return;
         }
     };
-    let written = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .and_then(|mut f| writeln!(f, "{line}"));
+    // Owner-only. The log names devices, organizations and the operator's own
+    // parameters; on a shared or roaming-profile machine the default 0644 made all
+    // of that world-readable. Applies at creation, so an existing log keeps whatever
+    // mode it already has.
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let written = opts.open(&path).and_then(|mut f| writeln!(f, "{line}"));
     if let Err(err) = written {
         warn!(?err, path = %path.display(), "could not append to the action audit log");
     }
@@ -144,6 +161,23 @@ mod tests {
         assert!(redacted.contains("CLIENTSECRET=<redacted>"));
         assert!(redacted.contains("Token=<redacted>"));
         assert!(!redacted.contains("zzz") && !redacted.contains("qqq"));
+    }
+
+    /// A pasted parameter line is not guaranteed to be space-separated, and the
+    /// splitter used to be `' '` only — so a tab or newline left the whole run as one
+    /// token that `is_sensitive` could not match, and the credential was written to
+    /// disk verbatim.
+    #[test]
+    fn credentials_are_redacted_across_any_whitespace_separator() {
+        for sep in ["\t", "\n", "\r\n", "  "] {
+            let redacted =
+                redact_parameters(&format!("kbAllowList=5040434{sep}servicePassword=hunter2"));
+            assert!(
+                redacted.contains("servicePassword=<redacted>") && !redacted.contains("hunter2"),
+                "separator {sep:?} left the credential in: {redacted}"
+            );
+            assert!(redacted.contains("kbAllowList=5040434"), "{redacted}");
+        }
     }
 
     #[test]

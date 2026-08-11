@@ -627,10 +627,10 @@ mod tests {
                 aged_critical: 0,
             }],
             failures: vec![FailureGroup {
-                patch_type: "OS".into(),
+                patch_type: "OS",
                 kb: Some("KB1".into()),
                 name: "<img src=x onerror=alert(1)>".into(),
-                severity: "Critical".into(),
+                severity: "Critical",
                 severity_rank: 5,
                 affected_devices: 4,
                 device_names: vec!["web-01".into()],

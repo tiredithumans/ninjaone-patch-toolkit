@@ -7,6 +7,7 @@
 use std::borrow::Cow;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,17 @@ impl LookupMaps {
     fn role_name(&self, id: Option<i64>) -> Option<String> {
         id.and_then(|i| self.roles.get(&i)).cloned()
     }
+
+    /// Borrowing forms of the two above, for the per-device label resolution — the
+    /// interner takes `&str` and owns the copy it keeps, so cloning here would be a
+    /// `String` allocated only to be thrown away.
+    fn location_name_str(&self, id: Option<i64>) -> Option<&str> {
+        id.and_then(|i| self.locations.get(&i)).map(String::as_str)
+    }
+
+    fn role_name_str(&self, id: Option<i64>) -> Option<&str> {
+        id.and_then(|i| self.roles.get(&i)).map(String::as_str)
+    }
 }
 
 /// One slice of fetched patches tagged with its family and (for installs) a status
@@ -73,13 +85,89 @@ fn fmt_dt(ts: Option<DateTime<Utc>>) -> Option<String> {
     ts.map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
 }
 
+/// Hands out one shared [`Arc<str>`] per distinct string.
+///
+/// Nearly everything a [`PatchRow`] carries is drawn from a small vocabulary
+/// repeated across the whole row set: an organization name recurs once per row in
+/// that org, a device's name and OS once per patch on it, and a patch title once per
+/// device missing it (a single Chrome update covers the fleet). Those were an owned
+/// `String` per row, so the cached result — which is the app's largest live
+/// allocation and is held for the lifetime of the query — stored hundreds of
+/// thousands of copies of a few thousand distinct strings.
+///
+/// The set is keyed by the `Arc` itself, which borrows as `str`, so a hit costs a
+/// hash and a refcount bump and no allocation at all.
+#[derive(Default)]
+struct Interner(HashSet<Arc<str>>);
+
+impl Interner {
+    fn intern(&mut self, s: &str) -> Arc<str> {
+        if let Some(existing) = self.0.get(s) {
+            return Arc::clone(existing);
+        }
+        let shared: Arc<str> = Arc::from(s);
+        self.0.insert(Arc::clone(&shared));
+        shared
+    }
+
+    fn intern_opt(&mut self, s: Option<&str>) -> Option<Arc<str>> {
+        s.map(|s| self.intern(s))
+    }
+}
+
+/// The device-derived half of a row, resolved once per device instead of once per
+/// patch.
+///
+/// The join looks these up through `LookupMaps` and formats them per row; a device
+/// with 300 pending patches did that 300 times for an answer that cannot change.
+struct DeviceLabels {
+    device_name: Arc<str>,
+    organization: Arc<str>,
+    location: Option<Arc<str>>,
+    device_role: Option<Arc<str>>,
+    os_name: Option<Arc<str>>,
+    node_class: Option<Arc<str>>,
+    needs_reboot: bool,
+    offline: bool,
+}
+
+impl DeviceLabels {
+    fn resolve(device: Option<&Device>, maps: &LookupMaps, pool: &mut Interner) -> Self {
+        let Some(d) = device else {
+            // An orphan patch — its device is not in the (possibly scoped) inventory.
+            return Self {
+                device_name: pool.intern(UNKNOWN_LABEL),
+                organization: pool.intern(UNKNOWN_LABEL),
+                location: None,
+                device_role: None,
+                os_name: None,
+                node_class: None,
+                needs_reboot: false,
+                offline: false,
+            };
+        };
+        Self {
+            device_name: pool.intern(d.label()),
+            organization: pool.intern(maps.org_name_str(d.organization_id)),
+            location: pool.intern_opt(maps.location_name_str(d.location_id)),
+            device_role: pool.intern_opt(maps.role_name_str(d.node_role_id)),
+            os_name: pool.intern_opt(d.os_name_str()),
+            node_class: pool.intern_opt(d.node_class.as_deref()),
+            needs_reboot: d.needs_reboot(),
+            offline: d.is_offline(),
+        }
+    }
+}
+
 /// Maps a raw NinjaOne patch status to the operator-facing label. NinjaOne uses
 /// `MANUAL` for patches pending approval; show that as `PENDING` so the table
 /// matches the Status filter (and NinjaOne's own UI, which labels them "Pending").
-fn display_status(raw: &str) -> String {
+fn display_status(raw: Option<&str>) -> &str {
     match raw {
-        "MANUAL" => "PENDING".to_string(),
-        other => other.to_string(),
+        Some("MANUAL") => "PENDING",
+        Some(other) => other,
+        // A record carrying no status of its own and no source-level override.
+        None => "UNKNOWN",
     }
 }
 
@@ -94,6 +182,13 @@ pub fn build_rows(
     let mut rows = Vec::new();
     // Lower the query needles and parse the severities once, not per patch.
     let prepared = filter.prepare();
+    // One shared copy of each distinct row string, and one resolved label bundle per
+    // device rather than per patch. Both are scoped to this join: the `Arc`s they
+    // hand out live on in the rows, but the lookup structures are dropped here.
+    let mut pool = Interner::default();
+    let mut labels: HashMap<Option<i64>, DeviceLabels> = HashMap::new();
+    // Reused across every row; see `Patch::write_display_name`.
+    let mut name_buf = String::new();
     for source in sources {
         for patch in source.patches {
             if let Some(allowed) = source.status_filter {
@@ -143,31 +238,30 @@ pub fn build_rows(
             if !prepared.detected_within_allowed(first_seen.map(|r| r.timestamp())) {
                 continue;
             }
-            let status = patch
-                .status
-                .as_deref()
-                .or(source.status_override)
-                .map(display_status)
-                .unwrap_or_else(|| "UNKNOWN".to_string());
+            let status = display_status(patch.status.as_deref().or(source.status_override));
+            patch.write_display_name(&mut name_buf);
+
+            // Resolved once per device id, then shared by every row on it.
+            let device_labels = labels
+                .entry(patch.device_id)
+                .or_insert_with(|| DeviceLabels::resolve(device, maps, &mut pool));
 
             rows.push(PatchRow {
                 device_id: patch.device_id.unwrap_or_default(),
-                device_name: device
-                    .map(|d| d.label().to_string())
-                    .unwrap_or_else(|| "(unknown)".to_string()),
-                organization: maps.org_name(device.and_then(|d| d.organization_id)),
-                location: maps.location_name(device.and_then(|d| d.location_id)),
-                device_role: maps.role_name(device.and_then(|d| d.node_role_id)),
-                os_name: os_name_ref.map(str::to_string),
-                node_class: device.and_then(|d| d.node_class.clone()),
-                needs_reboot: device.map(|d| d.needs_reboot()).unwrap_or(false),
-                offline: device.map(|d| d.is_offline()).unwrap_or(false),
-                patch_type: source.type_label.to_string(),
-                kb: patch.kb_number.clone(),
-                name: patch.display_name(),
-                severity: severity.label().to_string(),
+                device_name: Arc::clone(&device_labels.device_name),
+                organization: Arc::clone(&device_labels.organization),
+                location: device_labels.location.clone(),
+                device_role: device_labels.device_role.clone(),
+                os_name: device_labels.os_name.clone(),
+                node_class: device_labels.node_class.clone(),
+                needs_reboot: device_labels.needs_reboot,
+                offline: device_labels.offline,
+                patch_type: source.type_label,
+                kb: pool.intern_opt(patch.kb_number.as_deref()),
+                name: pool.intern(&name_buf),
+                severity: severity.label(),
                 severity_rank: severity.rank(),
-                status,
+                status: pool.intern(status),
                 first_seen_date: fmt_dt(first_seen),
                 installed_date: fmt_dt(installed),
                 // Normalised through `first_seen_at`/`installed_at` like the dates
@@ -444,16 +538,16 @@ pub fn pending_counts(current_patches: &[&Patch]) -> HashMap<i64, usize> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailureGroup {
-    pub patch_type: String,
-    pub kb: Option<String>,
-    pub name: String,
-    pub severity: String,
+    pub patch_type: &'static str,
+    pub kb: Option<Arc<str>>,
+    pub name: Arc<str>,
+    pub severity: &'static str,
     pub severity_rank: u8,
     /// Distinct devices the patch failed on (the headline count).
     pub affected_devices: usize,
     /// Every affected device name, so the table and Excel/HTML export carry the
     /// complete list (not a truncated sample).
-    pub device_names: Vec<String>,
+    pub device_names: Vec<Arc<str>>,
     pub latest_failure: Option<String>,
     pub latest_failure_ts: Option<i64>,
 }
@@ -465,6 +559,21 @@ pub enum TableCell {
     Text(String),
     Count(usize),
     Number(f64),
+}
+
+impl TableCell {
+    /// A text cell from anything string-like. The row fields are a mix of `String`,
+    /// `Arc<str>` and `&'static str` now that [`PatchRow`] shares its repeated
+    /// values, and a renderer should not have to care which.
+    pub fn text(value: impl AsRef<str>) -> Self {
+        Self::Text(value.as_ref().to_string())
+    }
+
+    /// A text cell for an optional field, blank when absent — which every renderer
+    /// already spelled out as `.clone().unwrap_or_default()`.
+    pub fn opt_text(value: Option<impl AsRef<str>>) -> Self {
+        Self::Text(value.map(|v| v.as_ref().to_string()).unwrap_or_default())
+    }
 }
 
 /// One table column: its header and how to read that cell off a row.
@@ -482,15 +591,24 @@ impl FailureGroup {
     /// The failure-table columns as (header, accessor), in display order. Shared by
     /// the Excel exporter and the HTML report.
     pub const COLUMNS: [TableColumn<FailureGroup>; 7] = [
-        ("Severity", |f| TableCell::Text(f.severity.clone())),
-        ("Patch Type", |f| TableCell::Text(f.patch_type.clone())),
-        ("KB", |f| TableCell::Text(f.kb.clone().unwrap_or_default())),
-        ("Patch", |f| TableCell::Text(f.name.clone())),
+        ("Severity", |f| TableCell::text(f.severity)),
+        ("Patch Type", |f| TableCell::text(f.patch_type)),
+        ("KB", |f| TableCell::opt_text(f.kb.as_deref())),
+        ("Patch", |f| TableCell::text(&f.name)),
         ("Affected Devices", |f| TableCell::Count(f.affected_devices)),
         ("Latest Failure", |f| {
-            TableCell::Text(f.latest_failure.clone().unwrap_or_default())
+            TableCell::opt_text(f.latest_failure.as_deref())
         }),
-        ("Devices", |f| TableCell::Text(f.device_names.join(", "))),
+        ("Devices", |f| {
+            // `Vec<Arc<str>>` has no `join`; the rendering is unchanged.
+            TableCell::Text(
+                f.device_names
+                    .iter()
+                    .map(|n| n.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        }),
     ];
 }
 
@@ -649,28 +767,31 @@ fn is_pending(status: Option<&str>) -> bool {
 /// of affected device names. Sorted by affected-device count then severity, desc.
 pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
     struct Acc {
-        patch_type: String,
-        kb: Option<String>,
-        name: String,
-        severity: String,
+        patch_type: &'static str,
+        kb: Option<Arc<str>>,
+        name: Arc<str>,
+        severity: &'static str,
         severity_rank: u8,
         devices: HashSet<i64>,
-        device_names: Vec<String>,
+        device_names: Vec<Arc<str>>,
         latest_ts: Option<i64>,
         latest_date: Option<String>,
     }
-    let mut groups: HashMap<(String, Option<String>, String), Acc> = HashMap::new();
+    /// patch type + KB + name — the rows' own shared strings, so grouping the
+    /// failure set is refcount bumps rather than three `String` copies per row.
+    type FailureKey = (&'static str, Option<Arc<str>>, Arc<str>);
+    let mut groups: HashMap<FailureKey, Acc> = HashMap::new();
     for r in rows {
-        if r.status != "FAILED" {
+        if &*r.status != "FAILED" {
             continue;
         }
         let acc = groups
-            .entry((r.patch_type.clone(), r.kb.clone(), r.name.clone()))
+            .entry((r.patch_type, r.kb.clone(), r.name.clone()))
             .or_insert_with(|| Acc {
-                patch_type: r.patch_type.clone(),
+                patch_type: r.patch_type,
                 kb: r.kb.clone(),
                 name: r.name.clone(),
-                severity: r.severity.clone(),
+                severity: r.severity,
                 severity_rank: r.severity_rank,
                 devices: HashSet::new(),
                 device_names: Vec::new(),
@@ -685,7 +806,7 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
         // Surface the highest severity seen for the group (records can disagree).
         if r.severity_rank > acc.severity_rank {
             acc.severity_rank = r.severity_rank;
-            acc.severity = r.severity.clone();
+            acc.severity = r.severity;
         }
         if let Some(ts) = r.installed_ts
             && acc.latest_ts.map(|cur| ts > cur).unwrap_or(true)
@@ -906,7 +1027,9 @@ pub enum RowSortKey {
     InstalledDate,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+/// `PartialEq` so the cache can tell whether its memoized order still answers the
+/// sort being asked for — the same check `with_grouped_result` makes on [`GroupBy`].
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RowSort {
     pub key: RowSortKey,
@@ -929,15 +1052,36 @@ const GROUP_KEY_SEP: char = '\u{1f}';
 /// The stable identity the frontend echoes back to fetch a group's members and to
 /// key its expand state. Keyed on the same tuple the group is built from, so it
 /// round-trips without the backend holding per-request state.
+#[cfg(test)]
 pub fn group_key(row: &PatchRow, group_by: GroupBy) -> String {
+    let mut buf = String::new();
+    write_group_key(row, group_by, &mut buf);
+    buf
+}
+
+/// The same key, into a caller-owned buffer which it clears first. This is the form
+/// production uses; the owned `group_key` above remains as the readable statement of
+/// the encoding, which the tests hold `GroupKeyMatcher` against.
+///
+/// [`build_groups`] needs a key for every row purely to look one up, and almost all
+/// of those lookups hit an existing group. A reused buffer turns that into zero
+/// allocations per row; only a row that opens a *new* group pays for a `String`.
+fn write_group_key(row: &PatchRow, group_by: GroupBy, buf: &mut String) {
+    use std::fmt::Write as _;
+    buf.clear();
     match group_by {
-        GroupBy::Device => row.device_id.to_string(),
-        GroupBy::Patch => format!(
-            "{}{GROUP_KEY_SEP}{}{GROUP_KEY_SEP}{}",
-            row.patch_type,
-            row.kb.as_deref().unwrap_or(""),
-            row.name
-        ),
+        GroupBy::Device => {
+            let _ = write!(buf, "{}", row.device_id);
+        }
+        GroupBy::Patch => {
+            let _ = write!(
+                buf,
+                "{}{GROUP_KEY_SEP}{}{GROUP_KEY_SEP}{}",
+                row.patch_type,
+                row.kb.as_deref().unwrap_or(""),
+                row.name
+            );
+        }
     }
 }
 
@@ -948,17 +1092,17 @@ pub fn group_key(row: &PatchRow, group_by: GroupBy) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct PatchGroup {
     pub key: String,
-    pub label: String,
+    pub label: Arc<str>,
     /// Organization for a device group; KB for a patch group (blank when absent —
     /// third-party patches carry no KB).
-    pub sublabel: Option<String>,
+    pub sublabel: Option<Arc<str>>,
     pub rows: usize,
     /// Distinct devices in the group: always 1 for a device group, and the
     /// affected-device count for a patch group.
     pub devices: usize,
     /// Highest severity among the members, so a collapsed group still shows how
     /// urgent its worst patch is.
-    pub severity: String,
+    pub severity: &'static str,
     pub severity_rank: u8,
     /// Device groups only — the id actions dispatch against, and its state.
     pub device_id: Option<i64>,
@@ -974,59 +1118,73 @@ pub struct PatchGroup {
 /// is the thing worth seeing first.
 pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
     struct Acc {
-        label: String,
-        sublabel: Option<String>,
+        /// Insertion order, which the stable display sorts fall back to on a tie.
+        seq: usize,
+        label: Arc<str>,
+        sublabel: Option<Arc<str>>,
         rows: usize,
         devices: HashSet<i64>,
-        severity: String,
+        severity: &'static str,
         severity_rank: u8,
         device_id: Option<i64>,
         offline: bool,
         needs_reboot: bool,
     }
     let mut groups: HashMap<String, Acc> = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
+    // One reusable key buffer for the whole pass — see `write_group_key`. Grouping
+    // used to cost three `String`s per row (the key, and a clone each for the map
+    // entry and the insertion-order list); it now costs one per *group*.
+    let mut key_buf = String::new();
     for r in rows {
-        let key = group_key(r, group_by);
-        let acc = groups.entry(key.clone()).or_insert_with(|| {
-            order.push(key.clone());
-            match group_by {
-                GroupBy::Device => Acc {
-                    label: r.device_name.clone(),
-                    sublabel: Some(r.organization.clone()),
-                    rows: 0,
-                    devices: HashSet::new(),
-                    severity: r.severity.clone(),
-                    severity_rank: r.severity_rank,
-                    device_id: Some(r.device_id),
-                    offline: r.offline,
-                    needs_reboot: r.needs_reboot,
-                },
-                GroupBy::Patch => Acc {
-                    label: r.name.clone(),
-                    sublabel: r.kb.clone().filter(|k| !k.is_empty()),
-                    rows: 0,
-                    devices: HashSet::new(),
-                    severity: r.severity.clone(),
-                    severity_rank: r.severity_rank,
-                    device_id: None,
-                    offline: false,
-                    needs_reboot: false,
-                },
-            }
-        });
+        write_group_key(r, group_by, &mut key_buf);
+        // Insertion order is load-bearing: the display sorts below are stable, so
+        // tied groups fall back to it, and it follows the canonical row order.
+        // Carrying it on the accumulator replaces the parallel `order` vec.
+        let seq = groups.len();
+        let acc = match groups.get_mut(&key_buf) {
+            Some(acc) => acc,
+            None => groups
+                .entry(key_buf.clone())
+                .or_insert_with(|| match group_by {
+                    GroupBy::Device => Acc {
+                        seq,
+                        label: r.device_name.clone(),
+                        sublabel: Some(r.organization.clone()),
+                        rows: 0,
+                        devices: HashSet::new(),
+                        severity: r.severity,
+                        severity_rank: r.severity_rank,
+                        device_id: Some(r.device_id),
+                        offline: r.offline,
+                        needs_reboot: r.needs_reboot,
+                    },
+                    GroupBy::Patch => Acc {
+                        seq,
+                        label: r.name.clone(),
+                        sublabel: r.kb.clone().filter(|k| !k.is_empty()),
+                        rows: 0,
+                        devices: HashSet::new(),
+                        severity: r.severity,
+                        severity_rank: r.severity_rank,
+                        device_id: None,
+                        offline: false,
+                        needs_reboot: false,
+                    },
+                }),
+        };
         acc.rows += 1;
         acc.devices.insert(r.device_id);
         // Records for the same group can disagree; surface the worst.
         if r.severity_rank > acc.severity_rank {
             acc.severity_rank = r.severity_rank;
-            acc.severity = r.severity.clone();
+            acc.severity = r.severity;
         }
     }
 
-    let mut out: Vec<PatchGroup> = order
+    let mut accumulated: Vec<(String, Acc)> = groups.into_iter().collect();
+    accumulated.sort_unstable_by_key(|(_, a)| a.seq);
+    let mut out: Vec<PatchGroup> = accumulated
         .into_iter()
-        .filter_map(|k| groups.remove(&k).map(|a| (k, a)))
         .map(|(key, a)| PatchGroup {
             key,
             label: a.label,
@@ -1045,7 +1203,7 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
         GroupBy::Device => out.sort_by_cached_key(|g| {
             (
                 Reverse(g.severity_rank),
-                g.sublabel.clone().unwrap_or_default().to_lowercase(),
+                g.sublabel.as_deref().unwrap_or_default().to_lowercase(),
                 g.label.to_lowercase(),
             )
         }),
@@ -1144,32 +1302,57 @@ impl<'a> GroupKeyMatcher<'a> {
             } => {
                 row.patch_type == *patch_type
                     && row.kb.as_deref().unwrap_or("") == *kb
-                    && row.name == *name
+                    && &*row.name == *name
             }
         }
     }
 }
 
-/// Serves one page of the cached detail rows, optionally re-ordered by `sort`.
+/// The row order `sort` implies, as a permutation of indices into `rows`.
 ///
-/// `None` reproduces the cache order exactly (the canonical severity/org/device
-/// sort stamped in `run_query`). A sort orders references over the full set and
-/// clones only the requested page — the cached rows themselves are never
-/// reordered; their order is load-bearing for the export and the summary's
-/// inline first page.
+/// Split from the slicing for the same reason [`build_groups`] is split from
+/// [`slice_groups`]: this is the expensive half and the caller memoizes it. Paging
+/// through a sorted view used to re-sort the entire cached row set on **every page
+/// request** — a full `O(n log n)` string comparison sweep per click, under the lock
+/// the export also takes — while the identical problem on the grouping side had
+/// already been fixed. The permutation is `u32` rather than `&PatchRow` so the memo
+/// costs 4 bytes a row instead of a pointer plus a second copy of the set.
+///
+/// The cached rows themselves are never reordered; their canonical order is
+/// load-bearing for the export and for the summary's inline first page.
+pub fn sort_order(rows: &[PatchRow], sort: RowSort) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..rows.len() as u32).collect();
+    // Stable sort: rows that tie keep the canonical cache order.
+    order.sort_by(|a, b| compare_rows(&rows[*a as usize], &rows[*b as usize], sort));
+    order
+}
+
+/// Serves one page of the cached detail rows, in `order` when one is supplied.
+///
+/// `None` reproduces the cache order exactly (the canonical severity/org/device sort
+/// stamped in `run_query`), without materializing an identity permutation for a fleet
+/// that never asked to be re-sorted. Only the requested page is cloned either way.
+///
+/// An index in `order` that is out of range is skipped rather than panicking: the
+/// permutation and the rows come from the same cache entry under one lock, so this
+/// is unreachable, but a page request is not worth a process abort if that ever
+/// stops being true.
 pub fn page_rows(
     rows: &[PatchRow],
+    order: Option<&[u32]>,
     offset: usize,
     limit: usize,
-    sort: Option<RowSort>,
 ) -> Vec<PatchRow> {
-    let Some(sort) = sort else {
-        return rows.iter().skip(offset).take(limit).cloned().collect();
-    };
-    let mut refs: Vec<&PatchRow> = rows.iter().collect();
-    // Stable sort: rows that tie keep the canonical cache order.
-    refs.sort_by(|a, b| compare_rows(a, b, sort));
-    refs.into_iter().skip(offset).take(limit).cloned().collect()
+    match order {
+        None => rows.iter().skip(offset).take(limit).cloned().collect(),
+        Some(order) => order
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .filter_map(|i| rows.get(*i as usize))
+            .cloned()
+            .collect(),
+    }
 }
 
 fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
@@ -1196,7 +1379,7 @@ fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
             sort.desc,
             |x, y| cmp_ci(x, y),
         ),
-        PatchType => dir(a.patch_type.cmp(&b.patch_type)),
+        PatchType => dir(a.patch_type.cmp(b.patch_type)),
         Kb => cmp_opt_last(a.kb.as_deref(), b.kb.as_deref(), sort.desc, |x, y| {
             cmp_ci(x, y)
         }),
@@ -1236,6 +1419,21 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    /// Composes the two halves of paging the way `AppState::with_sorted_result`
+    /// does — build the order once, then slice it — so these assertions still
+    /// describe what a real page request produces. Keeping the composition in one
+    /// helper is also what makes a divergence between `sort_order` and `page_rows`
+    /// visible here rather than only in the app.
+    fn sorted_page(
+        rows: &[PatchRow],
+        offset: usize,
+        limit: usize,
+        sort: Option<RowSort>,
+    ) -> Vec<PatchRow> {
+        let order = sort.map(|s| sort_order(rows, s));
+        page_rows(rows, order.as_deref(), offset, limit)
+    }
 
     /// Borrows an owned patch fixture into the `&[&Patch]` shape the rollups take.
     /// Production builds these by filtering the `Arc` cache; the tests own theirs.
@@ -1430,7 +1628,7 @@ mod tests {
             &filter,
         );
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].organization, "Contoso");
+        assert_eq!(&*rows[0].organization, "Contoso");
         assert_eq!(rows[0].location.as_deref(), Some("HQ"));
         assert_eq!(rows[0].device_role.as_deref(), Some("Domain Controller"));
         assert_eq!(rows[0].patch_type, "OS");
@@ -1513,7 +1711,7 @@ mod tests {
             }],
             &FilterParams::default(),
         );
-        assert_eq!(rows[0].status, "INSTALLED");
+        assert_eq!(&*rows[0].status, "INSTALLED");
     }
 
     #[test]
@@ -1538,7 +1736,7 @@ mod tests {
             &FilterParams::default(),
         );
         assert_eq!(rows.len(), 1, "a MANUAL patch matches the Pending filter");
-        assert_eq!(rows[0].status, "PENDING", "MANUAL renders as PENDING");
+        assert_eq!(&*rows[0].status, "PENDING", "MANUAL renders as PENDING");
     }
 
     #[test]
@@ -1569,7 +1767,7 @@ mod tests {
             &FilterParams::default(),
         );
         assert_eq!(rows.len(), 1, "only the FAILED install record is kept");
-        assert_eq!(rows[0].status, "FAILED");
+        assert_eq!(&*rows[0].status, "FAILED");
     }
 
     #[test]
@@ -1597,7 +1795,7 @@ mod tests {
             &FilterParams::default(),
         );
         assert_eq!(rows.len(), 1, "missing status falls back to the override");
-        assert_eq!(rows[0].status, "INSTALLED");
+        assert_eq!(&*rows[0].status, "INSTALLED");
     }
 
     #[test]
@@ -1818,16 +2016,63 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let mapped = rows.iter().find(|r| r.device_id == 1).unwrap();
         assert_eq!(
-            mapped.organization, "(unknown)",
+            &*mapped.organization, "(unknown)",
             "an org id absent from the lookup map renders as (unknown)"
         );
-        assert_eq!(mapped.device_name, "srv1");
+        assert_eq!(&*mapped.device_name, "srv1");
         let orphan = rows.iter().find(|r| r.device_id == 404).unwrap();
         assert_eq!(
-            orphan.device_name, "(unknown)",
+            &*orphan.device_name, "(unknown)",
             "a patch for a device not in inventory has no resolvable name"
         );
-        assert_eq!(orphan.organization, "(unknown)");
+        assert_eq!(&*orphan.organization, "(unknown)");
+    }
+
+    /// Rows that report the same value must *share* it, not each own a copy.
+    ///
+    /// This is the whole point of the interner, and it is invisible in every other
+    /// assertion — a row set that duplicated every string would satisfy all of them
+    /// while costing the cached result an allocation per field per row. On a fleet
+    /// where one patch is missing from thousands of devices, and every device in an
+    /// org repeats its org name, that difference is most of the result's memory.
+    #[test]
+    fn rows_share_one_allocation_per_distinct_string() {
+        let maps = maps();
+        let devices = [device(1, 10, "Windows Server 2022")];
+        let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+        // The same device and the same patch identity, twice.
+        let patches = vec![
+            patch(1, "MANUAL", "CRITICAL", Some(1)),
+            patch(1, "MANUAL", "CRITICAL", Some(1)),
+        ];
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &refs(&patches),
+                type_label: "OS",
+                status_override: None,
+                status_filter: None,
+            }],
+            &FilterParams::default(),
+        );
+        assert_eq!(rows.len(), 2);
+        let (a, b) = (&rows[0], &rows[1]);
+        for (what, x, y) in [
+            ("organization", &a.organization, &b.organization),
+            ("device_name", &a.device_name, &b.device_name),
+            ("name", &a.name, &b.name),
+            ("status", &a.status, &b.status),
+        ] {
+            assert!(
+                Arc::ptr_eq(x, y),
+                "`{what}` must be one shared allocation across rows, not a copy each"
+            );
+        }
+        assert!(Arc::ptr_eq(
+            a.os_name.as_ref().unwrap(),
+            b.os_name.as_ref().unwrap()
+        ));
     }
 
     #[test]
@@ -1896,6 +2141,38 @@ mod tests {
                 "installedDate",
             ],
             "PatchRow",
+        );
+
+        // The frontend mirror (`web-rs/src/types.rs`) declares these as `String` /
+        // `Option<String>`, and the two crates share no code — nothing but this
+        // checks that the wire still carries strings. The backend fields behind them
+        // are now a mix of `String`, `Arc<str>` and `&'static str` so that a row set
+        // shares its repeated values; all three must serialize identically, and a
+        // future field that stops doing so has to fail here rather than at runtime in
+        // a webview.
+        let row_json = serde_json::to_value(&rows[0]).unwrap();
+        for key in [
+            "deviceName",
+            "organization",
+            "location",
+            "deviceRole",
+            "osName",
+            "patchType",
+            "kb",
+            "name",
+            "severity",
+            "status",
+            "firstSeenDate",
+        ] {
+            let value = &row_json[key];
+            assert!(
+                value.is_string(),
+                "PatchRow.{key} must reach the frontend as a JSON string, got {value}"
+            );
+        }
+        assert!(
+            row_json["deviceId"].is_i64() && row_json["offline"].is_boolean(),
+            "the non-string row fields must keep their JSON types too"
         );
 
         let summaries = build_device_summaries(&[&d], &pending_counts(&refs(&patches)), &maps);
@@ -1987,7 +2264,7 @@ mod tests {
             kb: kb.map(Into::into),
             name: name.into(),
             severity_rank: rank,
-            patch_type: if kb.is_some() { "OS" } else { "SOFTWARE" }.into(),
+            patch_type: if kb.is_some() { "OS" } else { "SOFTWARE" },
             ..failed_row(device_id, device, "KB1", None)
         }
     }
@@ -2004,12 +2281,12 @@ mod tests {
 
         // Highest severity in the group wins, so a collapsed row still reads as
         // urgent as its worst member — and that ordering puts web-01 first.
-        assert_eq!(groups[0].label, "web-01");
+        assert_eq!(&*groups[0].label, "web-01");
         assert_eq!(groups[0].severity_rank, 7);
         assert_eq!(groups[0].rows, 2);
         assert_eq!(groups[0].devices, 1, "a device group is exactly one device");
         assert_eq!(groups[0].device_id, Some(1));
-        assert_eq!(groups[1].label, "web-02");
+        assert_eq!(&*groups[1].label, "web-02");
     }
 
     #[test]
@@ -2025,14 +2302,14 @@ mod tests {
         let groups = build_groups(&rows, GroupBy::Patch);
         assert_eq!(groups.len(), 2);
         // Blast radius leads: "missing on 3 machines" outranks "critical on 1".
-        assert_eq!(groups[0].label, "Google Chrome 138");
+        assert_eq!(&*groups[0].label, "Google Chrome 138");
         assert_eq!(groups[0].devices, 3);
         assert_eq!(groups[0].rows, 3);
         assert_eq!(
             groups[0].sublabel, None,
             "third-party patches carry no KB, so the sublabel stays empty"
         );
-        assert_eq!(groups[1].label, "Rare Critical");
+        assert_eq!(&*groups[1].label, "Rare Critical");
         assert_eq!(groups[1].sublabel.as_deref(), Some("KB9"));
         assert_eq!(groups[1].device_id, None, "a patch group spans devices");
     }
@@ -2097,7 +2374,7 @@ mod tests {
         let key = group_key(&rows[0], GroupBy::Patch);
         let members = group_member_page(&rows, GroupBy::Patch, &key, 0, 10);
         assert_eq!(members.len(), 2);
-        assert!(members.iter().all(|r| r.name == "Cumulative Update"));
+        assert!(members.iter().all(|r| &*r.name == "Cumulative Update"));
 
         // ...and a device group's members are that device's patches.
         let key = group_key(&rows[0], GroupBy::Device);
@@ -2147,11 +2424,14 @@ mod tests {
         let rows: Vec<PatchRow> = (0..5)
             .map(|i| failed_row(i, &format!("srv{i}"), "KB1", None))
             .collect();
-        let page = page_rows(&rows, 1, 2, None);
+        let page = sorted_page(&rows, 1, 2, None);
         assert_eq!(page.len(), 2);
-        assert_eq!(page[0].device_name, "srv1");
-        assert_eq!(page[1].device_name, "srv2");
-        assert!(page_rows(&rows, 10, 2, None).is_empty(), "offset past end");
+        assert_eq!(&*page[0].device_name, "srv1");
+        assert_eq!(&*page[1].device_name, "srv2");
+        assert!(
+            sorted_page(&rows, 10, 2, None).is_empty(),
+            "offset past end"
+        );
     }
 
     /// Every `RowSortKey` variant round-trips: each sorts ascending, and reverses
@@ -2208,12 +2488,7 @@ mod tests {
                 Some("alpine".into()),
                 Some("Windows".into())
             ),
-            case!(
-                RowSortKey::PatchType,
-                patch_type,
-                "OS".into(),
-                "SOFTWARE".into()
-            ),
+            case!(RowSortKey::PatchType, patch_type, "OS", "SOFTWARE"),
             case!(RowSortKey::Kb, kb, Some("KB1".into()), Some("KB2".into())),
             case!(RowSortKey::Name, name, "aardvark".into(), "Zebra".into()),
             // Ascending severity is most-urgent-first, so the HIGHER rank is `lo`.
@@ -2248,7 +2523,7 @@ mod tests {
             // Fed in reverse so an unsorted passthrough fails.
             let rows = vec![hi, lo];
             let ids = |desc: bool| -> Vec<i64> {
-                page_rows(&rows, 0, 10, Some(RowSort { key, desc }))
+                sorted_page(&rows, 0, 10, Some(RowSort { key, desc }))
                     .iter()
                     .map(|r| r.device_id)
                     .collect()
@@ -2264,11 +2539,11 @@ mod tests {
     #[test]
     fn patch_type_and_status_sort_by_byte_order() {
         let lower = PatchRow {
-            patch_type: "os".into(),
+            patch_type: "os",
             ..failed_row(1, "a", "KB1", None)
         };
         let upper = PatchRow {
-            patch_type: "OS".into(),
+            patch_type: "OS",
             ..failed_row(2, "b", "KB1", None)
         };
         let sort = RowSort {
@@ -2293,13 +2568,13 @@ mod tests {
             key: RowSortKey::Device,
             desc: false,
         });
-        let names: Vec<_> = page_rows(&rows, 0, 10, sort)
+        let names: Vec<_> = sorted_page(&rows, 0, 10, sort)
             .into_iter()
-            .map(|r| r.device_name)
+            .map(|r| r.device_name.to_string())
             .collect();
         assert_eq!(names, ["Alpha", "bravo", "charlie"]);
         // The offset/limit slice applies after the sort.
-        assert_eq!(page_rows(&rows, 1, 1, sort)[0].device_name, "bravo");
+        assert_eq!(&*sorted_page(&rows, 1, 1, sort)[0].device_name, "bravo");
     }
 
     #[test]
@@ -2311,9 +2586,9 @@ mod tests {
         ];
         let key = RowSortKey::InstalledDate;
         let names = |desc: bool| -> Vec<String> {
-            page_rows(&rows, 0, 10, Some(RowSort { key, desc }))
+            sorted_page(&rows, 0, 10, Some(RowSort { key, desc }))
                 .into_iter()
-                .map(|r| r.device_name)
+                .map(|r| r.device_name.to_string())
                 .collect()
         };
         assert_eq!(names(false), ["a", "c", "b"]);
@@ -2331,7 +2606,7 @@ mod tests {
             sortable_row("crit", 5, None),
             sortable_row("mod", 3, None),
         ];
-        let names: Vec<_> = page_rows(
+        let names: Vec<_> = sorted_page(
             &rows,
             0,
             10,
@@ -2341,7 +2616,7 @@ mod tests {
             }),
         )
         .into_iter()
-        .map(|r| r.device_name)
+        .map(|r| r.device_name.to_string())
         .collect();
         assert_eq!(names, ["crit", "mod", "low"]);
     }
@@ -2357,10 +2632,10 @@ mod tests {
             node_class: None,
             needs_reboot: false,
             offline: false,
-            patch_type: "OS".into(),
+            patch_type: "OS",
             kb: Some(kb.into()),
             name: "Cumulative Update".into(),
-            severity: "Critical".into(),
+            severity: "Critical",
             severity_rank: 5,
             status: "FAILED".into(),
             first_seen_date: None,
@@ -2406,7 +2681,7 @@ mod tests {
         ];
         let sev = build_severity_by_org(&refs(&current), &by_id, &maps);
         assert_eq!(sev.len(), 1);
-        assert_eq!(sev[0].organization, "Contoso");
+        assert_eq!(&*sev[0].organization, "Contoso");
         assert_eq!(sev[0].counts.critical, 1);
         assert_eq!(sev[0].counts.important, 1);
         assert_eq!(sev[0].counts.moderate, 0);
@@ -2431,7 +2706,7 @@ mod tests {
             buckets[4].count, 1,
             "180+ holds only the genuinely aged one"
         );
-        assert_eq!(buckets[5].label, "Unknown");
+        assert_eq!(&*buckets[5].label, "Unknown");
         assert_eq!(buckets[5].count, 1, "the undated patch lands in Unknown");
     }
 

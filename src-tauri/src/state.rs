@@ -9,8 +9,9 @@ use tracing::warn;
 use crate::actions::{JobReport, MAX_JOBS};
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::auth::AuthState;
+use crate::model::PatchRow;
 use crate::model::{Device, Location, Organization, Patch, Role};
-use crate::rows::{GroupBy, PatchGroup, QueryResult, build_groups};
+use crate::rows::{GroupBy, PatchGroup, QueryResult, RowSort, build_groups, sort_order};
 use crate::settings::Settings;
 
 /// How long a confirmation token issued by `plan_action` stays usable. Short
@@ -142,6 +143,13 @@ struct CachedResult {
     tenant: TenantKey,
     result: QueryResult,
     groups: Option<(GroupBy, Arc<Vec<PatchGroup>>)>,
+    /// The row order most recently asked for, memoized for exactly the same reason
+    /// `groups` is: `page_rows` re-sorted the entire cached row set on every paging
+    /// request, so clicking through a sorted view of a large fleet paid a full
+    /// `O(n log n)` string-comparison sweep per click — under this lock, which the
+    /// export takes too. Kept inside the slot so replacing or clearing the result
+    /// drops it in the same operation.
+    sorted: Option<(RowSort, Arc<Vec<u32>>)>,
 }
 
 struct LookupCache {
@@ -674,10 +682,11 @@ impl AppState {
                 *slot = Some(CachedResult {
                     tenant: token.tenant,
                     result,
-                    // Built on first request, not here: most queries are never
-                    // grouped, and grouping the whole fleet eagerly would pay for a
-                    // view the operator may not open.
+                    // Both memos are built on first request, not here: most queries
+                    // are never grouped or re-sorted, and doing either over the whole
+                    // fleet eagerly would pay for a view the operator may not open.
                     groups: None,
+                    sorted: None,
                 });
                 StoreOutcome::Stored
             }
@@ -706,6 +715,43 @@ impl AppState {
             Some(c) if c.tenant == key => Some(f(&c.result)),
             _ => None,
         })
+    }
+
+    /// Runs `f` against the cached rows and the index permutation for `sort`,
+    /// building that permutation at most once per sort.
+    ///
+    /// `None` passes `None` through rather than materializing an identity
+    /// permutation — the unsorted view is already in cache order, and a fleet that
+    /// never asked to be re-sorted should not pay four bytes a row to say so.
+    ///
+    /// Mirrors [`Self::with_grouped_result`], including reading as a miss on a tenant
+    /// switch.
+    pub fn with_sorted_result<T>(
+        &self,
+        sort: Option<RowSort>,
+        f: impl FnOnce(&[PatchRow], Option<&[u32]>) -> T,
+    ) -> Result<Option<T>, CachePoisoned> {
+        let key = self.tenant_key();
+        let mut guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
+        let Some(cached) = guard.as_mut() else {
+            return Ok(None);
+        };
+        if cached.tenant != key {
+            return Ok(None);
+        }
+        let Some(sort) = sort else {
+            return Ok(Some(f(&cached.result.rows, None)));
+        };
+        let fresh = matches!(&cached.sorted, Some((s, _)) if *s == sort);
+        if !fresh {
+            cached.sorted = Some((sort, Arc::new(sort_order(&cached.result.rows, sort))));
+        }
+        let order = cached
+            .sorted
+            .as_ref()
+            .map(|(_, o)| Arc::clone(o))
+            .expect("just populated");
+        Ok(Some(f(&cached.result.rows, Some(&order))))
     }
 
     /// Runs `f` against one page of group headers, building the grouping only when
@@ -940,6 +986,13 @@ impl AppState {
     /// Consumes a confirmation token, returning whether it authorizes this exact
     /// request. Single-use: the slot is cleared on any match attempt, so a
     /// double-click can't dispatch twice.
+    ///
+    /// Both secrets are compared in constant time. The realistic threat here is low —
+    /// the slot holds one token at a time, it is single-use, it expires in five
+    /// minutes, and the only party that can present one is the frontend that was
+    /// handed it — but `==` on a `String` returns on the first differing byte, and
+    /// this is the gate standing between a stale or modified frontend and a fleet-wide
+    /// reboot. A comparison that leaks nothing costs nothing here.
     pub fn consume_confirm_token(&self, token: &str, request_hash: &str) -> bool {
         let Ok(mut guard) = self.pending_confirm.lock() else {
             return false;
@@ -947,9 +1000,10 @@ impl AppState {
         let Some(pending) = guard.take() else {
             return false;
         };
-        pending.token == token
-            && pending.request_hash == request_hash
-            && pending.issued_at.elapsed() < CONFIRM_TTL
+        // Not short-circuiting: both comparisons run regardless of the first result.
+        let token_ok = constant_time_eq(pending.token.as_bytes(), token.as_bytes());
+        let hash_ok = constant_time_eq(pending.request_hash.as_bytes(), request_hash.as_bytes());
+        token_ok & hash_ok && pending.issued_at.elapsed() < CONFIRM_TTL
     }
 }
 
@@ -991,11 +1045,22 @@ impl AppState {
     }
 }
 
+/// Byte-equality that does not return early on the first difference.
+///
+/// The length check is deliberately *not* constant time — the length of a token is
+/// not the secret, and both sides here are fixed-width by construction.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::actions::{ActionKind, JobState};
-    use crate::rows::QueryResult;
+    use crate::rows::{QueryResult, page_rows};
 
     fn sample_result() -> QueryResult {
         QueryResult {
@@ -1010,6 +1075,135 @@ mod tests {
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }
+    }
+
+    #[test]
+    fn constant_time_eq_agrees_with_ordinary_equality() {
+        for (a, b, want) in [
+            (&b"abc"[..], &b"abc"[..], true),
+            (&b"abc"[..], &b"abd"[..], false),
+            (&b"abc"[..], &b"Abc"[..], false), // differs in the first byte
+            (&b"abc"[..], &b"ab"[..], false),  // length mismatch
+            (&b""[..], &b""[..], true),
+        ] {
+            assert_eq!(constant_time_eq(a, b), want, "{a:?} vs {b:?}");
+        }
+    }
+
+    /// A result whose rows differ only in the field the sorts below key on, so the
+    /// order a test asserts can only have come from the sort.
+    fn result_with_devices(names: &[&str]) -> QueryResult {
+        QueryResult {
+            rows: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| PatchRow {
+                    device_id: i as i64,
+                    device_name: (*n).into(),
+                    organization: "Alpha".into(),
+                    location: None,
+                    device_role: None,
+                    os_name: None,
+                    node_class: None,
+                    needs_reboot: false,
+                    offline: false,
+                    patch_type: "OS",
+                    kb: None,
+                    name: format!("patch-{n}").into(),
+                    severity: "Critical",
+                    severity_rank: 7,
+                    status: "PENDING".into(),
+                    first_seen_date: None,
+                    installed_date: None,
+                    first_seen_ts: None,
+                    installed_ts: None,
+                })
+                .collect(),
+            ..sample_result()
+        }
+    }
+
+    fn device_sort(desc: bool) -> Option<RowSort> {
+        Some(RowSort {
+            key: crate::rows::RowSortKey::Device,
+            desc,
+        })
+    }
+
+    /// Paging a sorted view must be consistent across pages *and* must follow the
+    /// sort it was asked for, not the one it memoized last.
+    ///
+    /// The memo is the whole point of `with_sorted_result` — before it, every page
+    /// request re-sorted the full row set — so the failure it could introduce is a
+    /// stale order surviving a sort change. Paging forward and then flipping the
+    /// direction is exactly the sequence an operator produces by clicking a column
+    /// header twice.
+    #[test]
+    fn a_memoized_sort_order_pages_consistently_and_is_rebuilt_when_the_sort_changes() {
+        let state = AppState::seeded("http://example.test".into());
+        state.store_last_result_if_current(
+            state.begin_query(),
+            result_with_devices(&["delta", "alpha", "charlie", "bravo"]),
+        );
+
+        let page = |sort, offset, limit| {
+            state
+                .with_sorted_result(sort, |rows, order| page_rows(rows, order, offset, limit))
+                .expect("cache readable")
+                .expect("a result is cached")
+                .into_iter()
+                .map(|r| r.device_name.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Two successive pages of one sort must partition the sorted set, not
+        // re-sort independently.
+        assert_eq!(page(device_sort(false), 0, 2), ["alpha", "bravo"]);
+        assert_eq!(page(device_sort(false), 2, 2), ["charlie", "delta"]);
+
+        // Flipping direction must not serve the memo built for the other one.
+        assert_eq!(page(device_sort(true), 0, 2), ["delta", "charlie"]);
+
+        // No sort reproduces the cache order exactly.
+        assert_eq!(
+            page(None, 0, 4),
+            ["delta", "alpha", "charlie", "bravo"],
+            "an unsorted page must be the canonical cache order"
+        );
+    }
+
+    /// The memo lives inside the cache slot, so replacing the result must drop it —
+    /// otherwise a fresh query would be paged through the previous one's order, and
+    /// the indices would not even refer to the same rows.
+    #[test]
+    fn replacing_the_result_drops_the_memoized_sort_order() {
+        let state = AppState::seeded("http://example.test".into());
+        state.store_last_result_if_current(
+            state.begin_query(),
+            result_with_devices(&["delta", "alpha"]),
+        );
+        let sorted = |state: &AppState| {
+            state
+                .with_sorted_result(device_sort(false), |rows, order| {
+                    page_rows(rows, order, 0, 10)
+                })
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .map(|r| r.device_name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sorted(&state), ["alpha", "delta"]);
+
+        state.store_last_result_if_current(
+            state.begin_query(),
+            result_with_devices(&["zulu", "yankee", "xray"]),
+        );
+        assert_eq!(
+            sorted(&state),
+            ["xray", "yankee", "zulu"],
+            "the new result must be sorted on its own rows"
+        );
     }
 
     /// A mock exposing both current-patch feeds, each counting its own hits.

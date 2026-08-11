@@ -52,7 +52,11 @@ rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "rustls", "charset", "http2", "system-proxy", "gzip"] }
 rust_xlsxwriter = "0.97"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `raw_value` lets the paginated fetchers look at the `{ results, cursor }` wrapper
+# without parsing the rows inside it, so a six-figure patch feed is deserialized
+# once, straight into `Vec<Patch>`, instead of through a discarded `Value` tree.
+# See `api::parse_page`.
+serde_json = { version = "1.0", features = ["raw_value"] }
 sha2 = "0.11"
 tokio = { version = "1.42", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
 tracing = "0.1"

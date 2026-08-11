@@ -11,6 +11,38 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Security
+
+- **Credentials pasted into a script's parameters are redacted from the action audit log no matter
+  how the line is spaced.** The redactor split on single spaces only, so a pasted line containing a
+  tab or a newline arrived as one unsplittable token, matched nothing, and the credential was written
+  to disk in cleartext.
+- **The action audit log is now created owner-only (`0600`) on macOS and Linux.** It names devices,
+  organizations and the operator's own parameters, and the default mode left all of that readable by
+  every account on a shared or roaming-profile machine. Existing logs keep their current mode.
+- **The action confirmation token and its request fingerprint are compared in constant time.** Low
+  risk in practice — one single-use token at a time, expiring in five minutes — but this is the gate
+  between a stale or modified frontend and a fleet-wide reboot, and a non-leaking comparison costs
+  nothing.
+
+### Performance
+
+- **Large patch feeds are parsed once instead of twice.** Every paginated response used to be decoded
+  into a generic JSON tree and then converted row by row, allocating a string for each field name of
+  each row and discarding the whole intermediate. Whole-fleet queries — where the third-party feed
+  alone runs to six figures of rows — now deserialize straight into their final type.
+- **Queries and exports no longer stall the rest of the app while they work.** The device/patch join
+  and rollups, the Excel and HTML writes, the save dialog, and the keyring write during a token
+  refresh all ran on the async runtime, so a long export or a save dialog left open blocked unrelated
+  work — including the background poller that resolves dispatched actions.
+- **Paging a sorted patch table no longer re-sorts the whole fleet on every page.** The sort order is
+  computed once and reused until the sort or the query changes, matching what grouping already did.
+- **A query result holds far less memory.** Rows now share one copy of each repeated value —
+  organization, device, OS, patch title, status — instead of each row owning its own; on a large
+  fleet those are a few thousand distinct strings across hundreds of thousands of rows.
+- **The client-side OS-name and free-text filters no longer allocate per row**, and grouping no longer
+  allocates three strings per row to build its keys.
+
 ## [0.12.1] - 2026-08-10
 
 ### Security

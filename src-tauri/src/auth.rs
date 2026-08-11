@@ -448,11 +448,28 @@ impl AuthState {
         }
 
         let parsed: TokenResponse = resp.json().await.context("refresh token body")?;
-        let token_set = self.store_tokens(parsed)?;
+        let token_set = self.store_tokens(parsed).await?;
         Ok(token_set.access_token)
     }
 
-    fn store_tokens(&self, parsed: TokenResponse) -> Result<TokenSet> {
+    /// [`Self::store_tokens_blocking`], moved off the async runtime.
+    ///
+    /// The keyring write inside it is a synchronous OS call — Keychain, Credential
+    /// Manager, or a D-Bus round trip to the Secret Service — and it runs while
+    /// `refresh_lock` is held, which is exactly when every other caller of
+    /// `access_token()` is queued behind it. On a tokio worker that also blocked a
+    /// thread the rest of the app needs; a Secret Service that is slow or absent
+    /// turned one refresh into a stall across every concurrent fetch in the query.
+    /// The lock is still held across this await, which is correct — the point is to
+    /// stop holding a *worker* too.
+    async fn store_tokens(&self, parsed: TokenResponse) -> Result<TokenSet> {
+        let this = self.clone();
+        tauri::async_runtime::spawn_blocking(move || this.store_tokens_blocking(parsed))
+            .await
+            .context("token persistence task failed")?
+    }
+
+    fn store_tokens_blocking(&self, parsed: TokenResponse) -> Result<TokenSet> {
         let expires_at = Utc::now() + Duration::seconds(parsed.expires_in);
         // Prefer what the server said it granted; fall back to the token's own
         // claim when the response omits `scope`.
@@ -692,7 +709,7 @@ impl AuthState {
         }
 
         let parsed: TokenResponse = resp.json().await.context("token exchange body")?;
-        self.store_tokens(parsed)?;
+        self.store_tokens(parsed).await?;
         Ok(())
     }
 }
@@ -1195,7 +1212,7 @@ mod tests {
             Some("client-a".into()),
             false,
         );
-        auth.store_tokens(token_response(Some("refresh-a")))
+        auth.store_tokens_blocking(token_response(Some("refresh-a")))
             .expect("store");
         assert!(auth.is_authenticated());
 
@@ -1223,7 +1240,7 @@ mod tests {
             Some("client-a".into()),
             false,
         );
-        auth.store_tokens(token_response(Some("refresh-a")))
+        auth.store_tokens_blocking(token_response(Some("refresh-a")))
             .expect("store");
 
         let changed = auth.apply_settings(
@@ -1314,11 +1331,11 @@ mod tests {
             Some("client-k".into()),
             false,
         );
-        auth.store_tokens(token_response(Some("original-refresh")))
+        auth.store_tokens_blocking(token_response(Some("original-refresh")))
             .expect("first store");
 
         let set = auth
-            .store_tokens(token_response(None))
+            .store_tokens_blocking(token_response(None))
             .expect("second store, server declined to rotate");
 
         assert_eq!(
@@ -1431,7 +1448,7 @@ mod tests {
         let auth = AuthState::new(http, "https://x".into(), 0, None, false);
         // Response says read-only; the token claims management. RFC 6749 §5.1 makes
         // the response authoritative for what was actually granted.
-        auth.store_tokens(TokenResponse {
+        auth.store_tokens_blocking(TokenResponse {
             access_token: jwt_with(serde_json::json!({ "scope": "monitoring management" })),
             refresh_token: None,
             expires_in: 3600,
@@ -1451,7 +1468,7 @@ mod tests {
             "no token yet means the grant is unknown, not denied"
         );
 
-        auth.store_tokens(TokenResponse {
+        auth.store_tokens_blocking(TokenResponse {
             access_token: "opaque".into(),
             refresh_token: None,
             expires_in: 3600,
@@ -1580,7 +1597,7 @@ mod tests {
 
         // Backed by the in-process test keyring, so the write does land and this
         // asserts the in-memory assignment rather than tolerating either outcome.
-        auth.store_tokens(TokenResponse {
+        auth.store_tokens_blocking(TokenResponse {
             access_token: "fresh-access".into(),
             refresh_token: Some("fresh-refresh".into()),
             expires_in: 3600,
@@ -1604,7 +1621,7 @@ mod tests {
         let http = reqwest::Client::new();
         let auth = AuthState::new(http, "https://x".into(), 0, None, true);
 
-        auth.store_tokens(TokenResponse {
+        auth.store_tokens_blocking(TokenResponse {
             access_token: "new-token".into(),
             refresh_token: None,
             expires_in: 3600,

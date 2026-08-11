@@ -238,7 +238,14 @@ fn request_hash(req: &ActionRequest, parameters: &str, script: Option<&ScriptRef
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    // Written directly rather than `format!` per byte, which allocated and dropped a
+    // `String` for each of the digest's 32 bytes on every plan and every confirm.
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 fn random_token() -> String {

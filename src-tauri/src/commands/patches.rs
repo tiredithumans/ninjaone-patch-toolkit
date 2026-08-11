@@ -2,6 +2,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
@@ -401,20 +402,24 @@ where
 
     // Fetches done; the rest is the in-memory scope + join/rollup.
     progress("joining", 0);
-    Ok(assemble_result(
-        &plan,
-        FetchedSources {
-            devices,
-            current,
-            orgs,
-            locations,
-            roles,
-            os_installs,
-            sw_installs,
-        },
-        sla_days,
-        now,
-    ))
+    let src = FetchedSources {
+        devices,
+        current,
+        orgs,
+        locations,
+        roles,
+        os_installs,
+        sw_installs,
+    };
+    // Off the async runtime. This is the one genuinely CPU-bound stretch in the
+    // command — scoping the whole-fleet caches, joining every patch to its device,
+    // sorting the row set and computing six rollups over it — and on a large fleet it
+    // runs for seconds with no `.await` in it. Left inline it held a tokio worker for
+    // that whole time, stalling unrelated IPC commands and the job poller. Everything
+    // it needs is owned and `Send`, so moving it is just a `spawn_blocking`.
+    tauri::async_runtime::spawn_blocking(move || assemble_result(&plan, src, sla_days, now))
+        .await
+        .context("join/rollup task failed")
 }
 
 /// Scopes the whole-fleet caches client-side, joins devices to patches, and
@@ -577,12 +582,13 @@ pub async fn get_patch_rows(
     limit: usize,
     sort: Option<RowSort>,
 ) -> Result<Vec<PatchRow>, UiError> {
-    // `with_current_result` runs the page-slice under the lock and only against a
-    // result belonging to the current tenant (a tenant switch reads as empty). The
-    // sort is an in-memory, bounded ref-sort — still "locks are brief, never across
-    // await".
+    // `with_sorted_result` runs the page-slice under the lock and only against a
+    // result belonging to the current tenant (a tenant switch reads as empty). It
+    // also memoizes the sort order, so paging through a sorted view costs one sweep
+    // rather than one per page — the lock is held for a slice, not a full re-sort.
+    let limit = clamp_page(limit);
     let rows = state
-        .with_current_result(|r| page_rows(&r.rows, offset, clamp_page(limit), sort))
+        .with_sorted_result(sort, |rows, order| page_rows(rows, order, offset, limit))
         .map_err(|_| UiError::new("result cache poisoned"))?
         .unwrap_or_default();
     Ok(rows)
@@ -993,8 +999,8 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         let row = &result.rows[0];
         assert_eq!(row.kb.as_deref(), Some("KB1"));
-        assert_eq!(row.status, "PENDING");
-        assert_eq!(row.organization, "Alpha");
+        assert_eq!(&*row.status, "PENDING");
+        assert_eq!(&*row.organization, "Alpha");
         assert_eq!(row.severity, "Critical");
         assert!(row.needs_reboot);
 
@@ -1009,7 +1015,7 @@ mod tests {
         // APPROVED Low is below the Important rank so neither counts it.
         assert_eq!(result.compliance.len(), 1);
         let alpha = &result.compliance[0];
-        assert_eq!(alpha.organization, "Alpha");
+        assert_eq!(&*alpha.organization, "Alpha");
         assert_eq!(alpha.devices_total, 2);
         assert_eq!(alpha.devices_compliant, 0);
         assert_eq!(alpha.compliance_pct, 0.0);
@@ -1079,7 +1085,7 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         let row = &result.rows[0];
         assert_eq!(row.kb.as_deref(), Some("KBOK"));
-        assert_eq!(row.status, "INSTALLED");
+        assert_eq!(&*row.status, "INSTALLED");
         assert!(row.installed_date.is_some());
 
         // No FAILED status was requested, so the failure rollup is empty.
@@ -1203,7 +1209,7 @@ mod tests {
         .expect("a FAILED-only query must send status=FAILED to the install endpoint");
 
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].status, "FAILED");
+        assert_eq!(&*result.rows[0].status, "FAILED");
         assert_eq!(result.failures.len(), 1);
     }
 
@@ -1263,8 +1269,8 @@ mod tests {
 
         // Both records survive: one INSTALLED, one FAILED.
         assert_eq!(result.rows.len(), 2);
-        assert!(result.rows.iter().any(|r| r.status == "INSTALLED"));
-        assert!(result.rows.iter().any(|r| r.status == "FAILED"));
+        assert!(result.rows.iter().any(|r| &*r.status == "INSTALLED"));
+        assert!(result.rows.iter().any(|r| &*r.status == "FAILED"));
     }
 
     #[tokio::test]
@@ -1329,13 +1335,13 @@ mod tests {
         );
         assert_eq!(result.rows.len(), 1, "only Alpha's patch becomes a row");
         assert_eq!(result.rows[0].kb.as_deref(), Some("KB1"));
-        assert_eq!(result.rows[0].organization, "Alpha");
+        assert_eq!(&*result.rows[0].organization, "Alpha");
         assert_eq!(
             result.compliance.len(),
             1,
             "only Alpha in the compliance roll"
         );
-        assert_eq!(result.compliance[0].organization, "Alpha");
+        assert_eq!(&*result.compliance[0].organization, "Alpha");
         assert_eq!(result.compliance[0].pending_critical, 1);
     }
 }
