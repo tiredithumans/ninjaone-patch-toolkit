@@ -253,9 +253,16 @@ secrets are **not** stored there — see below).
   - **The three paging commands all return empty on a cache miss**, never an error. A miss is a
     normal transient (tenant switch, sign-out, superseded query); the frontend already renders its
     own empty state from the absent result.
-  `get_patch_rows` also takes an optional `sort` (`rows::RowSort`) and re-orders **per request** via a
-  ref-sort in `rows::page_rows` — the cached rows themselves are never reordered; their canonical
+  `get_patch_rows` also takes an optional `sort` (`rows::RowSort`), applied through
+  `AppState::with_sorted_result` — the cached rows themselves are never reordered; their canonical
   severity/org/device order feeds the export and the summary's inline first page.
+  - **Both derived views are memoized inside the cache slot, and for the same reason.** `CachedResult`
+    carries `groups: Option<(GroupBy, …)>` **and** `sorted: Option<(RowSort, Arc<Vec<u32>>)>`.
+    `rows::sort_order` builds an index permutation; `rows::page_rows` slices it (or the cache order
+    when `None`, so an unsorted fleet never materializes an identity permutation). Paging a sorted
+    view used to re-sort every cached row on **every page request**, under the lock the export also
+    takes. Both memos live *inside* the slot, so replacing or clearing the result drops them in the
+    same operation and there is no second staleness protocol to get wrong.
   - **Grouping is backend-side too, for the same reason.** The Patches tab's *By device* / *By patch*
     modes go through `get_patch_groups` (headers + total, `rows::group_page`) and
     `get_patch_group_members` (one group's rows, `rows::group_member_page`). The frontend only ever
@@ -320,6 +327,16 @@ secrets are **not** stored there — see below).
   `Option<String>`s, so cloning the scoped subset — and again into `all_current` — cost millions of
   allocations per query for data the cache already owns and outlives. Keep new rollups on
   `&[&Patch]`; don't reintroduce an owned `Vec<Patch>` to make a signature more convenient.
+
+- **CPU-bound and blocking work goes on `spawn_blocking`, never on a tokio worker.** A Tauri `async`
+  command runs on the async runtime, so blocking there stalls unrelated IPC *and* the job poller —
+  `async` only buys you off the UI thread. Four places do real blocking work and all of them are
+  wrapped: `commands::patches::run_query`'s `assemble_result` (the scope→join→sort→rollup, seconds on
+  a large fleet with no `.await` in it), `commands::export`'s save dialog (`blocking_save_file` parks
+  until the operator picks a file) and its workbook/report writes, and `auth::store_tokens` (a
+  synchronous Keychain / Credential Manager / Secret Service call made while `refresh_lock` is held,
+  i.e. exactly when every other `access_token()` caller is queued behind it). Keep new work of either
+  kind off the runtime the same way.
 
 - **`AppState` locks are brief — never held across `.await`.** `settings`/`last_result` are
   `std::sync::Mutex`. Take a `settings_snapshot()` (clone) before any `.await`; don't hold a guard
@@ -481,6 +498,17 @@ secrets are **not** stored there — see below).
   JSON array **and** the `{ results, cursor }` envelope, where `cursor` may be a string or a
   `{ name, offset, … }` object; it stops when a page returns 0 rows even if the server echoes a
   stale token. Don't hand-roll a second reqwest/cursor loop.
+  - **Paginated bodies are deserialized straight into `T`; everything else goes through `Value`.**
+    `send_with_retry` owns the request/retry loop and returns the raw `reqwest::Response`;
+    `request_raw` decodes it as a `Value` (single-shot GETs, acting POSTs — all small bodies) and
+    `request_page` decodes it as a `PageBody<T>` (`api::parse_page`). The paginated path exists
+    because a whole-fleet third-party feed runs to six figures, and a `Value` intermediate allocated
+    a `String` for every JSON key on every row and then walked the tree again to build the `Patch` —
+    the rows were parsed twice. `parse_page` dispatches on the body's first non-whitespace byte and
+    reads the `{ results, cursor }` wrapper via `serde_json`'s `RawValue` (hence the `raw_value`
+    feature), so the shape checks stay explicit and the rows are parsed once. The `after`-paginated
+    branch needs each row's id, which is no longer reachable generically — `api::PagedRow` supplies
+    it, so a new paged type is a compile error rather than a silently non-advancing cursor.
   - **The retry policy is a pure function.** `retry_for(status, replay, attempt, retry_after)`
     returns `Retry::{No, Wait, Reauth}`, and `decode_response` handles the body — extracted from a
     ~300-line `request_raw` so the policy can be tested without a server. Its arms are below.
@@ -528,6 +556,16 @@ secrets are **not** stored there — see below).
   aliasing worked. **Fixtures must emit `timestamp`.** Undated pending patches get their own
   `Unknown` age bucket rather than inflating `180+ days`; they still count as aged in the SLA rollup
   (`unwrap_or(true)` — can't prove recent).
+
+- **`PatchRow` shares its repeated strings; it does not own them.** Device/org/location/role/OS names,
+  patch titles, KBs and statuses are `Arc<str>` handed out by a per-join interner (`rows::Interner`),
+  the device-derived half is resolved once per device (`rows::DeviceLabels`) rather than once per
+  patch, and `patch_type`/`severity` are `&'static str` because both vocabularies are fixed. The
+  cached `QueryResult` is the app's largest live allocation, and it used to hold one owned `String`
+  per field per row for a few thousand distinct values. `FailureGroup` and `PatchGroup` carry the same
+  shared strings so the rollups are refcount bumps. All of it serializes to plain JSON strings, so
+  `web-rs/src/types.rs` still mirrors them as `String` — `serialized_shapes_carry_every_frontend_required_key`
+  asserts the wire *types*, not just the keys, because the two crates share no code.
 
 - **Severity: NinjaOne sends two vocabularies on one field (load-bearing).** The feeds mix
   uppercase MSRC values (`CRITICAL`/`IMPORTANT`/`OPTIONAL`/`NONE`) with lowercase engine values
