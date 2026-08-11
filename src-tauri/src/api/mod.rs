@@ -4,16 +4,19 @@ pub mod devices;
 pub mod lookups;
 pub mod patches;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use serde_json::value::RawValue;
 use std::collections::HashSet;
 use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::auth::AuthState;
 use crate::error::truncate_body;
+use crate::model::{Device, Location, Organization, Patch, Role};
 
 const DEFAULT_PAGE_SIZE: u32 = 500;
 /// Page size for the high-volume `/queries/*` reporting endpoints (patches and
@@ -63,7 +66,12 @@ impl NinjaApiClient {
     }
 
     /// Issues a request against `{base}/api/v2{path}`, refreshing the bearer token
-    /// and retrying per `replay` (see [`ReplaySafety`]).
+    /// and retrying per `replay` (see [`ReplaySafety`]), and decodes the success
+    /// body into a [`Value`].
+    ///
+    /// The paginated fetchers deliberately do **not** go through here — see
+    /// [`Self::request_page`]. Everything else (the single-shot GETs and the acting
+    /// POSTs) returns small bodies where a `Value` costs nothing.
     async fn request_raw(
         &self,
         method: Method,
@@ -72,6 +80,48 @@ impl NinjaApiClient {
         body: Option<Value>,
         replay: ReplaySafety,
     ) -> Result<Value> {
+        let resp = self
+            .send_with_retry(method, path, query, body, replay)
+            .await?;
+        decode_response(resp).await
+    }
+
+    /// Issues a request and decodes the success body as one page of rows,
+    /// deserialized **straight into `T`** rather than through a [`Value`] tree.
+    ///
+    /// This is the whole reason [`Self::send_with_retry`] is split out of
+    /// [`Self::request_raw`]. A whole-fleet third-party patch feed runs to six
+    /// figures, and routing it through `Value` meant serde built a
+    /// `Map<String, Value>` for every row — allocating a `String` for each of its
+    /// ~10 JSON keys — and then walked the tree a second time to produce the
+    /// `Patch`. The rows were parsed twice and the intermediate was discarded
+    /// immediately. Here the row array is handed to `serde_json` once, as `Vec<T>`.
+    async fn request_page<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<PageBody<T>> {
+        let resp = self
+            .send_with_retry(Method::GET, path, query, None, ReplaySafety::Idempotent)
+            .await?;
+        decode_page(resp).await
+    }
+
+    /// The shared request + retry loop, returning the successful response with its
+    /// body unread so the caller can decode it however it likes.
+    ///
+    /// Split from [`Self::request_raw`] so the typed page decoder can reuse the
+    /// retry policy verbatim instead of growing a second copy of it — the arms here
+    /// (`ActOnce` on timeout, `Idempotent`-only on 5xx/connect, 429/401 for both) are
+    /// what keep an acting POST from being replayed into a second reboot.
+    async fn send_with_retry(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<Value>,
+        replay: ReplaySafety,
+    ) -> Result<reqwest::Response> {
         let base = self.auth.base_url();
         let url = format!("{base}/api/v2{path}");
         let mut attempt = 0u8;
@@ -161,7 +211,7 @@ impl NinjaApiClient {
                 warn!(%method, %url, %status, body = %text, "http error");
                 bail!("{method} {url} failed ({status}): {text}");
             }
-            return decode_response(resp).await;
+            return Ok(resp);
         }
     }
 
@@ -207,7 +257,7 @@ impl NinjaApiClient {
     /// short, and ids are de-duplicated so an inclusive-`after` boundary row isn't
     /// counted twice. Forward progress is required (the max id must advance), so a
     /// misbehaving endpoint can't loop forever.
-    pub async fn get_paginated<T: DeserializeOwned + Clone>(
+    pub async fn get_paginated<T: DeserializeOwned + PagedRow>(
         &self,
         path: &str,
         base_query: &[(&str, String)],
@@ -219,7 +269,7 @@ impl NinjaApiClient {
     /// Like [`get_paginated`](Self::get_paginated), reporting the cumulative row
     /// count to `on_progress` after each page so a long fetch can stream progress
     /// to the UI.
-    pub async fn get_paginated_reporting<T: DeserializeOwned + Clone>(
+    pub async fn get_paginated_reporting<T: DeserializeOwned + PagedRow>(
         &self,
         path: &str,
         base_query: &[(&str, String)],
@@ -241,16 +291,12 @@ impl NinjaApiClient {
                 query.push(("after", a.to_string()));
             }
 
-            let raw: Value = self
-                .request_raw(Method::GET, path, &query, None, ReplaySafety::Idempotent)
-                .await?;
-
-            match raw {
-                Value::Array(items) => {
+            match self.request_page::<T>(path, &query).await? {
+                PageBody::Array(items) => {
                     let len = items.len();
                     let mut max_id = after;
                     for item in items {
-                        let id = item.get("id").and_then(Value::as_i64);
+                        let id = item.row_id();
                         // Skip a row already seen on a prior page (an inclusive
                         // `after` cursor re-returns the boundary row).
                         if let Some(id) = id
@@ -261,8 +307,7 @@ impl NinjaApiClient {
                         if let Some(id) = id {
                             max_id = Some(max_id.map_or(id, |m| m.max(id)));
                         }
-                        let v: T = serde_json::from_value(item).context("deserialize page item")?;
-                        all.push(v);
+                        all.push(item);
                     }
                     if let Some(report) = on_progress {
                         report(all.len());
@@ -278,25 +323,12 @@ impl NinjaApiClient {
                         _ => return Ok(all),
                     }
                 }
-                Value::Object(mut obj) => {
-                    let results = obj
-                        .remove("results")
-                        .ok_or_else(|| anyhow!("paginated response missing `results`"))?;
-                    // `results` must be an array. A non-array (string/object/number)
-                    // is a malformed envelope, not an empty page — fail loudly
-                    // rather than silently treating it as zero rows and stopping,
-                    // which would return a truncated fleet as if it were complete.
-                    let Value::Array(items) = results else {
-                        bail!(
-                            "paginated `results` was not an array: {}",
-                            truncate_body(&results.to_string())
-                        );
-                    };
-                    let page_len = items.len();
-                    for item in items {
-                        let v: T = serde_json::from_value(item).context("deserialize page item")?;
-                        all.push(v);
-                    }
+                PageBody::Envelope {
+                    results,
+                    cursor: next,
+                } => {
+                    let page_len = results.len();
+                    all.extend(results);
 
                     if let Some(report) = on_progress {
                         report(all.len());
@@ -309,18 +341,150 @@ impl NinjaApiClient {
                     if page_len == 0 {
                         return Ok(all);
                     }
-                    match next_cursor(obj.get("cursor"))? {
+                    match next_cursor(next.as_ref())? {
                         Some(c) => cursor = Some(c),
                         None => return Ok(all),
                     }
                 }
-                Value::Null => return Ok(all),
-                other => bail!(
-                    "unexpected paginated body shape: {}",
-                    truncate_body(&other.to_string())
-                ),
+                PageBody::Empty => return Ok(all),
             }
         }
+    }
+}
+
+/// Row identity for the `after`-paginated list endpoints.
+///
+/// `get_paginated` advances its cursor by the largest `id` on a page and
+/// de-duplicates the inclusive boundary row, which used to read `item["id"]` off the
+/// intermediate `Value`. With the rows deserialized straight into `T` that field is
+/// no longer reachable generically, so the types say what their id is — which also
+/// makes it a compile error for a new paged type to forget.
+///
+/// `None` means "this row carries no id", which is the honest answer for a patch
+/// record. It cannot move the cursor, so a bare-array endpoint returning such rows
+/// stops after one full page exactly as it did before — the reporting feeds that
+/// return patches are cursor-enveloped and never take that branch.
+pub trait PagedRow {
+    fn row_id(&self) -> Option<i64>;
+}
+
+impl PagedRow for Device {
+    fn row_id(&self) -> Option<i64> {
+        Some(self.id)
+    }
+}
+
+impl PagedRow for Organization {
+    fn row_id(&self) -> Option<i64> {
+        Some(self.id)
+    }
+}
+
+impl PagedRow for Location {
+    fn row_id(&self) -> Option<i64> {
+        Some(self.id)
+    }
+}
+
+impl PagedRow for Role {
+    fn row_id(&self) -> Option<i64> {
+        Some(self.id)
+    }
+}
+
+impl PagedRow for Patch {
+    /// The `/queries/*` patch feeds carry no row id — they page by cursor.
+    fn row_id(&self) -> Option<i64> {
+        None
+    }
+}
+
+/// One decoded page of a paginated response, with its rows already in their final
+/// type.
+#[derive(Debug)]
+enum PageBody<T> {
+    /// A bare JSON array — the `after`-paginated list endpoints
+    /// (`/devices-detailed`, `/organizations`, `/locations`, `/roles`).
+    Array(Vec<T>),
+    /// The `{ results, cursor }` envelope — the `/queries/*` reporting endpoints.
+    /// The cursor stays a [`Value`] because it is one small field per page, so
+    /// nothing is gained by typing it and [`next_cursor`] already reads every shape
+    /// NinjaOne sends.
+    Envelope {
+        results: Vec<T>,
+        cursor: Option<Value>,
+    },
+    /// `204`, an empty body, or a literal `null` — no rows and no cursor.
+    Empty,
+}
+
+/// The envelope's own two fields, left **unparsed**.
+///
+/// [`RawValue`] borrows the original bytes rather than building a tree, so the
+/// shape checks below cost nothing and `results` is handed to serde exactly once,
+/// as `Vec<T>`.
+#[derive(Deserialize)]
+struct RawEnvelope<'a> {
+    #[serde(borrow, default)]
+    results: Option<&'a RawValue>,
+    #[serde(borrow, default)]
+    cursor: Option<&'a RawValue>,
+}
+
+/// Reads a successful response as one page of `T`.
+async fn decode_page<T: DeserializeOwned>(resp: reqwest::Response) -> Result<PageBody<T>> {
+    if resp.status() == StatusCode::NO_CONTENT {
+        return Ok(PageBody::Empty);
+    }
+    let bytes = resp.bytes().await.context("read body")?;
+    parse_page(&bytes)
+}
+
+/// Decides which of NinjaOne's two pagination shapes a body is and deserializes it.
+///
+/// Dispatching on the first non-whitespace byte rather than on `Content-Type`
+/// matches what [`decode_response`] already tolerated: some endpoints return JSON
+/// without a JSON content type, and a body that isn't JSON at all (a proxy's HTML
+/// error page) falls through to the same "unexpected shape" error it did before.
+fn parse_page<T: DeserializeOwned>(bytes: &[u8]) -> Result<PageBody<T>> {
+    let trimmed = bytes.trim_ascii();
+    match trimmed.first() {
+        None => Ok(PageBody::Empty),
+        Some(b'[') => Ok(PageBody::Array(
+            serde_json::from_slice(trimmed).context("deserialize page item")?,
+        )),
+        Some(b'{') => {
+            let env: RawEnvelope =
+                serde_json::from_slice(trimmed).context("decode paginated envelope")?;
+            let Some(results) = env.results else {
+                bail!("paginated response missing `results`");
+            };
+            // `results` must be an array. A non-array (string/object/number) is a
+            // malformed envelope, not an empty page — fail loudly rather than
+            // silently treating it as zero rows and stopping, which would return a
+            // truncated fleet as if it were complete. Checked on the raw slice so the
+            // message names the shape that arrived rather than serde's type error.
+            let raw = results.get();
+            if !raw.trim_start().starts_with('[') {
+                bail!(
+                    "paginated `results` was not an array: {}",
+                    truncate_body(raw)
+                );
+            }
+            Ok(PageBody::Envelope {
+                results: serde_json::from_str(raw).context("deserialize page item")?,
+                cursor: env
+                    .cursor
+                    .map(|c| serde_json::from_str::<Value>(c.get()))
+                    .transpose()
+                    .context("decode cursor")?,
+            })
+        }
+        Some(b'n') if trimmed == b"null" => Ok(PageBody::Empty),
+        _ => bail!(
+            "unexpected paginated body shape: {}",
+            truncate_body(&String::from_utf8_lossy(trimmed))
+        ),
     }
 }
 
@@ -551,6 +715,89 @@ mod tests {
             ),
             Retry::No
         );
+    }
+
+    /// The body-shape dispatch is a pure function now that the rows deserialize
+    /// straight into `T`, so the branches that used to be reachable only through a
+    /// wiremock round trip are asserted directly.
+    #[test]
+    fn parse_page_reads_both_pagination_shapes_and_every_empty_form() {
+        let array: PageBody<Organization> = parse_page(br#"[{"id":1,"name":"Alpha"}]"#).unwrap();
+        let PageBody::Array(rows) = array else {
+            panic!("a bare array must decode as the after-paginated shape");
+        };
+        assert_eq!(rows[0].name, "Alpha");
+
+        let env: PageBody<Organization> =
+            parse_page(br#"{"results":[{"id":2,"name":"Beta"}],"cursor":"tok"}"#).unwrap();
+        let PageBody::Envelope { results, cursor } = env else {
+            panic!("a results/cursor object must decode as the enveloped shape");
+        };
+        assert_eq!(results[0].name, "Beta");
+        assert_eq!(
+            next_cursor(cursor.as_ref()).unwrap().as_deref(),
+            Some("tok")
+        );
+
+        // 204 is handled before the body is read; these are the on-the-wire forms.
+        for empty in [b"".as_slice(), b"   ".as_slice(), b"null".as_slice()] {
+            assert!(
+                matches!(parse_page::<Organization>(empty).unwrap(), PageBody::Empty),
+                "{:?} must read as an empty page",
+                String::from_utf8_lossy(empty)
+            );
+        }
+
+        // Leading whitespace must not change which branch is taken.
+        assert!(matches!(
+            parse_page::<Organization>(b"\n  [] ").unwrap(),
+            PageBody::Array(_)
+        ));
+    }
+
+    /// A malformed envelope must fail loudly rather than read as zero rows: the
+    /// caller cannot tell a truncated fleet from a complete one, and every
+    /// compliance number derived from it would be silently wrong. The message names
+    /// the shape that arrived, which is why the check is on the raw slice rather
+    /// than left to serde's type error.
+    #[test]
+    fn parse_page_rejects_a_malformed_envelope_and_a_non_json_body() {
+        let err = parse_page::<Organization>(br#"{"results":"not-an-array","cursor":""}"#)
+            .expect_err("a non-array `results` must error");
+        assert!(err.to_string().contains("was not an array"), "{err}");
+
+        let missing = parse_page::<Organization>(br#"{"cursor":"tok"}"#)
+            .expect_err("an envelope with no `results` must error");
+        assert!(
+            missing.to_string().contains("missing `results`"),
+            "{missing}"
+        );
+
+        // A proxy's HTML error page reached this path before as a `Value::String`.
+        let html = parse_page::<Organization>(b"<html>gateway error</html>")
+            .expect_err("a non-JSON body must error");
+        assert!(
+            html.to_string().contains("unexpected paginated body"),
+            "{html}"
+        );
+    }
+
+    /// The cursor advance and boundary de-dup read the id off the row itself now.
+    /// `Patch` genuinely has none — the feeds that carry it are cursor-enveloped —
+    /// and saying so is what keeps it out of the `after` branch.
+    #[test]
+    fn paged_rows_report_the_id_the_after_cursor_advances_by() {
+        assert_eq!(
+            Organization {
+                id: 9,
+                name: "Alpha".into()
+            }
+            .row_id(),
+            Some(9)
+        );
+        // Every `Patch` field is optional, so an empty object is a valid one.
+        let patch: Patch = serde_json::from_str("{}").unwrap();
+        assert_eq!(patch.row_id(), None);
     }
 
     #[test]
