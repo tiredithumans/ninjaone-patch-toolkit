@@ -23,27 +23,40 @@ use crate::model::Activity;
 const ACTIVITY_PAGE_SIZE: u32 = 500;
 
 impl NinjaApiClient {
-    /// Activity log, newest first. `newer_than` is a Unix timestamp in **seconds**.
+    /// Activity log, newest first. `since_ts` is a Unix timestamp in **seconds** and
+    /// is applied **client-side** — see below.
     ///
     /// The response is a bare array on most tenants but an `{ "activities": [...] }`
     /// envelope on others, so both are accepted.
     ///
-    /// Scoped to one device and to activities since just before dispatch, so the
-    /// [`ACTIVITY_PAGE_SIZE`] window is ample in practice. A device noisy enough to
-    /// overflow it within a job's timeout would push the terminal activity out of
-    /// reach, so that case is logged rather than left to look like a job that simply
-    /// never finished — the job itself still resolves via its timeout.
+    /// Scoped to one device, so the [`ACTIVITY_PAGE_SIZE`] window is ample in
+    /// practice. A device noisy enough to overflow it within a job's timeout would
+    /// push the terminal activity out of reach, so that case is logged rather than
+    /// left to look like a job that simply never finished — the job itself still
+    /// resolves via its timeout.
+    ///
+    /// **The time bound is not sent to the API.** This used to pass the dispatch
+    /// timestamp as `newerThan`, which the spec defines as *"activities … than
+    /// specified activity **ID**"* (`type: integer, format: int64`) — so a value near
+    /// 1.7e9 asked for activities newer than an id far beyond any real one, and the
+    /// feed came back empty for every poll. An empty feed reads as "the feed lags"
+    /// (which is a real and expected condition), so every dispatched scan, apply,
+    /// reboot and script resolved by timeout instead of by its activity, with no
+    /// error anywhere. The endpoint's date-valued parameters are `after`/`before`,
+    /// whose format the spec does not state; rather than guess between epoch and
+    /// ISO-8601 on the path that reports what a *write* did, the request is left
+    /// unbounded and `activityTime` — which is typed, and already parsed — does the
+    /// filtering here.
     pub async fn activities(
         &self,
         device_id: Option<i64>,
-        newer_than: Option<i64>,
+        since_ts: Option<i64>,
     ) -> Result<Vec<Activity>> {
         let mut query: Vec<(&str, String)> = Vec::new();
         if let Some(id) = device_id {
-            query.push(("df", format!("id = {id}")));
-        }
-        if let Some(after) = newer_than {
-            query.push(("newerThan", after.to_string()));
+            // No spaces around `=`: the documented grammar is `id=<DeviceID>`, and
+            // its worked example is `df=class%3DWINDOWS_SERVER%20AND%20offline`.
+            query.push(("df", format!("id={id}")));
         }
         query.push(("pageSize", ACTIVITY_PAGE_SIZE.to_string()));
 
@@ -71,9 +84,16 @@ impl NinjaApiClient {
 
         // A single malformed entry shouldn't blind the poller to every other job on
         // the device, so unparseable rows are dropped rather than failing the call.
+        let floor = since_ts.map(|t| t as f64);
         Ok(items
             .into_iter()
             .filter_map(|v| serde_json::from_value::<Activity>(v).ok())
+            // An activity with no timestamp is kept: it cannot be shown to predate
+            // the dispatch, and dropping it would lose a terminal state.
+            .filter(|a| match (floor, a.activity_time) {
+                (Some(floor), Some(ts)) => ts >= floor,
+                _ => true,
+            })
             .collect())
     }
 }
@@ -97,11 +117,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v2/activities"))
-            .and(query_param("df", "id = 42"))
-            .and(query_param("newerThan", "1700"))
+            .and(query_param("df", "id=42"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-                { "id": 1, "activityType": "SCRIPT", "status": "COMPLETED",
-                  "result": { "exitCode": 0 } },
+                { "id": 1, "activityType": "SCRIPTING", "statusCode": "COMPLETED",
+                  "activityResult": "SUCCESS", "activityTime": 1800.0,
+                  "data": { "exitCode": 0 } },
             ])))
             .mount(&server)
             .await;
@@ -113,6 +133,39 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert!(list[0].is_terminal());
         assert_eq!(list[0].exit_code(), Some(0));
+    }
+
+    /// The dispatch-time floor is ours to apply, because the API parameter that
+    /// looks like it (`newerThan`) takes an activity id, not a timestamp.
+    #[tokio::test]
+    async fn the_time_floor_is_applied_here_and_never_sent_as_newer_than() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/activities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 1, "activityTime": 1_000.0, "statusCode": "COMPLETED" },
+                { "id": 2, "activityTime": 2_000.0, "statusCode": "COMPLETED" },
+                // No timestamp: kept, since it can't be shown to predate the floor.
+                { "id": 3, "statusCode": "COMPLETED" },
+            ])))
+            .mount(&server)
+            .await;
+
+        let list = client(&server)
+            .activities(Some(42), Some(1_500))
+            .await
+            .expect("activities");
+        assert_eq!(
+            list.iter().filter_map(|a| a.id).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+
+        let sent = &server.received_requests().await.expect("requests")[0];
+        let url = sent.url.as_str();
+        assert!(
+            !url.contains("newerThan"),
+            "newerThan takes an activity id, not a timestamp: {url}"
+        );
     }
 
     #[tokio::test]
@@ -138,7 +191,7 @@ mod tests {
             .and(path("/api/v2/activities"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([
                 { "id": "not-a-number" },
-                { "id": 3, "status": "FAILED" },
+                { "id": 3, "statusCode": "COMPLETED", "activityResult": "FAILURE" },
             ])))
             .mount(&server)
             .await;
@@ -154,7 +207,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/v2/activities"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-                { "id": 4, "status": "FAILED", "result": { "resultCode": 2 } },
+                { "id": 4, "statusCode": "COMPLETED", "activityResult": "FAILURE",
+                  "data": { "resultCode": 2 } },
             ])))
             .mount(&server)
             .await;

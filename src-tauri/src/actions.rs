@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use chrono::{DateTime, Datelike, Local, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Activity, Device, RebootMode};
+use crate::model::{Activity, ActivityOutcome, Device, RebootMode};
 use crate::settings::ActionSettings;
 
 pub mod audit;
@@ -593,6 +593,34 @@ pub fn build_parameters(
     }
 }
 
+/// Whether an activity type is one a dispatched action can produce.
+///
+/// The third correlation tier is the *only* path open to the native endpoints
+/// (`scan`/`apply`/`reboot`), which return no correlator at all — and those emit
+/// `PATCH_MANAGEMENT`, `SOFTWARE_PATCH_MANAGEMENT` and `SYSTEM` activities, none of
+/// which this accepted. A script emits `SCRIPTING`; `SCRIPT`, the value the filter
+/// was written against, is not in the spec's `activityType` enum at all, so every
+/// job whose dispatch response omitted an id or uid sat unmatched until it timed
+/// out. `SCRIPT` is kept anyway — an accepted-but-never-sent value costs nothing,
+/// while a missing one costs a hung job.
+fn is_action_activity(activity_type: Option<&str>) -> bool {
+    matches!(
+        activity_type,
+        Some(
+            "SCRIPTING"
+                | "SCRIPT"
+                | "ACTION"
+                | "ACTIONSET"
+                | "CONDITION_ACTION"
+                | "CONDITION_ACTIONSET"
+                | "PATCH_MANAGEMENT"
+                | "SOFTWARE_PATCH_MANAGEMENT"
+                | "SCHEDULED_TASK"
+                | "SYSTEM"
+        )
+    )
+}
+
 /// Finds the activity that corresponds to a dispatched job.
 ///
 /// Three tiers, most to least certain: the exact activity id the dispatch returned,
@@ -630,12 +658,7 @@ pub fn match_activity<'a>(
     let floor = (job.dispatched_ts - 5) as f64;
     activities
         .iter()
-        .filter(|a| {
-            matches!(
-                a.activity_type.as_deref(),
-                Some("SCRIPT") | Some("ACTION") | Some("ACTIONSET")
-            )
-        })
+        .filter(|a| is_action_activity(a.activity_type.as_deref()))
         .filter(|a| a.activity_time.unwrap_or(0.0) >= floor)
         // An activity with no id cannot be tracked, so it cannot be excluded either;
         // it stays eligible exactly as before.
@@ -666,11 +689,10 @@ pub fn advance_job(
 ) {
     match match_activity(activities, job, claimed) {
         Some(a) if a.is_terminal() => {
-            let state = match a.status.as_deref() {
-                Some("COMPLETED") => JobState::Completed,
-                Some("TIMED_OUT") => JobState::TimedOut,
-                Some(other) => JobState::Failed(other.to_string()),
-                None => JobState::Failed("unknown terminal state".into()),
+            let state = match a.outcome() {
+                ActivityOutcome::Succeeded => JobState::Completed,
+                ActivityOutcome::TimedOut => JobState::TimedOut,
+                ActivityOutcome::Failed(code) => JobState::Failed(code),
             };
             if job.activity_id.is_none() {
                 job.activity_id = a.id;
@@ -1303,6 +1325,64 @@ mod tests {
             match_activity(&list, &j, &HashSet::new()).and_then(|a| a.id),
             Some(2)
         );
+    }
+
+    /// The native endpoints return no correlator, so the activity-type heuristic is
+    /// their only path to resolving — and the types they emit were not on the list.
+    #[test]
+    fn the_native_patch_endpoints_activity_types_are_matchable() {
+        let now = Utc::now().timestamp();
+        for kind in [
+            "PATCH_MANAGEMENT",
+            "SOFTWARE_PATCH_MANAGEMENT",
+            "SCRIPTING",
+            "SYSTEM",
+        ] {
+            let j = job(None, None, now);
+            let list = vec![activity(
+                json!({ "id": 1, "activityType": kind, "activityTime": now as f64 }),
+            )];
+            assert_eq!(
+                match_activity(&list, &j, &HashSet::new()).and_then(|a| a.id),
+                Some(1),
+                "{kind} must be correlatable"
+            );
+        }
+        // Unrelated feed noise on the same device still must not be claimed.
+        let j = job(None, None, now);
+        let noise = vec![activity(
+            json!({ "id": 2, "activityType": "SPLASHTOP_CONNECTION_INITIATED",
+                    "activityTime": now as f64 }),
+        )];
+        assert!(match_activity(&noise, &j, &HashSet::new()).is_none());
+    }
+
+    /// `statusCode` is the enumerated lifecycle and `activityResult` is the outcome;
+    /// a COMPLETED activity carrying FAILURE is a failed job, not a successful one.
+    #[test]
+    fn the_outcome_comes_from_activity_result_not_the_lifecycle_code() {
+        let now = Utc::now();
+        let ts = now.timestamp();
+        let mut j = job(Some(7), None, ts);
+        let list = vec![activity(json!({
+            "id": 7, "activityType": "SCRIPTING", "activityTime": ts as f64,
+            "statusCode": "COMPLETED", "activityResult": "FAILURE",
+            "data": { "exitCode": 1 }
+        }))];
+        advance_job(&mut j, &list, now, &mut HashSet::new());
+        assert_eq!(j.state, JobState::Failed("FAILURE".into()));
+        assert_eq!(j.exit_code, Some(1));
+
+        // …and a genuine success still reads as one.
+        let mut ok = job(Some(8), None, ts);
+        let good = vec![activity(json!({
+            "id": 8, "activityType": "SCRIPTING", "activityTime": ts as f64,
+            "statusCode": "COMPLETED", "activityResult": "SUCCESS",
+            "data": { "exitCode": 0 }
+        }))];
+        advance_job(&mut ok, &good, now, &mut HashSet::new());
+        assert_eq!(ok.state, JobState::Completed);
+        assert_eq!(ok.exit_code, Some(0));
     }
 
     #[test]

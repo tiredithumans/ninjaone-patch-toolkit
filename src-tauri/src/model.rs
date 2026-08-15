@@ -384,40 +384,122 @@ impl RebootMode {
 
 /// One entry from `GET /v2/activities`. Only the fields needed to resolve a
 /// dispatched job are modelled; the feed carries far more.
+///
+/// The spec's `Activity` schema names three fields the terminal-state decision
+/// depends on, and they are not interchangeable:
+/// * `statusCode` — the enumerated lifecycle code (`STARTED`, `IN_PROCESS`,
+///   `COMPLETED`, `CANCELLED`, `BLOCKED`, …).
+/// * `status` — "Status description", free text, with no enum at all.
+/// * `activityResult` — `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED` /
+///   `AGENT_OFFLINE`.
+///
+/// This modelled only `status` and matched the *code* vocabulary against it, so on a
+/// tenant where `status` really is a description, no job ever reached a terminal
+/// state and every dispatch resolved by timeout instead. Both are read now, code
+/// first, and the outcome comes from `activityResult` rather than from a `FAILED`
+/// spelling that the code vocabulary does not contain.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Activity {
     #[serde(default)]
     pub id: Option<i64>,
     #[serde(default, rename = "activityType")]
     pub activity_type: Option<String>,
+    /// The enumerated lifecycle code. Preferred over [`status`](Self::status).
+    #[serde(default, rename = "statusCode")]
+    pub status_code: Option<String>,
+    /// The human-readable status description. Kept as a fallback because tenants
+    /// have been observed returning the code here, which is what the previous
+    /// version relied on exclusively.
     #[serde(default)]
     pub status: Option<String>,
+    /// `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED` / `AGENT_OFFLINE`.
+    #[serde(default, rename = "activityResult")]
+    pub activity_result: Option<String>,
     #[serde(default, rename = "activityTime")]
     pub activity_time: Option<f64>,
     /// Activity series uid — the correlator shared with `Job.uid` and, on some
     /// tenants, the `script/run` response.
     #[serde(default, rename = "seriesUid")]
     pub series_uid: Option<String>,
-    /// Exit-code fields vary by activity kind, so this stays untyped.
-    #[serde(default)]
-    pub result: Option<Value>,
+    /// The free-form payload. `data` is the spec's name for it; `result` is kept as
+    /// an alias because that is the key this code originally read — and reading only
+    /// a key the schema does not define meant `exit_code()` silently returned `None`
+    /// for every job, which surfaced as "Completed, no exit code" rather than as an
+    /// error.
+    #[serde(default, alias = "result")]
+    pub data: Option<Value>,
+}
+
+/// How a terminal [`Activity`] turned out, decoupled from the `JobState` it maps to
+/// so `model` stays free of the action domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivityOutcome {
+    Succeeded,
+    TimedOut,
+    /// Carries the code that explains it, for the job report.
+    Failed(String),
 }
 
 impl Activity {
+    /// The lifecycle code, preferring the enumerated field over the description.
+    fn lifecycle(&self) -> Option<&str> {
+        self.status_code.as_deref().or(self.status.as_deref())
+    }
+
     /// Whether the activity has reached a state that will not change again.
-    /// NinjaOne spells cancellation both ways across tenants.
+    ///
+    /// `CANCELED`/`CANCELLED` are both accepted (tenants spell it both ways), and
+    /// `FAILED`/`TIMED_OUT` are kept even though the documented `statusCode` enum
+    /// contains neither — dropping a spelling that a tenant might still emit would
+    /// turn a finished job back into one that hangs to timeout.
     pub fn is_terminal(&self) -> bool {
         matches!(
-            self.status.as_deref(),
-            Some("COMPLETED" | "FAILED" | "TIMED_OUT" | "CANCELED" | "CANCELLED")
+            self.lifecycle(),
+            Some(
+                "COMPLETED"
+                    | "FAILED"
+                    | "TIMED_OUT"
+                    | "CANCELED"
+                    | "CANCELLED"
+                    | "BLOCKED"
+                    | "EVALUATION_FAILURE"
+            )
         )
     }
 
+    /// How a terminal activity turned out, as a short code for the job report.
+    ///
+    /// `activityResult` is the field the spec gives an outcome enum, so it decides;
+    /// the lifecycle code answers only when the result is absent. A `COMPLETED`
+    /// activity carrying `FAILURE` is a failure, which the previous version — which
+    /// read the lifecycle alone — reported as success.
+    pub fn outcome(&self) -> ActivityOutcome {
+        match self.activity_result.as_deref() {
+            Some("SUCCESS") => return ActivityOutcome::Succeeded,
+            Some("UNCOMPLETED") => return ActivityOutcome::TimedOut,
+            Some(other) if !other.is_empty() => {
+                return ActivityOutcome::Failed(other.to_string());
+            }
+            _ => {}
+        }
+        match self.lifecycle() {
+            Some("COMPLETED") => ActivityOutcome::Succeeded,
+            Some("TIMED_OUT") => ActivityOutcome::TimedOut,
+            Some(other) => ActivityOutcome::Failed(other.to_string()),
+            None => ActivityOutcome::Failed("unknown terminal state".into()),
+        }
+    }
+
     pub fn exit_code(&self) -> Option<i32> {
-        let v = self.result.as_ref()?;
-        for key in ["exitCode", "resultCode"] {
-            if let Some(n) = v.get(key).and_then(Value::as_i64) {
-                return Some(n as i32);
+        let v = self.data.as_ref()?;
+        // Checked at the top level and one nesting down: `data` is an untyped bag
+        // (`additionalProperties: true`), and tenants have been seen putting the
+        // script result under `data.result` as well as directly on `data`.
+        for bag in [Some(v), v.get("result")].into_iter().flatten() {
+            for key in ["exitCode", "resultCode"] {
+                if let Some(n) = bag.get(key).and_then(Value::as_i64) {
+                    return Some(n as i32);
+                }
             }
         }
         None
