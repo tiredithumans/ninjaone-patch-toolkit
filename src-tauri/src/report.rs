@@ -109,6 +109,15 @@ pub fn render_report(result: &QueryResult) -> String {
         rows = result.rows.len()
     );
 
+    let _ = write!(
+        buf,
+        "<p class=\"meta\">{}</p>",
+        escape_html(&crate::rows::compliance_scope_note(
+            result.devices_offline,
+            result.patch_families
+        ))
+    );
+
     buf.push_str("<section><h2>Compliance by organization</h2>");
     write_compliance_chart(&mut buf, &result.compliance);
     buf.push_str("</section>");
@@ -169,8 +178,8 @@ fn write_compliance_bars(buf: &mut String, rows: &[(String, f64)]) {
             "<text x=\"0\" y=\"{text_y}\" class=\"lbl\">{label}</text>\
              <rect class=\"track\" x=\"{bar_x}\" y=\"{rect_y}\" width=\"{track:.0}\" height=\"16\" rx=\"3\"/>\
              <rect x=\"{bar_x}\" y=\"{rect_y}\" width=\"{bar:.1}\" height=\"16\" rx=\"3\" fill=\"{color}\"/>\
-             <text x=\"{val_x:.0}\" y=\"{text_y}\" class=\"val\">{pct:.0}%</text>",
-            pct = *pct
+             <text x=\"{val_x:.0}\" y=\"{text_y}\" class=\"val\">{shown}</text>",
+            shown = crate::rows::format_pct(*pct)
         );
     }
     buf.push_str("</svg>");
@@ -394,6 +403,7 @@ footer{margin-top:32px;color:#9ca3af;font-size:11px;border-top:1px solid #e5e7eb
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rows::PatchFamilies;
 
     /// The HTML report and the Excel workbook render the same `FailureGroup` list,
     /// so they must agree on the columns. They previously did not: the workbook had
@@ -656,6 +666,11 @@ mod tests {
                 },
             ],
             devices_total: 10,
+            devices_offline: 0,
+            patch_families: PatchFamilies {
+                os: true,
+                software: true,
+            },
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }
@@ -701,6 +716,11 @@ mod tests {
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
             devices_total: 0,
+            devices_offline: 0,
+            patch_families: PatchFamilies {
+                os: true,
+                software: true,
+            },
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         };

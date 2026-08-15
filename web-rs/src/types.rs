@@ -14,9 +14,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilterParams {
-    pub organization_id: Option<i64>,
-    pub location_id: Option<i64>,
-    pub role_id: Option<i64>,
+    /// Selected organizations; empty = every organization. Multi-select, and the
+    /// backend accepts a bare id here too so presets saved when these were scalars
+    /// still load — see `src-tauri/src/filter.rs::ids`.
+    pub organization_ids: Vec<i64>,
+    /// Selected locations; empty = every location.
+    pub location_ids: Vec<i64>,
+    /// Selected device roles; empty = every role.
+    pub role_ids: Vec<i64>,
     pub node_classes: Vec<String>,
     pub os_name_contains: Option<String>,
     pub search: Option<String>,
@@ -33,6 +38,35 @@ pub struct FilterParams {
     pub detected_before: Option<i64>,
 }
 
+/// Mirror of the backend's `rows::PatchFamilies` — the honest scope of every
+/// compliance/severity/age number in a result.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchFamilies {
+    #[serde(default)]
+    pub os: bool,
+    #[serde(default)]
+    pub software: bool,
+}
+
+impl PatchFamilies {
+    pub fn label(self) -> &'static str {
+        match (self.os, self.software) {
+            (true, true) => "OS and third-party patches",
+            (true, false) => "OS patches only",
+            (false, true) => "third-party patches only",
+            (false, false) => "no patch families",
+        }
+    }
+
+    /// Whether the rollups describe the whole backlog. `Default` is `false/false`,
+    /// which reports as incomplete — the right way to fail if the field is ever
+    /// missing from the wire.
+    pub fn is_complete(self) -> bool {
+        self.os && self.software
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Organization {
     pub id: i64,
@@ -40,9 +74,15 @@ pub struct Organization {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Location {
     pub id: i64,
     pub name: String,
+    /// Which organization the location belongs to. The lookup now returns locations
+    /// across every selected organization at once, so the list has to say which is
+    /// which.
+    #[serde(default)]
+    pub organization_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -121,11 +161,15 @@ pub struct OsCompliance {
     pub aged_critical: usize,
 }
 
-// Backend also sends patchType, severityRank and latestFailureTs; serde ignores
-// undeclared fields. Only what the failures table renders is mirrored here.
+// Backend also sends severityRank and latestFailureTs; serde ignores undeclared
+// fields. Only what the failures table renders is mirrored here.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailureGroup {
+    /// `OS` or `SOFTWARE`. Third-party failures carry no KB, so this is what tells
+    /// the two apart in the table.
+    #[serde(default)]
+    pub patch_type: String,
     pub kb: Option<String>,
     pub name: String,
     pub severity: String,
@@ -220,6 +264,15 @@ pub struct QueryResult {
     /// Pending-patch age histogram for the dashboard charts.
     pub age_buckets: Vec<AgeBucket>,
     pub devices_total: usize,
+    /// How many of `devices_total` are offline. The compliance rollups exclude them
+    /// from both the denominator and the pending counts, so the Devices column of the
+    /// compliance table does not sum to `devices_total` — this is what lets the UI
+    /// say so instead of showing two device counts with no explanation.
+    #[serde(default)]
+    pub devices_offline: usize,
+    /// Which patch families the fleet-health rollups actually cover.
+    #[serde(default)]
+    pub patch_families: PatchFamilies,
     pub generated_at: String,
     /// When the underlying whole-fleet patch data was last fetched (vs. when this
     /// re-filter was computed). Drives the "patch data as of …" label.

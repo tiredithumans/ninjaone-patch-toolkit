@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use leptos::prelude::*;
 
 use super::*;
@@ -32,6 +34,15 @@ pub(crate) fn Results() -> impl IntoView {
                     rows_total: r.rows_total,
                     devices_total: r.devices_total,
                     failures: r.failures.len(),
+                    // Distinct devices across every failure group: the groups
+                    // overlap (one device usually fails several patches), so the
+                    // per-group counts cannot simply be added.
+                    failing_devices: r
+                        .failures
+                        .iter()
+                        .flat_map(|f| f.device_names.iter())
+                        .collect::<BTreeSet<_>>()
+                        .len(),
                     orgs: r.compliance.len(),
                     reboot: r.reboot_devices.len(),
                 };
@@ -659,6 +670,30 @@ fn GroupMembers(rows: Vec<PatchRow>) -> impl IntoView {
     }
 }
 
+/// The scope sentence under the Compliance tab's banner. Reads the population and
+/// the patch families off the displayed result, so it always describes the numbers
+/// actually on screen rather than the controls' current state.
+#[component]
+fn ComplianceScopeNote() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    view! {
+        <p class="scope-note">
+            {move || {
+                state
+                    .query
+                    .result
+                    .with(|r| {
+                        r.as_ref()
+                            .map(|r| {
+                                util::compliance_scope_note(r.devices_offline, r.patch_families)
+                            })
+                            .unwrap_or_default()
+                    })
+            }}
+        </p>
+    }
+}
+
 #[component]
 fn ComplianceTab() -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -685,9 +720,16 @@ fn ComplianceTab() -> impl IntoView {
             <ScopeBanner
                 kind="fleet"
                 tier="Fleet health"
-                reflects="the whole pending backlog for the selected device scope."
-                filters="Device scope only (Org / Location / Role / OS Type / OS name). Status, Severity, Search, First-seen and Installed-within are ignored here."
+                reflects="the pending backlog for the selected device scope."
+                // `Type` is listed because it genuinely narrows these numbers: only
+                // the patch families the query fetched are in the rollups, and an
+                // OS-only query cannot see a third-party backlog. Claiming it was
+                // ignored here — which this said, and which the struck-through chip
+                // above still implied — let "100% compliant" mean "no pending OS
+                // patches" with nothing on screen saying so.
+                filters="Device scope (Org / Location / Role / OS Type / OS name) and patch Type. Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
+            <ComplianceScopeNote/>
             <ComplianceCharts/>
             <ComplianceRollupTable first_col="Organization" rows=org_rows drill=RollupDrill::Organization/>
             <section class="compliance-os">
@@ -771,11 +813,12 @@ fn ComplianceRollupTable(
                     <thead>
                         <tr>
                             <th scope="col">{first_col}</th>
+                            // Canonical spellings from `rows::ComplianceBucket::COLUMNS`.
                             <th scope="col">"Devices"</th>
                             <th scope="col">"Compliant"</th>
-                            <th scope="col">"Compliance"</th>
-                            <th scope="col">"Pending Critical/Important Patches"</th>
-                            <th scope="col">"Pending past SLA"</th>
+                            <th scope="col">"Compliance %"</th>
+                            <th scope="col">"Pending Critical/Important"</th>
+                            <th scope="col">"Aged (past SLA)"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -783,7 +826,7 @@ fn ComplianceRollupTable(
                             rows.get()
                                 .into_iter()
                                 .map(|b| {
-                                    let pct = format!("{:.0}%", b.compliance_pct);
+                                    let pct = util::format_pct(b.compliance_pct);
                                     let (aged_class, aged_label, aged_title) = aged_badge(
                                         b.aged_critical,
                                     );
@@ -874,11 +917,18 @@ fn FailuresTable() -> impl IntoView {
                 <table>
                     <thead>
                         <tr>
+                            // Seven columns spelled as `rows::FailureGroup::COLUMNS`
+                            // spells them. `Patch Type` was missing here while the
+                            // workbook and the HTML report both carried it, so the
+                            // on-screen table could not tell an OS failure from a
+                            // third-party one — and third-party rows show "(no KB)",
+                            // which is exactly when the distinction matters.
                             <th scope="col">"Severity"</th>
+                            <th scope="col">"Patch Type"</th>
                             <th scope="col">"KB"</th>
                             <th scope="col">"Patch"</th>
-                            <th scope="col">"Affected devices"</th>
-                            <th scope="col">"Latest failure"</th>
+                            <th scope="col">"Affected Devices"</th>
+                            <th scope="col">"Latest Failure"</th>
                             <th scope="col">"Devices"</th>
                         </tr>
                     </thead>
@@ -904,6 +954,7 @@ fn FailuresTable() -> impl IntoView {
                                             <td>
                                                 <span class=sev>{f.severity}</span>
                                             </td>
+                                            <td>{f.patch_type}</td>
                                             <td>
                                                 <button
                                                     class="drill"
@@ -972,7 +1023,7 @@ fn RebootTable() -> impl IntoView {
                 kind="fleet"
                 tier="Fleet health"
                 reflects="devices in the selected device scope flagged for reboot."
-                filters="Device scope only. Status, Severity, Search, First-seen and Installed-within are ignored here."
+                filters="Device scope and patch Type (the pending count covers only the patch families this query fetched). Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
             <Show when=move || { page_count() > 1 }>
                 <div class="pager">
@@ -999,12 +1050,15 @@ fn RebootTable() -> impl IntoView {
                 <table>
                     <thead>
                         <tr>
+                            // Spelled as `rows::DeviceSummary::COLUMNS` spells them,
+                            // so the app, the workbook and the HTML report name the
+                            // same column the same way.
                             <th scope="col">"Organization"</th>
                             <th scope="col">"Location"</th>
-                            <th scope="col">"Role"</th>
+                            <th scope="col">"Device Role"</th>
                             <th scope="col">"Device"</th>
                             <th scope="col">"OS"</th>
-                            <th scope="col">"Pending patches"</th>
+                            <th scope="col">"Pending Patches"</th>
                         </tr>
                     </thead>
                     <tbody>

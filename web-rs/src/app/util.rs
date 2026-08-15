@@ -10,7 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::state::{DeviceSelection, SelectedPatch};
 use super::{AppliedFilters, Tab};
 use crate::types::{
-    ActionKind, AuthStatus, FilterParams, JobReport, PatchRow, RebootMode, RowSort, RowSortKey,
+    ActionKind, AuthStatus, FilterParams, JobReport, Location, Organization, PatchFamilies,
+    PatchRow, RebootMode, Role, RowSort, RowSortKey,
 };
 
 /// What [`AppState::run_query_inner`] should do, decided from the flags alone.
@@ -303,10 +304,6 @@ pub(crate) fn non_empty(s: String) -> Option<String> {
     }
 }
 
-pub(crate) fn parse_opt(s: &str) -> Option<i64> {
-    s.trim().parse().ok()
-}
-
 /// Parses a `yyyy-mm-dd` date (the only shape an `<input type="date">` produces)
 /// to Unix seconds at UTC midnight. `None` for empty or malformed input.
 ///
@@ -386,9 +383,9 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 /// them so the mapping below can be tested without a reactive runtime.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FilterInputs {
-    pub organization_id: Option<i64>,
-    pub location_id: Option<i64>,
-    pub role_id: Option<i64>,
+    pub organization_ids: Vec<i64>,
+    pub location_ids: Vec<i64>,
+    pub role_ids: Vec<i64>,
     pub node_classes: Vec<String>,
     pub severities: Vec<String>,
     pub os_name: String,
@@ -422,9 +419,9 @@ pub(crate) fn filter_params(i: FilterInputs) -> FilterParams {
         _ => (None, None, None),
     };
     FilterParams {
-        organization_id: i.organization_id,
-        location_id: i.location_id,
-        role_id: i.role_id,
+        organization_ids: i.organization_ids,
+        location_ids: i.location_ids,
+        role_ids: i.role_ids,
         node_classes: i.node_classes,
         os_name_contains: non_empty(i.os_name),
         search: non_empty(i.search),
@@ -649,6 +646,8 @@ pub(crate) struct SummaryCounts {
     pub rows_total: usize,
     pub devices_total: usize,
     pub failures: usize,
+    /// Distinct devices carrying at least one of those failures.
+    pub failing_devices: usize,
     pub orgs: usize,
     pub reboot: usize,
 }
@@ -663,10 +662,13 @@ pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts, generated_at: &str) -> S
             group_thousands(c.rows_total),
             group_thousands(c.devices_total),
         ),
+        // Against the devices that actually failed, not the fleet. "12 failing
+        // patches across 4,000 devices" put the fleet size where the reader expects
+        // the blast radius, making a contained problem look fleet-wide.
         Tab::Failures => format!(
-            "{} failing patches across {} devices",
+            "{} failing patches on {} devices",
             group_thousands(c.failures),
-            group_thousands(c.devices_total),
+            group_thousands(c.failing_devices),
         ),
         Tab::Compliance => format!(
             "{} organizations \u{00b7} {} devices",
@@ -742,28 +744,170 @@ pub(crate) fn detected_label(window: &str, after: &str, before: &str) -> Option<
     }
 }
 
+/// Anything the scope multi-selects can list: an id and a display name.
+///
+/// The three lookups (`Organization`/`Location`/`Role`) are separate types with the
+/// same two fields, so one trait keeps the picker, the chip row and the snapshot
+/// generic over all three instead of triplicating each of them.
+pub(crate) trait Named {
+    fn id(&self) -> i64;
+    fn name(&self) -> &str;
+}
+
+impl Named for Organization {
+    fn id(&self) -> i64 {
+        self.id
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Named for Location {
+    fn id(&self) -> i64 {
+        self.id
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Named for Role {
+    fn id(&self) -> i64 {
+        self.id
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Resolves selected ids to display names, in the lookup's own order.
+///
+/// Ordered by the lookup rather than by the selection so the chip reads the same way
+/// the picker does, and ids with no matching lookup row are dropped — a name is the
+/// only thing a chip can usefully say, and "Org: 4711" is not one.
+pub(crate) fn names_for<T: Named>(
+    selected: &[i64],
+    options: impl Iterator<Item = T>,
+) -> Vec<String> {
+    options
+        .filter(|o| selected.contains(&o.id()))
+        .map(|o| o.name().to_string())
+        .collect()
+}
+
+/// Filters a lookup list by a case-insensitive substring of the display name, for
+/// the picker's search box. An empty needle matches everything.
+pub(crate) fn matching_options<T: Named + Clone>(options: &[T], needle: &str) -> Vec<T> {
+    let needle = needle.trim().to_lowercase();
+    options
+        .iter()
+        .filter(|o| needle.is_empty() || o.name().to_lowercase().contains(&needle))
+        .cloned()
+        .collect()
+}
+
+/// Qualifies location names that are ambiguous across the selected organizations.
+///
+/// With the organization facet multi-select, the location list spans several orgs at
+/// once, and "HQ" or "Main Office" is the same string under most of them — a picker
+/// offering three identical entries is not a choice anyone can make. Only genuinely
+/// duplicated names are qualified, so the common single-org case stays unchanged.
+pub(crate) fn disambiguate_locations(
+    locations: &[Location],
+    orgs: &[Organization],
+) -> Vec<Location> {
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for l in locations {
+        *seen.entry(l.name.as_str()).or_default() += 1;
+    }
+    locations
+        .iter()
+        .map(|l| {
+            let ambiguous = seen.get(l.name.as_str()).is_some_and(|n| *n > 1);
+            let org = l
+                .organization_id
+                .and_then(|id| orgs.iter().find(|o| o.id == id))
+                .map(|o| o.name.as_str());
+            match (ambiguous, org) {
+                (true, Some(org)) => Location {
+                    name: format!("{} \u{00b7} {org}", l.name),
+                    ..l.clone()
+                },
+                _ => l.clone(),
+            }
+        })
+        .collect()
+}
+
+/// The picker's collapsed summary: what the current selection covers.
+///
+/// Names the selection while it is short enough to read, and falls back to a count
+/// once it isn't — a scope of eleven sites is not legible as a comma list, and the
+/// chip row below the results carries the full list anyway.
+pub(crate) fn selection_label(selected_names: &[String], all_label: &str) -> String {
+    match selected_names.len() {
+        0 => all_label.to_string(),
+        1..=2 => selected_names.join(", "),
+        n => format!("{n} selected"),
+    }
+}
+
+/// One sentence stating exactly which devices and which patches the compliance
+/// numbers describe.
+///
+/// Mirrors `src-tauri/src/rows.rs::compliance_scope_note`, which the workbook and the
+/// HTML report print — the two crates share no code, so the wording lives twice and
+/// the tests on both sides pin it. Two things are invisible in a bare percentage and
+/// both change what it means: offline devices are excluded from the rollups entirely,
+/// and only the patch families the query fetched are in them.
+pub(crate) fn compliance_scope_note(devices_offline: usize, families: PatchFamilies) -> String {
+    let excluded = match devices_offline {
+        0 => String::new(),
+        1 => " (1 offline device excluded)".to_string(),
+        n => format!(" ({n} offline devices excluded)"),
+    };
+    let families = if families.is_complete() {
+        String::new()
+    } else {
+        format!(", and counts {}", families.label())
+    };
+    format!("Compliance covers online devices only{excluded}{families}.")
+}
+
+/// Formats a compliance percentage at zero decimals **without ever rounding up to
+/// 100%**.
+///
+/// Mirrors `src-tauri/src/rows.rs::format_pct`; the two crates share no code, so the
+/// rule is written twice on purpose. Plain `{:.0}%` renders anything from 99.5% up as
+/// `100%`, which is the one rounding error here that changes what an operator does:
+/// a compliance report claiming a clean fleet stops the work. Values below 100 cap at
+/// 99%.
+pub(crate) fn format_pct(pct: f64) -> String {
+    let shown = if pct >= 100.0 {
+        100.0
+    } else {
+        pct.round().min(99.0)
+    };
+    format!("{shown:.0}%")
+}
+
 /// Builds the glanceable chip row from a Run-time snapshot — one chip per non-default
 /// facet (an empty vec ⇒ the caller shows a "whole fleet" placeholder). Device-scope
 /// facets come first (`patch: false`), then the patch-tier facets (`patch: true`).
 pub(crate) fn filter_chips(f: &AppliedFilters) -> Vec<FilterChip> {
     let mut out = Vec::new();
-    if let Some(o) = &f.organization {
-        out.push(FilterChip {
-            label: format!("Org: {o}"),
-            patch: false,
-        });
-    }
-    if let Some(l) = &f.location {
-        out.push(FilterChip {
-            label: format!("Location: {l}"),
-            patch: false,
-        });
-    }
-    if let Some(r) = &f.role {
-        out.push(FilterChip {
-            label: format!("Role: {r}"),
-            patch: false,
-        });
+    for (label, names) in [
+        ("Org", &f.organizations),
+        ("Location", &f.locations),
+        ("Role", &f.roles),
+    ] {
+        if !names.is_empty() {
+            out.push(FilterChip {
+                label: format!("{label}: {}", names.join(", ")),
+                patch: false,
+            });
+        }
     }
     if !f.os_types.is_empty() {
         out.push(FilterChip {
@@ -1265,14 +1409,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_opt_trims_and_rejects_non_numbers() {
-        assert_eq!(parse_opt("  42 "), Some(42));
-        assert_eq!(parse_opt("-7"), Some(-7));
-        assert_eq!(parse_opt(""), None);
-        assert_eq!(parse_opt("abc"), None);
-    }
-
-    #[test]
     fn non_empty_collapses_blank_to_none() {
         assert_eq!(non_empty("   ".to_string()), None);
         assert_eq!(non_empty(" hi ".to_string()), Some("hi".to_string()));
@@ -1616,18 +1752,18 @@ mod tests {
     #[test]
     fn identity_and_text_facets_pass_through_with_blanks_dropped() {
         let f = filter_params(FilterInputs {
-            organization_id: Some(7),
-            location_id: Some(8),
-            role_id: Some(9),
+            organization_ids: vec![7, 11],
+            location_ids: vec![8],
+            role_ids: vec![9],
             node_classes: vec!["WINDOWS_SERVER".into()],
             severities: vec!["CRITICAL".into()],
             os_name: "  Windows 11  ".into(),
             search: "   ".into(),
             ..Default::default()
         });
-        assert_eq!(f.organization_id, Some(7));
-        assert_eq!(f.location_id, Some(8));
-        assert_eq!(f.role_id, Some(9));
+        assert_eq!(f.organization_ids, vec![7, 11]);
+        assert_eq!(f.location_ids, vec![8]);
+        assert_eq!(f.role_ids, vec![9]);
         assert_eq!(f.node_classes, vec!["WINDOWS_SERVER".to_string()]);
         assert_eq!(f.severities, vec!["CRITICAL".to_string()]);
         // Trimmed, and a whitespace-only box is "no filter" rather than a search
@@ -1865,6 +2001,7 @@ mod tests {
             rows_total: 12_300,
             devices_total: 540,
             failures: 7,
+            failing_devices: 5,
             orgs: 3,
             reboot: 12,
         };
@@ -1874,7 +2011,8 @@ mod tests {
         );
         assert_eq!(
             summary_line(Tab::Failures, &c, "2026-06-28"),
-            "7 failing patches across 540 devices \u{00b7} generated 2026-06-28"
+            // Against the devices that actually failed, not the fleet.
+            "7 failing patches on 5 devices \u{00b7} generated 2026-06-28"
         );
         assert_eq!(
             summary_line(Tab::Compliance, &c, "2026-06-28"),
@@ -2049,13 +2187,142 @@ mod tests {
         assert!(parse_changelog("   \n\n  ").is_empty());
     }
 
+    fn org(id: i64, name: &str) -> Organization {
+        Organization {
+            id,
+            name: name.to_string(),
+        }
+    }
+
+    fn loc(id: i64, name: &str, org_id: i64) -> Location {
+        Location {
+            id,
+            name: name.to_string(),
+            organization_id: Some(org_id),
+        }
+    }
+
+    /// Selected ids resolve in the lookup's order, and an id with no lookup row is
+    /// dropped rather than rendered as a bare number.
+    #[test]
+    fn names_for_resolves_in_lookup_order_and_drops_unknown_ids() {
+        let orgs = vec![org(1, "Acme"), org(2, "Globex"), org(3, "Initech")];
+        assert_eq!(
+            names_for(&[3, 1, 99], orgs.clone().into_iter()),
+            vec!["Acme".to_string(), "Initech".to_string()]
+        );
+        assert!(names_for(&[], orgs.into_iter()).is_empty());
+    }
+
+    #[test]
+    fn the_picker_search_matches_case_insensitively() {
+        let orgs = vec![org(1, "Acme Corp"), org(2, "Globex"), org(3, "acme labs")];
+        let hits: Vec<String> = matching_options(&orgs, " ACME ")
+            .into_iter()
+            .map(|o| o.name)
+            .collect();
+        assert_eq!(hits, vec!["Acme Corp".to_string(), "acme labs".to_string()]);
+        // An empty needle is "no filter", not "match nothing".
+        assert_eq!(matching_options(&orgs, "").len(), 3);
+        assert!(matching_options(&orgs, "zzz").is_empty());
+    }
+
+    /// The collapsed summary names a short selection and counts a long one.
+    #[test]
+    fn the_selection_summary_names_a_short_selection_and_counts_a_long_one() {
+        assert_eq!(
+            selection_label(&[], "All organizations"),
+            "All organizations"
+        );
+        assert_eq!(selection_label(&["Acme".into()], "All"), "Acme");
+        assert_eq!(
+            selection_label(&["Acme".into(), "Globex".into()], "All"),
+            "Acme, Globex"
+        );
+        assert_eq!(
+            selection_label(&["Acme".into(), "Globex".into(), "Initech".into()], "All"),
+            "3 selected"
+        );
+    }
+
+    /// Only genuinely colliding location names get qualified — an MSP's three "HQ"
+    /// entries are unpickable otherwise, but a unique name must stay as it is.
+    #[test]
+    fn only_ambiguous_location_names_are_qualified_by_organization() {
+        let orgs = vec![org(1, "Acme"), org(2, "Globex")];
+        let locations = vec![loc(10, "HQ", 1), loc(20, "HQ", 2), loc(30, "Depot", 1)];
+        let names: Vec<String> = disambiguate_locations(&locations, &orgs)
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "HQ \u{00b7} Acme".to_string(),
+                "HQ \u{00b7} Globex".to_string(),
+                "Depot".to_string(),
+            ]
+        );
+        // Ids survive the rewrite — they are what the selection is keyed on.
+        assert_eq!(
+            disambiguate_locations(&locations, &orgs)
+                .iter()
+                .map(|l| l.id)
+                .collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
+    }
+
+    /// A compliance report must never print "100%" for a fleet that isn't clean.
+    /// Mirrors the backend assertion on `rows::format_pct`.
+    #[test]
+    fn a_compliance_percentage_never_rounds_up_to_a_hundred() {
+        assert_eq!(format_pct(100.0), "100%");
+        assert_eq!(format_pct(99.9), "99%");
+        assert_eq!(format_pct(99.5), "99%");
+        assert_eq!(format_pct(94.6), "95%");
+        assert_eq!(format_pct(0.0), "0%");
+    }
+
+    /// The scope sentence must name both things a bare percentage hides. Mirrors the
+    /// backend's `rows::compliance_scope_note`, which the workbook and report print.
+    #[test]
+    fn the_scope_note_states_the_population_and_the_families() {
+        let both = PatchFamilies {
+            os: true,
+            software: true,
+        };
+        assert_eq!(
+            compliance_scope_note(0, both),
+            "Compliance covers online devices only."
+        );
+        assert_eq!(
+            compliance_scope_note(1, both),
+            "Compliance covers online devices only (1 offline device excluded)."
+        );
+        assert_eq!(
+            compliance_scope_note(
+                12,
+                PatchFamilies {
+                    os: true,
+                    software: false
+                }
+            ),
+            "Compliance covers online devices only (12 offline devices excluded), \
+             and counts OS patches only."
+        );
+        // A missing `patchFamilies` on the wire defaults to neither family, which
+        // must read as an incomplete scope rather than a silent whole-backlog claim.
+        assert!(compliance_scope_note(0, PatchFamilies::default()).contains("no patch families"));
+    }
+
     #[test]
     fn filter_chips_emits_only_non_default_facets() {
         // A default snapshot (no facets, ALL/empty) yields no chips.
         assert!(filter_chips(&AppliedFilters::default()).is_empty());
 
         let scope_only = AppliedFilters {
-            organization: Some("Acme".to_string()),
+            organizations: vec!["Acme".to_string()],
             patch_type: "ALL".to_string(),
             ..Default::default()
         };
@@ -2065,9 +2332,9 @@ mod tests {
         assert!(!chips[0].patch);
 
         let full = AppliedFilters {
-            organization: Some("Acme".to_string()),
-            location: Some("HQ".to_string()),
-            role: Some("Server".to_string()),
+            organizations: vec!["Acme".to_string(), "Globex".to_string()],
+            locations: vec!["HQ".to_string()],
+            roles: vec!["Server".to_string()],
             os_types: vec!["Windows Server".to_string()],
             os_name: Some("2022".to_string()),
             patch_type: "OS".to_string(),
@@ -2084,7 +2351,8 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "Org: Acme",
+                // One chip per facet, listing every selection in it.
+                "Org: Acme, Globex",
                 "Location: HQ",
                 "Role: Server",
                 "OS Type: Windows Server",

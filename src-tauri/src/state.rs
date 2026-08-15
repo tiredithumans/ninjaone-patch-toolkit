@@ -1060,6 +1060,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::actions::{ActionKind, JobState};
+    use crate::rows::PatchFamilies;
     use crate::rows::{QueryResult, page_rows};
 
     fn sample_result() -> QueryResult {
@@ -1072,6 +1073,11 @@ mod tests {
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
             devices_total: 0,
+            devices_offline: 0,
+            patch_families: PatchFamilies {
+                os: true,
+                software: true,
+            },
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }

@@ -1571,3 +1571,101 @@ tbody tr:hover {
 .group-members td {
   padding: 6px 10px;
 }
+
+/* --- Scope multi-select (Organizations / Locations / Device Roles) ------------
+   Sits in the same `.grid` the three single-selects used, so the panel keeps its
+   layout; the popover is positioned relative to the picker rather than the grid so
+   an open list overlays the row below instead of reflowing the whole panel. */
+.scope-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  position: relative;
+}
+
+.scope-picker__label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.scope-picker__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.scope-picker__summary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.scope-picker__value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-picker__caret {
+  color: var(--muted);
+  flex: none;
+}
+
+.scope-picker__panel {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
+}
+
+.scope-picker__tools {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.scope-picker__search {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Bounded so a tenant with hundreds of organizations scrolls the list rather than
+   the page. */
+.scope-picker__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.scope-picker__empty {
+  margin: 4px 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* The sentence stating which devices and which patch families the compliance
+   numbers describe. Muted and small — it qualifies the figures below it rather
+   than competing with them. */
+.scope-note {
+  margin: 8px 2px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}

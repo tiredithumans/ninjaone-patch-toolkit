@@ -67,6 +67,7 @@ pub fn write_workbook(
     compliance_by_os: &[OsCompliance],
     reboot_devices: &[DeviceSummary],
     failures: &[FailureGroup],
+    scope_note: &str,
 ) -> Result<()> {
     let mut workbook = Workbook::new();
     let header = header_format();
@@ -93,6 +94,10 @@ pub fn write_workbook(
             compliance,
             false,
         )?;
+        // Stated on the sheet itself: a workbook outlives the session it came from,
+        // and a bare "Compliance %" column says nothing about which devices and
+        // which patch families produced it.
+        write_footnote(&mut workbook, compliance.len(), scope_note)?;
     }
     if !compliance_by_os.is_empty() {
         write_sheet(
@@ -104,6 +109,7 @@ pub fn write_workbook(
             compliance_by_os,
             false,
         )?;
+        write_footnote(&mut workbook, compliance_by_os.len(), scope_note)?;
     }
     if !reboot_devices.is_empty() {
         write_sheet(
@@ -139,6 +145,18 @@ pub fn write_workbook(
 /// re-deriving the header loop, the per-cell writes and the width application by
 /// hand — which is exactly how the failures table came to be headed one way in the
 /// workbook and another in the report.
+/// Writes a scope sentence one blank row under the last data row of the sheet just
+/// added. Takes the row count rather than the sheet so it can run after
+/// [`write_sheet`] has handed the worksheet back to the workbook.
+fn write_footnote(workbook: &mut Workbook, data_rows: usize, note: &str) -> Result<()> {
+    let last = workbook.worksheets().len() - 1;
+    let sheet = workbook.worksheet_from_index(last)?;
+    sheet
+        .write_string((data_rows + 2) as u32, 0, note)
+        .context("write scope note")?;
+    Ok(())
+}
+
 fn write_sheet<T>(
     workbook: &mut Workbook,
     header: &Format,
@@ -191,6 +209,8 @@ fn apply_widths(sheet: &mut rust_xlsxwriter::Worksheet, widths: &[f64]) -> Resul
 
 #[cfg(test)]
 mod tests {
+    /// Stand-in for the scope sentence the command builds from the cached result.
+    const NOTE: &str = "Compliance covers online devices only.";
     use super::*;
 
     fn sample_row() -> PatchRow {
@@ -239,7 +259,16 @@ mod tests {
             pending_critical: 3,
             aged_critical: 1,
         }];
-        write_workbook(&path_str, &rows, &compliance, &compliance_by_os, &[], &[]).unwrap();
+        write_workbook(
+            &path_str,
+            &rows,
+            &compliance,
+            &compliance_by_os,
+            &[],
+            &[],
+            NOTE,
+        )
+        .unwrap();
 
         // Read it back to prove it is a valid, populated workbook.
         use calamine::{Reader, Xlsx, open_workbook};
@@ -282,7 +311,7 @@ mod tests {
             needs_reboot: true,
             pending_count: 4,
         }];
-        write_workbook(&path.to_string_lossy(), &[], &[], &[], &reboot, &[]).unwrap();
+        write_workbook(&path.to_string_lossy(), &[], &[], &[], &reboot, &[], NOTE).unwrap();
 
         let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
         let sheets = wb.sheet_names().to_owned();
@@ -326,7 +355,7 @@ mod tests {
             latest_failure: Some("2026-05-01 00:00 UTC".into()),
             latest_failure_ts: Some(1_777_000_000),
         }];
-        write_workbook(&path.to_string_lossy(), &[], &[], &[], &[], &failures).unwrap();
+        write_workbook(&path.to_string_lossy(), &[], &[], &[], &[], &failures, NOTE).unwrap();
 
         let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
         let range = wb.worksheet_range("Patch Failures").unwrap();

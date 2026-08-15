@@ -102,8 +102,11 @@ pub async fn export_patches_xlsx(
         compliance,
         compliance_by_os,
         failures,
+        devices_offline,
+        patch_families,
         ..
     } = cached_result(&state)?;
+    let scope_note = crate::rows::compliance_scope_note(devices_offline, patch_families);
     let reboot: Vec<_> = devices.into_iter().filter(|d| d.needs_reboot).collect();
 
     // Serializing a six-figure row set into a zipped workbook is seconds of pure CPU
@@ -117,6 +120,7 @@ pub async fn export_patches_xlsx(
             &compliance_by_os,
             &reboot,
             &failures,
+            &scope_note,
         )
     })
     .await

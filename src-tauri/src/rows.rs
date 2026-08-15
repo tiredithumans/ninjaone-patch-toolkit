@@ -12,7 +12,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::filter::FilterParams;
+use crate::filter::PreparedFilter;
 use crate::model::{Device, Location, Organization, Patch, PatchRow, Role, Severity};
 
 /// Placeholder for a name the join could not resolve — an orphan device, a device
@@ -177,11 +177,10 @@ pub fn build_rows(
     devices_by_id: &HashMap<i64, &Device>,
     maps: &LookupMaps,
     sources: &[PatchSource<'_>],
-    filter: &FilterParams,
+    prepared: &PreparedFilter<'_>,
 ) -> Vec<PatchRow> {
     let mut rows = Vec::new();
-    // Lower the query needles and parse the severities once, not per patch.
-    let prepared = filter.prepare();
+    let scope_active = prepared.has_scope();
     // One shared copy of each distinct row string, and one resolved label bundle per
     // device rather than per patch. Both are scoped to this join: the `Arc`s they
     // hand out live on in the rows, but the lookup structures are dropped here.
@@ -209,11 +208,23 @@ pub fn build_rows(
                 .device_id
                 .and_then(|id| devices_by_id.get(&id))
                 .copied();
-            // NinjaOne's /queries/* patch endpoints ignore `class` in `df`, so the
-            // node-class facet is applied here: `devices_by_id` is already
-            // class-filtered (the device query does honor `class`), so when a class
-            // is selected, drop patches whose device isn't in that set.
-            if !filter.node_classes.is_empty() && device.is_none() {
+            // The identity scope is enforced **here**, against the already-scoped
+            // `devices_by_id`, for every source — not just the node-class facet it
+            // originally covered.
+            //
+            // The cached current-patch feeds arrive pre-scoped (`assemble_result`
+            // filters them), but the install-history rows arrive straight from the
+            // API, scoped only by the `df` the server chose to honor. NinjaOne's
+            // `/queries/*` endpoints ignore `class` outright, and a mistyped or
+            // unsupported clause is silently dropped rather than rejected — so a
+            // narrowed query could return, and display, rows from devices the
+            // operator had scoped out. Requiring an in-scope device makes the
+            // client-side scope authoritative and the `df` purely an optimization.
+            //
+            // With no identity scope at all, orphan patches (no matching device in
+            // inventory) are still kept, as they always were: there is no scope for
+            // them to fall outside of.
+            if scope_active && device.is_none() {
                 continue;
             }
             // Borrowed for the filter check; the owned copy is taken below, only
@@ -357,8 +368,7 @@ impl ComplianceAcc {
 /// installed — both count. The rank threshold deliberately excludes `Security` and
 /// `Recommended`, which are NinjaOne *classifications* rather than urgency grades.
 fn counts_toward_backlog(p: &Patch) -> bool {
-    matches!(p.status.as_deref(), Some("MANUAL") | Some("APPROVED"))
-        && p.severity_enum().rank() >= Severity::Important.rank()
+    is_pending(p.status.as_deref()) && p.severity_enum().rank() >= Severity::Important.rank()
 }
 
 /// Whether a pending patch has aged past the SLA cutoff.
@@ -390,16 +400,25 @@ fn accumulate_compliance<'a>(
 ) -> HashMap<String, ComplianceAcc> {
     let mut by_key: HashMap<String, ComplianceAcc> = HashMap::new();
 
+    // One rule for who is in this rollup at all, applied to *both* halves below.
+    // An offline device can't apply patches and reports no current patch records, so
+    // a zero pending count says nothing about its compliance: it is excluded from the
+    // denominator rather than scored compliant and inflating the headline metric.
+    //
+    // The patch half used to skip this check, which made a bucket describe two
+    // different device populations at once — an org whose devices were all offline
+    // reported "100% compliant" (no devices in the denominator, and an empty bucket
+    // is 100%) beside a four-figure pending-critical count drawn from those same
+    // excluded devices. Same for a patch whose device isn't in the scoped inventory
+    // at all: it used to open its own `(unknown)` bucket with zero devices in it.
+    let counted = |device_id: Option<i64>| -> bool {
+        device_id
+            .and_then(|id| devices_by_id.get(&id))
+            .is_some_and(|d| !d.is_offline())
+    };
+
     for s in summaries {
-        // An offline device can't apply patches and reports no current patch
-        // records, so a zero pending count says nothing about its compliance.
-        // Exclude it from the denominator rather than scoring it compliant and
-        // inflating the headline metric.
-        let offline = devices_by_id
-            .get(&s.device_id)
-            .map(|d| d.is_offline())
-            .unwrap_or(false);
-        if offline {
+        if !counted(Some(s.device_id)) {
             continue;
         }
         let key = device_key(s);
@@ -415,7 +434,7 @@ fn accumulate_compliance<'a>(
 
     let sla_cutoff = now - Duration::days(sla_days);
     for p in current_patches {
-        if !counts_toward_backlog(p) {
+        if !counts_toward_backlog(p) || !counted(p.device_id) {
             continue;
         }
         let device = p.device_id.and_then(|id| devices_by_id.get(&id)).copied();
@@ -519,11 +538,13 @@ pub fn build_compliance_by_os(
 }
 
 /// Counts current pending/approved patches per device for compliance and the
-/// reboot/summary views. NinjaOne uses `MANUAL` for pending-approval patches.
+/// reboot/summary views. Shares [`is_pending`] with every other pending rollup, so
+/// the device's pending count, the severity breakdown and the age histogram cannot
+/// disagree about which records are pending.
 pub fn pending_counts(current_patches: &[&Patch]) -> HashMap<i64, usize> {
     let mut counts: HashMap<i64, usize> = HashMap::new();
     for p in current_patches {
-        if matches!(p.status.as_deref(), Some("MANUAL") | Some("APPROVED"))
+        if is_pending(p.status.as_deref())
             && let Some(id) = p.device_id
         {
             *counts.entry(id).or_default() += 1;
@@ -634,9 +655,36 @@ impl DeviceSummary {
 }
 
 /// Rounds a percentage to one decimal for display, so the workbook and the report
-/// cannot disagree about precision.
+/// cannot disagree about precision — and never *up* to a full 100. See
+/// [`format_pct`], which applies the same rule at zero decimals.
 fn pct_cell(pct: f64) -> TableCell {
-    TableCell::Number((pct * 10.0).round() / 10.0)
+    let rounded = (pct * 10.0).round() / 10.0;
+    TableCell::Number(if pct >= 100.0 {
+        100.0
+    } else {
+        rounded.min(99.9)
+    })
+}
+
+/// Formats a compliance percentage at zero decimals **without ever rounding up to
+/// 100%**.
+///
+/// A compliance report that prints "100%" for a fleet that is not fully compliant is
+/// the one rounding error in this app that can send someone home: plain `{:.0}%`
+/// renders anything from 99.5% up as `100%`, so 199 of 200 devices patched read as
+/// "done". Values below 100 are capped at 99%, which understates by less than a
+/// point and never claims a clean fleet that isn't. Exactly 100.0 still prints
+/// `100%`.
+///
+/// Mirrored in `web-rs/src/app/util.rs::format_pct` for the in-app tables and charts;
+/// the two crates share no code, so the rule is written twice on purpose.
+pub fn format_pct(pct: f64) -> String {
+    let shown = if pct >= 100.0 {
+        100.0
+    } else {
+        pct.round().min(99.0)
+    };
+    format!("{shown:.0}%")
 }
 
 impl ComplianceBucket {
@@ -758,8 +806,16 @@ pub struct AgeBucket {
 
 /// Whether a current-patch status counts toward the pending backlog. NinjaOne uses
 /// `MANUAL` (pending approval) and `APPROVED` for patches not yet installed.
+///
+/// A record with **no** status counts too. `status` is not a required property on
+/// `DeviceOSPatch`/`DeviceSoftwarePatch`, and everything reaching this predicate came
+/// from the current feed, which the API defines as "patches for which there were no
+/// installation attempts" — so an untyped record there is pending by construction.
+/// Excluding it silently shrank the backlog and *raised* the compliance percentage,
+/// which is the wrong direction to fail in; this mirrors [`is_aged`], which flags an
+/// undated patch rather than assuming it recent.
 fn is_pending(status: Option<&str>) -> bool {
-    matches!(status, Some("MANUAL") | Some("APPROVED"))
+    matches!(status, Some("MANUAL") | Some("APPROVED") | None)
 }
 
 /// Groups the FAILED detail rows by patch (`patch_type` + `kb` + `name`), counting
@@ -925,6 +981,62 @@ pub fn build_age_buckets(current_patches: &[&Patch], now: DateTime<Utc>) -> Vec<
         .collect()
 }
 
+/// Which current-patch families a query's fleet-health rollups were computed from.
+///
+/// Not a copy of the patch-type facet for its own sake: it is the honest scope of
+/// every compliance/severity/age number, and the one thing that cannot be recovered
+/// from the numbers themselves. See [`QueryResult::patch_families`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchFamilies {
+    pub os: bool,
+    pub software: bool,
+}
+
+impl PatchFamilies {
+    /// The operator-facing name of this scope, for a label that has room for it.
+    pub fn label(self) -> &'static str {
+        match (self.os, self.software) {
+            (true, true) => "OS and third-party patches",
+            (true, false) => "OS patches only",
+            (false, true) => "third-party patches only",
+            // Not reachable from the UI (the Type facet is ALL/OS/SOFTWARE), but a
+            // rollup over nothing must not silently read as a rollup over
+            // everything.
+            (false, false) => "no patch families",
+        }
+    }
+
+    /// Whether both families were included, i.e. whether the rollups describe the
+    /// whole backlog. The UI shows a scope note when they don't.
+    pub fn is_complete(self) -> bool {
+        self.os && self.software
+    }
+}
+
+/// One sentence stating exactly which devices and which patches the fleet-health
+/// rollups in this result describe.
+///
+/// Every surface that shows a compliance number prints this beside it — the
+/// Compliance tab, the HTML report header and the workbook's Compliance sheet — so
+/// none of them can imply a scope the numbers don't have. Two things are invisible
+/// in a bare percentage and both change what it means: offline devices are excluded
+/// from the rollups entirely, and only the patch families the query fetched are in
+/// them.
+pub fn compliance_scope_note(devices_offline: usize, families: PatchFamilies) -> String {
+    let excluded = match devices_offline {
+        0 => String::new(),
+        1 => " (1 offline device excluded)".to_string(),
+        n => format!(" ({n} offline devices excluded)"),
+    };
+    let families = if families.is_complete() {
+        String::new()
+    } else {
+        format!(", and counts {}", families.label())
+    };
+    format!("Compliance covers online devices only{excluded}{families}.")
+}
+
 /// The full result of a patch query. Cached in `AppState.last_result` and read by
 /// the Excel exporter; **not** sent wholesale over IPC — the frontend gets a
 /// [`QuerySummary`] and pages the detail rows on demand via `get_patch_rows`.
@@ -943,6 +1055,26 @@ pub struct QueryResult {
     /// Pending-patch age histogram for the dashboard.
     pub age_buckets: Vec<AgeBucket>,
     pub devices_total: usize,
+    /// How many of `devices_total` are offline.
+    ///
+    /// The compliance rollups deliberately exclude offline devices from both halves
+    /// of every bucket (they report no current patch records, so a zero pending count
+    /// says nothing about them) — which means the `Devices` column of the compliance
+    /// table does **not** sum to `devices_total`, and used to have nothing on screen
+    /// explaining the gap. Carried so the UI, the workbook and the HTML report can
+    /// state the excluded population instead of leaving two different device counts
+    /// side by side.
+    pub devices_offline: usize,
+    /// Which patch families the fleet-health rollups actually cover, taken from the
+    /// query's patch-type facet.
+    ///
+    /// The compliance/severity/age rollups are computed from the *current* patch
+    /// feeds, and only the families the query asked for are fetched at all — a
+    /// whole-fleet third-party feed is the largest fetch in the app, so an OS-only
+    /// query does not page it. That makes "compliant" mean "no pending OS patches"
+    /// on such a query, which is a defensible reading but not one the operator can
+    /// infer from a bare percentage. Reported so every surface can name its scope.
+    pub patch_families: PatchFamilies,
     /// When the query was computed (the join/rollup clock).
     pub generated_at: String,
     /// When the underlying whole-fleet patch data was last fetched from NinjaOne —
@@ -977,6 +1109,26 @@ pub struct QuerySummary {
     /// Pending-patch age histogram for the dashboard charts.
     pub age_buckets: Vec<AgeBucket>,
     pub devices_total: usize,
+    /// How many of `devices_total` are offline.
+    ///
+    /// The compliance rollups deliberately exclude offline devices from both halves
+    /// of every bucket (they report no current patch records, so a zero pending count
+    /// says nothing about them) — which means the `Devices` column of the compliance
+    /// table does **not** sum to `devices_total`, and used to have nothing on screen
+    /// explaining the gap. Carried so the UI, the workbook and the HTML report can
+    /// state the excluded population instead of leaving two different device counts
+    /// side by side.
+    pub devices_offline: usize,
+    /// Which patch families the fleet-health rollups actually cover, taken from the
+    /// query's patch-type facet.
+    ///
+    /// The compliance/severity/age rollups are computed from the *current* patch
+    /// feeds, and only the families the query asked for are fetched at all — a
+    /// whole-fleet third-party feed is the largest fetch in the app, so an OS-only
+    /// query does not page it. That makes "compliant" mean "no pending OS patches"
+    /// on such a query, which is a defensible reading but not one the operator can
+    /// infer from a bare percentage. Reported so every surface can name its scope.
+    pub patch_families: PatchFamilies,
     pub generated_at: String,
     /// When the underlying whole-fleet patch data was last fetched (see
     /// [`QueryResult::data_fetched_at`]).
@@ -1002,6 +1154,8 @@ impl QuerySummary {
             severity_by_org: result.severity_by_org.clone(),
             age_buckets: result.age_buckets.clone(),
             devices_total: result.devices_total,
+            devices_offline: result.devices_offline,
+            patch_families: result.patch_families,
             generated_at: result.generated_at.clone(),
             data_fetched_at: result.data_fetched_at.clone(),
         }
@@ -1419,6 +1573,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::filter::FilterParams;
 
     /// Composes the two halves of paging the way `AppState::with_sorted_result`
     /// does — build the order once, then slice it — so these assertions still
@@ -1582,7 +1737,7 @@ mod tests {
                 status_override: None,
                 status_filter: None,
             }],
-            &FilterParams::default(),
+            &FilterParams::default().prepare(),
         );
 
         assert_eq!(rows.len(), 1);
@@ -1625,7 +1780,7 @@ mod tests {
                 status_override: None,
                 status_filter: None,
             }],
-            &filter,
+            &filter.prepare(),
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(&*rows[0].organization, "Contoso");
@@ -1657,7 +1812,7 @@ mod tests {
                 status_override: None,
                 status_filter: None,
             }],
-            &filter,
+            &filter.prepare(),
         );
         assert_eq!(rows.len(), 1);
     }
@@ -1686,7 +1841,7 @@ mod tests {
                 status_override: None,
                 status_filter: None,
             }],
-            &filter,
+            &filter.prepare(),
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].device_id, 1);
@@ -1709,7 +1864,7 @@ mod tests {
                 status_override: Some("INSTALLED"),
                 status_filter: None,
             }],
-            &FilterParams::default(),
+            &FilterParams::default().prepare(),
         );
         assert_eq!(&*rows[0].status, "INSTALLED");
     }
@@ -1733,7 +1888,7 @@ mod tests {
                 status_override: None,
                 status_filter: Some(&pending_set),
             }],
-            &FilterParams::default(),
+            &FilterParams::default().prepare(),
         );
         assert_eq!(rows.len(), 1, "a MANUAL patch matches the Pending filter");
         assert_eq!(&*rows[0].status, "PENDING", "MANUAL renders as PENDING");
@@ -1764,7 +1919,7 @@ mod tests {
                 status_override: Some("INSTALLED"),
                 status_filter: Some(&failed_set),
             }],
-            &FilterParams::default(),
+            &FilterParams::default().prepare(),
         );
         assert_eq!(rows.len(), 1, "only the FAILED install record is kept");
         assert_eq!(&*rows[0].status, "FAILED");
@@ -1792,7 +1947,7 @@ mod tests {
                 status_override: Some("INSTALLED"),
                 status_filter: Some(&installed_set),
             }],
-            &FilterParams::default(),
+            &FilterParams::default().prepare(),
         );
         assert_eq!(rows.len(), 1, "missing status falls back to the override");
         assert_eq!(&*rows[0].status, "INSTALLED");
@@ -1818,6 +1973,90 @@ mod tests {
         assert_eq!(b.pending_critical, 2);
         assert_eq!(b.aged_critical, 1);
         assert!((b.compliance_pct - 50.0).abs() < 1e-9);
+    }
+
+    /// The two halves of a compliance bucket must describe the *same* devices.
+    ///
+    /// The device half already skipped offline devices; the patch half did not, so an
+    /// org whose devices were all offline produced a row reading "0 devices,
+    /// 100% compliant, 40 pending Critical/Important" — a full green bar drawn from
+    /// the backlog of the very devices the percentage refused to look at.
+    #[test]
+    fn an_excluded_devices_backlog_is_excluded_too() {
+        let mut offline = device(1, 10, "Windows Server 2022");
+        offline.offline = Some(true);
+        let by_id = HashMap::from([(1, &offline)]);
+        let maps = maps();
+        let current = vec![
+            patch(1, "MANUAL", "CRITICAL", Some(90)),
+            patch(1, "APPROVED", "IMPORTANT", Some(90)),
+        ];
+        let counts = pending_counts(&refs(&current));
+        let summaries = build_device_summaries(&[&offline], &counts, &maps);
+        let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, 30, Utc::now());
+        assert!(
+            buckets.is_empty(),
+            "a bucket with no devices in it must not be emitted at all, \
+             let alone one reporting 100% beside a backlog: {buckets:?}"
+        );
+    }
+
+    /// A patch whose device isn't in the scoped inventory has no device to be
+    /// non-compliant, so it must not open a bucket of its own. It used to create an
+    /// `(unknown)` organization with zero devices and — via `pct()`'s empty-bucket
+    /// rule — 100% compliance.
+    #[test]
+    fn an_orphan_patch_does_not_invent_an_organization() {
+        let d = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d)]);
+        let maps = maps();
+        let mut orphan = patch(1, "MANUAL", "CRITICAL", Some(90));
+        orphan.device_id = Some(999); // not in the scoped inventory
+        let current = vec![orphan];
+        let counts = pending_counts(&refs(&current));
+        let summaries = build_device_summaries(&[&d], &counts, &maps);
+        let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, 30, Utc::now());
+        assert_eq!(buckets.len(), 1, "only the real organization: {buckets:?}");
+        assert_eq!(buckets[0].pending_critical, 0);
+    }
+
+    /// A current-feed record with no `status` is pending by construction — that feed
+    /// is defined as the patches with no installation attempt — and `status` is not a
+    /// required property. Dropping it understated the backlog and *raised* the
+    /// compliance percentage.
+    #[test]
+    fn a_current_patch_with_no_status_still_counts_as_pending() {
+        let d = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d)]);
+        let maps = maps();
+        let mut untyped = patch(1, "MANUAL", "CRITICAL", Some(90));
+        untyped.status = None;
+        let current = vec![untyped];
+        let counts = pending_counts(&refs(&current));
+        assert_eq!(counts.get(&1).copied(), Some(1));
+        let summaries = build_device_summaries(&[&d], &counts, &maps);
+        let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, 30, Utc::now());
+        assert_eq!(buckets[0].devices_compliant, 0);
+        assert_eq!(buckets[0].pending_critical, 1);
+        // 90 days old → the "61-90 days" bucket.
+        assert_eq!(build_age_buckets(&refs(&current), Utc::now())[2].count, 1);
+    }
+
+    /// Rounding must never manufacture a clean fleet.
+    #[test]
+    fn a_compliance_percentage_never_rounds_up_to_a_hundred() {
+        assert_eq!(format_pct(100.0), "100%");
+        assert_eq!(format_pct(99.9), "99%");
+        assert_eq!(format_pct(99.5), "99%");
+        assert_eq!(format_pct(94.6), "95%");
+        assert_eq!(format_pct(0.4), "0%");
+        // Same rule at the workbook's one decimal.
+        let cell = |pct| match pct_cell(pct) {
+            TableCell::Number(n) => n,
+            _ => unreachable!("pct_cell always yields a number"),
+        };
+        assert!((cell(100.0) - 100.0).abs() < 1e-9);
+        assert!((cell(99.99) - 99.9).abs() < 1e-9);
     }
 
     #[test]
@@ -1893,7 +2132,7 @@ mod tests {
                 status_override: None,
                 status_filter: None,
             }],
-            &FilterParams::default(),
+            &FilterParams::default().prepare(),
         );
         let counts = pending_counts(&refs(&patches));
         let devices = build_device_summaries(&[&d], &counts, &maps);
@@ -1907,6 +2146,11 @@ mod tests {
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
             devices_total: 1,
+            devices_offline: 0,
+            patch_families: PatchFamilies {
+                os: true,
+                software: true,
+            },
             generated_at: "2026-01-01 00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00 UTC".into(),
         };
@@ -1949,7 +2193,7 @@ mod tests {
                 status_override: None,
                 status_filter: None,
             }],
-            &FilterParams::default(),
+            &FilterParams::default().prepare(),
         );
         let counts = pending_counts(&refs(&patches));
         let devices = build_device_summaries(&[&d1, &d2], &counts, &maps);
@@ -1963,6 +2207,11 @@ mod tests {
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
             devices_total: 2,
+            devices_offline: 0,
+            patch_families: PatchFamilies {
+                os: true,
+                software: true,
+            },
             generated_at: "2026-01-01 00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00 UTC".into(),
         };
@@ -2010,7 +2259,7 @@ mod tests {
                 status_override: None,
                 status_filter: None,
             }],
-            &FilterParams::default(),
+            &FilterParams::default().prepare(),
         );
 
         assert_eq!(rows.len(), 2);
@@ -2054,7 +2303,7 @@ mod tests {
                 status_override: None,
                 status_filter: None,
             }],
-            &FilterParams::default(),
+            &FilterParams::default().prepare(),
         );
         assert_eq!(rows.len(), 2);
         let (a, b) = (&rows[0], &rows[1]);
@@ -2079,7 +2328,7 @@ mod tests {
     fn empty_inputs_yield_no_rows_or_compliance() {
         let maps = maps();
         let by_id: HashMap<i64, &Device> = HashMap::new();
-        let rows = build_rows(&by_id, &maps, &[], &FilterParams::default());
+        let rows = build_rows(&by_id, &maps, &[], &FilterParams::default().prepare());
         assert!(rows.is_empty());
         let compliance = build_compliance(&[], &[], &by_id, &maps, 30, Utc::now());
         assert!(compliance.is_empty());
@@ -2118,7 +2367,7 @@ mod tests {
                 status_override: None,
                 status_filter: None,
             }],
-            &FilterParams::default(),
+            &FilterParams::default().prepare(),
         );
         assert_keys_present(
             &serde_json::to_value(&rows[0]).unwrap(),
@@ -2227,6 +2476,11 @@ mod tests {
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
             devices_total: 1,
+            devices_offline: 0,
+            patch_families: PatchFamilies {
+                os: true,
+                software: true,
+            },
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         };
@@ -2242,10 +2496,42 @@ mod tests {
                 "severityByOrg",
                 "ageBuckets",
                 "devicesTotal",
+                "devicesOffline",
+                "patchFamilies",
                 "generatedAt",
                 "dataFetchedAt",
             ],
             "QuerySummary",
+        );
+    }
+
+    /// The sentence every compliance surface prints beside its percentages. It has to
+    /// name both things a bare percentage hides: the excluded devices and the patch
+    /// families actually counted.
+    #[test]
+    fn the_scope_note_states_the_population_and_the_families() {
+        let both = PatchFamilies {
+            os: true,
+            software: true,
+        };
+        assert_eq!(
+            compliance_scope_note(0, both),
+            "Compliance covers online devices only."
+        );
+        assert_eq!(
+            compliance_scope_note(1, both),
+            "Compliance covers online devices only (1 offline device excluded)."
+        );
+        assert_eq!(
+            compliance_scope_note(
+                12,
+                PatchFamilies {
+                    os: true,
+                    software: false
+                }
+            ),
+            "Compliance covers online devices only (12 offline devices excluded), \
+             and counts OS patches only."
         );
     }
 

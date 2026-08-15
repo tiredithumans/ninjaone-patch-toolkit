@@ -47,75 +47,47 @@ pub(crate) fn Filters() -> impl IntoView {
             // While the lookups load, the scope selects are disabled (their options
             // aren't there yet) and the grid reports busy to assistive tech.
             <div class="grid" aria-busy=move || state.lookups.loading_lookups().to_string()>
-                <label>
-                    "Organization"
-                    <select
-                        prop:disabled=move || state.lookups.loading_lookups()
-                        prop:value=move || {
-                            state.filters.org_id.get().map(|id| id.to_string()).unwrap_or_default()
-                        }
-                        on:change=move |ev| {
-                            state.select_org(parse_opt(&event_target_value(&ev)));
-                        }
-                    >
-                        <option value="">"All organizations"</option>
-                        {move || {
-                            state.lookups.orgs
-                                .get()
-                                .into_iter()
-                                .map(|o| {
-                                    view! { <option value=o.id.to_string()>{o.name}</option> }
-                                })
-                                .collect_view()
-                        }}
-                    </select>
-                </label>
-                <label>
-                    "Location"
-                    <select
-                        prop:disabled=move || {
-                            state.lookups.loading_lookups() || state.lookups.locations.get().is_empty()
-                        }
-                        prop:value=move || {
-                            state.filters.loc_id.get().map(|id| id.to_string()).unwrap_or_default()
-                        }
-                        on:change=move |ev| state.filters.loc_id.set(parse_opt(&event_target_value(&ev)))
-                    >
-                        <option value="">"All locations"</option>
-                        {move || {
-                            state.lookups.locations
-                                .get()
-                                .into_iter()
-                                .map(|l| {
-                                    view! { <option value=l.id.to_string()>{l.name}</option> }
-                                })
-                                .collect_view()
-                        }}
-                    </select>
-                </label>
-                <label>
-                    "Device Role"
-                    <select
-                        prop:disabled=move || state.lookups.loading_lookups()
-                        prop:value=move || {
-                            state.filters.role_id.get().map(|id| id.to_string()).unwrap_or_default()
-                        }
-                        on:change=move |ev| {
-                            state.filters.role_id.set(parse_opt(&event_target_value(&ev)))
-                        }
-                    >
-                        <option value="">"All roles"</option>
-                        {move || {
-                            state.lookups.roles
-                                .get()
-                                .into_iter()
-                                .map(|r| {
-                                    view! { <option value=r.id.to_string()>{r.name}</option> }
-                                })
-                                .collect_view()
-                        }}
-                    </select>
-                </label>
+                <ScopePicker
+                    label="Organizations"
+                    all_label="All organizations"
+                    options=Signal::derive(move || state.lookups.orgs.get())
+                    selected=state.filters.org_ids
+                    // Changing the org scope changes which locations exist, so this
+                    // one facet routes through the state method that reloads them
+                    // (and drops any selected location that just went away).
+                    on_toggle=Callback::new(move |id: i64| state.toggle_org(id))
+                    disabled=Signal::derive(move || state.lookups.loading_lookups())
+                />
+                <ScopePicker
+                    label="Locations"
+                    all_label="All locations"
+                    options=Signal::derive(move || {
+                        // Names are qualified only where they'd otherwise collide —
+                        // with several organizations in scope, "HQ" appears once per
+                        // org and is unpickable without saying whose.
+                        util::disambiguate_locations(
+                            &state.lookups.locations.get(),
+                            &state.lookups.orgs.get(),
+                        )
+                    })
+                    selected=state.filters.loc_ids
+                    on_toggle=Callback::new(move |id: i64| {
+                        state.filters.toggle_id(state.filters.loc_ids, id)
+                    })
+                    disabled=Signal::derive(move || {
+                        state.lookups.loading_lookups() || state.lookups.locations.get().is_empty()
+                    })
+                />
+                <ScopePicker
+                    label="Device Roles"
+                    all_label="All roles"
+                    options=Signal::derive(move || state.lookups.roles.get())
+                    selected=state.filters.role_ids
+                    on_toggle=Callback::new(move |id: i64| {
+                        state.filters.toggle_id(state.filters.role_ids, id)
+                    })
+                    disabled=Signal::derive(move || state.lookups.loading_lookups())
+                />
             </div>
             <div class="stacked-filters">
                 <div class="control-group">
@@ -314,5 +286,109 @@ pub(crate) fn Filters() -> impl IntoView {
             </Show>
             </Show>
         </section>
+    }
+}
+
+/// One multi-select scope facet: a summary line that opens a scrollable, searchable
+/// checkbox list.
+///
+/// A `<select multiple>` was the obvious alternative and is the wrong tool here — it
+/// needs ctrl-click to add to a selection and silently discards the whole selection
+/// on a plain click, which for a scope facet means quietly re-running against one
+/// organization when the operator meant to add a second. Checkboxes cannot be
+/// mis-clicked that way, and the search box is what keeps the pattern usable for a
+/// tenant with hundreds of organizations.
+///
+/// Generic over the three lookup types via [`util::Named`], since they differ only in
+/// which struct holds the id and name.
+#[component]
+fn ScopePicker<T>(
+    label: &'static str,
+    /// Shown when nothing is selected — the facet's "everything" state.
+    all_label: &'static str,
+    options: Signal<Vec<T>>,
+    selected: RwSignal<Vec<i64>>,
+    on_toggle: Callback<i64>,
+    disabled: Signal<bool>,
+) -> impl IntoView
+where
+    T: util::Named + Clone + Send + Sync + 'static,
+{
+    let open = RwSignal::new(false);
+    let search = RwSignal::new(String::new());
+
+    // The collapsed summary names the selection while it is short enough to read.
+    let summary = move || {
+        let sel = selected.get();
+        let names = options.with(|opts| util::names_for(&sel, opts.iter().cloned()));
+        util::selection_label(&names, all_label)
+    };
+    let count = move || selected.get().len();
+
+    view! {
+        <div class="scope-picker">
+            <span class="scope-picker__label">{label}</span>
+            <button
+                type="button"
+                class="scope-picker__summary"
+                prop:disabled=move || disabled.get()
+                aria-expanded=move || open.get().to_string()
+                on:click=move |_| open.update(|o| *o = !*o)
+            >
+                <span class="scope-picker__value">{summary}</span>
+                <span class="scope-picker__caret">{move || if open.get() { "▾" } else { "▸" }}</span>
+            </button>
+            <Show when=move || open.get()>
+                <div class="scope-picker__panel">
+                    <div class="scope-picker__tools">
+                        <input
+                            class="scope-picker__search"
+                            placeholder="Filter…"
+                            aria-label=format!("Filter {label}")
+                            prop:value=move || search.get()
+                            on:input=move |ev| search.set(event_target_value(&ev))
+                        />
+                        <button
+                            type="button"
+                            class="btn btn-ghost"
+                            prop:disabled=move || count() == 0
+                            on:click=move |_| selected.set(Vec::new())
+                        >
+                            "Clear"
+                        </button>
+                    </div>
+                    <div class="scope-picker__list" role="group" aria-label=label>
+                        {move || {
+                            let needle = search.get();
+                            let matching = options.with(|o| util::matching_options(o, &needle));
+                            if matching.is_empty() {
+                                return view! {
+                                    <p class="scope-picker__empty">"No matches"</p>
+                                }
+                                    .into_any();
+                            }
+                            matching
+                                .into_iter()
+                                .map(|o| {
+                                    let id = o.id();
+                                    let checked = move || selected.get().contains(&id);
+                                    view! {
+                                        <label class="chip">
+                                            <input
+                                                type="checkbox"
+                                                prop:checked=checked
+                                                on:change=move |_| on_toggle.run(id)
+                                            />
+                                            {o.name().to_string()}
+                                        </label>
+                                    }
+                                })
+                                .collect_view()
+                                .into_any()
+                        }}
+                    </div>
+                </div>
+            </Show>
+        </div>
     }
 }
