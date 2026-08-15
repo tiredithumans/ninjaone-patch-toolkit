@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-15
+
 ### Added
 
 - **Organization, Location and Device Role are now multi-select.** Each is a searchable checkbox
