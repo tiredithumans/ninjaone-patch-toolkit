@@ -84,7 +84,7 @@ pub fn auth_status(state: State<'_, AppState>) -> AuthStatus {
 mod tests {
     use super::*;
     use crate::actions::{ActionKind, JobReport, JobState};
-    use crate::rows::QueryResult;
+    use crate::rows::{PatchFamilies, QueryResult};
 
     fn sample_result() -> QueryResult {
         QueryResult {
@@ -96,6 +96,11 @@ mod tests {
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
             devices_total: 0,
+            devices_offline: 0,
+            patch_families: PatchFamilies {
+                os: true,
+                software: true,
+            },
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }

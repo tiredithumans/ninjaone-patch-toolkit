@@ -11,6 +11,71 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **Organization, Location and Device Role are now multi-select.** Each is a searchable checkbox
+  picker: pick any number, or none for "all". Within a facet the selections are OR'd and the facets
+  are AND'd, so "these four sites, servers only" is one query instead of four. The location list
+  spans every selected organization and qualifies names that would otherwise collide (three sites
+  called "HQ" are now distinguishable), and selecting a location that no longer belongs to any
+  selected organization is no longer possible. Presets saved with the old single-select facets still
+  load and still mean the same scope.
+- **Every compliance surface now states what it covers.** The Compliance tab, the HTML report and
+  both workbook compliance sheets carry a sentence naming the excluded offline devices and the patch
+  families counted — the two things a bare percentage hides.
+
+### Fixed
+
+- **The location filter was never applied to install-history queries.** The device-filter clause was
+  built as `location = <id>`, and `loc` is the only token NinjaOne's filter grammar defines, so the
+  clause was rejected or silently ignored. Multi-value scopes now use the documented
+  `org in (1, 2, 3)` list form as well.
+- **A narrowed query could display rows from devices outside the scope.** Install-history rows were
+  scoped only by the server-side device filter, and an unhonored filter clause is dropped silently
+  rather than rejected. The client-side scope is now re-checked against every joined row, so it is
+  authoritative and the server-side filter is only an optimization.
+- **The "OS name contains" filter did not narrow the fleet-health tabs.** It is presented as device
+  scope — the filter panel files it there and its chip stays active on those tabs — but was applied
+  only to patch rows, so the device count, the compliance rollups, the charts and the whole Needs
+  Reboot list still covered the entire fleet.
+- **Compliance could report "100% compliant" beside a four-figure backlog.** Offline devices are
+  excluded from the compliance denominator, but their pending patches were still counted, so an
+  organization whose devices were all offline produced a row with no devices in it, a full green bar
+  and a large Critical/Important count. Patches on devices outside the rollup — including orphans,
+  which invented their own "(unknown)" organization — are now excluded with them.
+- **99.5% no longer displays as "100%".** Compliance percentages round down rather than up, in the
+  app, the Excel workbook and the HTML report, so a fleet that is not fully patched can never read as
+  one that is.
+- **Current patches with no reported status were missing from every rollup** while still appearing as
+  rows, which understated the backlog and raised the compliance percentage. That feed is defined as
+  the patches with no installation attempt, so such a record now counts as pending.
+- **Dispatched actions resolved by timeout instead of by their activity.** The activity feed was
+  queried with a timestamp in `newerThan`, which takes an activity *ID*, so every poll came back
+  empty — indistinguishable from a lagging feed. The time bound is now applied locally. Job state
+  also reads NinjaOne's actual fields: the lifecycle from `statusCode`, the verdict from
+  `activityResult` (so a completed-but-failed activity is reported as a failure), and the exit code
+  from `data`, which had never been read at all. Patch-apply, scan and reboot activities are now
+  recognised by the correlator, which only matched script activities under a type code the API does
+  not use.
+- **The severity chart could overstate every band.** Segments looked their counts up by display
+  label with a fallback to Unknown, so a renamed band silently drew Unknown's count twice.
+- **Paging could loop forever** on an endpoint that returns a full page while echoing back an
+  unchanged cursor.
+- **The Failures table was missing its Patch Type column**, which both exports carried — the one
+  column that distinguishes an OS failure from a third-party one, and third-party rows show
+  "(no KB)". Several table headers also disagreed with the workbook and report ("Compliance %",
+  "Pending Critical/Important", "Aged (past SLA)", "Device Role", "Pending Patches").
+- **"N failing patches across M devices" used the fleet size** rather than the number of devices that
+  actually failed, making a contained problem look fleet-wide.
+
+### Changed
+
+- **The Compliance and Needs Reboot tabs no longer claim the patch Type filter is ignored there.**
+  It genuinely narrows those numbers — only the patch families a query fetches are in the rollups —
+  so the tabs name the families instead of implying a whole-backlog figure.
+- **Locations are loaded once for the whole tenant and served from cache**, so changing the
+  organization scope no longer costs an API round trip per change.
+
 ## [0.12.2] - 2026-08-11
 
 ### Security

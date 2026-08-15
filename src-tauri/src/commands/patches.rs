@@ -12,7 +12,7 @@ use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus, PatchType, Role};
 use crate::rows::{
-    GroupBy, GroupPage, LookupMaps, PatchSource, QueryResult, QuerySummary, RowSort,
+    GroupBy, GroupPage, LookupMaps, PatchFamilies, PatchSource, QueryResult, QuerySummary, RowSort,
     build_age_buckets, build_compliance, build_compliance_by_os, build_device_summaries,
     build_failures, build_rows, build_severity_by_org, group_member_page, page_rows,
     pending_counts, slice_groups,
@@ -436,11 +436,15 @@ fn assemble_result(
     // role/class) client-side — this is what makes a re-filter a no-refetch
     // operation, replacing the old per-query device/patch `df`. `devices_by_id` then
     // holds only in-scope devices, so every downstream rollup is scoped through it.
-    let has_scope = plan.filter.has_identity_scope();
+    // One prepared filter for the whole assembly: it lowers the text needles and
+    // parses the severities once, and it is what both the device scoping below and
+    // the row join use — so a device the scope excludes cannot reappear as a row.
+    let prepared = plan.filter.prepare();
+    let has_scope = prepared.has_scope();
     let scoped_devices: Vec<&Device> = src
         .devices
         .iter()
-        .filter(|d| plan.filter.device_allowed(d))
+        .filter(|d| prepared.device_allowed(d))
         .collect();
     let devices_by_id: HashMap<i64, &Device> = scoped_devices.iter().map(|d| (d.id, *d)).collect();
 
@@ -506,7 +510,7 @@ fn assemble_result(
                 status_filter: Some(&plan.install_status_set),
             });
         }
-        build_rows(&devices_by_id, &maps, &sources, &plan.filter)
+        build_rows(&devices_by_id, &maps, &sources, &prepared)
     };
     // Highest severity first, then organization, then device — case-insensitive.
     // sort_by_cached_key lowercases each field once instead of on every compare.
@@ -554,6 +558,15 @@ fn assemble_result(
         severity_by_org,
         age_buckets,
         devices_total: scoped_devices.len(),
+        // Counted over the same scoped set the compliance rollups draw from, so the
+        // two device numbers on screen are reconcilable: `devices_total` is every
+        // in-scope device, and `devices_total - devices_offline` is the compliance
+        // denominator.
+        devices_offline: scoped_devices.iter().filter(|d| d.is_offline()).count(),
+        patch_families: PatchFamilies {
+            os: plan.include_os,
+            software: plan.include_sw,
+        },
         generated_at: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         data_fetched_at: src
             .current
@@ -658,6 +671,11 @@ mod tests {
                 severity_by_org: Vec::new(),
                 age_buckets: Vec::new(),
                 devices_total: 0,
+                devices_offline: 0,
+                patch_families: PatchFamilies {
+                    os: true,
+                    software: true,
+                },
                 generated_at: "2026-01-01 00:00:00 UTC".into(),
                 data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
             },
@@ -1301,7 +1319,7 @@ mod tests {
         );
 
         let mut a = args(PatchType::Os, vec![PatchStatus::Pending]);
-        a.filter.organization_id = Some(1);
+        a.filter.organization_ids = vec![1];
 
         let http = reqwest::Client::new();
         let api = NinjaApiClient::new(

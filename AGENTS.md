@@ -62,8 +62,8 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── patches.rs               # current patches + install-history endpoints
 │   ├── actions.rs               # WRITE path: patch scan/apply, reboot, script/run, automation-script library
 │   ├── activities.rs            # /activities feed used to resolve dispatched jobs
-│   └── lookups.rs               # orgs / locations / roles / node classes
-├── src/filter.rs                # FilterParams → install-query df DSL + client-side device_allowed (identity scope) / OS-name / KB-search facets
+│   └── lookups.rs               # orgs / all-locations / roles / node classes
+├── src/filter.rs                # FilterParams (multi-select org/loc/role ids) → install-query df DSL + PreparedFilter::device_allowed (identity + OS-name scope) / KB-search facets
 ├── src/model.rs                 # domain types (Device, Patch, PatchType, PatchStatus, …)
 ├── src/rows.rs                  # join → PatchRow, compliance %, SLA aging, reboot/pending + failure/severity/age rollups
 ├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / Compliance by OS / Needs-Reboot / Patch Failures)
@@ -512,6 +512,13 @@ secrets are **not** stored there — see below).
   - **The retry policy is a pure function.** `retry_for(status, replay, attempt, retry_after)`
     returns `Retry::{No, Wait, Reauth}`, and `decode_response` handles the body — extracted from a
     ~300-line `request_raw` so the policy can be tested without a server. Its arms are below.
+  - **Both pagination branches require forward progress.** The `after` branch stops unless the max
+    row id advances; the envelope branch stops when the server echoes back the same cursor it was
+    handed on a *full* page. Without the latter, an endpoint that never advances its cursor loops
+    forever, re-fetching the same rows. Note also that `REPORTING_PAGE_SIZE = 5000` rests on the
+    envelope branch tolerating a server-side cap, **not** on a documented ceiling: the four patch
+    endpoints declare `pageSize` with no maximum (the `maximum: 10000` in the spec is on
+    `/queries/logged-on-users`, which this app never calls).
   - **An unreadable `cursor` is an error, not end-of-pages.** `next_cursor` returns
     `Result<Option<String>>` and bails on a shape it cannot interpret (an object with no usable
     `name`, a number, an array). It is only consulted after a page that *returned rows* — the caller
@@ -530,16 +537,98 @@ secrets are **not** stored there — see below).
     JSON feeds and a fresh TLS handshake per concurrent fetch were both silent consequences of that
     one line. If you touch the feature list, keep `gzip`, `http2`, `system-proxy`, `charset`.
 
-- **Filter — client-side identity scope vs server-side install `df` vs client-side facets.** Because
-  devices/current patches are prefetched whole-fleet (above), **all** identity facets
-  (`org`/`location`/`role` + the coarse OS-type `class`) are matched **client-side** by
-  `FilterParams::device_allowed` (case-insensitive class), and `has_identity_scope` reports whether any
-  is active. The install-history queries, fetched fresh per query, still send identity facets
-  server-side via `FilterParams::patch_filter` (the `df`; `class` is omitted — `/queries/*` ignore it —
-  and reapplied via the device join in `build_rows`). The granular OS-name substring (`os_name_allowed`)
-  and free-text KB/name search (`search_allowed`, which accepts a `KB` prefix on either side) are
-  applied **client-side** against rows after fetch. Keep the split: an identity/scope facet extends
-  `device_allowed`; a substring/text facet is a client-side `*_allowed()`.
+- **Filter — client-side device scope vs server-side install `df` vs client-side row facets.** Because
+  devices/current patches are prefetched whole-fleet (above), **every device-scope facet**
+  (`org`/`location`/`role`, the coarse OS-type `class`, and the granular OS-name substring) is matched
+  **client-side** by `PreparedFilter::device_allowed` (case-insensitive class and OS name), and
+  `has_identity_scope` reports whether any is active. Only the free-text KB/name search
+  (`search_allowed`, which accepts a `KB` prefix on either side), the severity facet and the
+  first-seen window are matched per **row**. Keep the split: a facet that describes a *device*
+  extends `device_allowed` (and so reaches the device count and every fleet-health rollup); a facet
+  that describes a *patch* is a client-side `*_allowed()`. The OS-name needle used to be row-only
+  while the UI filed it under "Device scope" and left its chip undimmed on the fleet tabs, so
+  compliance and Needs-Reboot silently covered the whole fleet.
+  - **`device_allowed` lives on `PreparedFilter`, not on `FilterParams`.** `prepare()` lowers the
+    text needles and parses the severities once per query and borrows the id/class facets, so the
+    device sweep and the row join share one object — a device the scope excludes cannot reappear as a
+    row. `assemble_result` prepares once and passes it to `build_rows`.
+  - **The three identity facets are multi-select (`organization_ids` / `location_ids` / `role_ids`).**
+    Empty = every one of them; within a facet the ids are OR'd, and the facets are AND'd. They
+    deserialize from a bare id *or* a list (`filter::ids`, which also sorts and dedupes), so presets
+    saved when they were `Option<i64>` still load as the same scope. `id_clause` normalizes again on
+    the way out, so the emitted `df` is canonical however the struct was built.
+  - **The `df` grammar is NinjaOne's and is worth checking against their syntax doc.** Single value is
+    `org=<id>` (no spaces around `=`), several are `org in (1, 2, 3)`, and the location token is
+    **`loc`** — `location` is not a token the grammar defines, so that clause was either rejected or
+    silently dropped. `class` is omitted entirely (the `/queries/*` endpoints ignore it).
+  - **The install-history `df` is a bandwidth optimization, not the scope boundary.** `build_rows`
+    re-checks every joined row against the client-side scope (`scope_active && device.is_none()` →
+    drop), for *all* sources rather than only the node-class facet it once covered. Install-history
+    rows arrive scoped only by whatever `df` the server chose to honor, and an unhonored clause is
+    dropped silently — so without this a narrowed query could display rows from devices the operator
+    had scoped out. With no scope active, orphan patches are still kept.
+
+- **What a compliance number means (load-bearing).** The rollups in `rows.rs` describe a *narrower*
+  population than `devices_total`, and every surface has to say so rather than leave two device
+  counts side by side.
+  - **One population for both halves of a bucket.** `accumulate_compliance` has a single `counted`
+    predicate — the device must be in the scoped inventory **and** online — applied to the device
+    loop *and* the patch loop. Offline devices are excluded because they report no current patch
+    records, so a zero pending count says nothing about them. The patch loop used to skip this check,
+    so an org whose devices were all offline read "0 devices · 100% compliant · 45 pending
+    Critical/Important", and an orphan patch opened its own zero-device `(unknown)` org. A bucket can
+    no longer exist without at least one device in it.
+  - **`devices_offline` and `patch_families` ride on `QueryResult`/`QuerySummary`** so the note can be
+    stated. `rows::compliance_scope_note` builds the sentence; the Compliance tab
+    (`ComplianceScopeNote`), the HTML report header and both workbook compliance sheets print it, and
+    `web-rs/src/app/util.rs` mirrors it (the crates share no code — both sides are tested).
+  - **The fleet-health rollups *do* depend on the patch-`Type` facet**, because only the families a
+    query asked for are fetched at all (see the whole-fleet prefetch above — a third-party feed runs
+    to six figures, so an OS-only query does not page it). That makes "compliant" mean "no pending OS
+    patches" on such a query. The tabs and the exports name the families instead of claiming Type is
+    ignored, which is what they used to claim while the chip was struck through.
+  - **"Compliant" and "Pending Critical/Important" grade differently, on purpose.** Compliant is
+    `pending_count == 0` over patches of *any* severity (`is_pending`), while the two SLA columns
+    count only rank ≥ Important (`counts_toward_backlog`). A row can legitimately read
+    "10 devices · 4 compliant · 0 pending Critical/Important".
+  - **A current-feed record with no `status` counts as pending.** `status` is not required on
+    `DeviceOSPatch`/`DeviceSoftwarePatch`, and that feed is defined as the patches with no
+    installation attempt, so an untyped record there is pending by construction. Excluding it
+    understated the backlog and *raised* the percentage — the wrong direction to fail in, and the
+    opposite of what `is_aged` does with an undated patch.
+  - **A percentage never rounds up to 100.** `rows::format_pct` (and its `web-rs` mirror) caps
+    anything below 100 at 99%, and `pct_cell` does the same at one decimal. Plain `{:.0}%` printed
+    "100%" from 99.5% up, so 199 of 200 devices patched read as a clean fleet — the one rounding
+    error here that changes what an operator does.
+  - **Enumerate bands through an accessor list, never by matching a label string.**
+    `rows::SeverityCounts::BANDS` and `charts::SEV_BANDS` both pair each band with the function that
+    reads it, and their totals derive from that list. The frontend's version used to match on the
+    display label with a `_ => c.unknown` fallback, so a renamed band silently drew Unknown's count
+    twice and overflowed the bar.
+  - **Table headers come from `rows::TableColumn` spellings.** The Leptos tables are hand-written and
+    are not wired to `COLUMNS`, so they are kept spelled identically by review: "Compliance %",
+    "Pending Critical/Important", "Aged (past SLA)", "Device Role", "Pending Patches", and the
+    Failures table's seven columns including "Patch Type".
+
+- **Resolving a dispatched action from `/activities` (load-bearing).** Three fields decide a job's
+  fate and the spec gives them different jobs: `statusCode` is the enumerated lifecycle
+  (`STARTED`/`IN_PROCESS`/`COMPLETED`/`CANCELLED`/`BLOCKED`), `status` is free-text "Status
+  description" with no enum, and `activityResult` is the outcome (`SUCCESS`/`FAILURE`/`UNSUPPORTED`/
+  `UNCOMPLETED`/`AGENT_OFFLINE`). `Activity::lifecycle()` prefers `statusCode` and falls back to
+  `status`; `Activity::outcome()` takes the verdict from `activityResult` first, so a `COMPLETED`
+  activity carrying `FAILURE` is a failed job. The exit code comes from `data` (the spec's untyped
+  bag), with `result` kept as an alias — reading only `result` meant `exit_code()` always returned
+  `None` and every job reported "Completed, no exit code".
+  - **`newerThan` is an activity ID, not a timestamp.** The dispatch-time floor is applied
+    **client-side** in `api::activities` against `activityTime`. Sending a Unix timestamp there asked
+    for activities newer than an id beyond any real one, so the feed came back empty every poll — and
+    an empty feed reads as "the feed lags", so every dispatch resolved by timeout instead. The
+    endpoint's date parameters are `after`/`before`, whose format the spec never states; don't guess.
+  - **The activity-type filter must list what the native endpoints emit.** `is_action_activity`
+    accepts `SCRIPTING` (the spec's value; `SCRIPT` is not in the enum but is kept anyway),
+    `PATCH_MANAGEMENT`, `SOFTWARE_PATCH_MANAGEMENT`, `SYSTEM`, `SCHEDULED_TASK` and the
+    `ACTION`/`ACTIONSET` pair. `scan`/`apply`/`reboot` return no correlator, so this heuristic is
+    their only path to resolving.
 
 - **There is no patch release date in the NinjaOne API (load-bearing).** Grep the spec: `releaseDate`
   appears **zero** times. `DeviceOSPatch` / `DeviceSoftwarePatch` carry only `installedAt`

@@ -24,9 +24,11 @@ pub(crate) enum Tab {
 /// not re-run. Frontend-only; never crosses IPC, so it is not mirrored in `types.rs`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct AppliedFilters {
-    pub organization: Option<String>,
-    pub location: Option<String>,
-    pub role: Option<String>,
+    /// Names of the selected organizations (empty = every organization). Plural for
+    /// the same reason the facet is: one chip has to describe a set.
+    pub organizations: Vec<String>,
+    pub locations: Vec<String>,
+    pub roles: Vec<String>,
     pub os_types: Vec<String>,
     pub os_name: Option<String>,
     pub patch_type: String,
@@ -147,9 +149,12 @@ impl LookupState {
 /// The live filter controls (device scope + patch facets) as the user edits them.
 #[derive(Clone, Copy)]
 pub(crate) struct FilterState {
-    pub(super) org_id: RwSignal<Option<i64>>,
-    pub(super) loc_id: RwSignal<Option<i64>>,
-    pub(super) role_id: RwSignal<Option<i64>>,
+    /// Selected organizations; empty = every organization. All three identity
+    /// facets are multi-select, so a scope like "these four sites" is one query
+    /// rather than four.
+    pub(super) org_ids: RwSignal<Vec<i64>>,
+    pub(super) loc_ids: RwSignal<Vec<i64>>,
+    pub(super) role_ids: RwSignal<Vec<i64>>,
     pub(super) selected_classes: RwSignal<Vec<String>>,
     pub(super) selected_severities: RwSignal<Vec<String>>,
     pub(super) os_name: RwSignal<String>,
@@ -166,9 +171,9 @@ pub(crate) struct FilterState {
 impl FilterState {
     pub(super) fn new() -> Self {
         Self {
-            org_id: RwSignal::new(None),
-            loc_id: RwSignal::new(None),
-            role_id: RwSignal::new(None),
+            org_ids: RwSignal::new(Vec::new()),
+            loc_ids: RwSignal::new(Vec::new()),
+            role_ids: RwSignal::new(Vec::new()),
             selected_classes: RwSignal::new(Vec::new()),
             selected_severities: RwSignal::new(Vec::new()),
             os_name: RwSignal::new(String::new()),
@@ -192,14 +197,29 @@ impl FilterState {
         });
     }
 
+    /// [`toggle_in`](Self::toggle_in) for an id facet. Kept sorted so the chip row,
+    /// the `df` clause and preset equality all see one canonical order regardless of
+    /// the order the operator ticked things.
+    pub(super) fn toggle_id(self, sig: RwSignal<Vec<i64>>, id: i64) {
+        sig.update(|v| {
+            match v.iter().position(|x| *x == id) {
+                Some(pos) => {
+                    v.remove(pos);
+                }
+                None => v.push(id),
+            }
+            v.sort_unstable();
+        });
+    }
+
     /// Reads the panel's signals and hands them to the pure [`filter_params`]
     /// mapping. Everything below the signal reads is testable there; this method
     /// stays a lift so it has nothing left to get wrong.
     pub(super) fn current_filter(self) -> FilterParams {
         filter_params(FilterInputs {
-            organization_id: self.org_id.get_untracked(),
-            location_id: self.loc_id.get_untracked(),
-            role_id: self.role_id.get_untracked(),
+            organization_ids: self.org_ids.get_untracked(),
+            location_ids: self.loc_ids.get_untracked(),
+            role_ids: self.role_ids.get_untracked(),
             node_classes: self.selected_classes.get_untracked(),
             severities: self.selected_severities.get_untracked(),
             os_name: self.os_name.get_untracked(),
@@ -564,7 +584,7 @@ impl AppState {
     }
 
     pub(super) fn load_lookups(self) {
-        self.lookups.lookups_pending.set(2);
+        self.lookups.lookups_pending.set(3);
         spawn_local(async move {
             match api::list_orgs().await {
                 Ok(o) => self.lookups.orgs.set(o),
@@ -576,6 +596,18 @@ impl AppState {
             match api::list_roles().await {
                 Ok(r) => self.lookups.roles.set(r),
                 Err(e) => self.notify(Toast::err(format!("Couldn't load roles: {e}"))),
+            }
+            self.lookups.lookup_done();
+        });
+        // Locations load up front too, rather than only once an organization is
+        // picked. With the facets multi-select, "every organization" is a real and
+        // common scope, and under it the location picker would otherwise sit
+        // permanently empty and disabled — the operator could not narrow to a site
+        // without first selecting its org.
+        spawn_local(async move {
+            match api::list_locations(Vec::new()).await {
+                Ok(locs) => self.lookups.locations.set(locs),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
             }
             self.lookups.lookup_done();
         });
@@ -592,23 +624,50 @@ impl AppState {
         });
     }
 
-    pub(super) fn select_org(self, org: Option<i64>) {
-        self.filters.org_id.set(org);
-        self.filters.loc_id.set(None);
-        self.lookups.locations.set(Vec::new());
-        if let Some(id) = org {
-            // Demo mode resolves locations from the sample, not the backend.
-            if self.session.demo.get_untracked() {
-                self.lookups.locations.set(demo::sample_locations(id));
-                return;
-            }
-            spawn_local(async move {
-                match api::list_locations(id).await {
-                    Ok(locs) => self.lookups.locations.set(locs),
-                    Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
-                }
-            });
+    /// Toggles one organization in the scope and reloads the locations available
+    /// under the new selection.
+    ///
+    /// Locations that no longer belong to any selected organization are dropped from
+    /// the selection rather than left behind: an invisible location id would go on
+    /// narrowing every query with nothing on screen to explain the empty result.
+    pub(super) fn toggle_org(self, org_id: i64) {
+        self.filters.toggle_id(self.filters.org_ids, org_id);
+        self.reload_locations();
+    }
+
+    /// Reloads the location list for the current organization selection, then prunes
+    /// any selected location that is no longer offered.
+    pub(super) fn reload_locations(self) {
+        let orgs = self.filters.org_ids.get_untracked();
+        // Demo mode resolves locations from the sample, not the backend.
+        if self.session.demo.get_untracked() {
+            self.lookups.locations.set(demo::sample_locations(&orgs));
+            self.prune_selected_locations();
+            return;
         }
+        spawn_local(async move {
+            match api::list_locations(orgs).await {
+                Ok(locs) => {
+                    self.lookups.locations.set(locs);
+                    self.prune_selected_locations();
+                }
+                Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
+            }
+        });
+    }
+
+    /// Drops selected location ids that the current list no longer offers.
+    fn prune_selected_locations(self) {
+        let available: Vec<i64> = self
+            .lookups
+            .locations
+            .get_untracked()
+            .iter()
+            .map(|l| l.id)
+            .collect();
+        self.filters
+            .loc_ids
+            .update(|sel| sel.retain(|id| available.contains(id)));
     }
 
     /// Snapshots the active filters for the applied-filter chips, resolving org/loc/role
@@ -627,30 +686,18 @@ impl AppState {
             .any(|s| s == "INSTALLED" || s == "FAILED")
             .then(|| self.filters.install_days.get_untracked());
 
-        let organization = self.filters.org_id.get_untracked().and_then(|id| {
-            self.lookups
-                .orgs
-                .get_untracked()
-                .into_iter()
-                .find(|o| o.id == id)
-                .map(|o| o.name)
-        });
-        let location = self.filters.loc_id.get_untracked().and_then(|id| {
-            self.lookups
-                .locations
-                .get_untracked()
-                .into_iter()
-                .find(|l| l.id == id)
-                .map(|l| l.name)
-        });
-        let role = self.filters.role_id.get_untracked().and_then(|id| {
-            self.lookups
-                .roles
-                .get_untracked()
-                .into_iter()
-                .find(|r| r.id == id)
-                .map(|r| r.name)
-        });
+        let organizations = util::names_for(
+            &self.filters.org_ids.get_untracked(),
+            self.lookups.orgs.get_untracked().into_iter(),
+        );
+        let locations = util::names_for(
+            &self.filters.loc_ids.get_untracked(),
+            self.lookups.locations.get_untracked().into_iter(),
+        );
+        let roles = util::names_for(
+            &self.filters.role_ids.get_untracked(),
+            self.lookups.roles.get_untracked().into_iter(),
+        );
         let selected = self.filters.selected_classes.get_untracked();
         let os_types = self
             .lookups
@@ -668,9 +715,9 @@ impl AppState {
             .collect();
 
         AppliedFilters {
-            organization,
-            location,
-            role,
+            organizations,
+            locations,
+            roles,
             os_types,
             os_name: non_empty(self.filters.os_name.get_untracked()),
             patch_type: self.filters.patch_type.get_untracked(),
@@ -1034,6 +1081,9 @@ impl AppState {
     pub(super) fn enter_demo(self) {
         self.lookups.orgs.set(demo::sample_orgs());
         self.lookups.roles.set(demo::sample_roles());
+        // Every location up front, matching the signed-in path: with no organization
+        // selected the demo's location picker would otherwise be empty and disabled.
+        self.lookups.locations.set(demo::sample_locations(&[]));
         self.lookups.node_classes.set(demo::sample_node_classes());
         self.session.demo.set(true);
     }
@@ -1060,7 +1110,12 @@ impl AppState {
             .orgs
             .with_untracked(|orgs| orgs.iter().find(|o| o.name == organization).map(|o| o.id));
         match id {
-            Some(id) => self.filters.org_id.set(Some(id)),
+            // Replaces the org scope rather than adding to it: a drill-down means
+            // "show me this org's rows", not "add this org to whatever was picked".
+            Some(id) => {
+                self.filters.org_ids.set(vec![id]);
+                self.reload_locations();
+            }
             None => self.notify(Toast::err(format!(
                 "No organization named \"{organization}\" in the current scope — showing every org."
             ))),
@@ -1182,7 +1237,7 @@ impl AppState {
         if let Some(d) = p.install_days {
             self.filters.install_days.set(d);
         }
-        self.filters.role_id.set(f.role_id);
+        self.filters.role_ids.set(f.role_ids);
         self.filters.selected_classes.set(f.node_classes);
         self.filters.selected_severities.set(f.severities);
         self.filters
@@ -1207,22 +1262,30 @@ impl AppState {
                 self.filters.detected_before_date.set(String::new());
             }
         }
-        // Load the org's locations, then restore the saved location.
-        self.filters.org_id.set(f.organization_id);
-        self.filters.loc_id.set(None);
+        // Load the locations for the restored org scope, then restore the saved
+        // location selection — the list has to exist before the ids can be pruned
+        // against it.
+        self.filters.org_ids.set(f.organization_ids);
+        let want_locs = f.location_ids;
+        self.filters.loc_ids.set(Vec::new());
         self.lookups.locations.set(Vec::new());
-        if let Some(org) = f.organization_id {
-            let want_loc = f.location_id;
-            spawn_local(async move {
-                match api::list_locations(org).await {
-                    Ok(locs) => {
-                        self.lookups.locations.set(locs);
-                        self.filters.loc_id.set(want_loc);
-                    }
-                    Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
-                }
-            });
+        let orgs = self.filters.org_ids.get_untracked();
+        if self.session.demo.get_untracked() {
+            self.lookups.locations.set(demo::sample_locations(&orgs));
+            self.filters.loc_ids.set(want_locs);
+            self.prune_selected_locations();
+            return;
         }
+        spawn_local(async move {
+            match api::list_locations(orgs).await {
+                Ok(locs) => {
+                    self.lookups.locations.set(locs);
+                    self.filters.loc_ids.set(want_locs);
+                    self.prune_selected_locations();
+                }
+                Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
+            }
+        });
     }
 
     // --- Device actions ------------------------------------------------------

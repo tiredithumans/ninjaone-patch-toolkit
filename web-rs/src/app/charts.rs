@@ -11,21 +11,39 @@
 use leptos::prelude::*;
 
 use super::AppState;
-use super::util::severity_raw;
+use super::util::{format_pct, severity_raw};
 use crate::types::{OrgSeverity, SeverityCounts};
 
-/// Severity bands in most-to-least-urgent order, paired with the CSS class that
-/// fills their chart segment / legend swatch.
-const SEV_BANDS: [(&str, &str); 8] = [
-    ("Critical", "seg-critical"),
-    ("Important", "seg-important"),
-    ("Security", "seg-security"),
-    ("Moderate", "seg-moderate"),
-    ("Recommended", "seg-recommended"),
-    ("Low", "seg-low"),
-    ("Optional", "seg-optional"),
-    ("Unknown", "seg-unknown"),
+/// Severity bands in most-to-least-urgent order: display label, the CSS class that
+/// fills their chart segment / legend swatch, and the accessor that reads the band
+/// off the counts.
+///
+/// The accessor is the point. This used to be label + class only, with a separate
+/// `sev_count(counts, label)` that matched on the **string** and ended in
+/// `_ => c.unknown` — so renaming a label silently drew Unknown's count in that
+/// band's colour *and* again as Unknown, overflowing the track and overstating every
+/// visible width, with nothing failing. The backend hit exactly this and fixed it the
+/// same way (`rows::SeverityCounts::BANDS`); this is the frontend's copy of that fix.
+type SevBand = (&'static str, &'static str, fn(&SeverityCounts) -> usize);
+
+const SEV_BANDS: [SevBand; 8] = [
+    ("Critical", "seg-critical", |c| c.critical),
+    ("Important", "seg-important", |c| c.important),
+    ("Security", "seg-security", |c| c.security),
+    ("Moderate", "seg-moderate", |c| c.moderate),
+    ("Recommended", "seg-recommended", |c| c.recommended),
+    ("Low", "seg-low", |c| c.low),
+    ("Optional", "seg-optional", |c| c.optional),
+    ("Unknown", "seg-unknown", |c| c.unknown),
 ];
+
+/// Total pending patches across every band.
+///
+/// Derived from [`SEV_BANDS`] rather than summed field by field, so the denominator
+/// cannot disagree with the segments drawn from the same list.
+fn severity_total(c: &SeverityCounts) -> usize {
+    SEV_BANDS.iter().map(|(_, _, read)| read(c)).sum()
+}
 
 // Fixed SVG coordinate spaces; CSS scales them down responsively (max-width:100%).
 const COMPLIANCE_VW: f64 = 480.0;
@@ -78,20 +96,15 @@ fn sum_severity(by_org: &[OrgSeverity]) -> SeverityCounts {
         t.optional += o.counts.optional;
         t.unknown += o.counts.unknown;
     }
+    debug_assert_eq!(
+        severity_total(&t),
+        by_org
+            .iter()
+            .map(|o| severity_total(&o.counts))
+            .sum::<usize>(),
+        "a band added to SeverityCounts must be added here too, or the chart drops it"
+    );
     t
-}
-
-fn sev_count(c: &SeverityCounts, label: &str) -> usize {
-    match label {
-        "Critical" => c.critical,
-        "Important" => c.important,
-        "Security" => c.security,
-        "Moderate" => c.moderate,
-        "Recommended" => c.recommended,
-        "Low" => c.low,
-        "Optional" => c.optional,
-        _ => c.unknown,
-    }
 }
 
 /// One positioned segment of the stacked severity bar (its `x`/`width` are pixels in
@@ -108,21 +121,14 @@ struct Segment {
 /// Lays the non-empty severity bands out left-to-right across `track` pixels,
 /// proportional to each band's share of the total.
 fn severity_segments(c: &SeverityCounts, track: f64) -> Vec<Segment> {
-    let total = c.critical
-        + c.important
-        + c.security
-        + c.moderate
-        + c.recommended
-        + c.low
-        + c.optional
-        + c.unknown;
+    let total = severity_total(c);
     if total == 0 {
         return Vec::new();
     }
     let mut x = 0.0;
     let mut out = Vec::new();
-    for (label, class) in SEV_BANDS {
-        let count = sev_count(c, label);
+    for (label, class, read) in SEV_BANDS {
+        let count = read(c);
         if count == 0 {
             continue;
         }
@@ -196,7 +202,7 @@ fn compliance_bars(items: Vec<(String, f64)>) -> AnyView {
                                 text-anchor="end"
                                 class="chart-val"
                             >
-                                {format!("{pct:.0}%")}
+                                {format_pct(pct)}
                             </text>
                             <rect
                                 class="chart-track"

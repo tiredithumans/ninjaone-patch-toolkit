@@ -23,7 +23,8 @@ use crate::app::util::date_to_epoch;
 use crate::types::QueryResult;
 use crate::types::{
     AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams, GroupBy, Location,
-    NodeClass, OrgSeverity, Organization, OsCompliance, PatchGroup, PatchRow, Role, SeverityCounts,
+    NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role,
+    SeverityCounts,
 };
 
 /// Wall-clock label shown in the results summary. Fixed (not "now") so the build
@@ -202,15 +203,16 @@ pub fn sample_roles() -> Vec<Role> {
         .collect()
 }
 
-/// Locations belonging to `org_id` for the demo's Location dropdown (mirrors the
-/// backend's org-scoped lookup).
-pub fn sample_locations(org_id: i64) -> Vec<Location> {
+/// Locations belonging to any of `org_ids` for the demo's Location picker (mirrors
+/// the backend's `list_locations`, where an empty list means every organization).
+pub fn sample_locations(org_ids: &[i64]) -> Vec<Location> {
     LOCATIONS
         .iter()
-        .filter(|(_, o, _)| *o == org_id)
-        .map(|(id, _, name)| Location {
+        .filter(|(_, o, _)| org_ids.is_empty() || org_ids.contains(o))
+        .map(|(id, org, name)| Location {
             id: *id,
             name: name.to_string(),
+            organization_id: Some(*org),
         })
         .collect()
 }
@@ -419,6 +421,7 @@ fn demo_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
                 }
             }
             None => groups.push(FailureGroup {
+                patch_type: r.patch_type.clone(),
                 kb: r.kb.clone(),
                 name: r.name.clone(),
                 severity: r.severity.clone(),
@@ -513,43 +516,30 @@ pub fn filtered_result(
         .filter(|d| patch_matches(&d.row, filter, patch_type, statuses, install_after_days))
         .map(|d| d.row)
         .collect();
-    assemble(rows, filter.organization_id)
+    assemble(rows, &filter.organization_ids)
 }
 
 /// Builds a `QueryResult` from already-filtered display rows, narrowing the rollups
-/// to `org_filter` (the organization facet) when one is set.
-fn assemble(rows: Vec<PatchRow>, org_filter: Option<i64>) -> QueryResult {
+/// to `org_filter` (the organization facet) when one is set. An empty `org_filter`
+/// means every organization, matching the real facet.
+fn assemble(rows: Vec<PatchRow>, org_filter: &[i64]) -> QueryResult {
     // Failures derive from the already-filtered rows, so the tab reacts to filters.
     let failures = demo_failures(&rows);
-    let (compliance, reboot_devices, severity_by_org, devices_total) =
-        match org_filter.and_then(org_name) {
-            Some(name) => {
-                let compliance: Vec<_> = sample_compliance()
-                    .into_iter()
-                    .filter(|b| b.organization == name)
-                    .collect();
-                let reboot_devices = sample_reboot()
-                    .into_iter()
-                    .filter(|d| d.organization == name)
-                    .collect();
-                let severity_by_org = sample_severity_by_org()
-                    .into_iter()
-                    .filter(|o| o.organization == name)
-                    .collect();
-                let devices_total = compliance.iter().map(|b| b.devices_total).sum();
-                (compliance, reboot_devices, severity_by_org, devices_total)
-            }
-            None => {
-                let compliance = sample_compliance();
-                let devices_total = compliance.iter().map(|b| b.devices_total).sum();
-                (
-                    compliance,
-                    sample_reboot(),
-                    sample_severity_by_org(),
-                    devices_total,
-                )
-            }
-        };
+    let names: Vec<&str> = org_filter.iter().copied().filter_map(org_name).collect();
+    let keep = |org: &str| names.is_empty() || names.contains(&org);
+    let compliance: Vec<_> = sample_compliance()
+        .into_iter()
+        .filter(|b| keep(&b.organization))
+        .collect();
+    let reboot_devices = sample_reboot()
+        .into_iter()
+        .filter(|d| keep(&d.organization))
+        .collect();
+    let severity_by_org = sample_severity_by_org()
+        .into_iter()
+        .filter(|o| keep(&o.organization))
+        .collect();
+    let devices_total = compliance.iter().map(|b| b.devices_total).sum();
     // Both of these used to ship whole-fleet regardless of the facet, so with an
     // organization selected the Compliance tab's by-OS chart and the age histogram
     // described a fleet the rest of the screen — and `devices_total` beside them —
@@ -567,15 +557,25 @@ fn assemble(rows: Vec<PatchRow>, org_filter: Option<i64>) -> QueryResult {
         severity_by_org,
         age_buckets,
         devices_total,
+        // The sample fleet is all-online and both families are represented, so the
+        // demo's scope note reads the same as a whole-fleet desktop query.
+        devices_offline: 0,
+        patch_families: PatchFamilies {
+            os: true,
+            software: true,
+        },
         generated_at: GENERATED_AT.to_string(),
         data_fetched_at: GENERATED_AT.to_string(),
     }
 }
 
 fn device_matches(d: &DemoRow, f: &FilterParams) -> bool {
-    f.organization_id.is_none_or(|id| d.org_id == id)
-        && f.location_id.is_none_or(|id| d.location_id == id)
-        && f.role_id.is_none_or(|id| d.role_id == id)
+    // Empty = every one of them, and within a facet the ids are OR'd — the same
+    // semantics `FilterParams::device_allowed` gives the real thing.
+    let any = |sel: &[i64], id: i64| sel.is_empty() || sel.contains(&id);
+    any(&f.organization_ids, d.org_id)
+        && any(&f.location_ids, d.location_id)
+        && any(&f.role_ids, d.role_id)
         && (f.node_classes.is_empty()
             || f.node_classes
                 .iter()
@@ -897,7 +897,7 @@ mod tests {
     #[test]
     fn org_facet_filters_rows_and_rollups() {
         let f = FilterParams {
-            organization_id: Some(1), // Contoso Ltd
+            organization_ids: vec![1], // Contoso Ltd
             ..FilterParams::default()
         };
         let r = filtered_result(&f, "ALL", &all_statuses(), Some(3650));
@@ -959,7 +959,7 @@ mod tests {
         let all = filtered_result(&filter(), "ALL", &all_statuses(), Some(3650));
         let scoped = filtered_result(
             &FilterParams {
-                organization_id: Some(1),
+                organization_ids: vec![1],
                 ..filter()
             },
             "ALL",
@@ -1034,9 +1034,12 @@ mod tests {
         assert_eq!(sample_orgs().len(), 3);
         assert_eq!(sample_roles().len(), 6);
         assert_eq!(sample_node_classes().len(), 6);
-        // Contoso (id 1) has two locations; an unknown org has none.
-        assert_eq!(sample_locations(1).len(), 2);
-        assert!(sample_locations(999).is_empty());
+        // Contoso (id 1) has two locations; an unknown org has none. With no org
+        // selected the picker offers every location, matching `list_locations`.
+        assert_eq!(sample_locations(&[1]).len(), 2);
+        assert!(sample_locations(&[999]).is_empty());
+        assert_eq!(sample_locations(&[]).len(), LOCATIONS.len());
+        assert!(sample_locations(&[1, 2]).len() > sample_locations(&[1]).len());
     }
 
     #[test]

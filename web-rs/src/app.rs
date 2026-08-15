@@ -33,8 +33,8 @@ use util::{
     FilterInputs, MdBlock, MdSpan, SummaryCounts, action_blocked_reason, action_disabled_reason,
     aged_badge, aria_sort, epoch_to_date, filter_chips, filter_params, format_duration,
     group_thousands, is_fleet_tab, job_mode_label, next_sort, non_empty, parse_changelog,
-    parse_clamped, parse_opt, parse_optional_id, patch_key, selection_summary, sev_class,
-    sort_glyph, sort_patch_rows, status_class, summary_line, tab_class,
+    parse_clamped, parse_optional_id, patch_key, selection_summary, sev_class, sort_glyph,
+    sort_patch_rows, status_class, summary_line, tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;

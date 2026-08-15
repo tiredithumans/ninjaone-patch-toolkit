@@ -24,9 +24,12 @@ const DEFAULT_PAGE_SIZE: u32 = 500;
 /// fewer *sequential* round trips on a big fleet — the cursor (not the page size)
 /// decides when paging stops, so an API that silently caps the page still returns
 /// every row (the `Value::Object` envelope branch never compares page length to the
-/// requested size). The NinjaOne spec documents this reporting family with a
-/// `pageSize` max of `10000` (default `1000`); `5000` is a safe margin under that
-/// cap that cuts round trips ~5× versus the old `1000`. The `after`-paginated list
+/// requested size). The four patch endpoints declare `pageSize` as a bare
+/// `integer/int32` with **no** documented maximum — the `maximum: 10000, default:
+/// 1000` this comment used to cite is declared on `/queries/logged-on-users`, which
+/// this app never calls — so `5000` rests on the envelope branch tolerating a
+/// server-side cap, not on a documented ceiling. That tolerance is the actual
+/// safety property here; keep it if you change the value. The `after`-paginated list
 /// endpoints stay at `DEFAULT_PAGE_SIZE` — their stop condition compares page length
 /// to the requested size, so over-requesting there would end paging early and drop
 /// the rest of the fleet.
@@ -342,6 +345,22 @@ impl NinjaApiClient {
                         return Ok(all);
                     }
                     match next_cursor(next.as_ref())? {
+                        // Forward progress is required here for the same reason the
+                        // `after` branch above requires it: an endpoint that echoes
+                        // the cursor it was handed alongside a *full* page would
+                        // otherwise loop forever, re-fetching the same rows and
+                        // growing `all` without bound. The array branch was hardened
+                        // against exactly this; the envelope branch stopped only on
+                        // an empty page.
+                        Some(c) if Some(&c) == cursor.as_ref() => {
+                            warn!(
+                                path,
+                                rows = all.len(),
+                                "the server echoed an unchanged cursor on a full page; \
+                                 stopping rather than re-fetching it forever"
+                            );
+                            return Ok(all);
+                        }
                         Some(c) => cursor = Some(c),
                         None => return Ok(all),
                     }
