@@ -84,6 +84,21 @@ fn scope_claim_from_jwt(access_token: &str) -> Option<String> {
     }
     None
 }
+/// The tenant a grant was *started* under, sampled before the network call and
+/// re-checked before the tokens are stored.
+///
+/// `AuthState` had the same write-time-stamping hazard `state.rs` solved with
+/// `QueryToken`: `store_tokens_blocking` resolved the keyring entry name by reading
+/// the *current* `base_url`/`client_id`, but a refresh takes a round trip and an
+/// interactive sign-in takes up to three minutes. An operator who changed instance
+/// in Settings during that window had tenant A's refresh token written under tenant
+/// B's entry name — and then handed to tenant B's API host on the next call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TenantStamp {
+    base_url: String,
+    client_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TokenSet {
     pub access_token: String,
@@ -197,6 +212,19 @@ impl AuthState {
             http,
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    /// The tenant currently configured, for stamping a grant that is about to start.
+    fn tenant_stamp(&self) -> TenantStamp {
+        let (base_url, client_id) = self
+            .inner
+            .read()
+            .map(|g| (g.base_url.clone(), g.client_id.clone()))
+            .unwrap_or_default();
+        TenantStamp {
+            base_url,
+            client_id,
         }
     }
 
@@ -414,6 +442,9 @@ impl AuthState {
             .ok_or_else(|| anyhow!("no client ID configured"))?;
         let base_url = self.base_url();
 
+        // Sampled before the round trip; see `TenantStamp`.
+        let started = self.tenant_stamp();
+
         let mut body = vec![
             ("grant_type", "refresh_token".to_string()),
             ("refresh_token", refresh_token.to_string()),
@@ -448,7 +479,7 @@ impl AuthState {
         }
 
         let parsed: TokenResponse = resp.json().await.context("refresh token body")?;
-        let token_set = self.store_tokens(parsed).await?;
+        let token_set = self.store_tokens(parsed, started).await?;
         Ok(token_set.access_token)
     }
 
@@ -462,14 +493,30 @@ impl AuthState {
     /// turned one refresh into a stall across every concurrent fetch in the query.
     /// The lock is still held across this await, which is correct — the point is to
     /// stop holding a *worker* too.
-    async fn store_tokens(&self, parsed: TokenResponse) -> Result<TokenSet> {
+    async fn store_tokens(&self, parsed: TokenResponse, started: TenantStamp) -> Result<TokenSet> {
         let this = self.clone();
-        tauri::async_runtime::spawn_blocking(move || this.store_tokens_blocking(parsed))
+        tauri::async_runtime::spawn_blocking(move || this.store_tokens_blocking(parsed, started))
             .await
             .context("token persistence task failed")?
     }
 
-    fn store_tokens_blocking(&self, parsed: TokenResponse) -> Result<TokenSet> {
+    fn store_tokens_blocking(
+        &self,
+        parsed: TokenResponse,
+        started: TenantStamp,
+    ) -> Result<TokenSet> {
+        // Tenant drift, checked the way `store_last_result_if_current` checks it:
+        // against the tenant the grant *started* under, not the one that happens to
+        // be current now. These tokens were issued by `started`'s authorization
+        // server; filing them under whatever is configured at this instant is the one
+        // way this can be actively wrong rather than merely stale.
+        let current = self.tenant_stamp();
+        if current != started {
+            warn!(
+                "the configured instance changed while signing in; discarding tokens issued by the previous one"
+            );
+            bail!("the instance changed while signing in; sign in again");
+        }
         let expires_at = Utc::now() + Duration::seconds(parsed.expires_in);
         // Prefer what the server said it granted; fall back to the token's own
         // claim when the response omits `scope`.
@@ -551,13 +598,30 @@ impl AuthState {
         }
     }
 
+    /// Signs out: drops the in-memory tokens and deletes the stored refresh token.
+    ///
+    /// A keyring delete that *fails* is reported, not swallowed. The in-memory clear
+    /// still happens first so the session ends either way, but returning `Ok(())`
+    /// unconditionally meant the UI could show a clean sign-out over a refresh token
+    /// still on disk — which the next `access_token()` would happily use to sign the
+    /// next operator straight back in as the previous one. On a shared workstation
+    /// that is the whole threat this function exists to close, so the operator has to
+    /// be told when it did not work.
+    ///
+    /// A *missing* entry is not a failure: `delete_keyring` reports it as `Ok`, so
+    /// signing out twice, or signing out of an install that never persisted a token,
+    /// stays quiet.
     pub fn logout(&self) -> Result<()> {
-        let _ = delete_keyring(&self.refresh_entry());
+        // In-memory first, so the session is over regardless of what the keyring does.
+        self.clear_tokens_locked();
+        let current = delete_keyring(&self.refresh_entry());
         // Signing out of an install that still holds a pre-tenant-scoping entry must
         // clear that too, or the next `access_token()` migrates it straight back in.
-        let _ = delete_keyring(LEGACY_KEYRING_USER_REFRESH);
-        self.clear_tokens_locked();
-        Ok(())
+        let legacy = delete_keyring(LEGACY_KEYRING_USER_REFRESH);
+        current.and(legacy).context(
+            "signed out of this session, but the stored refresh token could not be deleted; \
+             it may still be on this machine",
+        )
     }
 
     /// Interactive PKCE login: opens the browser and waits up to 3 minutes for the
@@ -591,6 +655,13 @@ impl AuthState {
                 inner.callback_port,
                 inner.request_management,
             )
+        };
+        // Sampled before the browser opens: an interactive flow waits up to three
+        // minutes, ample room for the operator to change instance in Settings while
+        // it is pending. See `TenantStamp`.
+        let started = TenantStamp {
+            base_url: base_url.clone(),
+            client_id: Some(client_id.clone()),
         };
         let scope = scope_for(request_management);
         let client_secret = self.client_secret();
@@ -709,7 +780,7 @@ impl AuthState {
         }
 
         let parsed: TokenResponse = resp.json().await.context("token exchange body")?;
-        self.store_tokens(parsed).await?;
+        self.store_tokens(parsed, started).await?;
         Ok(())
     }
 }
@@ -1212,7 +1283,7 @@ mod tests {
             Some("client-a".into()),
             false,
         );
-        auth.store_tokens_blocking(token_response(Some("refresh-a")))
+        auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.tenant_stamp())
             .expect("store");
         assert!(auth.is_authenticated());
 
@@ -1240,7 +1311,7 @@ mod tests {
             Some("client-a".into()),
             false,
         );
-        auth.store_tokens_blocking(token_response(Some("refresh-a")))
+        auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.tenant_stamp())
             .expect("store");
 
         let changed = auth.apply_settings(
@@ -1331,11 +1402,14 @@ mod tests {
             Some("client-k".into()),
             false,
         );
-        auth.store_tokens_blocking(token_response(Some("original-refresh")))
-            .expect("first store");
+        auth.store_tokens_blocking(
+            token_response(Some("original-refresh")),
+            auth.tenant_stamp(),
+        )
+        .expect("first store");
 
         let set = auth
-            .store_tokens_blocking(token_response(None))
+            .store_tokens_blocking(token_response(None), auth.tenant_stamp())
             .expect("second store, server declined to rotate");
 
         assert_eq!(
@@ -1448,12 +1522,15 @@ mod tests {
         let auth = AuthState::new(http, "https://x".into(), 0, None, false);
         // Response says read-only; the token claims management. RFC 6749 §5.1 makes
         // the response authoritative for what was actually granted.
-        auth.store_tokens_blocking(TokenResponse {
-            access_token: jwt_with(serde_json::json!({ "scope": "monitoring management" })),
-            refresh_token: None,
-            expires_in: 3600,
-            scope: Some("monitoring offline_access".into()),
-        })
+        auth.store_tokens_blocking(
+            TokenResponse {
+                access_token: jwt_with(serde_json::json!({ "scope": "monitoring management" })),
+                refresh_token: None,
+                expires_in: 3600,
+                scope: Some("monitoring offline_access".into()),
+            },
+            auth.tenant_stamp(),
+        )
         .expect("store");
         assert_eq!(auth.management_grant(), Some(false));
     }
@@ -1468,12 +1545,15 @@ mod tests {
             "no token yet means the grant is unknown, not denied"
         );
 
-        auth.store_tokens_blocking(TokenResponse {
-            access_token: "opaque".into(),
-            refresh_token: None,
-            expires_in: 3600,
-            scope: Some("monitoring management offline_access".into()),
-        })
+        auth.store_tokens_blocking(
+            TokenResponse {
+                access_token: "opaque".into(),
+                refresh_token: None,
+                expires_in: 3600,
+                scope: Some("monitoring management offline_access".into()),
+            },
+            auth.tenant_stamp(),
+        )
         .expect("store");
         assert_eq!(auth.management_grant(), Some(true));
     }
@@ -1597,12 +1677,15 @@ mod tests {
 
         // Backed by the in-process test keyring, so the write does land and this
         // asserts the in-memory assignment rather than tolerating either outcome.
-        auth.store_tokens_blocking(TokenResponse {
-            access_token: "fresh-access".into(),
-            refresh_token: Some("fresh-refresh".into()),
-            expires_in: 3600,
-            scope: Some("monitoring management offline_access".into()),
-        })
+        auth.store_tokens_blocking(
+            TokenResponse {
+                access_token: "fresh-access".into(),
+                refresh_token: Some("fresh-refresh".into()),
+                expires_in: 3600,
+                scope: Some("monitoring management offline_access".into()),
+            },
+            auth.tenant_stamp(),
+        )
         .expect("a keyring problem must not fail the store");
 
         assert!(
@@ -1621,12 +1704,15 @@ mod tests {
         let http = reqwest::Client::new();
         let auth = AuthState::new(http, "https://x".into(), 0, None, true);
 
-        auth.store_tokens_blocking(TokenResponse {
-            access_token: "new-token".into(),
-            refresh_token: None,
-            expires_in: 3600,
-            scope: None,
-        })
+        auth.store_tokens_blocking(
+            TokenResponse {
+                access_token: "new-token".into(),
+                refresh_token: None,
+                expires_in: 3600,
+                scope: None,
+            },
+            auth.tenant_stamp(),
+        )
         .expect("store");
         assert!(auth.is_authenticated());
 
@@ -1767,5 +1853,80 @@ mod tests {
     async fn callback_duplicate_keys_last_wins() {
         let r = drive_callback("/?code=first&code=second&state=xyz").await;
         assert_eq!(r.code.as_deref(), Some("second"));
+    }
+    /// A refresh takes a round trip and an interactive sign-in waits up to three
+    /// minutes — ample room for the operator to change instance in Settings. The
+    /// tokens in hand were issued by the *previous* instance's authorization server,
+    /// so filing them under the new tenant's keyring entry would hand tenant A's
+    /// refresh token to tenant B's API host. `state.rs` solved the identical hazard
+    /// with `QueryToken`; this is the auth-side counterpart.
+    #[test]
+    fn tokens_are_discarded_when_the_instance_changes_mid_grant() {
+        let auth = AuthState::new(
+            reqwest::Client::new(),
+            "https://a.example.com".into(),
+            11434,
+            Some("client-a".into()),
+            false,
+        );
+        let started = auth.tenant_stamp();
+
+        // The operator switches instance while the grant is in flight.
+        auth.apply_settings(
+            "https://b.example.com".into(),
+            Some("client-b".into()),
+            11434,
+            false,
+        );
+
+        let err = auth
+            .store_tokens_blocking(token_response(Some("refresh-a")), started)
+            .expect_err("a grant issued by the previous instance must not be stored");
+        assert!(
+            err.to_string().contains("instance changed"),
+            "the message must name the cause: {err}"
+        );
+        assert!(
+            !auth.is_authenticated(),
+            "the new tenant must not inherit the old tenant's session"
+        );
+    }
+
+    /// The stamp must not reject the ordinary case, or every sign-in fails.
+    #[test]
+    fn tokens_are_stored_when_the_instance_is_unchanged() {
+        let auth = AuthState::new(
+            reqwest::Client::new(),
+            "https://a.example.com".into(),
+            11434,
+            Some("client-a".into()),
+            false,
+        );
+        let started = auth.tenant_stamp();
+        auth.store_tokens_blocking(token_response(Some("refresh-a")), started)
+            .expect("an unchanged tenant stores normally");
+        assert!(auth.is_authenticated());
+    }
+
+    /// Signing out must not report success over a refresh token still on disk: the
+    /// next `access_token()` would use it to sign the next operator back in as the
+    /// previous one, which on a shared workstation is the whole threat. A *missing*
+    /// entry is not a failure, so a second sign-out stays quiet.
+    #[test]
+    fn logout_clears_the_session_and_is_idempotent() {
+        let auth = AuthState::new(
+            reqwest::Client::new(),
+            "https://a.example.com".into(),
+            11434,
+            Some("client-a".into()),
+            false,
+        );
+        auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.tenant_stamp())
+            .expect("store");
+        assert!(auth.is_authenticated());
+
+        auth.logout().expect("sign out");
+        assert!(!auth.is_authenticated());
+        auth.logout().expect("signing out twice is not an error");
     }
 }

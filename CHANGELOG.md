@@ -11,6 +11,26 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Signing out now reliably ends the session.** A fleet query can run for minutes, and one that was
+  still fetching when you signed out used to write its rows back into the cache *after* the sign-out
+  cleared it — leaving the previous operator's patch rows readable, pageable and exportable by
+  whoever signed in next on the same instance. The result cache is now version-gated the same way
+  the device and patch caches already were, so a query that began before the session ended can no
+  longer store after it.
+- **Signing in and re-authorizing now clear the previous session too**, not just signing out. Both
+  run the full browser flow, so on a shared workstation they routinely hand the app to a different
+  operator — who previously inherited the last one's device inventory, patch caches, query results,
+  job history and pending action approval.
+- **Sign-out reports a failure instead of claiming success** when the stored refresh token could not
+  be deleted. It previously always reported a clean sign-out, so a credential left on disk was
+  invisible — and the next sign-in would silently reuse it.
+- **Changing the instance while signing in no longer files the credentials under the wrong tenant.**
+  A sign-in waits up to three minutes for the browser; switching instance in Settings during that
+  window used to store the tokens the *old* instance issued under the *new* instance's name. Such a
+  grant is now discarded with an explanation.
+
 ## [0.13.0] - 2026-08-15
 
 ### Added

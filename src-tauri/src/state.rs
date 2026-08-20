@@ -93,6 +93,10 @@ pub enum StoreOutcome {
     Superseded,
     /// The operator switched instance/client id while this query was in flight.
     TenantChanged,
+    /// The session was cleared (sign-out, sign-in or re-authorization) while this
+    /// query was in flight. The tenant is unchanged, so `TenantChanged` cannot see
+    /// it — but the rows belong to the operator who just left and must not be stored.
+    SessionCleared,
     /// The cache lock was poisoned by a panic while held.
     Poisoned,
 }
@@ -129,6 +133,9 @@ impl Drop for JobPollerClaim {
 pub struct QueryToken {
     generation: u64,
     tenant: TenantKey,
+    /// The result-cache epoch at the moment the query started. A sign-out bumps it,
+    /// so a query that began before the clear cannot store after it.
+    result_epoch: u64,
 }
 
 /// The cached query result plus a memo of the grouping most recently asked for.
@@ -266,6 +273,14 @@ pub struct AppState {
     /// [`AppState::invalidate_current_patches`], which a mutating action calls — and
     /// whose whole purpose is defeated if an in-flight fetch stores over it.
     current_epoch: AtomicU64,
+    /// The same guard for the result cache, which was the one tenant-scoped slot
+    /// without it. `clear_last_result` used to clear the slot bare, so a whole-fleet
+    /// query still in flight at sign-out redeemed a token whose generation and tenant
+    /// were both still current and stored the signed-out operator's rows straight
+    /// back — after which export, the HTML report and all three paging commands
+    /// served them to whoever signed in next. `TenantKey` cannot cover this either:
+    /// a second operator on the same instance is the same tenant.
+    result_epoch: AtomicU64,
     /// Single-flight gates for the two whole-fleet fetches, mirroring
     /// `AuthState::refresh_lock`. Queries overlap routinely, and on a cold cache both
     /// would otherwise page the entire inventory / third-party feed independently —
@@ -320,6 +335,7 @@ impl AppState {
             lookups_epoch: AtomicU64::new(0),
             devices_epoch: AtomicU64::new(0),
             current_epoch: AtomicU64::new(0),
+            result_epoch: AtomicU64::new(0),
             devices_fetch_lock: tokio::sync::Mutex::new(()),
             os_fetch_lock: tokio::sync::Mutex::new(()),
             sw_fetch_lock: tokio::sync::Mutex::new(()),
@@ -638,6 +654,7 @@ impl AppState {
         QueryToken {
             generation: self.query_generation.fetch_add(1, Ordering::SeqCst) + 1,
             tenant: self.tenant_key(),
+            result_epoch: self.result_epoch.load(Ordering::SeqCst),
         }
     }
 
@@ -645,7 +662,7 @@ impl AppState {
     /// started or the tenant changed while this one was in flight. Returns whether
     /// the write happened.
     ///
-    /// Two races close here, and they need opposite treatment:
+    /// Three races close here, and they need different treatment:
     ///
     /// *Supersession.* Ordering by completion rather than by start let an
     /// auto-refresh tick clobber a manual Run: the two overlap routinely, a warm
@@ -661,6 +678,13 @@ impl AppState {
     /// operator switched instance mid-query — the one way the tenant defense could be
     /// *wrong* rather than merely miss. A drifted result is dropped rather than
     /// stored under either key.
+    ///
+    /// *Session clearing.* A sign-out, sign-in or re-authorization bumps
+    /// `result_epoch` before it clears the slot. The tenant stamp is blind to this —
+    /// a second operator on the same instance produces an identical `TenantKey` — and
+    /// so is the generation, since clearing the session starts no new query. Without
+    /// the epoch, an in-flight whole-fleet query simply stored the departing
+    /// operator's rows back over the clear.
     ///
     /// A poisoned cache is warned (not panicked) so the failure is observable but the
     /// app survives.
@@ -678,6 +702,13 @@ impl AppState {
                 // last look and here cannot still lose to us.
                 if self.query_generation.load(Ordering::SeqCst) != token.generation {
                     return StoreOutcome::Superseded;
+                }
+                // Read under the slot lock, exactly like the three fleet caches: the
+                // invalidator bumps *before* it clears, so a store landing either side
+                // of the clear sees the new epoch and declines. Without this the result
+                // slot was the one place a sign-out could be silently undone.
+                if self.result_epoch.load(Ordering::SeqCst) != token.result_epoch {
+                    return StoreOutcome::SessionCleared;
                 }
                 *slot = Some(CachedResult {
                     tenant: token.tenant,
@@ -794,6 +825,11 @@ impl AppState {
     /// reclaims the memory promptly and wipes rows on an explicit sign-out of the same
     /// tenant, which the stamp alone would not.
     pub fn clear_last_result(&self) {
+        // Bumped *before* the slot is cleared, for the same reason
+        // `invalidate_current_patches` does it: a whole-fleet query runs for minutes,
+        // so one is routinely in flight at sign-out. The store re-reads this under the
+        // slot lock, so whichever order the two interleave, the write loses.
+        self.result_epoch.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut slot) = self.last_result.lock() {
             *slot = None;
         }
@@ -1036,6 +1072,7 @@ impl AppState {
             lookups_epoch: AtomicU64::new(0),
             devices_epoch: AtomicU64::new(0),
             current_epoch: AtomicU64::new(0),
+            result_epoch: AtomicU64::new(0),
             devices_fetch_lock: tokio::sync::Mutex::new(()),
             os_fetch_lock: tokio::sync::Mutex::new(()),
             sw_fetch_lock: tokio::sync::Mutex::new(()),
@@ -1472,6 +1509,45 @@ mod tests {
         // previous tenant's rows.
         state.clear_last_result();
         assert!(state.with_current_result(|_| ()).unwrap().is_none());
+    }
+
+    /// A whole-fleet query runs for minutes, so one is routinely still in flight when
+    /// the operator signs out. Its token's generation and tenant are both still
+    /// current at that point — nothing else started a query, and a second operator on
+    /// the same instance is the same tenant — so before the result epoch existed the
+    /// store simply put the departing operator's rows straight back, and export, the
+    /// HTML report and all three paging commands then served them.
+    #[test]
+    fn a_query_in_flight_at_sign_out_cannot_restore_the_cleared_rows() {
+        let state = AppState::new().expect("build state");
+        let token = state.begin_query();
+
+        // The operator signs out while that query is still fetching.
+        state.clear_last_result();
+
+        assert_eq!(
+            state.store_last_result_if_current(token, sample_result()),
+            StoreOutcome::SessionCleared,
+            "a result fetched before the session was cleared must not be stored after it"
+        );
+        assert!(
+            state.with_current_result(|_| ()).unwrap().is_none(),
+            "the cache must still read empty for the next operator"
+        );
+    }
+
+    /// The epoch must not make ordinary back-to-back queries fail: only a clear bumps
+    /// it, so a query that starts after the clear stores normally.
+    #[test]
+    fn a_query_started_after_the_clear_stores_normally() {
+        let state = AppState::new().expect("build state");
+        state.clear_last_result();
+
+        let token = state.begin_query();
+        assert_eq!(
+            state.store_last_result_if_current(token, sample_result()),
+            StoreOutcome::Stored
+        );
     }
 
     /// An auto-refresh tick and a manual Run overlap routinely and do not finish in

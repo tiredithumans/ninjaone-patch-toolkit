@@ -188,7 +188,17 @@ fn summary_for(
                 "The instance changed while this query was running, so its results were discarded. Run the query again.",
             ))
         }
-        // Same shape as tenant drift: the rows would be on screen while paging and
+        // Same shape as tenant drift, and for a sharper reason: the operator signed
+        // out (or re-authorized as someone else) while this query was running, so
+        // these rows belong to the session that just ended. Returning the summary
+        // would paint them over a cache that deliberately refused to keep them.
+        StoreOutcome::SessionCleared => {
+            tracing::info!(qid, "session cleared mid-query; discarding the result");
+            Err(UiError::new(
+                "The session ended while this query was running, so its results were discarded. Sign in and run the query again.",
+            ))
+        }
+        // Same shape again: the rows would be on screen while paging and
         // export fail. `with_current_result` reports the poisoning to those callers;
         // report it here too rather than letting the table imply all is well.
         StoreOutcome::Poisoned => Err(UiError::new(
@@ -712,6 +722,17 @@ mod tests {
     #[test]
     fn a_poisoned_cache_refuses_to_hand_back_a_renderable_summary() {
         assert!(summary_for(StoreOutcome::Poisoned, empty_summary(), 7).is_err());
+        // Same rule, sharper case: the operator signed out (or re-authorized as
+        // someone else) mid-query, so these rows belong to the session that just
+        // ended and the cache deliberately refused them. Returning the summary would
+        // paint them over a cache that cannot serve a single page of them.
+        let err = summary_for(StoreOutcome::SessionCleared, empty_summary(), 7)
+            .expect_err("a cleared session must not yield a renderable summary");
+        assert!(
+            err.message.contains("session ended"),
+            "the message must name the cause: {}",
+            err.message
+        );
     }
 
     /// `FIRST_PAGE_ROWS` and the frontend's `PATCHES_PAGE_SIZE` must agree: the

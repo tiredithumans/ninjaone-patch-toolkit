@@ -26,8 +26,15 @@ pub struct AuthStatus {
 }
 
 /// Launches the interactive PKCE browser flow and waits for the callback.
+///
+/// Clears the session first. Signing in is not necessarily a *new* session
+/// continuing an old one — on a shared workstation it is routinely a different
+/// operator on the same instance, which every tenant stamp in the app reads as
+/// identical. Anything left in the caches at this point belongs to whoever was here
+/// before.
 #[tauri::command]
 pub async fn sign_in(state: State<'_, AppState>) -> Result<(), UiError> {
+    clear_session_state(&state);
     state.auth.login_pkce().await.map_err(UiError::from)
 }
 
@@ -39,6 +46,9 @@ pub async fn sign_in(state: State<'_, AppState>) -> Result<(), UiError> {
 /// rather than silently reusing the narrow one.
 #[tauri::command]
 pub async fn reauthorize(state: State<'_, AppState>) -> Result<(), UiError> {
+    // Same reason as `sign_in`: re-consent runs the full browser flow, so the
+    // operator who comes back may not be the one who left.
+    clear_session_state(&state);
     state.auth.logout().map_err(UiError::from)?;
     state.auth.login_pkce().await.map_err(UiError::from)
 }
@@ -57,7 +67,12 @@ pub async fn sign_out(state: State<'_, AppState>) -> Result<(), UiError> {
 /// workstation the consequence is the next person seeing the previous one's rows:
 /// the caches are tenant-stamped, but signing out and back in as a *different
 /// operator on the same instance* is the same tenant, so the stamp does not help
-/// here. These clears are the only defense.
+/// here. These clears are the only defense — which is why every path that starts or
+/// ends a session calls this, not just `sign_out`: `sign_in` and `reauthorize` both
+/// run the interactive flow and can hand the process to a different operator.
+///
+/// `clear_last_result` also bumps the result-cache epoch, so a whole-fleet query
+/// still in flight cannot store the departing operator's rows after this returns.
 fn clear_session_state(state: &AppState) {
     // Also drops the whole-fleet device and current-patch caches.
     state.clear_lookups_cache();
