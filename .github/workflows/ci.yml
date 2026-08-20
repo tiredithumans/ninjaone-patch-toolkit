@@ -26,6 +26,9 @@ jobs:
   # checks still post — as skipped → success — because this workflow always triggers
   # (a `paths-ignore` on the trigger would leave required checks stuck pending and
   # block the merge). Non-PR events (push to main, weekly cron) always run everything.
+  #
+  # Also reports whether the screenshot tooling changed, which gates the expensive
+  # end-to-end capture job (see `screenshot-capture`).
   changes:
     name: changes
     runs-on: ubuntu-latest
@@ -34,6 +37,7 @@ jobs:
       pull-requests: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      scripts: ${{ steps.filter.outputs.scripts }}
     steps:
       - name: Detect non-docs changes
         id: filter
@@ -43,6 +47,14 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"
+            # The end-to-end capture is heavy, so don't run it on every merge to
+            # main; the weekly cron covers upstream drift (a Playwright or Chromium
+            # release that breaks the tool without any commit of ours touching it).
+            if [ "${{ github.event_name }}" = "schedule" ]; then
+              echo "scripts=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "scripts=false" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           fi
           files=$(gh api --paginate \
@@ -53,6 +65,13 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+          # The capture is only worth its runtime when the tool, its dependencies,
+          # the recipe that drives it or the workflow that runs it actually changed.
+          if printf '%s\n' "$files" | grep -qE '(^scripts/|^justfile$|^\.github/workflows/screenshot\.yml$)'; then
+            echo "scripts=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "scripts=false" >> "$GITHUB_OUTPUT"
           fi
 
   rust:
@@ -163,6 +182,78 @@ jobs:
       # #[cfg(test)] module); the helpers under test are JS-free.
       - name: test
         run: just web-test
+
+  # The screenshot tooling (scripts/) is a dev/CI tool, but screenshot.yml runs it on
+  # every published release to refresh the README image — and until now NO job
+  # exercised it, so a break in it surfaced at release time. That is not theoretical:
+  # `selfsigned` 2 -> 5 made `generate` async, and the un-awaited call built an HTTPS
+  # server with undefined key/cert. It is also unwatched by Dependabot's cargo
+  # entries, so npm drift is the likeliest way it rots.
+  #
+  # This job is the cheap half: no Chromium, no built dist, seconds to run, so it
+  # rides along on every PR (including the Dependabot npm PRs that bump these very
+  # packages). The end-to-end capture is the separate, path-gated job below.
+  screenshot-tooling:
+    name: Screenshot tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+        with:
+          tool: just
+      # Via the same `just` recipe that is documented and run locally — a CI
+      # sequence that quietly differs from the documented one is how the two drift.
+      # The runner ships Node, so no setup-node.
+      - name: test
+        run: just screenshot-test
+
+  # The expensive half: build the real demo and drive it through headless Chromium,
+  # exactly as screenshot.yml does, proving the whole path still works. Gated on the
+  # tooling actually changing (or the weekly cron) because it costs a WASM build plus
+  # a Chromium download. Writes to a scratch path — regenerating the committed PNG is
+  # screenshot.yml's job, not this one's.
+  screenshot-capture:
+    name: Screenshot capture (end-to-end)
+    needs: changes
+    if: needs.changes.outputs.scripts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: web-rs
+      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+        with:
+          tool: just,trunk
+      - name: Build the web demo
+        run: just web-build
+      - name: Install Playwright Chromium
+        run: |
+          npm --prefix scripts install --no-audit --no-fund
+          (cd scripts && npx playwright install --with-deps chromium)
+      - name: Capture to a scratch path
+        env:
+          SCREENSHOT_OUT: ${{ runner.temp }}/screenshot.png
+        run: node scripts/screenshot.mjs
+      - name: Check the capture produced a real PNG
+        env:
+          SHOT: ${{ runner.temp }}/screenshot.png
+        shell: bash
+        run: |
+          # The script exiting 0 is not enough: assert it wrote a non-trivial PNG,
+          # and that it left the committed image alone.
+          test -s "$SHOT"
+          file "$SHOT" | grep -q 'PNG image data'
+          bytes=$(wc -c < "$SHOT")
+          echo "captured $bytes bytes"
+          [ "$bytes" -gt 10000 ] || { echo "::error::capture is suspiciously small"; exit 1; }
+          if ! git diff --quiet -- docs/images/screenshot.png; then
+            echo "::error::the capture overwrote the committed screenshot"
+            exit 1
+          fi
 
   coverage:
     name: Coverage (backend)
