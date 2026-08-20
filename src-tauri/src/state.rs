@@ -148,7 +148,13 @@ pub struct QueryToken {
 /// operation and no second staleness protocol exists to get wrong.
 struct CachedResult {
     tenant: TenantKey,
-    result: QueryResult,
+    /// Behind an `Arc` so a reader can take a *handle* under the lock and do its work
+    /// after releasing it. Export and the HTML report used to `clone()` the whole
+    /// result — every row, every `Arc<str>` field refcounted — while holding this
+    /// mutex, which is the same mutex all three paging commands take. On a six-figure
+    /// fleet that blocked the table for the length of a full deep copy, and then the
+    /// copy was thrown away.
+    result: Arc<QueryResult>,
     groups: Option<(GroupBy, Arc<Vec<PatchGroup>>)>,
     /// The row order most recently asked for, memoized for exactly the same reason
     /// `groups` is: `page_rows` re-sorted the entire cached row set on every paging
@@ -712,7 +718,7 @@ impl AppState {
                 }
                 *slot = Some(CachedResult {
                     tenant: token.tenant,
-                    result,
+                    result: Arc::new(result),
                     // Both memos are built on first request, not here: most queries
                     // are never grouped or re-sorted, and doing either over the whole
                     // fleet eagerly would pay for a view the operator may not open.
@@ -748,6 +754,23 @@ impl AppState {
         })
     }
 
+    /// Takes a *handle* on the cached result for the current tenant, releasing the
+    /// lock immediately.
+    ///
+    /// For readers that need the whole result for a long time — the Excel export and
+    /// the HTML report, both of which then hand it to `spawn_blocking` — this is the
+    /// right shape: an `Arc` bump under the lock instead of an O(rows) deep copy that
+    /// blocks every paging command for its duration. Prefer
+    /// [`Self::with_current_result`] when a cheap projection will do.
+    pub fn current_result_handle(&self) -> Result<Option<Arc<QueryResult>>, CachePoisoned> {
+        let key = self.tenant_key();
+        let guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
+        Ok(match guard.as_ref() {
+            Some(c) if c.tenant == key => Some(Arc::clone(&c.result)),
+            _ => None,
+        })
+    }
+
     /// Runs `f` against the cached rows and the index permutation for `sort`,
     /// building that permutation at most once per sort.
     ///
@@ -773,15 +796,19 @@ impl AppState {
         let Some(sort) = sort else {
             return Ok(Some(f(&cached.result.rows, None)));
         };
-        let fresh = matches!(&cached.sorted, Some((s, _)) if *s == sort);
-        if !fresh {
-            cached.sorted = Some((sort, Arc::new(sort_order(&cached.result.rows, sort))));
-        }
-        let order = cached
-            .sorted
-            .as_ref()
-            .map(|(_, o)| Arc::clone(o))
-            .expect("just populated");
+        // Built and bound in one step. This used to repopulate the memo and then
+        // re-read it with `.expect("just populated")` — a panic inside a held guard,
+        // which poisons the slot and takes export, the report and all three paging
+        // commands down with it. That exact pattern was deliberately removed from
+        // `append_jobs`; there is no reason to keep it here.
+        let order = match &cached.sorted {
+            Some((s, o)) if *s == sort => Arc::clone(o),
+            _ => {
+                let o = Arc::new(sort_order(&cached.result.rows, sort));
+                cached.sorted = Some((sort, Arc::clone(&o)));
+                o
+            }
+        };
         Ok(Some(f(&cached.result.rows, Some(&order))))
     }
 
@@ -805,18 +832,15 @@ impl AppState {
         if cached.tenant != key {
             return Ok(None);
         }
-        let fresh = matches!(&cached.groups, Some((g, _)) if *g == group_by);
-        if !fresh {
-            cached.groups = Some((
-                group_by,
-                Arc::new(build_groups(&cached.result.rows, group_by)),
-            ));
-        }
-        let groups = cached
-            .groups
-            .as_ref()
-            .map(|(_, g)| Arc::clone(g))
-            .expect("just populated");
+        // Same non-panicking shape as `with_sorted_result`.
+        let groups = match &cached.groups {
+            Some((g, v)) if *g == group_by => Arc::clone(v),
+            _ => {
+                let v = Arc::new(build_groups(&cached.result.rows, group_by));
+                cached.groups = Some((group_by, Arc::clone(&v)));
+                v
+            }
+        };
         Ok(Some(f(&groups)))
     }
 
@@ -1816,5 +1840,41 @@ mod tests {
         state.apply_job_updates(vec![sample_job(1, JobState::Completed)]);
         assert!(state.release_job_poller_if_idle(claim).is_none());
         assert!(state.try_claim_job_poller().is_some());
+    }
+    /// The export and the HTML report hold the whole result for the length of a
+    /// `spawn_blocking` write. Taking a handle rather than a deep copy is what keeps
+    /// the result mutex — the same one all three paging commands take — held for a
+    /// refcount bump instead of an O(rows) copy of a six-figure fleet.
+    #[test]
+    fn the_result_handle_shares_rather_than_copies() {
+        let state = AppState::new().expect("build state");
+        state.store_last_result_if_current(state.begin_query(), sample_result());
+
+        let a = state
+            .current_result_handle()
+            .expect("not poisoned")
+            .expect("cached for this tenant");
+        let b = state
+            .current_result_handle()
+            .expect("not poisoned")
+            .expect("cached for this tenant");
+
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "two handles must point at the same allocation, not two copies"
+        );
+    }
+
+    /// Same tenant check as every other read path: a miss must read as `None`, never
+    /// as another tenant's rows.
+    #[test]
+    fn the_result_handle_is_empty_with_nothing_cached() {
+        let state = AppState::new().expect("build state");
+        assert!(
+            state
+                .current_result_handle()
+                .expect("not poisoned")
+                .is_none()
+        );
     }
 }

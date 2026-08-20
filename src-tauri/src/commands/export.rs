@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::Utc;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
@@ -18,13 +20,18 @@ fn require_cached_result(state: &AppState) -> Result<(), UiError> {
         .ok_or_else(|| UiError::new("Run a query before exporting."))
 }
 
-/// Clones the cached query result for the current tenant, or errors if no query has
-/// run for it (a tenant switch invalidates the previous one). The lock is taken and
-/// released synchronously inside `with_current_result` — never held across the
+/// Takes a handle on the cached query result for the current tenant, or errors if no
+/// query has run for it (a tenant switch invalidates the previous one).
+///
+/// An `Arc` bump, not a copy. This used to `clone()` the entire result — every row,
+/// with each of its shared `Arc<str>` fields refcounted — *while holding* the result
+/// mutex, which is the same mutex the three paging commands take. A six-figure fleet
+/// therefore froze the table for the length of a full deep copy on every export. The
+/// lock is still taken and released synchronously here, never held across the
 /// blocking save dialogs below.
-fn cached_result(state: &AppState) -> Result<QueryResult, UiError> {
+fn cached_result(state: &AppState) -> Result<Arc<QueryResult>, UiError> {
     state
-        .with_current_result(|r| r.clone())
+        .current_result_handle()
         .map_err(|_| UiError::new("result cache poisoned"))?
         .ok_or_else(|| UiError::new("Run a query before exporting."))
 }
@@ -95,31 +102,30 @@ pub async fn export_patches_xlsx(
     };
     let path_str = path.to_string_lossy().to_string();
 
-    // The clone is owned, so the reboot subset is a move-filter, not a re-clone.
-    let QueryResult {
-        rows,
-        devices,
-        compliance,
-        compliance_by_os,
-        failures,
-        devices_offline,
-        patch_families,
-        ..
-    } = cached_result(&state)?;
-    let scope_note = crate::rows::compliance_scope_note(devices_offline, patch_families);
-    let reboot: Vec<_> = devices.into_iter().filter(|d| d.needs_reboot).collect();
+    // A handle on the cached result, not a copy of it. The whole thing moves into the
+    // blocking task and the sheets borrow out of it there, so the only allocation on
+    // this path is the reboot subset — which is a filtered projection either way.
+    let result = cached_result(&state)?;
+    let scope_note =
+        crate::rows::compliance_scope_note(result.devices_offline, result.patch_families);
 
     // Serializing a six-figure row set into a zipped workbook is seconds of pure CPU
     // plus the file write — both of which would hold a tokio worker for the duration.
     let written = path_str.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let reboot: Vec<_> = result
+            .devices
+            .iter()
+            .filter(|d| d.needs_reboot)
+            .cloned()
+            .collect();
         write_workbook(
             &written,
-            &rows,
-            &compliance,
-            &compliance_by_os,
+            &result.rows,
+            &result.compliance,
+            &result.compliance_by_os,
             &reboot,
-            &failures,
+            &result.failures,
             &scope_note,
         )
     })
