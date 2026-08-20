@@ -62,7 +62,7 @@ jobs:
         run: just web-build
       - name: Install Playwright Chromium
         run: |
-          npm --prefix scripts install --no-audit --no-fund
+          npm --prefix scripts ci --no-audit --no-fund
           (cd scripts && npx playwright install --with-deps chromium)
       - name: Capture screenshot
         run: node scripts/screenshot.mjs

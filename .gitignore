@@ -16,7 +16,6 @@
 
 # Screenshot tooling (Node/Playwright dev tool — see scripts/)
 /scripts/node_modules
-/scripts/package-lock.json
 
 # OS / editor cruft
 .DS_Store
