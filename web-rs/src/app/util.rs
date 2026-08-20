@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::state::{DeviceSelection, SelectedPatch};
 use super::{AppliedFilters, Tab};
 use crate::types::{
-    ActionKind, AuthStatus, FilterParams, JobReport, Location, Organization, PatchFamilies,
-    PatchRow, RebootMode, Role, RowSort, RowSortKey,
+    ActionKind, ActionRequest, AuthStatus, FilterParams, JobReport, Location, Organization,
+    PatchFamilies, PatchRow, RebootChoice, RebootMode, Role, RowSort, RowSortKey,
 };
 
 /// What [`AppState::run_query_inner`] should do, decided from the flags alone.
@@ -169,6 +169,93 @@ pub(crate) fn targets_by_device(
 
 /// [`targets_by_device`] for a remediation kind, which picks the family. Empty for
 /// any other kind — the native endpoints take no target list at all.
+/// The run options the ActionBar renders once and every dispatch reads.
+///
+/// Plain data, read out of the signals by the caller. `build_action_request` is then
+/// pure and host-testable — which is the whole point: the branching below decides
+/// which devices are dispatched to and what each is told to install, and it lived
+/// inside an `AppState` method in a file with no test module at all, in a crate whose
+/// only gates are a compile check and clippy.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RunOptions {
+    pub use_kb_targeting: bool,
+    pub include_offline: bool,
+    pub override_window: bool,
+    pub dry_run: bool,
+    pub script_reboot: RebootChoice,
+    pub run_as: String,
+    pub reboot_mode_forced: bool,
+    pub reason: String,
+    pub script_id: Option<i64>,
+    pub script_name: Option<String>,
+    pub script_params: String,
+}
+
+/// Assembles the dispatch for `kind` from the current selection and run options.
+///
+/// Two rules here are load-bearing and are what the tests pin:
+///
+/// A remediation kind dispatches only to devices with a ticked patch **of its own
+/// family**. Sending it the whole selection would hand a device with only software
+/// rows ticked an empty OS allow list — a job that reports success having installed
+/// nothing. A hand-picked script keeps every selected device, because the operator
+/// chose them and the script may do something useful without a target list;
+/// `plan()` warns about the ones that get an empty one.
+///
+/// The three shared run options reach every `runs_a_script()` kind and no other. The
+/// native endpoints take no parameters, have no preview mode (a dry run of one is a
+/// `plan()` blocker) and run as NinjaOne's agent, so setting them there would claim
+/// protection those endpoints cannot give.
+pub(crate) fn build_action_request(
+    kind: ActionKind,
+    selected: &BTreeMap<i64, DeviceSelection>,
+    opts: &RunOptions,
+) -> ActionRequest {
+    // Which patches each device is told to install. A remediation kind takes its own
+    // family; the hand-picked script path takes KBs, which is what its "Target only
+    // the selected KBs" checkbox means and all a `kbAllowList` script can accept.
+    let device_targets = if kind.is_remediation() {
+        remediation_targets(selected, kind)
+    } else if kind == ActionKind::Script && opts.use_kb_targeting {
+        targets_by_device(selected, true)
+    } else {
+        BTreeMap::new()
+    };
+
+    let device_ids: Vec<i64> = if kind.is_remediation() {
+        device_targets.keys().copied().collect()
+    } else {
+        selected.keys().copied().collect()
+    };
+
+    let mut req = ActionRequest::new(kind, device_ids);
+    req.device_targets = device_targets;
+    req.include_offline = opts.include_offline;
+    req.override_window = opts.override_window;
+
+    if kind.runs_a_script() {
+        req.dry_run = opts.dry_run;
+        req.reboot = opts.script_reboot;
+        req.run_as = (!opts.run_as.trim().is_empty()).then(|| opts.run_as.clone());
+    }
+
+    if kind == ActionKind::Reboot {
+        req.reboot_mode = Some(if opts.reboot_mode_forced {
+            RebootMode::Forced
+        } else {
+            RebootMode::Normal
+        });
+        req.reason = Some(opts.reason.clone());
+    }
+    if kind == ActionKind::Script {
+        req.script_id = opts.script_id;
+        req.script_name = opts.script_name.clone();
+        req.parameters =
+            (!opts.script_params.trim().is_empty()).then(|| opts.script_params.clone());
+    }
+    req
+}
+
 pub(crate) fn remediation_targets(
     selected: &BTreeMap<i64, DeviceSelection>,
     kind: ActionKind,
@@ -2621,5 +2708,147 @@ mod tests {
             None
         );
         assert_eq!(kind_disabled_reason(ActionKind::Reboot, false, 0), None);
+    }
+    /// A remediation dispatches only to devices with a ticked patch **of its own
+    /// family**. Handing a device with only software rows ticked an empty OS allow
+    /// list produces a job that reports success having installed nothing — and the
+    /// operator sees a green row.
+    #[test]
+    fn a_remediation_skips_devices_with_nothing_ticked_of_its_family() {
+        let mut selected = BTreeMap::new();
+        selected.insert(1, selection(vec![os("KB5040434")]));
+        selected.insert(2, selection(vec![sw("Google Chrome")]));
+
+        let req = build_action_request(
+            ActionKind::OsPatchRemediate,
+            &selected,
+            &RunOptions::default(),
+        );
+
+        assert_eq!(
+            req.device_ids,
+            vec![1],
+            "device 2 has no OS patch ticked, so it must not be dispatched to at all"
+        );
+        assert_eq!(req.device_targets.len(), 1);
+        assert!(!req.device_targets.contains_key(&2));
+
+        // ...and the software remediation is the mirror image.
+        let req = build_action_request(
+            ActionKind::SoftwarePatchRemediate,
+            &selected,
+            &RunOptions::default(),
+        );
+        assert_eq!(req.device_ids, vec![2]);
+    }
+
+    /// A hand-picked script keeps every selected device: the operator chose them, and
+    /// the script may do something useful with no target list. `plan()` warns about
+    /// the ones that get an empty one rather than silently dropping them.
+    #[test]
+    fn a_hand_picked_script_keeps_every_selected_device() {
+        let mut selected = BTreeMap::new();
+        selected.insert(1, selection(vec![os("KB5040434")]));
+        selected.insert(2, selection(vec![sw("Google Chrome")]));
+
+        let req = build_action_request(ActionKind::Script, &selected, &RunOptions::default());
+        assert_eq!(req.device_ids, vec![1, 2]);
+        assert!(
+            req.device_targets.is_empty(),
+            "no allow list unless KB targeting is on"
+        );
+
+        let opts = RunOptions {
+            use_kb_targeting: true,
+            ..RunOptions::default()
+        };
+        let req = build_action_request(ActionKind::Script, &selected, &opts);
+        assert_eq!(req.device_ids, vec![1, 2]);
+        assert!(req.device_targets.contains_key(&1));
+    }
+
+    /// The three shared run options reach every `runs_a_script()` kind and no other.
+    /// The native endpoints take no parameters, have no preview mode and run as
+    /// NinjaOne's agent, so setting them there would claim protection they cannot
+    /// give — which is exactly what the labelled options rows in the ActionBar say.
+    #[test]
+    fn shared_run_options_reach_script_kinds_only() {
+        let mut selected = BTreeMap::new();
+        selected.insert(1, selection(vec![os("KB5040434")]));
+        let opts = RunOptions {
+            dry_run: true,
+            run_as: "SYSTEM".into(),
+            script_reboot: RebootChoice::Auto,
+            ..RunOptions::default()
+        };
+
+        for kind in [ActionKind::Script, ActionKind::OsPatchRemediate] {
+            let req = build_action_request(kind, &selected, &opts);
+            assert!(req.dry_run, "{kind:?} runs a script, so dry run applies");
+            assert_eq!(req.run_as.as_deref(), Some("SYSTEM"), "{kind:?}");
+            assert_eq!(req.reboot, RebootChoice::Auto, "{kind:?}");
+        }
+
+        for kind in [
+            ActionKind::OsPatchApply,
+            ActionKind::OsPatchScan,
+            ActionKind::Reboot,
+        ] {
+            let req = build_action_request(kind, &selected, &opts);
+            assert!(!req.dry_run, "{kind:?} has no preview mode");
+            assert_eq!(req.run_as, None, "{kind:?} runs as NinjaOne's agent");
+        }
+    }
+
+    /// A blank Run-as must not become `Some("")` — the backend hashes it into the
+    /// confirm token and would send an empty execution identity.
+    #[test]
+    fn a_blank_run_as_is_omitted_rather_than_sent_empty() {
+        let mut selected = BTreeMap::new();
+        selected.insert(1, selection(vec![os("KB5040434")]));
+        let opts = RunOptions {
+            run_as: "   ".into(),
+            script_params: "  ".into(),
+            ..RunOptions::default()
+        };
+        let req = build_action_request(ActionKind::Script, &selected, &opts);
+        assert_eq!(req.run_as, None);
+        assert_eq!(req.parameters, None);
+    }
+
+    /// These four predicates decide whether the operator sees a confirmation dialog
+    /// and how the blast radius is described. They are a hand-mirrored copy of the
+    /// backend's `actions::ActionKind` with a doc comment as the only drift guard,
+    /// in a crate that had no test module outside this file — so a drifted mirror
+    /// silently dropped the warning that distinguishes Apply-all from Apply-selected.
+    #[test]
+    fn the_mirrored_action_predicates_match_the_backend_table() {
+        // kind, is_mutating, can_reboot, is_remediation, runs_a_script
+        let table = [
+            (ActionKind::OsPatchScan, false, false, false, false),
+            (ActionKind::SoftwarePatchScan, false, false, false, false),
+            (ActionKind::OsPatchApply, true, true, false, false),
+            (ActionKind::SoftwarePatchApply, true, true, false, false),
+            (ActionKind::OsPatchRemediate, true, true, true, true),
+            (ActionKind::SoftwarePatchRemediate, true, true, true, true),
+            (ActionKind::Reboot, true, true, false, false),
+            (ActionKind::Script, true, true, false, true),
+        ];
+        for (kind, mutating, reboot, remediation, script) in table {
+            assert_eq!(kind.is_mutating(), mutating, "{kind:?} is_mutating");
+            assert_eq!(kind.can_reboot(), reboot, "{kind:?} can_reboot");
+            assert_eq!(
+                kind.is_remediation(),
+                remediation,
+                "{kind:?} is_remediation"
+            );
+            assert_eq!(kind.runs_a_script(), script, "{kind:?} runs_a_script");
+        }
+        assert_eq!(
+            table.len(),
+            ActionKind::ALL.len(),
+            "a new ActionKind must be added to this table — it is the only thing \
+             asserting the frontend mirror still matches the backend"
+        );
     }
 }

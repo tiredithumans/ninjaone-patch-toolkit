@@ -483,6 +483,27 @@ impl ActionKind {
         !matches!(self, Self::OsPatchScan | Self::SoftwarePatchScan)
     }
 
+    /// Every variant, so a test can enumerate them rather than trusting a
+    /// hand-written list to stay complete. These predicates decide whether the
+    /// operator sees a confirmation dialog and how the blast radius is described,
+    /// and they are a hand-mirrored copy of the backend's `actions::ActionKind` —
+    /// the crates share no code, so nothing but a test can notice drift.
+    ///
+    /// Test-only: nothing in the app iterates the kinds (the ActionBar's
+    /// `ACTION_GROUPS` names them individually so each sits under the heading that
+    /// describes its blast radius), and the wasm build excludes `#[cfg(test)]`.
+    #[cfg(test)]
+    pub const ALL: [Self; 8] = [
+        Self::OsPatchScan,
+        Self::SoftwarePatchScan,
+        Self::OsPatchApply,
+        Self::SoftwarePatchApply,
+        Self::OsPatchRemediate,
+        Self::SoftwarePatchRemediate,
+        Self::Reboot,
+        Self::Script,
+    ];
+
     /// Whether this action can restart the device as a side effect.
     pub fn can_reboot(self) -> bool {
         !matches!(self, Self::OsPatchScan | Self::SoftwarePatchScan)

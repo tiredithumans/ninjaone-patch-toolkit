@@ -379,8 +379,16 @@ fn PatchesTable() -> impl IntoView {
                                     // installs everything approved on the device —
                                     // the per-row detail is what a kbAllowList
                                     // script is given.
-                                    let row = r.clone();
-                                    let checked_row = r.clone();
+                                    // One shared copy, not two. Both closures need
+                                    // an owned `'static` row, and `PatchRow` carries
+                                    // a dozen-plus `String`s — so cloning it twice per
+                                    // row meant ~200 row copies for every reactive
+                                    // re-render of a 100-row page. An `Rc` gives each
+                                    // closure a handle for a refcount bump, and the
+                                    // cells below still move out of `r` itself.
+                                    let shared = std::sync::Arc::new(r.clone());
+                                    let row = std::sync::Arc::clone(&shared);
+                                    let checked_row = shared;
                                     let label = format!(
                                         "Select {} on {}",
                                         r.kb.clone().unwrap_or_else(|| r.name.clone()),
@@ -613,8 +621,10 @@ fn GroupMembers(rows: Vec<PatchRow>) -> impl IntoView {
                     {rows
                         .into_iter()
                         .map(|r| {
-                            let row = r.clone();
-                            let checked_row = r.clone();
+                            // Same sharing as the flat table above.
+                            let shared = std::sync::Arc::new(r.clone());
+                            let row = std::sync::Arc::clone(&shared);
+                            let checked_row = shared;
                             let sev = sev_class(&r.severity);
                             let stat = status_class(&r.status);
                             let aria = format!(
