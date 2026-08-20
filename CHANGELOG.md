@@ -30,6 +30,16 @@ version and start a fresh `[Unreleased]`.
   A sign-in waits up to three minutes for the browser; switching instance in Settings during that
   window used to store the tokens the *old* instance issued under the *new* instance's name. Such a
   grant is now discarded with an explanation.
+### Changed
+
+- **Exports no longer freeze the patch table.** Saving a workbook or an HTML report used to copy the
+  entire cached result — every row — while holding the lock the table's paging also needs, so on a
+  large fleet the UI stalled for the length of the copy. Both now take a shared handle instead.
+- **Faster queries and action dispatch on large fleets.** The canonical row sort no longer allocates
+  two strings per row, the per-organization severity rollup no longer allocates an organization name
+  per patch record, and the action audit log is written once per batch off the async runtime rather
+  than reopened once per device. Saving settings no longer blocks in-flight API calls behind an OS
+  keyring read.
 
 ## [0.13.0] - 2026-08-15
 

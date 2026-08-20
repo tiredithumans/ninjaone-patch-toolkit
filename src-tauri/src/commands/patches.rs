@@ -1,4 +1,3 @@
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -523,13 +522,17 @@ fn assemble_result(
         build_rows(&devices_by_id, &maps, &sources, &prepared)
     };
     // Highest severity first, then organization, then device — case-insensitive.
-    // sort_by_cached_key lowercases each field once instead of on every compare.
-    rows.sort_by_cached_key(|r| {
-        (
-            Reverse(r.severity_rank),
-            r.organization.to_lowercase(),
-            r.device_name.to_lowercase(),
-        )
+    //
+    // `cmp_ci` rather than `sort_by_cached_key`: the cached key allocated two owned
+    // lowercase `String`s *per row*, which on a six-figure fleet is a few hundred
+    // thousand allocations to sort data whose repeated strings the row builder went
+    // to lengths to intern into shared `Arc<str>`. `cmp_ci` is the allocation-free
+    // comparison the memoized paging sort already uses on the same fields.
+    rows.sort_by(|a, b| {
+        b.severity_rank
+            .cmp(&a.severity_rank)
+            .then_with(|| crate::rows::cmp_ci(&a.organization, &b.organization))
+            .then_with(|| crate::rows::cmp_ci(&a.device_name, &b.device_name))
     });
 
     // Compliance + reboot rollups from the scoped current set. Concatenating the two

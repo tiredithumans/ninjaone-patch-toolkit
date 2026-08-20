@@ -787,7 +787,7 @@ async fn dispatch_one(
 
     // Written before the request goes out, so a crash mid-batch still leaves
     // evidence of what was attempted.
-    audit::record(&audit::AuditEntry {
+    audit::record_off_runtime(vec![audit::AuditEntry {
         timestamp: audit::now_stamp(),
         instance: ctx.instance.clone(),
         client_id: ctx.client_id.clone(),
@@ -811,7 +811,8 @@ async fn dispatch_one(
         activity_id: None,
         series_uid: None,
         exit_code: None,
-    });
+    }])
+    .await;
 
     let _permit = sem.acquire().await;
     let outcome = send_action(ctx, target.device_id).await;
@@ -1003,8 +1004,11 @@ fn spawn_job_poller(app: &AppHandle) {
             };
             // Close out the audit record opened at dispatch, now that the outcome
             // and exit code are known.
-            for job in &settled {
-                audit::record(&audit::AuditEntry {
+            // Collected first and written in one pass: the poller settles a whole
+            // batch at a time, so a per-job write reopened the log once per device.
+            let closing = settled
+                .iter()
+                .map(|job| audit::AuditEntry {
                     timestamp: audit::now_stamp(),
                     instance: settings.instance_base_url.clone(),
                     client_id: settings.client_id.clone(),
@@ -1022,8 +1026,9 @@ fn spawn_job_poller(app: &AppHandle) {
                     activity_id: job.activity_id,
                     series_uid: job.series_uid.clone(),
                     exit_code: job.exit_code,
-                });
-            }
+                })
+                .collect();
+            audit::record_off_runtime(closing).await;
             emit_progress(
                 &app,
                 ActionProgressEvent {

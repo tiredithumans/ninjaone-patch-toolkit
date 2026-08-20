@@ -90,27 +90,44 @@ fn audit_path() -> Option<PathBuf> {
         .map(|d| d.config_dir().join(AUDIT_FILE))
 }
 
-/// Appends one JSON-lines record. Never returns an error: auditing must not be
-/// able to stop an operator from working, and a warning in the log is the right
-/// severity for a disk that won't take the write.
-pub fn record(entry: &AuditEntry) {
+/// Appends every record in `entries`, opening the log once.
+///
+/// Never returns an error: auditing must not be able to stop an operator from
+/// working, and a warning in the log is the right severity for a disk that won't
+/// take the write.
+///
+/// **Synchronous file I/O — never call this from an async task.** Use
+/// [`record_off_runtime`] there. A dispatch fans out one entry per device and the
+/// poller closes out a whole settled batch, so this used to do `create_dir_all` +
+/// open + write per device directly on tokio workers.
+pub fn record_all(entries: &[AuditEntry]) {
+    if entries.is_empty() {
+        return;
+    }
     let Some(path) = audit_path() else {
         warn!("no config directory available; action audit record dropped");
         return;
     };
+    write_records(&path, entries);
+}
+
+/// The half of [`record_all`] that does not depend on the OS config directory, so it
+/// can be tested against a temp path. `record_all` itself was untestable — it
+/// resolved its own destination — which left the directory creation, the 0600 mode
+/// and the append behaviour with no coverage at all; only the pure `redact_parameters`
+/// helper was asserted.
+fn write_records(path: &std::path::Path, entries: &[AuditEntry]) {
+    // The poller calls this on every tick, so an empty batch must not so much as
+    // create the file.
+    if entries.is_empty() {
+        return;
+    }
     if let Some(parent) = path.parent()
         && let Err(err) = std::fs::create_dir_all(parent)
     {
         warn!(?err, "could not create the audit directory");
         return;
     }
-    let line = match serde_json::to_string(entry) {
-        Ok(l) => l,
-        Err(err) => {
-            warn!(?err, "could not serialize an audit record");
-            return;
-        }
-    };
     // Owner-only. The log names devices, organizations and the operator's own
     // parameters; on a shared or roaming-profile machine the default 0644 made all
     // of that world-readable. Applies at creation, so an existing log keeps whatever
@@ -122,9 +139,41 @@ pub fn record(entry: &AuditEntry) {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
     }
-    let written = opts.open(&path).and_then(|mut f| writeln!(f, "{line}"));
-    if let Err(err) = written {
-        warn!(?err, path = %path.display(), "could not append to the action audit log");
+    let mut file = match opts.open(path) {
+        Ok(f) => f,
+        Err(err) => {
+            warn!(?err, path = %path.display(), "could not open the action audit log");
+            return;
+        }
+    };
+    for entry in entries {
+        let line = match serde_json::to_string(entry) {
+            Ok(l) => l,
+            Err(err) => {
+                warn!(?err, "could not serialize an audit record");
+                continue;
+            }
+        };
+        if let Err(err) = writeln!(file, "{line}") {
+            warn!(?err, path = %path.display(), "could not append to the action audit log");
+            return;
+        }
+    }
+}
+
+/// [`record_all`], moved off the async runtime.
+///
+/// The write is a synchronous `create_dir_all` + open + append. On a tokio worker
+/// that blocks a thread the rest of the app needs — and both callers are on the
+/// hottest paths there are for it: `dispatch_one` runs inside a `JoinSet` fanning
+/// out across every targeted device, and the job poller closes out every settled
+/// batch. A slow or full disk stalled unrelated IPC and the poller itself.
+pub async fn record_off_runtime(entries: Vec<AuditEntry>) {
+    if entries.is_empty() {
+        return;
+    }
+    if let Err(err) = tauri::async_runtime::spawn_blocking(move || record_all(&entries)).await {
+        warn!(?err, "the action audit write task failed");
     }
 }
 
@@ -184,5 +233,92 @@ mod tests {
     fn ordinary_parameters_pass_through_unchanged() {
         let params = "kbAllowList=5040434,5041580 rebootBehavior=Never dryRun=true";
         assert_eq!(redact_parameters(params), params);
+    }
+    fn sample_entry(job_id: u64) -> AuditEntry {
+        AuditEntry {
+            timestamp: "2026-01-01 00:00:00 UTC".into(),
+            instance: "https://app.ninjarmm.com".into(),
+            client_id: Some("client-a".into()),
+            batch_id: 1,
+            job_id,
+            kind: ActionKind::OsPatchApply,
+            device_id: 7,
+            device_name: "srv-1".into(),
+            organization: "Contoso".into(),
+            detail: "Apply OS patches".into(),
+            parameters: None,
+            dry_run: false,
+            confirm_token_prefix: None,
+            outcome: "dispatching".into(),
+            activity_id: None,
+            series_uid: None,
+            exit_code: None,
+        }
+    }
+
+    /// The log is append-only JSON lines and creates its own directory. None of that
+    /// was covered: `record` resolved its own destination from the OS config dir, so
+    /// only the pure `redact_parameters` helper could be asserted.
+    #[test]
+    fn records_append_as_one_json_line_each_and_create_the_directory() {
+        let dir = std::env::temp_dir().join(format!("njp-audit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join(AUDIT_FILE);
+
+        write_records(&path, &[sample_entry(1), sample_entry(2)]);
+        write_records(&path, &[sample_entry(3)]);
+
+        let body = std::fs::read_to_string(&path).expect("the log must have been created");
+        let lines: Vec<_> = body.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "one line per record, appended not overwritten"
+        );
+        for (line, expected) in lines.iter().zip([1u64, 2, 3]) {
+            let v: serde_json::Value = serde_json::from_str(line).expect("each line is JSON");
+            assert_eq!(v["jobId"], expected);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mode is set at creation and the comment on it explains why: the log names
+    /// devices, organizations and the operator's own parameters, and a roaming profile
+    /// makes 0644 world-readable.
+    #[cfg(unix)]
+    #[test]
+    fn the_log_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("njp-audit-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(AUDIT_FILE);
+
+        write_records(&path, &[sample_entry(1)]);
+
+        let mode = std::fs::metadata(&path)
+            .expect("log exists")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the audit log must not be group/world readable"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An empty batch must not create the file — the poller calls this on every tick.
+    #[test]
+    fn an_empty_batch_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("njp-audit-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(AUDIT_FILE);
+
+        record_all(&[]);
+        write_records(&path, &[]);
+
+        assert!(!path.exists(), "no entries means no file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

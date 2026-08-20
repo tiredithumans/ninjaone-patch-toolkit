@@ -295,25 +295,45 @@ impl AuthState {
         callback_port: u16,
         request_management: bool,
     ) -> bool {
+        // Whether this is a tenant change is decided under a *read* lock, so the
+        // keyring lookup below happens with no lock held at all. It used to run
+        // inside the write guard — a synchronous Keychain / Credential Manager /
+        // D-Bus round trip while every concurrent `access_token()` caller was queued
+        // behind the same lock, on a tokio worker. A slow or absent Secret Service
+        // turned one settings save into a stall across every in-flight request.
+        let Ok(current) = self
+            .inner
+            .read()
+            .map(|g| (g.base_url.clone(), g.client_id.clone()))
+        else {
+            return false;
+        };
+        let tenant_changed = current.0 != base_url || current.1 != client_id;
+
+        // The secret is per-tenant, so re-read it for the tenant now in effect
+        // instead of carrying the previous one's over. Done before the write lock is
+        // taken; nothing else can be mid-`apply_settings` (the caller holds the
+        // settings mutex), so re-reading here cannot race a competing switch.
+        let fresh_secret = tenant_changed.then(|| {
+            load_tenant_keyring(
+                KEYRING_SECRET_PREFIX,
+                LEGACY_KEYRING_USER_SECRET,
+                &base_url,
+                client_id.as_deref(),
+            )
+            .unwrap_or_default()
+        });
+
         let Ok(mut inner) = self.inner.write() else {
             return false;
         };
-        let tenant_changed = inner.base_url != base_url || inner.client_id != client_id;
         inner.base_url = base_url;
         inner.client_id = client_id;
         inner.callback_port = callback_port;
         inner.request_management = request_management;
-        if tenant_changed {
+        if let Some(secret) = fresh_secret {
             inner.tokens = None;
-            // The secret is per-tenant too, so re-read it for the tenant now in
-            // effect instead of carrying the previous one's over.
-            inner.client_secret = load_tenant_keyring(
-                KEYRING_SECRET_PREFIX,
-                LEGACY_KEYRING_USER_SECRET,
-                &inner.base_url,
-                inner.client_id.as_deref(),
-            )
-            .unwrap_or_default();
+            inner.client_secret = secret;
         }
         tenant_changed
     }

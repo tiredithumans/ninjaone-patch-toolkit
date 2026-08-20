@@ -896,7 +896,12 @@ pub fn build_severity_by_org(
     devices_by_id: &HashMap<i64, &Device>,
     maps: &LookupMaps,
 ) -> Vec<OrgSeverity> {
-    let mut by_org: HashMap<String, SeverityCounts> = HashMap::new();
+    // Keyed by a borrowed name. This ran `org_name` — which allocates an owned
+    // `String` — once per pending record across the *whole-fleet* current-patch feed,
+    // which runs to six figures, to produce at most one distinct key per organization.
+    // `org_name_str` is the same lookup without the allocation, and is what the rest
+    // of this file already uses for exactly this reason.
+    let mut by_org: HashMap<&str, SeverityCounts> = HashMap::new();
     for p in current_patches {
         if !is_pending(p.status.as_deref()) {
             continue;
@@ -904,8 +909,8 @@ pub fn build_severity_by_org(
         let org = p
             .device_id
             .and_then(|id| devices_by_id.get(&id))
-            .map(|d| maps.org_name(d.organization_id))
-            .unwrap_or_else(|| "(unknown)".to_string());
+            .map(|d| maps.org_name_str(d.organization_id))
+            .unwrap_or(UNKNOWN_LABEL);
         let counts = by_org.entry(org).or_default();
         match p.severity_enum() {
             Severity::Critical => counts.critical += 1,
@@ -921,11 +926,11 @@ pub fn build_severity_by_org(
     let mut out: Vec<OrgSeverity> = by_org
         .into_iter()
         .map(|(organization, counts)| OrgSeverity {
-            organization,
+            organization: organization.to_string(),
             counts,
         })
         .collect();
-    out.sort_by_cached_key(|o| o.organization.to_lowercase());
+    out.sort_by(|a, b| cmp_ci(&a.organization, &b.organization));
     out
 }
 
@@ -1548,7 +1553,7 @@ fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
 }
 
 /// Case-insensitive (ASCII) ordering without a per-comparison allocation.
-fn cmp_ci(a: &str, b: &str) -> Ordering {
+pub fn cmp_ci(a: &str, b: &str) -> Ordering {
     a.bytes()
         .map(|c| c.to_ascii_lowercase())
         .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
