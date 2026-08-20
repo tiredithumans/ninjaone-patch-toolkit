@@ -16,7 +16,7 @@ use crate::state::AppState;
 fn require_cached_result(state: &AppState) -> Result<(), UiError> {
     state
         .with_current_result(|_| ())
-        .map_err(|_| UiError::new("result cache poisoned"))?
+        .map_err(UiError::from)?
         .ok_or_else(|| UiError::new("Run a query before exporting."))
 }
 
@@ -32,7 +32,7 @@ fn require_cached_result(state: &AppState) -> Result<(), UiError> {
 fn cached_result(state: &AppState) -> Result<Arc<QueryResult>, UiError> {
     state
         .current_result_handle()
-        .map_err(|_| UiError::new("result cache poisoned"))?
+        .map_err(UiError::from)?
         .ok_or_else(|| UiError::new("Run a query before exporting."))
 }
 
