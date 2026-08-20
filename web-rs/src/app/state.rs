@@ -1434,71 +1434,37 @@ impl AppState {
     }
 
     /// Builds the request for `kind` from the current selection and form state.
+    /// Reads the run options out of the signals and hands them to the pure
+    /// `util::build_action_request`.
+    ///
+    /// The branching this used to do inline decides which devices get dispatched to
+    /// and what each is told to install — including the rule that a remediation kind
+    /// skips devices with nothing ticked of its family, which exists because handing
+    /// one an empty allow list produces a job that reports success having installed
+    /// nothing. That belongs somewhere a test can reach it; this file has no test
+    /// module, and the crate's only gates are a compile check and clippy.
     pub(super) fn build_request(self, kind: ActionKind) -> ActionRequest {
-        // Which patches each device is told to install. A remediation kind takes its
-        // own family; the hand-picked script path takes KBs, which is what its
-        // "Target only the selected KBs" checkbox means and all a `kbAllowList`
-        // script can accept.
-        let device_targets = self.actions.selected.with_untracked(|sel| {
-            if kind.is_remediation() {
-                util::remediation_targets(sel, kind)
-            } else if kind == ActionKind::Script && self.actions.use_kb_targeting.get_untracked() {
-                util::targets_by_device(sel, true)
-            } else {
-                BTreeMap::new()
-            }
-        });
-        // A remediation kind dispatches only to devices that have a ticked patch of
-        // its family: sending the whole selection would hand a device with only
-        // software rows ticked an empty OS allow list — a job that reports success
-        // having installed nothing. A hand-picked script keeps every selected device,
-        // because the operator chose them and the script may do something useful
-        // without a target list; `plan()` warns about the ones that get an empty one.
-        let device_ids: Vec<i64> = if kind.is_remediation() {
-            device_targets.keys().copied().collect()
-        } else {
-            self.actions
-                .selected
-                .with_untracked(|s| s.keys().copied().collect())
+        let opts = util::RunOptions {
+            use_kb_targeting: self.actions.use_kb_targeting.get_untracked(),
+            include_offline: self.actions.include_offline.get_untracked(),
+            override_window: self.actions.override_window.get_untracked(),
+            dry_run: self.actions.dry_run.get_untracked(),
+            script_reboot: self.actions.script_reboot.get_untracked(),
+            run_as: self.actions.run_as.get_untracked(),
+            reboot_mode_forced: self.actions.reboot_mode.get_untracked() == "FORCED",
+            reason: self.actions.reason.get_untracked(),
+            script_id: self.actions.script_id.get_untracked(),
+            script_name: {
+                let id = self.actions.script_id.get_untracked();
+                self.actions
+                    .scripts
+                    .with_untracked(|s| s.iter().find(|s| Some(s.id) == id).map(|s| s.name.clone()))
+            },
+            script_params: self.actions.script_params.get_untracked(),
         };
-
-        let mut req = ActionRequest::new(kind, device_ids);
-        req.device_targets = device_targets;
-        req.include_offline = self.actions.include_offline.get_untracked();
-        req.override_window = self.actions.override_window.get_untracked();
-
-        // The three shared run options. They are rendered once, in the action bar,
-        // and mean the same thing for every script-driven dispatch — a remediation
-        // install and a hand-picked script differ in *what* runs, not in how the
-        // reboot behavior, preview flag or execution identity are chosen. The native
-        // endpoints ignore all three: they take no parameters, have no preview mode
-        // (a dry run of one is a `plan()` blocker), and run as NinjaOne's agent.
-        if kind.runs_a_script() {
-            req.dry_run = self.actions.dry_run.get_untracked();
-            req.reboot = self.actions.script_reboot.get_untracked();
-            let run_as = self.actions.run_as.get_untracked();
-            req.run_as = (!run_as.trim().is_empty()).then_some(run_as);
-        }
-
-        if kind == ActionKind::Reboot {
-            req.reboot_mode = Some(if self.actions.reboot_mode.get_untracked() == "FORCED" {
-                RebootMode::Forced
-            } else {
-                RebootMode::Normal
-            });
-            req.reason = Some(self.actions.reason.get_untracked());
-        }
-        if kind == ActionKind::Script {
-            let id = self.actions.script_id.get_untracked();
-            req.script_id = id;
-            req.script_name = self
-                .actions
-                .scripts
-                .with_untracked(|s| s.iter().find(|s| Some(s.id) == id).map(|s| s.name.clone()));
-            let params = self.actions.script_params.get_untracked();
-            req.parameters = (!params.trim().is_empty()).then_some(params);
-        }
-        req
+        self.actions
+            .selected
+            .with_untracked(|sel| util::build_action_request(kind, sel, &opts))
     }
 
     /// Asks the backend what `kind` would do and opens the confirmation modal.
