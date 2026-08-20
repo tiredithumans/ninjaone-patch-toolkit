@@ -69,7 +69,8 @@ async function collectAssets(dir, root = dir, out = new Map()) {
 async function withServer(fn) {
   if (REMOTE) return fn(REMOTE);
   const assets = await collectAssets(DIST_ROOT);
-  const { private: key, cert } = selfsigned.generate(
+  // selfsigned v5 made `generate` async; the result shape is unchanged.
+  const { private: key, cert } = await selfsigned.generate(
     [{ name: "commonName", value: "localhost" }],
     { days: 1, keySize: 2048, altNames: [{ type: 7, ip: "127.0.0.1" }] },
   );

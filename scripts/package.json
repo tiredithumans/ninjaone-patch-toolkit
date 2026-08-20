@@ -8,7 +8,7 @@
     "screenshot": "node screenshot.mjs"
   },
   "devDependencies": {
-    "playwright": "1.61.1",
-    "selfsigned": "2.4.1"
+    "playwright": "1.62.1",
+    "selfsigned": "5.5.0"
   }
 }
