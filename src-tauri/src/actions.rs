@@ -65,6 +65,19 @@ impl ActionKind {
         !matches!(self, Self::OsPatchScan | Self::SoftwarePatchScan)
     }
 
+    /// Whether this can restart the device as a side effect.
+    ///
+    /// Every mutating kind can: a reboot obviously, and any install because patches
+    /// routinely set the pending-reboot flag. Only a scan cannot. This exists so the
+    /// post-action cache invalidation is one decision instead of two — the dispatch
+    /// site invalidated the device inventory only for `Reboot` while the job poller
+    /// invalidated it for *every* settled batch, so the two copies of the same rule
+    /// disagreed in both directions at once. Mirrors `can_reboot` in
+    /// `web-rs/src/types.rs`.
+    pub fn can_reboot(self) -> bool {
+        self.is_mutating()
+    }
+
     /// Whether NinjaOne offers a real preview for this action. Only a library
     /// script does (via its own `dryRun` parameter); the native endpoints have no
     /// preview mode at all, so a "dry run" of them dispatches nothing.

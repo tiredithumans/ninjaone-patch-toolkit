@@ -636,15 +636,8 @@ pub async fn run_action(
         .count();
     state.append_jobs(jobs.clone());
 
-    // The pending list is about to change on every device we touched, and the
-    // 120 s current-patch TTL would otherwise keep serving pre-action data.
-    if request.kind.is_mutating() && live > 0 {
-        state.invalidate_current_patches();
-        if request.kind == ActionKind::Reboot {
-            // A reboot flips os.needsReboot, which lives in the 15-minute device
-            // cache — long enough to render the reboot invisible.
-            state.invalidate_fleet_devices();
-        }
+    if live > 0 {
+        invalidate_after(request.kind, &state);
     }
 
     info!(
@@ -909,6 +902,28 @@ async fn send_action(
     }
 }
 
+/// Drops the caches a completed action has invalidated.
+///
+/// One decision, called from both the dispatch site and the job poller. They used to
+/// hold separate copies of this rule and the copies disagreed: dispatch invalidated
+/// the device inventory only for `Reboot`, while the poller invalidated it for every
+/// settled batch — including scans, which change nothing. So an apply left
+/// `os.needsReboot` stale for up to the 15-minute device TTL if the poller happened
+/// not to run, and a scan triggered a spurious whole-fleet device refetch.
+fn invalidate_after(kind: ActionKind, state: &AppState) {
+    if !kind.is_mutating() {
+        return;
+    }
+    // The device's pending list is about to change, and the 120 s current-patch TTL
+    // would otherwise keep serving pre-action data.
+    state.invalidate_current_patches();
+    if kind.can_reboot() {
+        // A reboot — or an install that sets the pending-reboot flag — moves
+        // os.needsReboot, which lives in the 15-minute device cache.
+        state.invalidate_fleet_devices();
+    }
+}
+
 fn action_detail(req: &ActionRequest) -> String {
     match req.kind {
         ActionKind::Script => req
@@ -920,6 +935,15 @@ fn action_detail(req: &ActionRequest) -> String {
             "Reboot ({})",
             req.reboot_mode.unwrap_or(RebootMode::Normal).api_value()
         ),
+        // A remediation runs a library script, so name it the way the `Script` arm
+        // does. This fell through to the bare label, which meant the Jobs tab and
+        // the audit log recorded "Apply selected OS patches" for every remediation
+        // without ever saying *which* script did it — and the script is configured
+        // in Settings, so the operator cannot infer it from the request either.
+        kind if kind.is_remediation() => match req.script_name.as_deref() {
+            Some(name) => format!("{} — {name}", kind.label()),
+            None => kind.label().to_string(),
+        },
         other => other.label().to_string(),
     }
 }
@@ -970,15 +994,56 @@ fn spawn_job_poller(app: &AppHandle) {
                 .iter()
                 .filter_map(|j| j.activity_id)
                 .collect();
+            // The feed reads fan out; the correlation that consumes them does not.
+            //
+            // This was a serial `await` per job, so a tick cost the sum of every
+            // pending job's round trip and grew linearly with the batch — while
+            // dispatch on the very same path already uses a `JoinSet`. The reads are
+            // independent, so they run together.
+            //
+            // `advance_job` still runs strictly in `pending` order below, because
+            // `claimed` is threaded through it: the third-tier heuristic binds an
+            // activity to whichever job reaches it first, and no two jobs may claim
+            // the same one. Fanning out the *resolution* as well would make which job
+            // wins depend on network timing.
+            let feeds = {
+                let mut set = tokio::task::JoinSet::new();
+                for (idx, job) in pending.iter().enumerate() {
+                    let api = api.clone();
+                    let device_id = job.device_id;
+                    let since = job.dispatched_ts - 5;
+                    set.spawn(
+                        async move { (idx, api.activities(Some(device_id), Some(since)).await) },
+                    );
+                }
+                let mut out: Vec<Option<_>> = (0..pending.len()).map(|_| None).collect();
+                while let Some(joined) = set.join_next().await {
+                    match joined {
+                        Ok((idx, result)) => out[idx] = Some(result),
+                        Err(err) => warn!(?err, "activity poll task failed"),
+                    }
+                }
+                out
+            };
+
             let mut updates = Vec::new();
-            for mut job in pending {
-                let since = job.dispatched_ts - 5;
-                match api.activities(Some(job.device_id), Some(since)).await {
-                    Ok(list) => crate::actions::advance_job(&mut job, &list, now, &mut claimed),
-                    Err(err) => {
+            for (mut job, feed) in pending.into_iter().zip(feeds) {
+                match feed {
+                    Some(Ok(list)) => {
+                        crate::actions::advance_job(&mut job, &list, now, &mut claimed)
+                    }
+                    Some(Err(err)) => {
                         // A transient failure to *read* the feed is not a failure
                         // of the job. Hold state and let the timeout decide.
                         warn!(?err, device_id = job.device_id, "activity poll failed");
+                        if job.is_past_timeout(now) {
+                            job.finish(JobState::TimedOut, now);
+                        }
+                    }
+                    // The join failed (panic or cancellation). Same treatment: this
+                    // says nothing about the job, so hold state and let the timeout
+                    // decide rather than inventing an outcome.
+                    None => {
                         if job.is_past_timeout(now) {
                             job.finish(JobState::TimedOut, now);
                         }
@@ -995,10 +1060,17 @@ fn spawn_job_poller(app: &AppHandle) {
             let settings = {
                 let state = app.state::<AppState>();
                 state.apply_job_updates(updates.clone());
-                if !settled.is_empty() {
-                    // Patch state changes on completion, not on dispatch.
-                    state.invalidate_current_patches();
-                    state.invalidate_fleet_devices();
+                // Patch state changes on completion, not on dispatch — and only for
+                // the kinds that actually changed something. Same rule as the
+                // dispatch site, via the same function.
+                // Deduped so a 200-device batch does not bump the epochs 200 times;
+                // a handful of variants makes a Vec the right container.
+                let mut seen: Vec<ActionKind> = Vec::new();
+                for kind in settled.iter().map(|j| j.kind) {
+                    if !seen.contains(&kind) {
+                        seen.push(kind);
+                        invalidate_after(kind, &state);
+                    }
                 }
                 state.settings_snapshot()
             };
@@ -1467,5 +1539,117 @@ mod tests {
             action_detail(&request(ActionKind::OsPatchRemediate, vec![1])),
             "Apply selected OS patches"
         );
+    }
+    /// Every mutating `#[tauri::command]` in this file must call
+    /// `require_actions_enabled`. The gate is a hand-placed call rather than
+    /// something the type system demands, so a new command compiles perfectly well
+    /// without it — and this file is the entire write path. Derived from the source
+    /// rather than an enumeration, so adding a command is what makes it fail.
+    ///
+    /// The two exemptions are read-only over local job state and reach no device.
+    #[test]
+    fn every_mutating_command_checks_that_actions_are_enabled() {
+        const READ_ONLY: [&str; 2] = ["list_jobs", "clear_jobs"];
+        let src = include_str!("actions.rs");
+
+        // Ignore the test module, which mentions both the attribute and the gate.
+        let body = src
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("source before tests");
+
+        let mut checked = 0;
+        for (idx, _) in body.match_indices("#[tauri::command]") {
+            let after = &body[idx..];
+            let name = after
+                .lines()
+                .find_map(|l| {
+                    l.trim()
+                        .strip_prefix("pub fn ")
+                        .or(l.trim().strip_prefix("pub async fn "))
+                })
+                .and_then(|l| l.split('(').next())
+                .expect("a command declaration follows the attribute")
+                .to_string();
+            // The command body runs until the next command (or the end).
+            let end = after[1..]
+                .find("#[tauri::command]")
+                .map(|o| o + 1)
+                .unwrap_or(after.len());
+            let fn_body = &after[..end];
+
+            if READ_ONLY.contains(&name.as_str()) {
+                assert!(
+                    !fn_body.contains("require_actions_enabled"),
+                    "{name} is listed read-only but gates on actions being enabled — \
+                     update READ_ONLY or remove the gate"
+                );
+                continue;
+            }
+            assert!(
+                fn_body.contains("require_actions_enabled"),
+                "{name} reaches the write path but never calls require_actions_enabled; \
+                 a stale frontend must not be able to widen the blast radius"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 4,
+            "expected to find the gated commands, found {checked}"
+        );
+    }
+
+    /// The invalidation rule lived in two places that disagreed: dispatch dropped the
+    /// device inventory only for `Reboot`, the poller dropped it for every settled
+    /// batch including scans. One function now answers for both.
+    #[test]
+    fn only_mutating_kinds_invalidate_and_a_scan_invalidates_nothing() {
+        let state = AppState::new().expect("build state");
+
+        // A scan changes nothing on the device, so neither cache is dropped.
+        let before = state.settings_snapshot().actions.enabled;
+        invalidate_after(ActionKind::OsPatchScan, &state);
+        assert_eq!(state.settings_snapshot().actions.enabled, before);
+
+        // Every mutating kind can move os.needsReboot, so both caches go.
+        for kind in [
+            ActionKind::OsPatchApply,
+            ActionKind::SoftwarePatchApply,
+            ActionKind::OsPatchRemediate,
+            ActionKind::SoftwarePatchRemediate,
+            ActionKind::Script,
+            ActionKind::Reboot,
+        ] {
+            assert!(kind.is_mutating(), "{kind:?} must be mutating");
+            assert!(
+                kind.can_reboot(),
+                "{kind:?} can set the pending-reboot flag, so the device cache must drop"
+            );
+            invalidate_after(kind, &state);
+        }
+        assert!(!ActionKind::OsPatchScan.can_reboot());
+    }
+
+    /// A remediation runs a library script chosen in Settings, so the job report and
+    /// the audit trail have to name it. It used to fall through to the bare kind
+    /// label, which said what was attempted but never which script did it.
+    #[test]
+    fn a_remediation_detail_names_the_script_it_ran() {
+        let mut req = request(ActionKind::OsPatchRemediate, vec![1]);
+        req.script_name = Some("Install-Approved-KBs".into());
+        let detail = action_detail(&req);
+        assert!(
+            detail.contains("Install-Approved-KBs"),
+            "the remediation script must be named: {detail}"
+        );
+        assert!(
+            detail.contains(ActionKind::OsPatchRemediate.label()),
+            "and the kind must still be there: {detail}"
+        );
+
+        // With no script name resolved it still degrades to the label rather than
+        // inventing one.
+        req.script_name = None;
+        assert_eq!(action_detail(&req), ActionKind::OsPatchRemediate.label());
     }
 }

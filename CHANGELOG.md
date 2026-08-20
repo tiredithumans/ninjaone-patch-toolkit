@@ -21,6 +21,24 @@ version and start a fresh `[Unreleased]`.
 
 ### Fixed
 
+- **An action approval no longer survives an instance switch.** The confirmation dialog binds the
+  approval to the exact devices, patches and options you approved, but not to the NinjaOne instance.
+  Changing instance in Settings while the dialog was open let the approval dispatch against the new
+  one, on devices you never saw. The approval is now refused instead.
+- **Patch state refreshes correctly after every action.** The rule for which caches to drop was
+  written twice and the two copies disagreed: an apply could leave "needs reboot" stale for up to
+  15 minutes, while a scan — which changes nothing — forced a full device refetch.
+- **The Jobs tab and audit log now name the script an "Apply selected patches" action ran.** They
+  previously recorded only the action name, and the script is configured in Settings, so there was
+  no way to tell which one had run.
+
+### Changed
+
+- **Job polling is faster with many actions in flight.** Each pending job's status was fetched one
+  after another, so a tick took as long as the sum of them all; they now run together.
+
+### Fixed
+
 - **Signing out now reliably ends the session.** A fleet query can run for minutes, and one that was
   still fetching when you signed out used to write its rows back into the cache *after* the sign-out
   cleared it — leaving the previous operator's patch rows readable, pageable and exportable by
