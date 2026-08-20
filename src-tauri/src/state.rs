@@ -27,6 +27,17 @@ pub struct PendingConfirm {
     pub token: String,
     pub request_hash: String,
     pub issued_at: Instant,
+    /// The tenant the plan was approved against.
+    ///
+    /// `request_hash` destructures `ActionRequest` exhaustively — a new field there
+    /// is a compile error — but `ActionRequest` carries no instance or client id, so
+    /// no amount of hashing could bind the approval to a tenant. `run_action` then
+    /// re-reads `instance_base_url` from settings *after* consuming the token, which
+    /// means a plan approved against instance A could dispatch against instance B
+    /// inside the 5-minute window. Every other cache in this file is tenant-stamped
+    /// for exactly this reason; the one slot that authorizes writes to real devices
+    /// was not. It has to live on the slot rather than in the hash for that reason.
+    tenant: TenantKey,
 }
 
 /// How long cached org/location/role lookups stay fresh before a query refetches
@@ -1034,11 +1045,13 @@ impl AppState {
     /// Records the plan the operator is being asked to confirm, replacing any
     /// earlier one — only one dialog is open at a time.
     pub fn store_pending_confirm(&self, token: String, request_hash: String) {
+        let tenant = self.tenant_key();
         if let Ok(mut guard) = self.pending_confirm.lock() {
             *guard = Some(PendingConfirm {
                 token,
                 request_hash,
                 issued_at: Instant::now(),
+                tenant,
             });
         }
     }
@@ -1063,7 +1076,13 @@ impl AppState {
         // Not short-circuiting: both comparisons run regardless of the first result.
         let token_ok = constant_time_eq(pending.token.as_bytes(), token.as_bytes());
         let hash_ok = constant_time_eq(pending.request_hash.as_bytes(), request_hash.as_bytes());
-        token_ok & hash_ok && pending.issued_at.elapsed() < CONFIRM_TTL
+        // The tenant is compared here rather than folded into `request_hash` because
+        // `ActionRequest` has no field to hash it from — see `PendingConfirm::tenant`.
+        // An approval is for one instance; the operator can change instance in
+        // Settings while the dialog is open.
+        token_ok & hash_ok
+            && pending.tenant == self.tenant_key()
+            && pending.issued_at.elapsed() < CONFIRM_TTL
     }
 }
 
@@ -1763,6 +1782,29 @@ mod tests {
         assert!(state.consume_confirm_token("tok2", "hash-a"));
         // Single use: a double-click can't dispatch twice.
         assert!(!state.consume_confirm_token("tok2", "hash-a"));
+    }
+
+    /// An approval is for one instance. `request_hash` destructures `ActionRequest`
+    /// exhaustively, but `ActionRequest` has no instance field to hash — and
+    /// `run_action` re-reads `instance_base_url` from settings *after* consuming the
+    /// token. So a plan approved against instance A could dispatch against instance B
+    /// inside the 5-minute window, on devices the operator never saw. Every other
+    /// cache here is tenant-stamped; the slot that authorizes writes to real devices
+    /// has to be too.
+    #[test]
+    fn a_confirm_token_does_not_survive_an_instance_switch() {
+        let state = AppState::new().expect("build state");
+        state.store_pending_confirm("tok".into(), "hash-a".into());
+
+        // The operator changes instance while the confirmation dialog is open.
+        if let Ok(mut settings) = state.settings.lock() {
+            settings.instance_base_url = "https://other.ninjarmm.com".into();
+        }
+
+        assert!(
+            !state.consume_confirm_token("tok", "hash-a"),
+            "an approval granted against one instance must not dispatch against another"
+        );
     }
 
     #[test]
