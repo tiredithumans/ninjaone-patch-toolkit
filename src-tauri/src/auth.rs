@@ -717,7 +717,13 @@ impl AuthState {
                 )
             })?;
 
-        debug!(%auth_url, "opening browser for PKCE login");
+        // Never the whole URL. The query string carries `state` — the anti-CSRF
+        // nonce `handle_callback_conn` uses to decide which loopback request is the
+        // genuine redirect — plus `code_challenge` and the client id. This crate logs
+        // at debug by default in debug builds, so anything able to read the log
+        // stream could end or spoof an in-progress sign-in on the callback port.
+        // Everything diagnostic about this line survives dropping the query.
+        debug!(url = %url_without_query(&auth_url), "opening browser for PKCE login");
         if let Err(err) = open::that(&auth_url) {
             warn!(?err, "failed to open browser; user must navigate manually");
         }
@@ -1076,6 +1082,17 @@ async fn handle_callback_conn(
 /// keychain label. Truncating to 8 bytes is ample: this only has to distinguish the
 /// handful of tenants one operator uses, and a collision would merely reuse an entry
 /// the same way the old global name did.
+/// The scheme, host and path of `url`, with the query string and fragment removed.
+///
+/// Used for logging URLs whose query carries secrets. Deliberately textual rather
+/// than a `Url` parse: this must never fail or allocate its way into an error path,
+/// and truncating at the first `?` or `#` is exactly the guarantee needed — anything
+/// after either is dropped.
+fn url_without_query(url: &str) -> &str {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    &url[..end]
+}
+
 fn tenant_entry(prefix: &str, base_url: &str, client_id: Option<&str>) -> String {
     use std::fmt::Write as _;
 
@@ -1928,5 +1945,42 @@ mod tests {
         auth.logout().expect("sign out");
         assert!(!auth.is_authenticated());
         auth.logout().expect("signing out twice is not an error");
+    }
+    /// The authorize URL's query string carries the anti-CSRF `state`, the PKCE
+    /// `code_challenge` and the client id. Five analyzers in the 2026-08-20 review
+    /// converged on the single `debug!` that used to emit it whole — the highest
+    /// agreement in that run — because `state` is the only value distinguishing the
+    /// genuine redirect from any other local process hitting the callback port.
+    #[test]
+    fn logging_an_authorize_url_drops_everything_secret() {
+        let auth_url = "https://app.ninjarmm.com/ws/oauth/authorize?response_type=code\
+                        &client_id=abc123&state=super-secret-nonce\
+                        &code_challenge=Zm9vYmFy&redirect_uri=http%3A%2F%2F127.0.0.1%3A11434";
+        let logged = url_without_query(auth_url);
+
+        assert_eq!(logged, "https://app.ninjarmm.com/ws/oauth/authorize");
+        for secret in [
+            "state",
+            "super-secret-nonce",
+            "code_challenge",
+            "Zm9vYmFy",
+            "abc123",
+        ] {
+            assert!(
+                !logged.contains(secret),
+                "{secret} must not reach the log stream"
+            );
+        }
+    }
+
+    /// A URL with nothing to hide must survive intact, or the log stops being useful.
+    #[test]
+    fn a_url_without_a_query_is_unchanged() {
+        let plain = "https://app.ninjarmm.com/ws/oauth/authorize";
+        assert_eq!(url_without_query(plain), plain);
+        assert_eq!(
+            url_without_query("https://example.com/path#frag"),
+            "https://example.com/path"
+        );
     }
 }

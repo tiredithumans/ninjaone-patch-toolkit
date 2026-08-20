@@ -15,9 +15,21 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use state::AppState;
 
+/// Default log filter when `RUST_LOG` says nothing.
+///
+/// Debug for this crate in debug builds, `info` in release. It used to be debug in
+/// both, which made every debug event in the crate a *shipped* default — including
+/// ones whose arguments are only safe under a filter nobody had opted into. A
+/// released ops tool should not be more talkative than asked; `RUST_LOG` still turns
+/// everything back on for anyone diagnosing a problem.
+#[cfg(debug_assertions)]
+const DEFAULT_LOG_FILTER: &str = "info,ninjaone_patch_toolkit_lib=debug";
+#[cfg(not(debug_assertions))]
+const DEFAULT_LOG_FILTER: &str = "info";
+
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,ninjaone_patch_toolkit_lib=debug"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_target(false).compact())

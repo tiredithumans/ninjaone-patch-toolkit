@@ -11,6 +11,14 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Security
+
+- **The sign-in URL is no longer written to the log.** It carried the flow's anti-CSRF `state` value
+  — the one thing that distinguishes the real browser redirect from anything else reaching the
+  callback port — along with the PKCE challenge and the client id. Only the address is logged now.
+- **Release builds log at `info` by default** instead of debug. Set `RUST_LOG` to turn detailed
+  logging back on when diagnosing a problem.
+
 ### Fixed
 
 - **Signing out now reliably ends the session.** A fleet query can run for minutes, and one that was
