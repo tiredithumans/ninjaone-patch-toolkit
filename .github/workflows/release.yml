@@ -113,6 +113,21 @@ jobs:
       - name: verify
         run: just verify
 
+      # The screenshot tooling (scripts/) is exercised here and nowhere else.
+      # screenshot.yml runs the real capture, but only on `release: published` —
+      # i.e. after the release exists, where a failure is discovered too late to
+      # stop anything. This step is the same tool's unit test (browser-free, ~10s)
+      # run on the tagged commit *before* create-release, so a tool broken by a
+      # dependency bump refuses the release instead of silently failing to refresh
+      # the README image afterwards. That is not hypothetical: `selfsigned` 2 -> 5
+      # turned `generate` async, and the un-awaited call handed undefined key/cert
+      # to the HTTPS server.
+      #
+      # Deliberately not part of `just verify`: that recipe is the Rust gate and
+      # must not start requiring Node.
+      - name: screenshot tooling
+        run: just screenshot-test
+
   # Create the draft release ONCE, up front, so the per-OS build jobs all upload
   # into the same release instead of each running tauri-action's find-or-create
   # logic. With the matrix creating the release, parallel jobs raced: one job

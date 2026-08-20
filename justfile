@@ -112,7 +112,9 @@ icon:
 # Unit-test the screenshot tooling (scripts/*.test.mjs) — the TLS/static-server path
 # only, so it needs Node but no Chromium and no built dist, and runs in seconds. This
 # is what catches a dependency upgrade breaking the capture: `selfsigned` 2 -> 5 made
-# `generate` async, and nothing else in CI exercises this tool.
+# `generate` async. Run at release time (release.yml's verify job, which gates
+# create-release) and on demand here; deliberately NOT in `just verify`, which is the
+# Rust gate and must not start requiring Node.
 screenshot-test:
     npm --prefix scripts install --no-audit --no-fund
     npm --prefix scripts test

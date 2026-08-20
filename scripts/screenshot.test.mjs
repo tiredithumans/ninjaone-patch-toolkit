@@ -3,13 +3,15 @@
 // This exists because `selfsigned` 2 -> 5 turned `generate` into an async function
 // while leaving its resolved shape identical. The un-awaited call still "worked" —
 // it destructured a Promise, so key/cert were `undefined` and the HTTPS server was
-// built with no TLS material. Nothing caught it: no CI job ran this tooling, and
-// screenshot.yml only fires on release-published / workflow_dispatch, so the break
-// would have surfaced at the next release rather than on the PR that caused it.
+// built with no TLS material. Nothing caught it, because screenshot.yml only fires
+// on release-published / workflow_dispatch — after the release exists, where a
+// failure just means the README image quietly fails to refresh.
 //
-// Deliberately browser-free (no Playwright, no Chromium download, no built dist) so
-// it runs in seconds on every PR that touches scripts/. The full capture is smoke-
-// tested separately by the `Screenshot tooling` CI job, which runs the real script.
+// Runs in release.yml's `verify` job, which `create-release` needs: a tool broken by
+// a dependency bump therefore refuses the release. It does NOT run on PRs, so a break
+// reaches main green and is caught at tag time. Deliberately browser-free (no
+// Playwright, no Chromium download, no built dist) so it costs seconds in that gate;
+// the real capture is still exercised by screenshot.yml itself.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

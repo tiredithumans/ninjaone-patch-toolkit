@@ -99,7 +99,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 
 scripts/                         # dev/CI tooling (not shipped)
 ├── screenshot.mjs               # headless-Chromium capture of the web demo → docs/images/screenshot.png (Playwright)
-├── screenshot.test.mjs          # node:test guard for its TLS/static-server path (browser-free; `just screenshot-test`)
+├── screenshot.test.mjs          # node:test guard for its TLS/static-server path (browser-free; runs at release time)
 └── changelog-notes.sh           # prints one version's CHANGELOG section; the single source release.yml's guard + both notes steps call
 
 .github/workflows/               # ci.yml · codeql.yml · pages.yml · release.yml · screenshot.yml
@@ -819,18 +819,16 @@ each gate is also callable independently. Use the recipe flags from `/justfile`;
    `if: startsWith(github.ref, 'refs/tags/')` — i.e. after the tag and its irreversible release run
    have been pushed. The two crates share no workspace, so this is bumped by hand and the manifests
    co-change in ~23 of every 300 commits.
-10. **Screenshot tooling** *(CI; not yet a required check)* — `just screenshot-test` runs `scripts/*.test.mjs`
-    (node:test) over the capture tool's TLS/static-server path. Browser-free and seconds long, so
-    ci.yml's `Screenshot tooling` job runs it on **every** PR; the heavier `Screenshot capture
-    (end-to-end)` job builds the demo and drives real Chromium, gated on the tooling actually
-    changing (or the weekly cron, which catches upstream Playwright/Chromium drift). Neither is in
-    `just verify` — they need Node, which the Rust gates do not. This exists because `screenshot.yml`
-    only fires on `release: published` / `workflow_dispatch`, so nothing used to exercise this tool
-    until a release: `selfsigned` 2 → 5 turned `generate` async and the un-awaited call handed
-    `undefined` key/cert to the HTTPS server, which would have gone green through CI. Only
-    `Screenshot tooling` is safe to promote to a required check — it always runs. `Screenshot
-    capture` is `if`-gated, and a skipped job posts no check at all, so requiring it would leave
-    every unrelated PR pending forever (the same trap the `changes`/`backend` aggregation avoids).
+10. **Screenshot tooling** *(release-only)* — `just screenshot-test` runs `scripts/*.test.mjs`
+    (node:test) over the capture tool's TLS/static-server path: browser-free, no built dist,
+    seconds. It runs in **`release.yml`'s `verify` job only** — not in `ci.yml`, not in
+    `just verify` (which is the Rust gate and must not start requiring Node). Placed there because
+    `create-release` `needs:` that job, so a tool broken by a dependency bump refuses the release
+    rather than surfacing afterwards: `screenshot.yml` fires on `release: published`, i.e. once the
+    release already exists and a failure only means the README image silently fails to refresh.
+    That is the exact hole `selfsigned` 2 → 5 fell through — `generate` became async and the
+    un-awaited call handed `undefined` key/cert to the HTTPS server. The trade-off is deliberate:
+    a break now lands on `main` green and is caught at tag time instead of in review.
 11. **Release gate** *(GitHub-side)* — `release.yml`'s `verify` job runs `just verify` on the tagged
     commit and `create-release` `needs:` it, so a release cannot be cut from a commit that fails the
     gates. This is not redundant with `ci.yml`: a tag can point at any commit — one that never went
