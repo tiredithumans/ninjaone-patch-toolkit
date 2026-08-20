@@ -206,6 +206,17 @@ secrets are **not** stored there — see below).
   `UiError` serializes to `{ message }`, which the frontend renders in a toast (map errors with
   `.map_err(UiError::from)`). Must be in `generate_handler![]` **and** have an `invoke(...)` wrapper
   in `web-rs/src/api.rs`.
+  - **`async` is the default, not a requirement.** A handler that only reads or writes in-process
+    state and never `.await`s anything — `auth_status`, `list_jobs`, `clear_jobs`, the settings
+    getters, `list_node_classes` — is a plain `pub fn`, and 8 of the 25 handlers are. Making one
+    `async` to satisfy the shape buys nothing; making a handler that *does* I/O synchronous blocks a
+    runtime worker (see the `spawn_blocking` rule). The contract that always holds is the argument
+    order, the `Result<T, UiError>` return, and the two registrations.
+  - **A mutating handler must call `require_actions_enabled`.** It is a hand-placed call rather than
+    something the type system demands, so
+    `commands::actions::tests::every_mutating_command_checks_that_actions_are_enabled` derives the
+    command list from the source and fails if a new one skips it. Read-only handlers over local job
+    state are the documented exceptions and are named in that test.
 
 - **IPC arg shape — keys match Rust fn parameter names (camelCase).** The frontend wrapper builds an
   arg object whose keys equal the handler's parameter names. A handler taking `args: PatchQueryArgs`
@@ -332,13 +343,22 @@ secrets are **not** stored there — see below).
 
 - **CPU-bound and blocking work goes on `spawn_blocking`, never on a tokio worker.** A Tauri `async`
   command runs on the async runtime, so blocking there stalls unrelated IPC *and* the job poller —
-  `async` only buys you off the UI thread. Four places do real blocking work and all of them are
-  wrapped: `commands::patches::run_query`'s `assemble_result` (the scope→join→sort→rollup, seconds on
-  a large fleet with no `.await` in it), `commands::export`'s save dialog (`blocking_save_file` parks
-  until the operator picks a file) and its workbook/report writes, and `auth::store_tokens` (a
-  synchronous Keychain / Credential Manager / Secret Service call made while `refresh_lock` is held,
-  i.e. exactly when every other `access_token()` caller is queued behind it). Keep new work of either
-  kind off the runtime the same way.
+  `async` only buys you off the UI thread. That covers three kinds of work: seconds of CPU with no
+  `.await` in it (`commands::patches::run_query`'s `assemble_result` — the scope→join→sort→rollup),
+  synchronous filesystem I/O (`commands::export`'s workbook/report writes, `actions::audit`'s
+  append), and synchronous OS calls (`commands::export`'s `blocking_save_file`, which parks until the
+  operator picks a file; `auth::store_tokens`' keyring write, made while `refresh_lock` is held, i.e.
+  exactly when every other `access_token()` caller is queued behind it). **This list is illustrative,
+  not exhaustive** — do not read it as an inventory of everywhere the rule applies. It used to name
+  "four places … and all of them are wrapped", and that phrasing is precisely why four *more* blocking
+  sites read as compliant to every reviewer until they were measured: an audit write per device inside
+  the dispatch `JoinSet`, a whole-fleet sort permutation built inside a `std::sync::Mutex`, a keyring
+  read under the `AuthState` write guard, and an O(rows) deep copy of the result cache under the lock
+  the paging commands take. Judge new code against the rule, not against the examples.
+
+  A related rule for the same reason: **hold `AppState`'s result mutex for a handle, not for the
+  work.** `with_current_result` is for a cheap projection; anything that needs the whole result for
+  a while (export, the HTML report) takes `current_result_handle`, which is an `Arc` bump.
 
 - **`AppState` locks are brief — never held across `.await`.** `settings`/`last_result` are
   `std::sync::Mutex`. Take a `settings_snapshot()` (clone) before any `.await`; don't hold a guard

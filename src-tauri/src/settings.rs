@@ -161,8 +161,43 @@ impl Settings {
             return Ok(Self::default());
         }
         let text = fs::read_to_string(path).context("read settings")?;
-        let cfg: Settings = serde_json::from_str(&text).context("parse settings")?;
+        let mut cfg: Settings = serde_json::from_str(&text).context("parse settings")?;
+        cfg.enforce_https_instance();
         Ok(cfg)
+    }
+
+    /// Upgrades a non-loopback `http://` instance URL to `https://`.
+    ///
+    /// `save_settings` refuses plaintext at the IPC boundary, but nothing enforced it
+    /// on the *load* path — and `settings.json` is a plain file in the config
+    /// directory. A hand-edited or downgrade-written `http://` host therefore
+    /// survived a restart and every token request, refresh grant and API call for
+    /// that session went out in cleartext, carrying the bearer token and, on the
+    /// token endpoint, the client secret.
+    ///
+    /// Upgrading rather than rejecting keeps the operator's configured host: the
+    /// alternative is resetting them to the default instance, which loses the very
+    /// setting they are most likely to have deliberately changed. Loopback is left
+    /// alone — it is what a local mock server uses, and `require_https_instance`
+    /// permits it for the same reason.
+    fn enforce_https_instance(&mut self) {
+        let Ok(parsed) = url::Url::parse(&self.instance_base_url) else {
+            return;
+        };
+        if parsed.scheme() != "http" {
+            return;
+        }
+        let host = parsed.host_str().unwrap_or_default();
+        if matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+            return;
+        }
+        let upgraded = self.instance_base_url.replacen("http://", "https://", 1);
+        tracing::warn!(
+            from = %self.instance_base_url,
+            to = %upgraded,
+            "settings.json specified a plaintext instance URL; upgrading to https so credentials are not sent in the clear"
+        );
+        self.instance_base_url = upgraded;
     }
 
     pub fn save(&self) -> Result<()> {
@@ -320,5 +355,37 @@ mod tests {
         assert_eq!(loaded.actions.run_as, DEFAULT_RUN_AS);
         assert!(!loaded.actions.allow_offline_targets);
         let _ = fs::remove_file(&path);
+    }
+    /// `save_settings` refuses plaintext at the IPC boundary, but settings.json is a
+    /// plain file in the config directory: a hand-edited `http://` host used to
+    /// survive a restart, and then every token request, refresh grant and API call
+    /// for that session went out in the clear carrying the bearer token — and, on the
+    /// token endpoint, the client secret.
+    #[test]
+    fn a_plaintext_instance_url_is_upgraded_on_load() {
+        let mut cfg = Settings {
+            instance_base_url: "http://app.ninjarmm.com".into(),
+            ..Settings::default()
+        };
+        cfg.enforce_https_instance();
+        assert_eq!(cfg.instance_base_url, "https://app.ninjarmm.com");
+    }
+
+    /// Loopback is what a local mock server uses, and `require_https_instance`
+    /// permits it for the same reason — upgrading it would break that setup.
+    #[test]
+    fn a_loopback_instance_url_is_left_alone() {
+        for url in [
+            "http://127.0.0.1:8080",
+            "http://localhost:3000",
+            "https://app.ninjarmm.com",
+        ] {
+            let mut cfg = Settings {
+                instance_base_url: url.into(),
+                ..Settings::default()
+            };
+            cfg.enforce_https_instance();
+            assert_eq!(cfg.instance_base_url, url, "{url} must be preserved");
+        }
     }
 }

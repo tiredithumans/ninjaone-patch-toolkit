@@ -13,41 +13,6 @@ version and start a fresh `[Unreleased]`.
 
 ### Security
 
-- **Script credentials passed as a flag and a value are now redacted from the action audit log.**
-  Only `password=secret` was caught; `-Password secret` — the PowerShell and CLI convention — went
-  to disk in cleartext.
-- **Exported workbooks and HTML reports are created readable by you only** (on macOS and Linux),
-  matching what the action audit log already does. They carry the same fleet data — device names,
-  organizations, compliance posture — and were previously written with default permissions.
-
-### Security
-
-- **The sign-in URL is no longer written to the log.** It carried the flow's anti-CSRF `state` value
-  — the one thing that distinguishes the real browser redirect from anything else reaching the
-  callback port — along with the PKCE challenge and the client id. Only the address is logged now.
-- **Release builds log at `info` by default** instead of debug. Set `RUST_LOG` to turn detailed
-  logging back on when diagnosing a problem.
-
-### Fixed
-
-- **An action approval no longer survives an instance switch.** The confirmation dialog binds the
-  approval to the exact devices, patches and options you approved, but not to the NinjaOne instance.
-  Changing instance in Settings while the dialog was open let the approval dispatch against the new
-  one, on devices you never saw. The approval is now refused instead.
-- **Patch state refreshes correctly after every action.** The rule for which caches to drop was
-  written twice and the two copies disagreed: an apply could leave "needs reboot" stale for up to
-  15 minutes, while a scan — which changes nothing — forced a full device refetch.
-- **The Jobs tab and audit log now name the script an "Apply selected patches" action ran.** They
-  previously recorded only the action name, and the script is configured in Settings, so there was
-  no way to tell which one had run.
-
-### Changed
-
-- **Job polling is faster with many actions in flight.** Each pending job's status was fetched one
-  after another, so a tick took as long as the sum of them all; they now run together.
-
-### Fixed
-
 - **Signing out now reliably ends the session.** A fleet query can run for minutes, and one that was
   still fetching when you signed out used to write its rows back into the cache *after* the sign-out
   cleared it — leaving the previous operator's patch rows readable, pageable and exportable by
@@ -61,10 +26,43 @@ version and start a fresh `[Unreleased]`.
 - **Sign-out reports a failure instead of claiming success** when the stored refresh token could not
   be deleted. It previously always reported a clean sign-out, so a credential left on disk was
   invisible — and the next sign-in would silently reuse it.
+- **The sign-in URL is no longer written to the log.** It carried the flow's anti-CSRF `state` value
+  — the one thing that distinguishes the real browser redirect from anything else reaching the
+  callback port — along with the PKCE challenge and the client id. Only the address is logged now.
+- **A plaintext `http://` instance URL in `settings.json` is now upgraded to `https://` on load.**
+  The Settings screen already refused one, but nothing enforced it when reading the file back, so a
+  hand-edited value survived a restart and sent the access token — and the client secret — in the
+  clear.
+- **An action approval no longer survives an instance switch.** The confirmation dialog binds the
+  approval to the exact devices, patches and options you approved, but not to the NinjaOne instance.
+  Changing instance in Settings while the dialog was open let the approval dispatch against the new
+  one, on devices you never saw. The approval is now refused instead.
+- **Script credentials passed as a flag and a value are now redacted from the action audit log.**
+  Only `password=secret` was caught; `-Password secret` — the PowerShell and CLI convention — went
+  to disk in cleartext.
+- **Exported workbooks and HTML reports are created readable by you only** (on macOS and Linux),
+  matching what the action audit log already does. They carry the same fleet data — device names,
+  organizations, compliance posture — and were previously written with default permissions.
+- **Release builds log at `info` by default** instead of debug. Set `RUST_LOG` to turn detailed
+  logging back on when diagnosing a problem.
+
+### Fixed
+
 - **Changing the instance while signing in no longer files the credentials under the wrong tenant.**
   A sign-in waits up to three minutes for the browser; switching instance in Settings during that
   window used to store the tokens the *old* instance issued under the *new* instance's name. Such a
   grant is now discarded with an explanation.
+- **Patch state refreshes correctly after every action.** The rule for which caches to drop was
+  written twice and the two copies disagreed: an apply could leave "needs reboot" stale for up to
+  15 minutes, while a scan — which changes nothing — forced a full device refetch.
+- **The Jobs tab and audit log now name the script an "Apply selected patches" action ran.** They
+  previously recorded only the action name, and the script is configured in Settings, so there was
+  no way to tell which one had run.
+- **Failed-patch queries no longer drop install records that omit their own status.** They were
+  labelled as installed and then filtered out, so the Failures view could silently under-report.
+- **Running a query with no status selected now explains itself** instead of starting a full fleet
+  fetch that could only ever return an empty table.
+
 ### Changed
 
 - **Exports no longer freeze the patch table.** Saving a workbook or an HTML report used to copy the
@@ -75,6 +73,9 @@ version and start a fresh `[Unreleased]`.
   per patch record, and the action audit log is written once per batch off the async runtime rather
   than reopened once per device. Saving settings no longer blocks in-flight API calls behind an OS
   keyring read.
+- **Job polling is faster with many actions in flight.** Each pending job's status was fetched one
+  after another, so a tick took as long as the sum of them all; they now run together.
+- **The patch table re-renders more cheaply**, copying each visible row once instead of twice.
 
 ## [0.13.0] - 2026-08-15
 

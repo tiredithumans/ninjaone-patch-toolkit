@@ -23,6 +23,17 @@ impl From<anyhow::Error> for UiError {
     }
 }
 
+/// The result cache's poisoning error, which every read site had been translating
+/// with the same copy-pasted `.map_err(|_| UiError::new("result cache poisoned"))` —
+/// five verbatim copies of one message, so a reword had to find all five.
+impl From<crate::state::CachePoisoned> for UiError {
+    fn from(_: crate::state::CachePoisoned) -> Self {
+        Self::new(
+            "The result cache is unusable after an internal error. Restart the app to run queries again.",
+        )
+    }
+}
+
 impl std::fmt::Display for UiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)

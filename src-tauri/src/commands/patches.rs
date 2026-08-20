@@ -90,6 +90,16 @@ pub async fn query_patches(
     query_id: Option<u64>,
     force_refresh: Option<bool>,
 ) -> Result<QuerySummary, UiError> {
+    // Re-checked backend-side even though the UI cannot produce it: an empty status
+    // list can only ever return an empty table, and reaching the fetch anyway starts
+    // the most expensive thing this app does — a whole-fleet inventory sweep plus, on
+    // a cold cache, a six-figure third-party patch feed. A stale or hand-built
+    // frontend payload must not be able to ask for that.
+    if args.statuses.is_empty() {
+        return Err(UiError::new(
+            "Select at least one patch status before running a query.",
+        ));
+    }
     let settings = state.settings_snapshot();
     // Claimed before any fetch so overlapping queries are ordered by *start*, and so
     // the result is stamped with the tenant it was actually fetched under. Redeemed
@@ -505,17 +515,27 @@ fn assemble_result(
         if plan.want_installs {
             // The install endpoints return both successful and failed records, so
             // narrow each to the requested install statuses; the override labels a
-            // record that omits its own status (defaulting it to INSTALLED).
+            // record that omits its own status.
+            //
+            // That label is the pushed-down status when there is one. `status` is not
+            // required on an install record, and hardcoding INSTALLED meant that on a
+            // FAILED-only query — where the server has already filtered to failures —
+            // an untyped record was labelled INSTALLED and then dropped by the
+            // client-side FAILED backstop. The failure dashboard silently lost rows,
+            // and the wiremock fixtures always set an explicit status, so nothing
+            // caught it. With both statuses requested nothing has been narrowed, so
+            // INSTALLED stays the default.
+            let install_label = plan.install_status.unwrap_or("INSTALLED");
             sources.push(PatchSource {
                 patches: &os_install_refs,
                 type_label: "OS",
-                status_override: Some("INSTALLED"),
+                status_override: Some(install_label),
                 status_filter: Some(&plan.install_status_set),
             });
             sources.push(PatchSource {
                 patches: &sw_install_refs,
                 type_label: "SOFTWARE",
-                status_override: Some("INSTALLED"),
+                status_override: Some(install_label),
                 status_filter: Some(&plan.install_status_set),
             });
         }
@@ -615,7 +635,7 @@ pub async fn get_patch_rows(
     let limit = clamp_page(limit);
     let rows = state
         .with_sorted_result(sort, |rows, order| page_rows(rows, order, offset, limit))
-        .map_err(|_| UiError::new("result cache poisoned"))?
+        .map_err(UiError::from)?
         .unwrap_or_default();
     Ok(rows)
 }
@@ -640,7 +660,7 @@ pub async fn get_patch_groups(
     let limit = clamp_page(limit);
     let page = state
         .with_grouped_result(group_by, |all| slice_groups(all, offset, limit))
-        .map_err(|_| UiError::new("result cache poisoned"))?
+        .map_err(UiError::from)?
         .unwrap_or_default();
     Ok(page)
 }
@@ -660,7 +680,7 @@ pub async fn get_patch_group_members(
         .with_current_result(|r| {
             group_member_page(&r.rows, group_by, &key, offset, clamp_page(limit))
         })
-        .map_err(|_| UiError::new("result cache poisoned"))?
+        .map_err(UiError::from)?
         .unwrap_or_default();
     Ok(rows)
 }
@@ -1385,5 +1405,66 @@ mod tests {
         );
         assert_eq!(&*result.compliance[0].organization, "Alpha");
         assert_eq!(result.compliance[0].pending_critical, 1);
+    }
+    /// `status` is not required on an install record. Under the single-status
+    /// pushdown the server has already filtered, so labelling an untyped record
+    /// INSTALLED on a FAILED-only query meant the client-side FAILED backstop then
+    /// dropped it — the failure dashboard silently lost rows, and the wiremock
+    /// fixtures always set an explicit status so nothing caught it.
+    #[test]
+    fn an_untyped_install_record_takes_the_pushed_down_status() {
+        let failed_only = QueryPlan::build(
+            args(PatchType::All, vec![PatchStatus::Failed]),
+            30,
+            Utc::now(),
+        );
+        assert_eq!(
+            failed_only.install_status,
+            Some("FAILED"),
+            "a single install status is pushed to the server"
+        );
+
+        let installed_only = QueryPlan::build(
+            args(PatchType::All, vec![PatchStatus::Installed]),
+            30,
+            Utc::now(),
+        );
+        assert_eq!(installed_only.install_status, Some("INSTALLED"));
+
+        // With both requested nothing is narrowed, so the label falls back and the
+        // client-side set does the filtering.
+        let both = QueryPlan::build(
+            args(
+                PatchType::All,
+                vec![PatchStatus::Installed, PatchStatus::Failed],
+            ),
+            30,
+            Utc::now(),
+        );
+        assert_eq!(both.install_status, None);
+        assert_eq!(
+            both.install_status.unwrap_or("INSTALLED"),
+            "INSTALLED",
+            "the fallback is what assemble_result applies"
+        );
+    }
+
+    /// The paging surface had no test at all despite 700+ test lines in this file,
+    /// and `MAX_PAGE_LIMIT` is the only thing standing between a hand-built IPC
+    /// payload and a request for the whole fleet in one page.
+    #[test]
+    fn the_page_limit_is_capped() {
+        // 0 is passed through, not rebased: an empty window returns no rows, which is
+        // harmless and is exactly what the caller asked for. The cap is the point.
+        assert_eq!(clamp_page(0), 0);
+        assert_eq!(clamp_page(50), 50);
+        assert_eq!(clamp_page(FIRST_PAGE_ROWS), FIRST_PAGE_ROWS);
+        assert_eq!(clamp_page(MAX_PAGE_LIMIT), MAX_PAGE_LIMIT);
+        assert_eq!(
+            clamp_page(MAX_PAGE_LIMIT + 1),
+            MAX_PAGE_LIMIT,
+            "a caller cannot ask for more than the cap"
+        );
+        assert_eq!(clamp_page(usize::MAX), MAX_PAGE_LIMIT);
     }
 }
