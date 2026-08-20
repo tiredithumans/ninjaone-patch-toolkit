@@ -63,3 +63,24 @@ updates:
         update-types:
           - minor
           - patch
+
+  # The headless-screenshot tooling (scripts/) — a dev/CI tool, never shipped with
+  # the app, but screenshot.yml runs it on every published release to refresh the
+  # README image. It was missing from this file until now, so its two packages
+  # drifted unwatched: `selfsigned` fell four majors behind and had turned
+  # `generate` async, which would have broken the capture at runtime.
+  #
+  # scripts/package-lock.json is gitignored, so there is no lockfile to update —
+  # the versions are exact pins in package.json and Dependabot rewrites those.
+  - package-ecosystem: npm
+    directory: /scripts
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch

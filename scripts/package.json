@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Headless capture of the web demo for the README. Dev/CI tool only — not shipped with the app.",
   "scripts": {
-    "screenshot": "node screenshot.mjs"
+    "screenshot": "node screenshot.mjs",
+    "test": "node --test \"*.test.mjs\""
   },
   "devDependencies": {
     "playwright": "1.62.1",

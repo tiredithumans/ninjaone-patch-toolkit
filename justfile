@@ -109,6 +109,14 @@ build:
 icon:
     cargo tauri icon src-tauri/icons/icon.png
 
+# Unit-test the screenshot tooling (scripts/*.test.mjs) — the TLS/static-server path
+# only, so it needs Node but no Chromium and no built dist, and runs in seconds. This
+# is what catches a dependency upgrade breaking the capture: `selfsigned` 2 -> 5 made
+# `generate` async, and nothing else in CI exercises this tool.
+screenshot-test:
+    npm --prefix scripts install --no-audit --no-fund
+    npm --prefix scripts test
+
 # Regenerate the README demo screenshot (docs/images/screenshot.png) by driving the
 # built web demo in headless Chromium. Needs Node; first run installs Playwright +
 # its Chromium under scripts/ (both gitignored). CI runs the same via screenshot.yml.

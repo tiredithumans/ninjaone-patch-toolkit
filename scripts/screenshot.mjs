@@ -21,6 +21,7 @@
 import { createServer } from "node:https";
 import { readFile, readdir } from "node:fs/promises";
 import { join, extname, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import selfsigned from "selfsigned";
 
@@ -52,7 +53,7 @@ const MIME = {
 // on-disk file. The request path then only ever indexes this map — it's never joined
 // into a filesystem path and never reaches the response body — so a crafted path can
 // neither escape DIST nor reflect request input back into the served HTML.
-async function collectAssets(dir, root = dir, out = new Map()) {
+export async function collectAssets(dir, root = dir, out = new Map()) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const abs = join(dir, entry.name);
     if (entry.isDirectory()) await collectAssets(abs, root, out);
@@ -66,9 +67,9 @@ async function collectAssets(dir, root = dir, out = new Map()) {
 // single-page app loads. TLS uses a throwaway self-signed cert (regenerated per run)
 // so the transport is never cleartext, even on 127.0.0.1; Chromium is told to accept
 // the self-signed cert below. Skipped when SCREENSHOT_URL is set.
-async function withServer(fn) {
+export async function withServer(fn, distRoot = DIST_ROOT) {
   if (REMOTE) return fn(REMOTE);
-  const assets = await collectAssets(DIST_ROOT);
+  const assets = await collectAssets(distRoot);
   // selfsigned v5 made `generate` async; the result shape is unchanged.
   const { private: key, cert } = await selfsigned.generate(
     [{ name: "commonName", value: "localhost" }],
@@ -76,7 +77,7 @@ async function withServer(fn) {
   );
   const server = createServer({ key, cert }, async (req, res) => {
     const sendIndex = async () => {
-      const body = await readFile(join(DIST, "index.html"));
+      const body = await readFile(join(distRoot, "index.html"));
       res.writeHead(200, {
         "Content-Type": MIME[".html"],
         "X-Content-Type-Options": "nosniff",
@@ -117,7 +118,9 @@ async function withServer(fn) {
   }
 }
 
-await withServer(async (url) => {
+// Drives the served demo and writes the PNG. Exported alongside the helpers so the
+// module can be imported (by screenshot.test.mjs) without capturing anything.
+export async function capture(url) {
   // --no-sandbox keeps Chromium's own sandbox from clashing with restricted CI /
   // container environments; the page we load is our own local build.
   // SCREENSHOT_CHROMIUM lets a caller point at an already-installed full Chromium
@@ -150,4 +153,11 @@ await withServer(async (url) => {
   } finally {
     await browser.close();
   }
-});
+}
+
+// Only capture when run as a program (`node scripts/screenshot.mjs`). Importing the
+// module — which the tests do, to exercise the TLS/static-server path without a
+// browser — must not launch Chromium or overwrite the committed PNG.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await withServer(capture);
+}
