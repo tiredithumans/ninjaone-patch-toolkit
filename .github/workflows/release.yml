@@ -5,8 +5,14 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Workflow-level default is the *narrowest* that works; the two jobs that actually
+# publish raise it themselves. `guard` and `verify` only read the repo — and `verify`
+# compiles 596 backend + 185 frontend dependencies, whose build scripts and
+# proc-macros execute arbitrary code at compile time. Handing that a token which can
+# push to the repository is the one avoidable part. pages.yml in this repo already
+# models the same per-job pattern.
 permissions:
-  contents: write
+  contents: read
 
 # Two tags pushed close together must not race on which assets attach to which
 # draft — queue them instead. Never cancel: a half-cancelled release run is
@@ -18,6 +24,9 @@ concurrency:
 jobs:
   guard:
     name: Guard tag matches manifests
+    # Reads the repo and compares three manifests against the tag. Nothing else.
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,6 +89,11 @@ jobs:
   verify:
     name: Verify (gates the release)
     runs-on: ubuntu-latest
+    # Read-only on purpose: this job compiles the full dependency tree, and a
+    # build script or proc-macro anywhere in it runs arbitrary code. It has no
+    # reason to hold a token that can write to the repository.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -139,6 +153,9 @@ jobs:
     name: Create draft release
     needs: [guard, verify]
     runs-on: ubuntu-latest
+    # Creates the draft release the build jobs upload into.
+    permissions:
+      contents: write
     if: startsWith(github.ref, 'refs/tags/')
     outputs:
       release_id: ${{ steps.create.outputs.result }}
@@ -151,16 +168,7 @@ jobs:
       - name: Extract changelog notes
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          notes=$(scripts/changelog-notes.sh "$version")
-          if [ -z "$(printf %s "$notes" | tr -d '[:space:]')" ]; then
-            notes="See the release notes on GitHub for what's new in v$version."
-          fi
-          {
-            echo "RELEASE_NOTES<<__CHANGELOG_EOF__"
-            echo "$notes"
-            echo "__CHANGELOG_EOF__"
-          } >> "$GITHUB_ENV"
+          scripts/changelog-notes.sh --github-env "${GITHUB_REF_NAME#v}"
 
       - name: Create draft release
         id: create
@@ -183,6 +191,9 @@ jobs:
     name: Build bundles (${{ matrix.os }})
     needs: create-release
     runs-on: ${{ matrix.os }}
+    # Uploads bundles, signatures and latest.json entries to the draft release.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       # Serialize the OS builds. Each job uploads into the shared draft and, for
@@ -237,16 +248,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          notes=$(scripts/changelog-notes.sh "$version")
-          if [ -z "$(printf %s "$notes" | tr -d '[:space:]')" ]; then
-            notes="See the release notes on GitHub for what's new in v$version."
-          fi
-          {
-            echo "RELEASE_NOTES<<__CHANGELOG_EOF__"
-            echo "$notes"
-            echo "__CHANGELOG_EOF__"
-          } >> "$GITHUB_ENV"
+          scripts/changelog-notes.sh --github-env "${GITHUB_REF_NAME#v}"
 
       # tauri-action builds the frontend (beforeBuildCommand = trunk build),
       # bundles per-OS, signs the updater artifacts with the minisign key, and

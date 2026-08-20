@@ -115,8 +115,15 @@ icon:
 # `generate` async. Run at release time (release.yml's verify job, which gates
 # create-release) and on demand here; deliberately NOT in `just verify`, which is the
 # Rust gate and must not start requiring Node.
+# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: playwright's postinstall pulls a full Chromium,
+# which this suite never launches — it is the browser-free half. Without it, the step
+# that GATES create-release spent minutes downloading a browser to run tests measured
+# in seconds. `screenshot` below sets it too and then installs Chromium explicitly.
+# `npm ci` not `npm install`: it installs exactly the committed lockfile and fails if
+# package.json and the lock disagree, so CI cannot silently resolve a different
+# transitive tree than the one dependabot reviews.
 screenshot-test:
-    npm --prefix scripts install --no-audit --no-fund
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix scripts ci --no-audit --no-fund
     npm --prefix scripts test
 
 # Regenerate the README demo screenshot (docs/images/screenshot.png) by driving the
@@ -124,7 +131,7 @@ screenshot-test:
 # its Chromium under scripts/ (both gitignored). CI runs the same via screenshot.yml.
 screenshot:
     just web-build
-    npm --prefix scripts install --no-audit --no-fund
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix scripts ci --no-audit --no-fund
     cd scripts && npx playwright install chromium
     node scripts/screenshot.mjs
 
