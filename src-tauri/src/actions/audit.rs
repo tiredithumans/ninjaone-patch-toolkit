@@ -70,14 +70,40 @@ pub fn redact_parameters(parameters: &str) -> String {
     // record is evidence of what was dispatched, not a byte-exact replay of it, and
     // the alternative is carrying separators through just to reproduce spacing that
     // NinjaOne collapses anyway.
-    parameters
-        .split_whitespace()
-        .map(|token| match token.split_once('=') {
-            Some((key, _)) if is_sensitive(key) => format!("{key}=<redacted>"),
-            _ => token.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    //
+    // Two shapes, because scripts take parameters in both. `-Password hunter2` is
+    // the PowerShell/CLI convention and is at least as common here as `key=value`;
+    // it used to pass straight through, since neither token contains an `=` and so
+    // neither could ever match. The module doc claims a script's service password
+    // does not reach disk in cleartext, and for that shape it did.
+    let mut out: Vec<String> = Vec::new();
+    let mut redact_next = false;
+    for token in parameters.split_whitespace() {
+        if redact_next {
+            redact_next = false;
+            // Only a *value* is swallowed. `-Password -Verbose` means the flag was
+            // given no value, and blanking the following flag would both lose
+            // evidence and misrepresent what ran.
+            if !is_flag(token) {
+                out.push("<redacted>".into());
+                continue;
+            }
+        }
+        match token.split_once('=') {
+            Some((key, _)) if is_sensitive(key) => out.push(format!("{key}=<redacted>")),
+            _ => {
+                redact_next = is_flag(token) && is_sensitive(token);
+                out.push(token.to_string());
+            }
+        }
+    }
+    out.join(" ")
+}
+
+/// Whether `token` is a flag rather than a value: `-Password`, `--api-key`, or the
+/// `/Password` form Windows tooling uses.
+fn is_flag(token: &str) -> bool {
+    token.starts_with('-') || token.starts_with('/')
 }
 
 fn is_sensitive(key: &str) -> bool {
@@ -320,5 +346,42 @@ mod tests {
 
         assert!(!path.exists(), "no entries means no file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// `-Password hunter2` — the PowerShell/CLI convention — carries the credential
+    /// in the *next* token, so neither half contains an `=` and neither could ever
+    /// match. It went to disk verbatim, contradicting this module's own doc comment.
+    #[test]
+    fn a_credential_passed_as_a_separate_flag_value_is_redacted() {
+        for flag in ["-Password", "--api-key", "/Secret", "-Token"] {
+            let redacted = redact_parameters(&format!("-Verbose {flag} hunter2 -Force"));
+            assert!(
+                !redacted.contains("hunter2"),
+                "{flag} left the credential in: {redacted}"
+            );
+            assert!(
+                redacted.contains("<redacted>"),
+                "{flag} should mark the value: {redacted}"
+            );
+            // Everything that is not the credential survives.
+            assert!(redacted.starts_with("-Verbose "), "{redacted}");
+            assert!(redacted.ends_with("-Force"), "{redacted}");
+        }
+    }
+
+    /// A sensitive flag given no value must not swallow the next flag: that loses
+    /// evidence and misrepresents what actually ran.
+    #[test]
+    fn a_valueless_sensitive_flag_does_not_swallow_the_next_flag() {
+        assert_eq!(
+            redact_parameters("-Password -Verbose"),
+            "-Password -Verbose"
+        );
+    }
+
+    /// Ordinary flags must not trigger it, or the audit trail redacts itself away.
+    #[test]
+    fn ordinary_flag_values_pass_through() {
+        let params = "-Path C:/temp -Retries 3 -Force";
+        assert_eq!(redact_parameters(params), params);
     }
 }

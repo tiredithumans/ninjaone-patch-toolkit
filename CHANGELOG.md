@@ -13,6 +13,15 @@ version and start a fresh `[Unreleased]`.
 
 ### Security
 
+- **Script credentials passed as a flag and a value are now redacted from the action audit log.**
+  Only `password=secret` was caught; `-Password secret` — the PowerShell and CLI convention — went
+  to disk in cleartext.
+- **Exported workbooks and HTML reports are created readable by you only** (on macOS and Linux),
+  matching what the action audit log already does. They carry the same fleet data — device names,
+  organizations, compliance posture — and were previously written with default permissions.
+
+### Security
+
 - **The sign-in URL is no longer written to the log.** It carried the flow's anti-CSRF `state` value
   — the one thing that distinguishes the real browser redirect from anything else reaching the
   callback port — along with the PKCE challenge and the client id. Only the address is logged now.

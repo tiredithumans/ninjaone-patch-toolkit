@@ -36,6 +36,37 @@ fn cached_result(state: &AppState) -> Result<Arc<QueryResult>, UiError> {
         .ok_or_else(|| UiError::new("Run a query before exporting."))
 }
 
+/// Restricts an exported file to its owner, matching what the action audit log
+/// already does and for the same reason.
+///
+/// A workbook or report carries the same category of data the audit log's own
+/// comment calls out — device names, organizations, compliance posture for a whole
+/// fleet — but they were written at the default umask, so on a shared or
+/// roaming-profile machine they landed group/world-readable. Applied after the write
+/// rather than through `OpenOptions`, because `rust_xlsxwriter` owns its own file
+/// handle.
+///
+/// Best-effort: a failure here means the export still succeeded, and refusing to
+/// hand the operator the file they asked for because its mode could not be narrowed
+/// would be the wrong trade. Non-unix targets have no equivalent, so this is a no-op
+/// there — Windows inherits the parent directory's ACL, which is already per-user
+/// under the profile.
+fn restrict_to_owner(path: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(err) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(
+                ?err,
+                path,
+                "could not restrict the exported file to its owner"
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 /// The default file name for an export, stamped so successive exports don't
 /// silently overwrite each other.
 fn default_name(stem: &str, ext: &str) -> String {
@@ -132,6 +163,7 @@ pub async fn export_patches_xlsx(
     .await
     .map_err(|e| UiError::new(format!("export task failed: {e}")))?
     .map_err(UiError::from)?;
+    restrict_to_owner(&path_str);
     Ok(Some(path_str))
 }
 
@@ -165,6 +197,7 @@ pub async fn export_report_html(
     .await
     .map_err(|e| UiError::new(format!("report task failed: {e}")))?
     .map_err(|e| UiError::new(format!("write report: {e}")))?;
+    restrict_to_owner(&path_str);
     Ok(Some(path_str))
 }
 
@@ -187,5 +220,89 @@ mod tests {
             html.starts_with("ninjaone-report-") && html.ends_with(".html"),
             "{html}"
         );
+    }
+    /// An export carries a whole fleet's device names, organizations and compliance
+    /// posture — the same category the audit log sets 0600 for, with a comment about
+    /// roaming profiles. These were written at the default umask.
+    #[cfg(unix)]
+    #[test]
+    fn an_exported_file_is_restricted_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = std::env::temp_dir().join(format!("njp-export-{}.xlsx", std::process::id()));
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, b"not really a workbook").expect("seed the file");
+
+        restrict_to_owner(&path_str);
+
+        let mode = std::fs::metadata(&path)
+            .expect("exists")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "exports must not be group/world readable"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Best-effort by design: an export that succeeded must not be reported as failed
+    /// because its mode could not be narrowed.
+    #[test]
+    fn restricting_a_missing_file_is_not_fatal() {
+        restrict_to_owner("/definitely/not/a/real/path/export.xlsx");
+    }
+
+    /// Both exports read the same cache, and both must refuse rather than write an
+    /// empty file when no query has run. `require_cached_result` is the probe that
+    /// runs *before* the save dialog, so the operator is not asked to pick a
+    /// destination for a file that cannot be produced.
+    #[test]
+    fn exporting_before_any_query_is_refused() {
+        let state = AppState::new().expect("build state");
+
+        let err = require_cached_result(&state).expect_err("nothing has been queried yet");
+        assert!(
+            err.message.contains("Run a query"),
+            "the message must say what to do: {}",
+            err.message
+        );
+        assert!(
+            cached_result(&state).is_err(),
+            "and the handle path must refuse too, not hand back an empty result"
+        );
+    }
+
+    /// With a result cached for this tenant, both paths succeed — the refusal above
+    /// must be about the empty cache and nothing else.
+    #[test]
+    fn exporting_after_a_query_finds_the_cached_result() {
+        let state = AppState::new().expect("build state");
+        state.store_last_result_if_current(state.begin_query(), sample_result());
+
+        require_cached_result(&state).expect("a cached result satisfies the probe");
+        let handle = cached_result(&state).expect("and the handle resolves");
+        assert_eq!(handle.rows.len(), 0);
+    }
+
+    fn sample_result() -> QueryResult {
+        QueryResult {
+            rows: Vec::new(),
+            devices: Vec::new(),
+            compliance: Vec::new(),
+            compliance_by_os: Vec::new(),
+            failures: Vec::new(),
+            severity_by_org: Vec::new(),
+            age_buckets: Vec::new(),
+            devices_total: 0,
+            devices_offline: 0,
+            patch_families: crate::rows::PatchFamilies {
+                os: true,
+                software: true,
+            },
+            generated_at: "2026-01-01 00:00:00 UTC".into(),
+            data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
+        }
     }
 }
