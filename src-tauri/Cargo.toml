@@ -50,7 +50,7 @@ rand = "0.10"
 # the reporting feeds are six-figure row counts of repetitive JSON, and reqwest
 # only sends `Accept-Encoding` when the feature is compiled in.
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "rustls", "charset", "http2", "system-proxy", "gzip"] }
-rust_xlsxwriter = "0.98"
+rust_xlsxwriter = "0.99"
 serde = { version = "1.0", features = ["derive"] }
 # `raw_value` lets the paginated fetchers look at the `{ results, cursor }` wrapper
 # without parsing the rows inside it, so a six-figure patch feed is deserialized
