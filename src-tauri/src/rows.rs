@@ -12,8 +12,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::filter::PreparedFilter;
-use crate::model::{Device, Location, Organization, Patch, PatchRow, Role, Severity};
+use crate::filter::{FilterParams, PreparedFilter};
+use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus, Role, Severity};
 
 /// Placeholder for a name the join could not resolve — an orphan device, a device
 /// reporting no OS, or a patch whose organization is not in the lookups.
@@ -379,6 +379,34 @@ fn is_aged(p: &Patch, sla_cutoff: DateTime<Utc>) -> bool {
     p.first_seen_at().map(|r| r < sla_cutoff).unwrap_or(true)
 }
 
+/// The device a fleet-health rollup should attribute a patch to, or `None` when the
+/// patch falls outside the population every one of those rollups describes: the
+/// device must be in the scoped inventory **and** online.
+///
+/// One predicate for compliance, the severity breakdown and the age histogram, so
+/// they cannot describe three different populations of the same fleet. They did:
+/// only [`accumulate_compliance`] applied this, so a report whose header states
+/// "Compliance covers online devices only (N offline devices excluded)" printed
+/// those very devices' backlog in the severity and age charts directly beneath the
+/// sentence — the gap being exactly the excluded population, and invisible. The
+/// inventory half matters for the same reason: an orphan patch (no matching device,
+/// which only survives scoping when no identity facet is active) used to open its
+/// own `(unknown)` organization in the severity breakdown while compliance dropped
+/// it, so the two disagreed about how many organizations the fleet even had.
+///
+/// An offline device can't apply patches and reports no current patch records, so a
+/// zero pending count says nothing about its compliance: it is excluded from the
+/// denominator rather than scored compliant and inflating the headline metric.
+fn rollup_device<'a>(
+    devices_by_id: &HashMap<i64, &'a Device>,
+    device_id: Option<i64>,
+) -> Option<&'a Device> {
+    devices_by_id
+        .get(&device_id?)
+        .copied()
+        .filter(|d| !d.is_offline())
+}
+
 /// The body shared by [`build_compliance`] and [`build_compliance_by_os`], which
 /// differ only in what they group by.
 ///
@@ -400,22 +428,9 @@ fn accumulate_compliance<'a>(
 ) -> HashMap<String, ComplianceAcc> {
     let mut by_key: HashMap<String, ComplianceAcc> = HashMap::new();
 
-    // One rule for who is in this rollup at all, applied to *both* halves below.
-    // An offline device can't apply patches and reports no current patch records, so
-    // a zero pending count says nothing about its compliance: it is excluded from the
-    // denominator rather than scored compliant and inflating the headline metric.
-    //
-    // The patch half used to skip this check, which made a bucket describe two
-    // different device populations at once — an org whose devices were all offline
-    // reported "100% compliant" (no devices in the denominator, and an empty bucket
-    // is 100%) beside a four-figure pending-critical count drawn from those same
-    // excluded devices. Same for a patch whose device isn't in the scoped inventory
-    // at all: it used to open its own `(unknown)` bucket with zero devices in it.
-    let counted = |device_id: Option<i64>| -> bool {
-        device_id
-            .and_then(|id| devices_by_id.get(&id))
-            .is_some_and(|d| !d.is_offline())
-    };
+    // [`rollup_device`] is the one rule for who is in this rollup at all, applied to
+    // *both* halves below.
+    let counted = |device_id: Option<i64>| rollup_device(devices_by_id, device_id).is_some();
 
     for s in summaries {
         if !counted(Some(s.device_id)) {
@@ -434,11 +449,13 @@ fn accumulate_compliance<'a>(
 
     let sla_cutoff = now - Duration::days(sla_days);
     for p in current_patches {
-        if !counts_toward_backlog(p) || !counted(p.device_id) {
+        let Some(device) = rollup_device(devices_by_id, p.device_id) else {
+            continue;
+        };
+        if !counts_toward_backlog(p) {
             continue;
         }
-        let device = p.device_id.and_then(|id| devices_by_id.get(&id)).copied();
-        let key = patch_key(device);
+        let key = patch_key(Some(device));
         let acc = match by_key.get_mut(key.as_ref()) {
             Some(acc) => acc,
             None => by_key.entry(key.into_owned()).or_default(),
@@ -906,11 +923,14 @@ pub fn build_severity_by_org(
         if !is_pending(p.status.as_deref()) {
             continue;
         }
-        let org = p
-            .device_id
-            .and_then(|id| devices_by_id.get(&id))
-            .map(|d| maps.org_name_str(d.organization_id))
-            .unwrap_or(UNKNOWN_LABEL);
+        // The same population the compliance rollups describe — see
+        // [`rollup_device`]. This breakdown is charted directly beneath compliance in
+        // the HTML report, so counting a wider set here made the two sections
+        // disagree about the fleet without saying so.
+        let Some(device) = rollup_device(devices_by_id, p.device_id) else {
+            continue;
+        };
+        let org = maps.org_name_str(device.organization_id);
         let counts = by_org.entry(org).or_default();
         match p.severity_enum() {
             Severity::Critical => counts.critical += 1,
@@ -958,10 +978,19 @@ const AGE_BUCKET_UNKNOWN: usize = 5;
 /// Builds the pending-patch age histogram from how long NinjaOne has been reporting
 /// each pending patch (see [`Patch::collected_timestamp`] — the API exposes no
 /// release date, so this measures detection age, not time-since-publication).
-pub fn build_age_buckets(current_patches: &[&Patch], now: DateTime<Utc>) -> Vec<AgeBucket> {
+///
+/// Over the same population as every other fleet-health rollup ([`rollup_device`]),
+/// which is why it needs the device inventory at all: it used to take only the
+/// patches, so it was the one rollup that structurally *could not* apply the
+/// exclusion the others do.
+pub fn build_age_buckets(
+    current_patches: &[&Patch],
+    devices_by_id: &HashMap<i64, &Device>,
+    now: DateTime<Utc>,
+) -> Vec<AgeBucket> {
     let mut counts = [0usize; 6];
     for p in current_patches {
-        if !is_pending(p.status.as_deref()) {
+        if !is_pending(p.status.as_deref()) || rollup_device(devices_by_id, p.device_id).is_none() {
             continue;
         }
         let idx = match p.first_seen_at() {
@@ -1042,6 +1071,148 @@ pub fn compliance_scope_note(devices_offline: usize, families: PatchFamilies) ->
     format!("Compliance covers online devices only{excluded}{families}.")
 }
 
+/// The facets that produced a result, resolved to the names the operator chose them
+/// by — the provenance block both exports print.
+///
+/// Derived backend-side from the `QueryPlan` the fetch actually ran under, **not**
+/// taken from the request or from the frontend's `AppliedFilters` chip row. Those
+/// describe what was *selected*; this describes what the query *did*, which is the
+/// distinction that matters once a workbook has been emailed to someone who never
+/// saw the app. It is the same rule the write path follows for the same reason: the
+/// backend re-derives rather than trusting a caller's description of its own request.
+///
+/// Carried on [`QueryResult`] **only**, deliberately not on [`QuerySummary`]: the
+/// frontend already has `AppliedFilters` (a Run-time snapshot with its own chip
+/// rendering), so shipping a second copy over IPC would add a wire field with no
+/// reader and a second thing to keep in step.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryScope {
+    /// `(facet, value)` in display order. Never empty — the patch type and the
+    /// status selection always apply.
+    pub facets: Vec<(&'static str, String)>,
+}
+
+/// Renders one id facet as a comma-separated name list.
+///
+/// An id the lookups can't resolve prints as `id 42` rather than the rows'
+/// `(unknown)`: two unresolved ids would otherwise render as `(unknown), (unknown)`,
+/// which says neither how many were selected nor which.
+fn id_facet(ids: &[i64], names: &HashMap<i64, String>) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    let mut out: Vec<String> = ids
+        .iter()
+        .map(|id| names.get(id).cloned().unwrap_or_else(|| format!("id {id}")))
+        .collect();
+    out.sort_by(|a, b| cmp_ci(a, b));
+    Some(out.join(", "))
+}
+
+/// Builds the provenance block from the plan a query ran under.
+///
+/// `install_history_after` is `Some` only when the status selection actually reached
+/// the `*-patch-installs` endpoints; printing a lookback window on a Pending-only
+/// query would describe a fetch that never happened.
+pub fn build_query_scope(
+    filter: &FilterParams,
+    maps: &LookupMaps,
+    families: PatchFamilies,
+    statuses: &[PatchStatus],
+    install_history_after: Option<i64>,
+) -> QueryScope {
+    let mut facets: Vec<(&'static str, String)> = Vec::new();
+
+    let organizations = id_facet(&filter.organization_ids, &maps.orgs);
+    let locations = id_facet(&filter.location_ids, &maps.locations);
+    let roles = id_facet(&filter.role_ids, &maps.roles);
+    let os_types = (!filter.node_classes.is_empty()).then(|| filter.node_classes.join(", "));
+    let severities = (!filter.severities.is_empty()).then(|| filter.severities.join(", "));
+    // Absolute bounds, because a report is read long after the day it was run:
+    // "the last 30 days" silently re-anchors to whenever the reader happens to
+    // look, while a timestamp does not. The relative window rides along in
+    // parentheses when that is what the operator picked, so the line still matches
+    // the control they used.
+    // `from_timestamp` rather than `model::unix_to_datetime`: these three bounds are
+    // composed backend-side as Unix *seconds* (`QueryPlan::build`), never read off a
+    // NinjaOne record, so the millisecond normalization that helper exists for
+    // cannot apply here.
+    let stamp = |ts: i64| {
+        DateTime::<Utc>::from_timestamp(ts, 0).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+    };
+    let detected_after =
+        filter
+            .detected_after
+            .and_then(stamp)
+            .map(|when| match filter.detected_within_days {
+                Some(days) => format!("{when} (last {days} days)"),
+                None => when,
+            });
+    let detected_before = filter.detected_before.and_then(stamp);
+
+    // Stated rather than left to inference: on a printed artifact the absence of
+    // narrowing lines is indistinguishable from a renderer that dropped them.
+    let narrowed = [
+        &organizations,
+        &locations,
+        &roles,
+        &os_types,
+        &severities,
+        &detected_after,
+        &detected_before,
+        &filter.os_name_contains,
+        &filter.search,
+    ]
+    .iter()
+    .any(|f| f.is_some());
+    if !narrowed {
+        facets.push((
+            "Scope",
+            "Whole fleet \u{2014} no device or patch filters applied".to_string(),
+        ));
+    }
+
+    for (label, value) in [
+        ("Organizations", organizations),
+        ("Locations", locations),
+        ("Device roles", roles),
+        ("OS type", os_types),
+        ("OS name contains", filter.os_name_contains.clone()),
+    ] {
+        if let Some(value) = value {
+            facets.push((label, value));
+        }
+    }
+
+    facets.push(("Patch type", families.label().to_string()));
+    facets.push((
+        "Status",
+        statuses
+            .iter()
+            .map(|s| s.label())
+            .collect::<Vec<_>>()
+            .join(", "),
+    ));
+
+    for (label, value) in [
+        ("Severity", severities),
+        ("Search", filter.search.clone()),
+        ("First seen after", detected_after),
+        ("First seen before", detected_before),
+        (
+            "Install history since",
+            install_history_after.and_then(stamp),
+        ),
+    ] {
+        if let Some(value) = value {
+            facets.push((label, value));
+        }
+    }
+
+    QueryScope { facets }
+}
+
 /// The full result of a patch query. Cached in `AppState.last_result` and read by
 /// the Excel exporter; **not** sent wholesale over IPC — the frontend gets a
 /// [`QuerySummary`] and pages the detail rows on demand via `get_patch_rows`.
@@ -1080,6 +1251,9 @@ pub struct QueryResult {
     /// on such a query, which is a defensible reading but not one the operator can
     /// infer from a bare percentage. Reported so every surface can name its scope.
     pub patch_families: PatchFamilies,
+    /// The facets this result was computed under, for the exports' provenance block.
+    /// `QueryResult`-only on purpose — see [`QueryScope`].
+    pub scope: QueryScope,
     /// When the query was computed (the join/rollup clock).
     pub generated_at: String,
     /// When the underlying whole-fleet patch data was last fetched from NinjaOne —
@@ -2044,7 +2218,10 @@ mod tests {
         assert_eq!(buckets[0].devices_compliant, 0);
         assert_eq!(buckets[0].pending_critical, 1);
         // 90 days old → the "61-90 days" bucket.
-        assert_eq!(build_age_buckets(&refs(&current), Utc::now())[2].count, 1);
+        assert_eq!(
+            build_age_buckets(&refs(&current), &by_id, Utc::now())[2].count,
+            1
+        );
     }
 
     /// Rounding must never manufacture a clean fleet.
@@ -2156,6 +2333,7 @@ mod tests {
                 os: true,
                 software: true,
             },
+            scope: Default::default(),
             generated_at: "2026-01-01 00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00 UTC".into(),
         };
@@ -2217,6 +2395,7 @@ mod tests {
                 os: true,
                 software: true,
             },
+            scope: Default::default(),
             generated_at: "2026-01-01 00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00 UTC".into(),
         };
@@ -2486,6 +2665,7 @@ mod tests {
                 os: true,
                 software: true,
             },
+            scope: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         };
@@ -2960,6 +3140,199 @@ mod tests {
         assert_eq!(groups[1].affected_devices, 1);
     }
 
+    fn scope_filter() -> FilterParams {
+        FilterParams {
+            organization_ids: Vec::new(),
+            location_ids: Vec::new(),
+            role_ids: Vec::new(),
+            node_classes: Vec::new(),
+            os_name_contains: None,
+            search: None,
+            severities: Vec::new(),
+            detected_within_days: None,
+            detected_after: None,
+            detected_before: None,
+        }
+    }
+
+    const BOTH_FAMILIES: PatchFamilies = PatchFamilies {
+        os: true,
+        software: true,
+    };
+
+    fn facet<'a>(scope: &'a QueryScope, label: &str) -> Option<&'a str> {
+        scope
+            .facets
+            .iter()
+            .find(|(l, _)| *l == label)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// An unfiltered export must *say* it is unfiltered. On a printed artifact the
+    /// absence of narrowing lines is indistinguishable from a renderer that dropped
+    /// them, and the two readings differ by the whole fleet.
+    #[test]
+    fn an_unnarrowed_query_states_that_it_covers_the_whole_fleet() {
+        let scope = build_query_scope(
+            &scope_filter(),
+            &maps(),
+            BOTH_FAMILIES,
+            &[PatchStatus::Pending],
+            None,
+        );
+        assert_eq!(
+            facet(&scope, "Scope"),
+            Some("Whole fleet \u{2014} no device or patch filters applied")
+        );
+        // The two facets that always apply are still stated.
+        assert_eq!(
+            facet(&scope, "Patch type"),
+            Some("OS and third-party patches")
+        );
+        assert_eq!(facet(&scope, "Status"), Some("Pending"));
+        assert_eq!(
+            facet(&scope, "Install history since"),
+            None,
+            "a Pending-only query never reached the history endpoints"
+        );
+    }
+
+    /// Ids resolve to the names the operator picked them by, and an id the lookups
+    /// can't resolve prints as `id N` — two unresolved ids rendering as
+    /// "(unknown), (unknown)" would say neither how many were selected nor which.
+    #[test]
+    fn the_scope_block_names_every_active_facet() {
+        let mut filter = scope_filter();
+        filter.organization_ids = vec![10, 77];
+        filter.location_ids = vec![100];
+        filter.role_ids = vec![2];
+        filter.node_classes = vec!["WINDOWS_SERVER".into()];
+        filter.os_name_contains = Some("Server 2019".into());
+        filter.severities = vec!["CRITICAL".into(), "IMPORTANT".into()];
+        filter.search = Some("KB5040434".into());
+        filter.detected_within_days = Some(30);
+        filter.detected_after = Some(1_777_000_000);
+        filter.detected_before = Some(1_779_000_000);
+
+        let scope = build_query_scope(
+            &filter,
+            &maps(),
+            PatchFamilies {
+                os: true,
+                software: false,
+            },
+            &[PatchStatus::Pending, PatchStatus::Failed],
+            Some(1_776_000_000),
+        );
+
+        assert_eq!(facet(&scope, "Scope"), None, "something was narrowed");
+        assert_eq!(facet(&scope, "Organizations"), Some("Contoso, id 77"));
+        assert_eq!(facet(&scope, "Locations"), Some("HQ"));
+        assert_eq!(facet(&scope, "Device roles"), Some("Domain Controller"));
+        assert_eq!(facet(&scope, "OS type"), Some("WINDOWS_SERVER"));
+        assert_eq!(facet(&scope, "OS name contains"), Some("Server 2019"));
+        assert_eq!(facet(&scope, "Patch type"), Some("OS patches only"));
+        assert_eq!(facet(&scope, "Status"), Some("Pending, Failed"));
+        assert_eq!(facet(&scope, "Severity"), Some("CRITICAL, IMPORTANT"));
+        assert_eq!(facet(&scope, "Search"), Some("KB5040434"));
+        // Absolute, so it still means the same thing when the report is read months
+        // later; the relative window the operator picked rides along in parentheses.
+        assert_eq!(
+            facet(&scope, "First seen after"),
+            Some("2026-04-24 03:06 UTC (last 30 days)")
+        );
+        assert_eq!(
+            facet(&scope, "First seen before"),
+            Some("2026-05-17 06:40 UTC")
+        );
+        assert_eq!(
+            facet(&scope, "Install history since"),
+            Some("2026-04-12 13:20 UTC")
+        );
+    }
+
+    /// A window entered as an absolute date carries no "(last N days)" tail — that
+    /// parenthetical describes the control the operator used, not the bound.
+    #[test]
+    fn an_absolute_first_seen_bound_is_not_labelled_as_a_relative_window() {
+        let mut filter = scope_filter();
+        filter.detected_after = Some(1_777_000_000);
+        let scope = build_query_scope(
+            &filter,
+            &maps(),
+            BOTH_FAMILIES,
+            &[PatchStatus::Pending],
+            None,
+        );
+        assert_eq!(
+            facet(&scope, "First seen after"),
+            Some("2026-04-24 03:06 UTC")
+        );
+    }
+
+    /// Every fleet-health rollup describes one population. The HTML report prints
+    /// the compliance sections and these two charts in sequence under a header
+    /// stating "Compliance covers online devices only (N offline devices excluded)",
+    /// so a rollup that counts a wider set makes that sentence false for part of its
+    /// own document — and the gap is exactly the excluded backlog, which is the one
+    /// thing a reader cannot recover from the numbers on the page.
+    #[test]
+    fn severity_and_age_rollups_cover_the_same_devices_compliance_does() {
+        let online = device(1, 10, "Windows Server 2022");
+        let mut offline = device(2, 10, "Windows Server 2022");
+        offline.offline = Some(true);
+        let devices = [online, offline];
+        let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+        let maps = maps();
+
+        // One pending Critical on the online device; three on the offline one, plus
+        // an orphan with no device in inventory at all.
+        let mut orphan = patch(1, "MANUAL", "CRITICAL", Some(5));
+        orphan.device_id = Some(999);
+        let current = vec![
+            patch(1, "MANUAL", "CRITICAL", Some(5)),
+            patch(2, "MANUAL", "CRITICAL", Some(5)),
+            patch(2, "MANUAL", "CRITICAL", Some(5)),
+            patch(2, "MANUAL", "CRITICAL", Some(5)),
+            orphan,
+        ];
+        let current = refs(&current);
+
+        let counts = pending_counts(&current);
+        let summaries = build_device_summaries(&devices.iter().collect::<Vec<_>>(), &counts, &maps);
+        let compliance = build_compliance(&summaries, &current, &by_id, &maps, 30, Utc::now());
+        let severity = build_severity_by_org(&current, &by_id, &maps);
+        let age = build_age_buckets(&current, &by_id, Utc::now());
+
+        assert_eq!(
+            compliance.len(),
+            1,
+            "one organization, not an (unknown) too"
+        );
+        assert_eq!(
+            compliance[0].devices_total, 1,
+            "the offline device is excluded"
+        );
+        assert_eq!(compliance[0].pending_critical, 1, "and so is its backlog");
+
+        let severity_total: usize = severity.iter().map(|o| o.counts.total()).sum();
+        assert_eq!(
+            severity_total, compliance[0].pending_critical,
+            "the severity breakdown counted the devices compliance excluded"
+        );
+        assert_eq!(
+            severity.len(),
+            1,
+            "an orphan patch must not open its own (unknown) organization here \
+             when compliance drops it"
+        );
+        let age_total: usize = age.iter().map(|b| b.count).sum();
+        assert_eq!(
+            age_total, compliance[0].pending_critical,
+            "the age histogram counted them too"
+        );
+    }
+
     #[test]
     fn build_severity_by_org_buckets_pending_patches() {
         let d1 = device(1, 10, "Windows Server 2022");
@@ -2980,6 +3353,8 @@ mod tests {
 
     #[test]
     fn build_age_buckets_separate_undated_patches_from_genuinely_old_ones() {
+        let d = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d)]);
         let mut undated = patch(1, "MANUAL", "CRITICAL", Some(5));
         undated.collected_timestamp = None;
         let current = vec![
@@ -2988,7 +3363,7 @@ mod tests {
             undated,
             patch(1, "INSTALLED", "CRITICAL", Some(5)), // not pending → ignored
         ];
-        let buckets = build_age_buckets(&refs(&current), Utc::now());
+        let buckets = build_age_buckets(&refs(&current), &by_id, Utc::now());
         assert_eq!(buckets.len(), 6, "five age bands plus the undated bucket");
         assert_eq!(buckets[0].count, 1, "0-30 bucket");
         // The undated patch must NOT inflate 180+: folding it in made the tallest,
@@ -3039,7 +3414,11 @@ mod tests {
             "SeverityCounts",
         );
 
-        let buckets = build_age_buckets(&[&patch(1, "MANUAL", "CRITICAL", Some(1))], Utc::now());
+        let buckets = build_age_buckets(
+            &[&patch(1, "MANUAL", "CRITICAL", Some(1))],
+            &by_id,
+            Utc::now(),
+        );
         assert_keys_present(
             &serde_json::to_value(&buckets[0]).unwrap(),
             &["label", "count"],

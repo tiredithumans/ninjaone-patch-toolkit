@@ -8,7 +8,7 @@ use std::fmt::Write;
 
 use crate::rows::{
     AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, OrgSeverity, OsCompliance,
-    QueryResult, SeverityCounts, TableCell, TableColumn,
+    QueryResult, QueryScope, SeverityCounts, TableCell, TableColumn,
 };
 
 /// At most this many table rows are rendered per section; a fleet-scale failure or
@@ -100,10 +100,19 @@ pub fn render_report(result: &QueryResult) -> String {
     buf.push_str("</style></head><body>");
 
     let generated = escape_html(&result.generated_at);
+    // Both clocks, because they differ and the difference changes what the report
+    // means. `generated_at` is when the join and rollups ran; `data_fetched_at` is
+    // when the fleet data last came from NinjaOne, and a re-filter recomputes over a
+    // warm cache with no round trip — so a report can be stamped *now* over data
+    // that is much older. The in-app UI says "patch data as of …" for exactly this
+    // reason; a printed report, which outlives the session and is read by people who
+    // never saw the app, needs it more.
+    let fetched = escape_html(&result.data_fetched_at);
     let _ = write!(
         buf,
         "<header><h1>NinjaOne Patch Compliance Report</h1>\
          <p class=\"meta\">Generated {generated} \u{00b7} {devices} devices \u{00b7} {rows} patch rows</p>\
+         <p class=\"meta\">Patch data fetched from NinjaOne {fetched}</p>\
          </header>",
         devices = result.devices_total,
         rows = result.rows.len()
@@ -117,6 +126,7 @@ pub fn render_report(result: &QueryResult) -> String {
             result.patch_families
         ))
     );
+    write_scope(&mut buf, &result.scope);
 
     buf.push_str("<section><h2>Compliance by organization</h2>");
     write_compliance_chart(&mut buf, &result.compliance);
@@ -147,6 +157,29 @@ pub fn render_report(result: &QueryResult) -> String {
          Print to PDF to share.</footer></body></html>",
     );
     buf
+}
+
+/// Renders the facets the query ran under as a label/value list under the header.
+///
+/// Without it two reports off the same fleet — one scoped to a single organization
+/// and CRITICAL-only, one unfiltered — are indistinguishable once printed, while
+/// every number in them describes a different population. Values are escaped like
+/// every other piece of NinjaOne (and operator) text on the page: an organization
+/// name and a free-text search both land here verbatim.
+fn write_scope(buf: &mut String, scope: &QueryScope) {
+    if scope.facets.is_empty() {
+        return;
+    }
+    buf.push_str("<dl class=\"scope\">");
+    for (label, value) in &scope.facets {
+        let _ = write!(
+            buf,
+            "<dt>{}</dt><dd>{}</dd>",
+            escape_html(label),
+            escape_html(value)
+        );
+    }
+    buf.push_str("</dl>");
 }
 
 /// Renders a horizontal compliance-bar SVG from `(label, pct)` rows — shared by the
@@ -384,6 +417,10 @@ max-width:900px;margin:0 auto;padding:32px;line-height:1.4}\
 header{border-bottom:2px solid #1f2a37;padding-bottom:12px;margin-bottom:8px}\
 h1{font-size:22px;margin:0 0 4px}\
 .meta{color:#6b7280;font-size:13px;margin:0}\
+.scope{display:grid;grid-template-columns:max-content 1fr;gap:2px 14px;\
+margin:10px 0 0;font-size:12px;page-break-inside:avoid}\
+.scope dt{color:#6b7280}\
+.scope dd{margin:0;color:#374151}\
 section{margin:24px 0;page-break-inside:avoid}\
 h2{font-size:16px;border-left:4px solid #1f2a37;padding-left:8px;margin:0 0 12px}\
 table{border-collapse:collapse;width:100%;font-size:13px}\
@@ -404,6 +441,51 @@ footer{margin-top:32px;color:#9ca3af;font-size:11px;border-top:1px solid #e5e7eb
 mod tests {
     use super::*;
     use crate::rows::PatchFamilies;
+
+    /// A report is printed, emailed and read months later by people who never saw
+    /// the app. `generated_at` is the join clock, not the data clock — a re-filter
+    /// recomputes over a warm cache — so the header has to carry both or it dates
+    /// the fleet to the moment someone pressed a button.
+    #[test]
+    fn the_header_states_when_the_patch_data_was_fetched() {
+        let mut result = sample_result();
+        result.generated_at = "2026-05-02 09:15:00 UTC".into();
+        result.data_fetched_at = "2026-05-02 08:40:00 UTC".into();
+        let html = render_report(&result);
+        assert!(
+            html.contains("Generated 2026-05-02 09:15:00 UTC"),
+            "the join clock is still stated"
+        );
+        assert!(
+            html.contains("Patch data fetched from NinjaOne 2026-05-02 08:40:00 UTC"),
+            "and the data clock beside it"
+        );
+    }
+
+    /// Two reports off the same fleet under different filters must not be
+    /// indistinguishable once printed — every number in them describes a different
+    /// population. Operator- and NinjaOne-supplied text lands here verbatim, so it
+    /// is escaped like everything else on the page.
+    #[test]
+    fn the_header_lists_the_facets_the_query_ran_under() {
+        let mut result = sample_result();
+        result.scope = QueryScope {
+            facets: vec![
+                ("Organizations", "Contoso & Co".to_string()),
+                ("Patch type", "OS patches only".to_string()),
+                ("Status", "Pending, Failed".to_string()),
+                ("Search", "<script>".to_string()),
+            ],
+        };
+        let html = render_report(&result);
+        assert!(html.contains("<dt>Organizations</dt><dd>Contoso &amp; Co</dd>"));
+        assert!(html.contains("<dt>Patch type</dt><dd>OS patches only</dd>"));
+        assert!(html.contains("<dt>Status</dt><dd>Pending, Failed</dd>"));
+        assert!(
+            html.contains("<dd>&lt;script&gt;</dd>") && !html.contains("<dd><script></dd>"),
+            "a free-text search reaches the page verbatim and must be escaped"
+        );
+    }
 
     /// The HTML report and the Excel workbook render the same `FailureGroup` list,
     /// so they must agree on the columns. They previously did not: the workbook had
@@ -671,6 +753,7 @@ mod tests {
                 os: true,
                 software: true,
             },
+            scope: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }
@@ -721,6 +804,7 @@ mod tests {
                 os: true,
                 software: true,
             },
+            scope: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         };
