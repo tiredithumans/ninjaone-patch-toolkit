@@ -1203,8 +1203,28 @@ impl AppState {
         // the honest end of the same rule `query_patches` enforces for a query that
         // spans the switch.
         if v.tenant_changed {
-            self.clear_results();
+            self.clear_session();
+            // The scope ids belong to the previous tenant's lookups. Left in place
+            // they narrowed the next query to organizations that do not exist here,
+            // and the chips could only name them as "(not found)".
+            self.filters.org_ids.set(Vec::new());
+            self.filters.loc_ids.set(Vec::new());
+            self.filters.role_ids.set(Vec::new());
         }
+    }
+
+    /// Everything the backend drops on sign-out, sign-in, re-authorization and a
+    /// tenant switch (`commands::auth::clear_session_state`): the cached result
+    /// *and* the job store *and* any pending confirmation. The frontend used to
+    /// refresh only the auth badge, so the table, the selection and the Jobs list
+    /// stayed rendered over a cache that was already gone — the next page came back
+    /// blank under "Rows 101–200 of N", and Export said "Run a query before
+    /// exporting" beside a visible table.
+    pub(super) fn clear_session(self) {
+        self.clear_results();
+        self.actions.jobs.set(Vec::new());
+        self.actions.pending.set(None);
+        self.actions.confirm_input.set(String::new());
     }
 
     /// Drops everything derived from the last query: the summary, the current page,
@@ -1506,7 +1526,11 @@ impl AppState {
         };
         let mut request = pending.request;
         request.confirm_token = pending.plan.confirm_token.clone();
-        let mutating = request.kind.is_mutating();
+        // A dry run changes nothing on the device, so the results on screen are not
+        // stale after it. `dry_run` defaults on, so without this every default
+        // "Preview on N devices" raised the amber banner and its Refresh link forced
+        // a whole-fleet refetch for nothing.
+        let mutating = request.kind.is_mutating() && !request.dry_run;
 
         self.actions.dispatching.set(true);
         spawn_local(async move {

@@ -38,6 +38,22 @@ version and start a fresh `[Unreleased]`.
   narrow those numbers (only the patch families the query fetched are in them), and the banner on
   the tab said so while the chip above it said "Ignored on this tab". The Type control also stays
   visible in the Filters panel on those tabs instead of being folded away with the row-only filters.
+- **Signing out no longer leaves the previous session's results on screen.** The rows, selection
+  and job list stayed rendered after Sign out (and after a fresh sign-in or Re-authorize) while the
+  app had already dropped the data behind them, so the next page came back blank and Export
+  complained there was nothing to export beside a visible table. A tenant switch now also clears the
+  job list and the organization/location/role scope, which belonged to the previous tenant.
+- **A dry run no longer flags the results as stale.** Previewing an action with "Dry run" ticked
+  (the default) raised the "An action was dispatched — these results predate it" banner and its
+  Refresh link forced a whole-fleet refetch, although nothing on any device had changed.
+- **"Re-authorize" is available wherever the read-only sign-in is reported.** The link lived only in
+  the action bar, which appears only once a query has returned rows; the Settings hint told the
+  operator to click a button that was not on the panel. It now appears in Settings, in the Jobs
+  tab's note and in the action bar.
+- **A scope that names an organization, location or role the app cannot find is shown as such.**
+  A preset whose organization has since been deleted, or a scope carried across a tenant switch,
+  used to produce zero rows under a chip row reading "No filters — whole fleet". Unresolved ids now
+  appear as "#4711 (not found)" in the chips and the scope pickers.
 - **The install-history lookback is enforced on the app's side as well as the server's.** The
   exports say "Install history since <date>", so a record NinjaOne returned from outside that window
   is now dropped rather than trusted into the Failures table.

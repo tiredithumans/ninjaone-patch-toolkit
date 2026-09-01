@@ -246,37 +246,55 @@ pub(crate) fn ActionBar() -> impl IntoView {
             <Show when=move || blocked().is_some()>
                 <p class="action-bar-blocked" role="note">
                     {move || blocked().unwrap_or_default()}
-                    <Show when=move || {
-                        state
-                            .session
-                            .auth
-                            .with(|a| {
-                                a.as_ref().is_some_and(|a| a.authenticated && a.actions_enabled
-                                    && !a.write_enabled)
-                            })
-                    }>
-                        <button
-                            class="link-btn"
-                            on:click=move |_| {
-                                leptos::task::spawn_local(async move {
-                                    match api::reauthorize().await {
-                                        Ok(()) => {
-                                            // Storing the fresh status is enough —
-                                            // the blocked reason derives from it.
-                                            state.session.refresh_auth();
-                                            state.notify(Toast::ok("Re-authorized"));
-                                        }
-                                        Err(e) => state.notify(Toast::err(e)),
-                                    }
-                                });
-                            }
-                        >
-                            "Re-authorize"
-                        </button>
-                    </Show>
+                    <ReauthorizeLink/>
                 </p>
             </Show>
         </div>
+    }
+}
+
+/// The one way out of a read-only grant once actions are enabled: a fresh OAuth
+/// consent that requests the `management` scope. Renders nothing unless that is
+/// the situation.
+///
+/// Rendered wherever the read-only verdict is stated — the action bar, the Jobs
+/// tab's blocked note and the Settings hint that tells the operator to
+/// "Re-authorize". It used to exist only in the action bar, which sits inside the
+/// Patches table and renders only once a query has returned rows, so an operator
+/// who enabled actions and read "read-only sign-in — Re-authorize…" had nowhere to
+/// click until a populated query ran.
+#[component]
+pub(crate) fn ReauthorizeLink() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let needed = move || {
+        state.session.auth.with(|a| {
+            a.as_ref()
+                .is_some_and(|a| a.authenticated && a.actions_enabled && !a.write_enabled)
+        })
+    };
+    view! {
+        <Show when=needed>
+            <button
+                class="link-btn"
+                on:click=move |_| {
+                    leptos::task::spawn_local(async move {
+                        match api::reauthorize().await {
+                            Ok(()) => {
+                                // The backend dropped the session's result and
+                                // jobs for the fresh grant; storing the new status
+                                // is what clears the blocked reason.
+                                state.clear_session();
+                                state.session.refresh_auth();
+                                state.notify(Toast::ok("Re-authorized"));
+                            }
+                            Err(e) => state.notify(Toast::err(e)),
+                        }
+                    });
+                }
+            >
+                "Re-authorize"
+            </button>
+        </Show>
     }
 }
 
@@ -725,6 +743,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
             <Show when=move || state.blocked_reason().is_some()>
                 <p class="empty" role="note">
                     {move || state.blocked_reason().unwrap_or_default()}
+                    <ReauthorizeLink/>
                 </p>
             </Show>
 

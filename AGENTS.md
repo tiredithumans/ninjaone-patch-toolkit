@@ -259,10 +259,15 @@ secrets are **not** stored there — see below).
     never bumps it, so returning the summary painted the previous tenant's rows over the new tenant's
     empty cache while paging and export read the miss. Keep the rule: return a summary only when the
     rows behind it are readable.
-  - **A tenant switch also clears the frontend.** `save_settings` reports `tenant_changed` on its
-    `SettingsView` (both halves of the tenant key — instance *and* client id), and
-    `apply_settings_view` calls `clear_results()`. Without it the previous tenant's rows stayed
-    rendered against a cache that had already been dropped — the same divergence one layer up.
+  - **A tenant switch, a sign-out, a sign-in and a re-authorization all clear the frontend.**
+    `save_settings` reports `tenant_changed` on its `SettingsView` (both halves of the tenant key —
+    instance *and* client id), and `apply_settings_view` calls `clear_session()` and resets the
+    org/location/role scope ids (they belong to the previous tenant's lookups). `clear_session`
+    drops everything `commands::auth::clear_session_state` drops backend-side — the result, the
+    job list and any pending confirmation — and the sign-in, sign-out and Re-authorize handlers
+    call it too. Without it the previous session's rows stayed rendered against a cache that had
+    already been dropped: Next page came back blank under "Rows 101–200 of N" and Export said "Run
+    a query before exporting" beside a visible table — the same divergence one layer up.
   - **The three paging commands all return empty on a cache miss**, never an error. A miss is a
     normal transient (tenant switch, sign-out, superseded query); the frontend already renders its
     own empty state from the absent result.
@@ -501,7 +506,10 @@ secrets are **not** stored there — see below).
   - **After a mutating action, call `invalidate_current_patches()`** (and
     `invalidate_fleet_devices()` after a reboot) — `clear_lookups_cache()` is too blunt, and
     the 120 s current-patch TTL would otherwise serve pre-action data. `last_result` is
-    deliberately *not* dropped; the frontend raises a stale-results banner instead.
+    deliberately *not* dropped; the frontend raises a stale-results banner instead. **A dry run
+    does neither**: `invalidate_after` takes `dry_run` and returns early, and `confirm_plan` sets
+    `results_stale` only for a non-dry-run mutating kind — `dry_run` defaults on, so every default
+    preview used to raise the banner and its Refresh link forced a whole-fleet refetch.
   - **Job state is tenant-stamped** in `AppState.jobs`, mirroring `last_result` — a tenant
     switch reads as a miss. The poller is single-claim (`try_claim_job_poller`) and emits
     `action:progress` (no capability change needed; `core:event:default` already covers it).
