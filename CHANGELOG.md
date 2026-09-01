@@ -11,6 +11,38 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-09-01
+
+### Fixed
+
+- **The exported report's severity and age charts now describe the same fleet as its compliance
+  sections.** Compliance deliberately excludes offline devices — they report no current patch
+  records, so a zero pending count says nothing about them — and the report says so in its header.
+  The "Pending patches by severity" and "Pending patch age" charts did not apply that exclusion, so
+  they silently counted the excluded devices' backlog directly beneath the sentence promising they
+  had been left out, and the difference was invisible on the page. Patches belonging to a device
+  that is not in the scoped inventory at all no longer open their own `(unknown)` organization in
+  the severity breakdown either. The same correction applies to the in-app Compliance charts, which
+  are computed from the same rollups.
+
+### Added
+
+- **Both exports now state when their patch data was fetched**, not just when the file was
+  generated. Re-running a filter recomputes over already-fetched data without a new round trip, so a
+  file stamped only with its generation time could date the fleet to the moment you pressed the
+  button. The HTML report prints both times in its header; the workbook gained an **About** sheet
+  that carries them — it previously had no timestamp at all beyond its suggested file name.
+- **Both exports now record the filters the query ran under** — organizations, locations, device
+  roles, OS type and name, patch type, status, severity, search text and the date windows. Two
+  workbooks taken from the same fleet, one narrowed to a single organization and one covering
+  everything, were previously indistinguishable once saved, while every number in them described a
+  different set of devices. Date windows are written as absolute timestamps so they still mean the
+  same thing when the file is read months later, with the relative window ("last 30 days") noted in
+  parentheses when that is what you picked.
+- **The workbook's Patches sheet has an Offline column.** The compliance sheets state how many
+  offline devices were excluded from their totals; the detail sheet now lets you find them and
+  reproduce that figure by hand.
+
 ## [0.13.1] - 2026-08-20
 
 ### Security
