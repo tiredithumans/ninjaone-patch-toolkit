@@ -821,18 +821,23 @@ pub struct AgeBucket {
     pub count: usize,
 }
 
-/// Whether a current-patch status counts toward the pending backlog. NinjaOne uses
-/// `MANUAL` (pending approval) and `APPROVED` for patches not yet installed.
+/// Whether a current-patch status counts toward the pending backlog.
 ///
-/// A record with **no** status counts too. `status` is not a required property on
-/// `DeviceOSPatch`/`DeviceSoftwarePatch`, and everything reaching this predicate came
-/// from the current feed, which the API defines as "patches for which there were no
-/// installation attempts" — so an untyped record there is pending by construction.
-/// Excluding it silently shrank the backlog and *raised* the compliance percentage,
-/// which is the wrong direction to fail in; this mirrors [`is_aged`], which flags an
-/// undated patch rather than assuming it recent.
+/// This is an **exclude list, not an allow list**: everything in the current feed is
+/// pending unless its status says the patch is no longer wanted (`REJECTED`) or is
+/// already on the device (`INSTALLED`). NinjaOne uses `MANUAL` (pending approval)
+/// and `APPROVED` for the common cases, but `status` has no enum in the spec and is
+/// not even a required property on `DeviceOSPatch`/`DeviceSoftwarePatch` — and the
+/// endpoints' own titles are "Pending, **Failed** and Rejected … report"
+/// (`getPendingFailedRejected*`), so a `FAILED` record, or a value this crate has
+/// never seen, can arrive here. The previous allow list (`MANUAL | APPROVED | None`)
+/// treated any such record as *not* pending, which scored the device compliant and
+/// dropped its most urgent patch from every rollup — the wrong direction to fail in,
+/// and the opposite of what [`is_aged`] does with an undated patch. An untyped record
+/// is pending for the same reason: the feed is defined as the patches with no
+/// installation attempt, so absence of a status cannot mean "done".
 fn is_pending(status: Option<&str>) -> bool {
-    matches!(status, Some("MANUAL") | Some("APPROVED") | None)
+    !matches!(status, Some("REJECTED") | Some("INSTALLED"))
 }
 
 /// Groups the FAILED detail rows by patch (`patch_type` + `kb` + `name`), counting
@@ -2130,6 +2135,56 @@ mod tests {
         );
         assert_eq!(rows.len(), 1, "missing status falls back to the override");
         assert_eq!(&*rows[0].status, "INSTALLED");
+    }
+
+    /// `is_pending` is an exclude list. The allow list it replaced scored a device
+    /// whose only patch sat in the current feed as FAILED — or under any value the
+    /// crate had not anticipated — as compliant, which is the one direction this
+    /// predicate must never fail in.
+    #[test]
+    fn a_current_feed_record_is_pending_unless_rejected_or_installed() {
+        for pending in [
+            Some("MANUAL"),
+            Some("APPROVED"),
+            Some("FAILED"),
+            Some("SOMETHING_NEW"),
+            None,
+        ] {
+            assert!(is_pending(pending), "{pending:?} must count as pending");
+        }
+        assert!(!is_pending(Some("REJECTED")));
+        assert!(!is_pending(Some("INSTALLED")));
+    }
+
+    /// The row join has to agree with the rollups about an untyped current-feed
+    /// record: `pending_counts` counts it, so the Pending selection must show it.
+    /// `assemble_result` labels the current sources MANUAL for exactly this.
+    #[test]
+    fn an_untyped_current_record_is_a_pending_row_under_the_pending_override() {
+        use crate::model::PatchStatus;
+        let d = device(1, 10, "Windows Server 2022");
+        let by_id = HashMap::from([(1, &d)]);
+        let maps = maps();
+        let mut untyped = patch(1, "MANUAL", "CRITICAL", Some(1));
+        untyped.status = None;
+        let patches = vec![untyped];
+        let refs = refs(&patches);
+        assert_eq!(pending_counts(&refs).get(&1), Some(&1));
+
+        let pending_set = HashSet::from([PatchStatus::Pending.api_value()]);
+        let rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &refs,
+                type_label: "OS",
+                status_override: Some(PatchStatus::Pending.api_value()),
+                status_filter: Some(&pending_set),
+            }],
+            &FilterParams::default().prepare(),
+        );
+        assert_eq!(rows.len(), 1, "the record the rollups count is also a row");
+        assert_eq!(&*rows[0].status, "PENDING");
     }
 
     #[test]
