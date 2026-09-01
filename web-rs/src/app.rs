@@ -10,6 +10,7 @@ mod charts;
 mod controls;
 mod filters;
 mod header;
+mod modal;
 mod settings;
 mod state;
 mod tables;

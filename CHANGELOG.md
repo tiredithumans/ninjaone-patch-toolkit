@@ -54,6 +54,10 @@ version and start a fresh `[Unreleased]`.
   A preset whose organization has since been deleted, or a scope carried across a tenant switch,
   used to produce zero rows under a chip row reading "No filters — whole fleet". Unresolved ids now
   appear as "#4711 (not found)" in the chips and the scope pickers.
+- **The confirmation and update dialogs now take keyboard focus.** Focus stayed on the button under
+  the overlay, so Tab walked the covered page and pressing Space re-opened the plan behind the
+  dialog. Both dialogs now receive focus when they open, keep Tab inside themselves, and return
+  focus to the button that opened them when they close.
 - **The install-history lookback is enforced on the app's side as well as the server's.** The
   exports say "Install history since <date>", so a record NinjaOne returned from outside that window
   is now dropped rather than trusted into the Failures table.

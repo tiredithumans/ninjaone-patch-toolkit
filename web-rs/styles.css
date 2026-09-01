@@ -733,6 +733,13 @@ tbody tr:hover {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
 }
 
+/* The container is focused programmatically on open (see app/modal.rs) so the
+   first Tab starts inside the dialog; the ring belongs on the controls, not on
+   the panel. */
+.modal:focus {
+  outline: none;
+}
+
 .modal h2 {
   margin: 0 0 4px;
   font-size: 18px;
