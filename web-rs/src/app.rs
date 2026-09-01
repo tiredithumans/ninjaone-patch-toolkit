@@ -19,7 +19,7 @@ mod update;
 // its own copy — the browser demo does its own date-window filtering.
 pub(crate) mod util;
 
-use actions::{ActionBar, ConfirmActionModal, JobsTable};
+use actions::{ActionBar, ConfirmActionModal, JobsTable, ReauthorizeLink};
 use charts::{ComplianceByOsBars, ComplianceCharts};
 use controls::RunControls;
 use filters::Filters;

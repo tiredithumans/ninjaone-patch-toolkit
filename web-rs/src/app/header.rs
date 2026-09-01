@@ -60,6 +60,10 @@ pub(crate) fn Header() -> impl IntoView {
                                     spawn_local(async move {
                                         match api::sign_in().await {
                                             Ok(()) => {
+                                                // The backend dropped the previous
+                                                // session's result and jobs; drop
+                                                // the rendering of them too.
+                                                state.clear_session();
                                                 state.session.refresh_auth();
                                                 state.load_lookups();
                                                 state.notify(Toast::ok("Signed in"));
@@ -83,6 +87,7 @@ pub(crate) fn Header() -> impl IntoView {
                             spawn_local(async move {
                                 match api::sign_out().await {
                                     Ok(()) => {
+                                        state.clear_session();
                                         state.session.refresh_auth();
                                         state.notify(Toast::ok("Signed out"));
                                     }

@@ -901,6 +901,16 @@ impl AppState {
         }
     }
 
+    /// The two cache epochs, for tests that assert an invalidation did (or did
+    /// not) happen without racing a fetch.
+    #[cfg(test)]
+    pub(crate) fn cache_epochs(&self) -> (u64, u64) {
+        (
+            self.devices_epoch.load(Ordering::SeqCst),
+            self.current_epoch.load(Ordering::SeqCst),
+        )
+    }
+
     /// Reserves `count` consecutive job ids, returning `(batch_id, first_job_id)`.
     pub fn next_job_ids(&self, count: usize) -> (u64, u64) {
         let batch = self.job_seq.fetch_add(1, Ordering::Relaxed);

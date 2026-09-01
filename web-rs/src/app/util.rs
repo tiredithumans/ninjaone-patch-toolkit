@@ -871,16 +871,32 @@ impl Named for Role {
 /// Resolves selected ids to display names, in the lookup's own order.
 ///
 /// Ordered by the lookup rather than by the selection so the chip reads the same way
-/// the picker does, and ids with no matching lookup row are dropped — a name is the
-/// only thing a chip can usefully say, and "Org: 4711" is not one.
+/// the picker does. An id with no matching lookup row is **named, not dropped**:
+/// `#4711 (not found)`, after the resolved names. It used to be dropped on the
+/// theory that a bare id is not a useful label — but a dropped id is still in the
+/// query. A preset whose organization has since been deleted, or a scope carried
+/// across a tenant switch, then ran a query that matched no device while the chip
+/// row read "No filters — whole fleet" beside zero rows. The backend's provenance
+/// block prints the same case as `id 4711` for the same reason.
 pub(crate) fn names_for<T: Named>(
     selected: &[i64],
     options: impl Iterator<Item = T>,
 ) -> Vec<String> {
-    options
+    let mut seen: Vec<i64> = Vec::new();
+    let mut names: Vec<String> = options
         .filter(|o| selected.contains(&o.id()))
-        .map(|o| o.name().to_string())
-        .collect()
+        .map(|o| {
+            seen.push(o.id());
+            o.name().to_string()
+        })
+        .collect();
+    names.extend(
+        selected
+            .iter()
+            .filter(|id| !seen.contains(id))
+            .map(|id| format!("#{id} (not found)")),
+    );
+    names
 }
 
 /// Filters a lookup list by a case-insensitive substring of the display name, for
@@ -2311,11 +2327,18 @@ mod tests {
     /// Selected ids resolve in the lookup's order, and an id with no lookup row is
     /// dropped rather than rendered as a bare number.
     #[test]
-    fn names_for_resolves_in_lookup_order_and_drops_unknown_ids() {
+    fn names_for_resolves_in_lookup_order_and_names_unknown_ids() {
         let orgs = vec![org(1, "Acme"), org(2, "Globex"), org(3, "Initech")];
+        // An id the lookup cannot resolve is still in the query, so it is still on
+        // the chip — dropping it read as "whole fleet" beside a result it narrowed
+        // to nothing.
         assert_eq!(
             names_for(&[3, 1, 99], orgs.clone().into_iter()),
-            vec!["Acme".to_string(), "Initech".to_string()]
+            vec![
+                "Acme".to_string(),
+                "Initech".to_string(),
+                "#99 (not found)".to_string()
+            ]
         );
         assert!(names_for(&[], orgs.into_iter()).is_empty());
     }

@@ -257,6 +257,9 @@ fn ActionSettingsFields() -> impl IntoView {
                 "Off by default. Turning this on makes the next sign-in request the "
                 <strong>"Management"</strong>
                 " scope, which the patch/reboot/script endpoints require — enable that scope on the API app in NinjaOne, then Re-authorize."
+                // The link the sentence refers to, right here rather than only in
+                // the action bar (which needs a populated query to render at all).
+                <ReauthorizeLink/>
             </p>
 
             <label class="inline">

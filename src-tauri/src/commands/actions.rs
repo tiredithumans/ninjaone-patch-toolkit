@@ -637,7 +637,7 @@ pub async fn run_action(
     state.append_jobs(jobs.clone());
 
     if live > 0 {
-        invalidate_after(request.kind, &state);
+        invalidate_after(request.kind, request.dry_run, &state);
     }
 
     info!(
@@ -910,8 +910,11 @@ async fn send_action(
 /// settled batch — including scans, which change nothing. So an apply left
 /// `os.needsReboot` stale for up to the 15-minute device TTL if the poller happened
 /// not to run, and a scan triggered a spurious whole-fleet device refetch.
-fn invalidate_after(kind: ActionKind, state: &AppState) {
-    if !kind.is_mutating() {
+fn invalidate_after(kind: ActionKind, dry_run: bool, state: &AppState) {
+    // A dry run previews a mutating kind without touching the device, so the
+    // caches are as fresh after it as before. Dropping them here cost a
+    // whole-fleet refetch per preview — and `dry_run` is the default.
+    if dry_run || !kind.is_mutating() {
         return;
     }
     // The device's pending list is about to change, and the 120 s current-patch TTL
@@ -1066,10 +1069,10 @@ fn spawn_job_poller(app: &AppHandle) {
                 // Deduped so a 200-device batch does not bump the epochs 200 times;
                 // a handful of variants makes a Vec the right container.
                 let mut seen: Vec<ActionKind> = Vec::new();
-                for kind in settled.iter().map(|j| j.kind) {
-                    if !seen.contains(&kind) {
-                        seen.push(kind);
-                        invalidate_after(kind, &state);
+                for job in settled.iter() {
+                    if !seen.contains(&job.kind) {
+                        seen.push(job.kind);
+                        invalidate_after(job.kind, job.dry_run, &state);
                     }
                 }
                 state.settings_snapshot()
@@ -1608,7 +1611,7 @@ mod tests {
 
         // A scan changes nothing on the device, so neither cache is dropped.
         let before = state.settings_snapshot().actions.enabled;
-        invalidate_after(ActionKind::OsPatchScan, &state);
+        invalidate_after(ActionKind::OsPatchScan, false, &state);
         assert_eq!(state.settings_snapshot().actions.enabled, before);
 
         // Every mutating kind can move os.needsReboot, so both caches go.
@@ -1625,9 +1628,22 @@ mod tests {
                 kind.can_reboot(),
                 "{kind:?} can set the pending-reboot flag, so the device cache must drop"
             );
-            invalidate_after(kind, &state);
+            invalidate_after(kind, false, &state);
         }
         assert!(!ActionKind::OsPatchScan.can_reboot());
+    }
+
+    /// A dry run of a mutating kind changes nothing on the device, so it must not
+    /// drop the caches: `dry_run` is the default, and every default preview used to
+    /// cost a whole-fleet refetch on the next query.
+    #[test]
+    fn a_dry_run_invalidates_nothing() {
+        let state = AppState::new().expect("build state");
+        let (devices_before, current_before) = state.cache_epochs();
+        invalidate_after(ActionKind::OsPatchRemediate, true, &state);
+        assert_eq!(state.cache_epochs(), (devices_before, current_before));
+        invalidate_after(ActionKind::OsPatchRemediate, false, &state);
+        assert_ne!(state.cache_epochs(), (devices_before, current_before));
     }
 
     /// A remediation runs a library script chosen in Settings, so the job report and
