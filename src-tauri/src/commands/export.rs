@@ -5,7 +5,7 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::error::UiError;
-use crate::export::write_workbook;
+use crate::export::{WorkbookMeta, write_workbook};
 use crate::rows::QueryResult;
 use crate::state::AppState;
 
@@ -157,7 +157,14 @@ pub async fn export_patches_xlsx(
             &result.compliance_by_os,
             &reboot,
             &result.failures,
-            &scope_note,
+            &WorkbookMeta {
+                generated_at: &result.generated_at,
+                data_fetched_at: &result.data_fetched_at,
+                devices_total: result.devices_total,
+                devices_offline: result.devices_offline,
+                scope: &result.scope,
+                scope_note: &scope_note,
+            },
         )
     })
     .await
@@ -301,6 +308,7 @@ mod tests {
                 os: true,
                 software: true,
             },
+            scope: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }

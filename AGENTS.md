@@ -65,9 +65,9 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   └── lookups.rs               # orgs / all-locations / roles / node classes
 ├── src/filter.rs                # FilterParams (multi-select org/loc/role ids) → install-query df DSL + PreparedFilter::device_allowed (identity + OS-name scope) / KB-search facets
 ├── src/model.rs                 # domain types (Device, Patch, PatchType, PatchStatus, …)
-├── src/rows.rs                  # join → PatchRow, compliance %, SLA aging, reboot/pending + failure/severity/age rollups
-├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / Compliance by OS / Needs-Reboot / Patch Failures)
-├── src/report.rs                # standalone HTML executive report (inline SVG charts) from the cached QueryResult
+├── src/rows.rs                  # join → PatchRow, compliance %, SLA aging, reboot/pending + failure/severity/age rollups (all sharing `rollup_device`), QueryScope export provenance
+├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / Compliance by OS / Needs-Reboot / Patch Failures / About) + WorkbookMeta provenance
+├── src/report.rs                # standalone HTML executive report (inline SVG charts + QueryScope provenance) from the cached QueryResult
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets)
 ├── src/error.rs                 # UiError { message } — the IPC error shape
 ├── src/commands/                # #[tauri::command] handlers (actions, auth, lookups, patches, export, settings, update)
@@ -593,17 +593,56 @@ secrets are **not** stored there — see below).
 - **What a compliance number means (load-bearing).** The rollups in `rows.rs` describe a *narrower*
   population than `devices_total`, and every surface has to say so rather than leave two device
   counts side by side.
-  - **One population for both halves of a bucket.** `accumulate_compliance` has a single `counted`
-    predicate — the device must be in the scoped inventory **and** online — applied to the device
-    loop *and* the patch loop. Offline devices are excluded because they report no current patch
-    records, so a zero pending count says nothing about them. The patch loop used to skip this check,
-    so an org whose devices were all offline read "0 devices · 100% compliant · 45 pending
-    Critical/Important", and an orphan patch opened its own zero-device `(unknown)` org. A bucket can
-    no longer exist without at least one device in it.
+  - **One population for *every* fleet-health rollup, via `rows::rollup_device`.** The device must be
+    in the scoped inventory **and** online. Offline devices are excluded because they report no
+    current patch records, so a zero pending count says nothing about them. `accumulate_compliance`
+    applies it to the device loop *and* the patch loop (the patch loop used to skip it, so an org
+    whose devices were all offline read "0 devices · 100% compliant · 45 pending Critical/Important",
+    and an orphan patch opened its own zero-device `(unknown)` org). `build_severity_by_org` and
+    `build_age_buckets` apply it too, and did not until it was lifted out: the HTML report prints
+    those two charts directly beneath the compliance sections, under a header stating "Compliance
+    covers online devices only (N offline devices excluded)", so the charts silently re-admitted the
+    excluded population — the gap being exactly the offline backlog, and unrecoverable from the page.
+    `build_age_buckets` therefore takes `devices_by_id`; it took only the patches, which made it the
+    one rollup structurally *unable* to apply the exclusion. A new rollup over the current feed goes
+    through `rollup_device` too — `severity_and_age_rollups_cover_the_same_devices_compliance_does`
+    pins the three against each other.
   - **`devices_offline` and `patch_families` ride on `QueryResult`/`QuerySummary`** so the note can be
     stated. `rows::compliance_scope_note` builds the sentence; the Compliance tab
     (`ComplianceScopeNote`), the HTML report header and both workbook compliance sheets print it, and
-    `web-rs/src/app/util.rs` mirrors it (the crates share no code — both sides are tested).
+    `web-rs/src/app/util.rs` mirrors it (the crates share no code — both sides are tested). The
+    detail sheet carries an **Offline** column for the same reason: a sheet asserting "N offline
+    devices excluded" has to let the reader reproduce the denominator, and `PatchRow.offline` was
+    already there (the in-app table draws its "offline" chip from it) — only the workbook dropped it.
+  - **Both exports state both clocks.** `generated_at` is the join/rollup clock; `data_fetched_at` is
+    when the fleet data last came from NinjaOne, and a re-filter recomputes over a warm cache with no
+    round trip — so an export stamped only with `generated_at` dates the fleet to the moment someone
+    pressed a button. The report header prints both; the workbook's **About** sheet carries them plus
+    the scoped/offline device counts and the detail-row total (`export::WorkbookMeta`).
+  - **Both exports state the facets, from `rows::QueryScope` (load-bearing).** Built by
+    `build_query_scope` in `assemble_result` out of the `QueryPlan` the fetch actually ran under —
+    **not** from the request and **not** from the frontend's `AppliedFilters`. Those describe what was
+    *selected*; the block has to describe what the query *did*, which is the same
+    backend-re-derives-rather-than-trusts rule the write path follows. `AppliedFilters` is
+    frontend-only and never crosses IPC anyway. Without it two workbooks off one fleet — one scoped to
+    a single org and CRITICAL-only, one unfiltered — are indistinguishable once saved, while every
+    number in them describes a different population.
+    - `QueryResult`-only, deliberately **not** on `QuerySummary`: the frontend has its own chip row,
+      so a second copy over IPC would be a wire field with no reader. This is the documented
+      exception to the compact-aggregates lockstep rule above.
+    - Date bounds are **absolute** (`%Y-%m-%d %H:%M UTC`), with the relative window in parentheses
+      when that is the control the operator used — "the last 30 days" silently re-anchors to whenever
+      the artifact is read. They are composed backend-side as Unix *seconds*, so they use
+      `DateTime::from_timestamp`, not `model::unix_to_datetime` (whose millisecond normalization is
+      for values read off NinjaOne records).
+    - Patch families are stated **once**, as the block's `Patch type` entry — the Type facet and the
+      rollups' family scope are the same value, and two adjacent rows saying it read as two things.
+    - The install lookback is named only when the status selection actually reached the history
+      endpoints (`plan.want_installs`), and an unnarrowed query emits an explicit whole-fleet
+      sentence: on a printed artifact, missing lines are indistinguishable from a renderer that
+      dropped them. `QueryPlan` keeps `statuses` verbatim for this — the two derived `HashSet`s are
+      unordered and spelled in NinjaOne's wire vocabulary, so `MANUAL` ⇄ "Pending" would be a second
+      place to get the mapping wrong (`PatchStatus::label`).
   - **The fleet-health rollups *do* depend on the patch-`Type` facet**, because only the families a
     query asked for are fetched at all (see the whole-fleet prefetch above — a third-party feed runs
     to six figures, so an OS-only query does not page it). That makes "compliant" mean "no pending OS

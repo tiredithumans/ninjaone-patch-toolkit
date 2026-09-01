@@ -312,6 +312,21 @@ impl PatchStatus {
         }
     }
 
+    /// The operator-facing name of this status — what the UI's Status facet calls
+    /// it, and what an export's provenance block prints. Deliberately not
+    /// [`api_value`](Self::api_value): `Pending` is NinjaOne's `MANUAL`, and an
+    /// export that named the wire value would describe a filter the operator never
+    /// recognizes selecting.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Approved => "Approved",
+            Self::Rejected => "Rejected",
+            Self::Installed => "Installed",
+            Self::Failed => "Failed",
+        }
+    }
+
     /// Whether this status is sourced from the `*-patch-installs` history
     /// endpoints rather than the current-patches feed. Both `Installed` and
     /// `Failed` are install *results*: per the NinjaOne API, the current

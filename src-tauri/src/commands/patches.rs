@@ -13,8 +13,8 @@ use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus,
 use crate::rows::{
     GroupBy, GroupPage, LookupMaps, PatchFamilies, PatchSource, QueryResult, QuerySummary, RowSort,
     build_age_buckets, build_compliance, build_compliance_by_os, build_device_summaries,
-    build_failures, build_rows, build_severity_by_org, group_member_page, page_rows,
-    pending_counts, slice_groups,
+    build_failures, build_query_scope, build_rows, build_severity_by_org, group_member_page,
+    page_rows, pending_counts, slice_groups,
 };
 use crate::settings::MAX_WINDOW_DAYS;
 use crate::state::{AppState, CurrentPatches, StoreOutcome};
@@ -239,6 +239,12 @@ fn summary_for(
 /// never appears in the current feed).
 struct QueryPlan {
     filter: FilterParams,
+    /// The operator's status selection, kept verbatim for the export provenance
+    /// block. The two derived sets below are equal to it by construction, but they
+    /// are `HashSet`s — unordered, and spelled in NinjaOne's wire vocabulary — so
+    /// reconstructing the operator's own list from them would be both lossy and a
+    /// second place to get `MANUAL` ⇄ "Pending" wrong.
+    statuses: Vec<PatchStatus>,
     /// Server-side `df` for the install-history endpoints, which are fetched fresh
     /// per query. The whole-fleet caches are scoped client-side instead.
     patch_df: Option<String>,
@@ -311,6 +317,7 @@ impl QueryPlan {
 
         Self {
             filter,
+            statuses: args.statuses,
             patch_df,
             want_installs,
             current_status_set,
@@ -580,7 +587,12 @@ fn assemble_result(
     // the severity/age distributions come from the current pending backlog.
     let failures = build_failures(&rows);
     let severity_by_org = build_severity_by_org(&all_current, &devices_by_id, &maps);
-    let age_buckets = build_age_buckets(&all_current, now);
+    let age_buckets = build_age_buckets(&all_current, &devices_by_id, now);
+
+    let families = PatchFamilies {
+        os: plan.include_os,
+        software: plan.include_sw,
+    };
 
     QueryResult {
         rows,
@@ -596,10 +608,17 @@ fn assemble_result(
         // in-scope device, and `devices_total - devices_offline` is the compliance
         // denominator.
         devices_offline: scoped_devices.iter().filter(|d| d.is_offline()).count(),
-        patch_families: PatchFamilies {
-            os: plan.include_os,
-            software: plan.include_sw,
-        },
+        patch_families: families,
+        // Built from the plan the fetch ran under, so the block describes the query
+        // rather than the request — including the install lookback, which is named
+        // only when the status selection actually reached the history endpoints.
+        scope: build_query_scope(
+            &plan.filter,
+            &maps,
+            families,
+            &plan.statuses,
+            plan.want_installs.then_some(plan.installed_after),
+        ),
         generated_at: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         data_fetched_at: src
             .current
@@ -709,6 +728,7 @@ mod tests {
                     os: true,
                     software: true,
                 },
+                scope: Default::default(),
                 generated_at: "2026-01-01 00:00:00 UTC".into(),
                 data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
             },
@@ -1213,6 +1233,75 @@ mod tests {
         let top = &result.failures[0];
         assert_eq!(top.kb.as_deref(), Some("KBFAIL"));
         assert_eq!(top.affected_devices, 2, "KBFAIL failed on two devices");
+    }
+
+    /// The provenance block must describe what the query *did*, so it is built from
+    /// the `QueryPlan` the fetch ran under rather than echoed from the request. This
+    /// runs the whole path to prove the wiring, not just `build_query_scope`: the
+    /// install lookback in particular is a plan-derived value the request never
+    /// carries, and it must appear only when the status selection actually reached
+    /// the history endpoints.
+    #[tokio::test]
+    async fn a_query_records_the_facets_it_ran_under() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [], "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let mut scoped = args(PatchType::Os, vec![PatchStatus::Pending]);
+        scoped.filter.organization_ids = vec![1];
+        scoped.filter.severities = vec!["CRITICAL".into()];
+
+        let progress = |_: &'static str, _: usize| {};
+        let result = run_query(
+            &client(&server),
+            async { Ok::<_, anyhow::Error>(lookups()) },
+            fleet_devices_via(&client(&server)),
+            fleet_current_via(&client(&server)),
+            30,
+            30,
+            scoped,
+            fixed_now(),
+            &progress,
+        )
+        .await
+        .expect("query");
+
+        let facets: Vec<(&str, &str)> = result
+            .scope
+            .facets
+            .iter()
+            .map(|(l, v)| (*l, v.as_str()))
+            .collect();
+        // Resolved through the same lookups the rows are labelled with, so the block
+        // and the table name the organization identically.
+        assert!(facets.contains(&("Organizations", "Alpha")), "{facets:?}");
+        assert!(
+            facets.contains(&("Patch type", "OS patches only")),
+            "{facets:?}"
+        );
+        assert!(facets.contains(&("Status", "Pending")), "{facets:?}");
+        assert!(facets.contains(&("Severity", "CRITICAL")), "{facets:?}");
+        assert!(
+            !facets.iter().any(|(l, _)| *l == "Install history since"),
+            "a Pending-only query never fetched install history: {facets:?}"
+        );
+        assert!(
+            !facets.iter().any(|(l, _)| *l == "Scope"),
+            "the whole-fleet sentence must not appear on a narrowed query: {facets:?}"
+        );
     }
 
     #[tokio::test]
