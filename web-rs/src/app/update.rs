@@ -79,6 +79,7 @@ pub(crate) fn UpdateSplash() -> impl IntoView {
                 });
             };
             let dismiss = move |_| state.updates.update.set(None);
+            let (dialog, on_tab) = modal::focus_trap();
             view! {
                 <div class="modal-overlay">
                     <div
@@ -86,6 +87,9 @@ pub(crate) fn UpdateSplash() -> impl IntoView {
                         role="dialog"
                         aria-modal="true"
                         aria-labelledby="update-title"
+                        tabindex="-1"
+                        node_ref=dialog
+                        on:keydown=move |ev| on_tab(&ev)
                     >
                         <h2 id="update-title">
                             {format!("Update available — v{}", info.version)}

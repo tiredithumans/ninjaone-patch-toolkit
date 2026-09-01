@@ -88,6 +88,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   ├── settings.rs              # SettingsPanel
 │   ├── charts.rs                # Compliance-tab inline-SVG charts (compliance / severity / age) + host-tested geometry
 │   ├── tables.rs                # Results tabs: Patches / Compliance (charts + table) / Needs Reboot / Failures
+│   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener on close
 │   ├── toaster.rs               # Toaster (aria-live toast region)
 │   ├── update.rs                # UpdateSplash modal + changelog-notes rendering
 │   └── util.rs                  # JS-free pure helpers (format/parse/CSS-class/sort) + their host tests
@@ -861,6 +862,13 @@ secrets are **not** stored there — see below).
 
 - **Frontend reactivity is closure-based (Leptos CSR).** `{move || sig.get()}` to track, `.get()` /
   `.with()` to read; state is `RwSignal<T>`. CSS is plain global `web-rs/styles.css`.
+  - **A dialog calls `modal::focus_trap()` in the closure that creates it.** `role="dialog"
+    aria-modal="true"` moves nothing by itself: focus stayed on the opener under the overlay, so
+    Tab walked the covered page and Space re-invoked `open_plan` behind the dialog. The trap
+    focuses the container (`tabindex="-1"`, `node_ref`) on mount, wraps Tab at either end, and
+    returns focus to the opener in `on_cleanup` — which is why it must be created *per dialog
+    instance* (inside the `pending.map(...)` / `info.map(...)` closure), not once per component.
+    `web-sys` is listed in `web-rs/Cargo.toml` only to enable the DOM features this needs.
 
 - **Demo mode + browser/Pages guard.** The same frontend serves two contexts. Inside Tauri it talks
   to the backend over IPC; in a plain browser (the GitHub Pages live demo) there is **no** backend.

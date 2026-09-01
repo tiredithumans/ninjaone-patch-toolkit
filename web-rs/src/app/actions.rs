@@ -360,6 +360,9 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                 util::needs_typed_confirmation(blocked, kind, pending.request.reboot_mode);
             let dry_run = plan.dry_run;
             let expected = device_count.to_string();
+            // Created per dialog, so its cleanup (focus back to the opener) runs
+            // when this plan's view is dropped, not when the component is.
+            let (dialog, on_tab) = modal::focus_trap();
             // A `Signal` rather than a bare closure: `Show` renders its children
             // through an `Fn`, and a non-Copy closure captured into one would only
             // be `FnOnce`.
@@ -391,6 +394,9 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                         role="dialog"
                         aria-modal="true"
                         aria-labelledby="confirm-action-title"
+                        tabindex="-1"
+                        node_ref=dialog
+                        on:keydown=move |ev| on_tab(&ev)
                     >
                         <h3 id="confirm-action-title">{plan.summary.clone()}</h3>
 
