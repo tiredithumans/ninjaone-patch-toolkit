@@ -396,7 +396,11 @@ fn is_aged(p: &Patch, sla_cutoff: DateTime<Utc>) -> bool {
 ///
 /// An offline device can't apply patches and reports no current patch records, so a
 /// zero pending count says nothing about its compliance: it is excluded from the
-/// denominator rather than scored compliant and inflating the headline metric.
+/// denominator rather than scored compliant and inflating the headline metric. A
+/// device NinjaOne cannot patch at all ([`Device::is_patchable`] — switches,
+/// printers, hypervisors, cloud monitors) is excluded for the same reason: it is
+/// online, carries no patch records, and used to score compliant, so a fleet of
+/// 100 servers and 100 network devices read 25 points better than its servers.
 fn rollup_device<'a>(
     devices_by_id: &HashMap<i64, &'a Device>,
     device_id: Option<i64>,
@@ -404,7 +408,7 @@ fn rollup_device<'a>(
     devices_by_id
         .get(&device_id?)
         .copied()
-        .filter(|d| !d.is_offline())
+        .filter(|d| !d.is_offline() && d.is_patchable())
 }
 
 /// The body shared by [`build_compliance`] and [`build_compliance_by_os`], which
@@ -1062,18 +1066,35 @@ impl PatchFamilies {
 /// in a bare percentage and both change what it means: offline devices are excluded
 /// from the rollups entirely, and only the patch families the query fetched are in
 /// them.
-pub fn compliance_scope_note(devices_offline: usize, families: PatchFamilies) -> String {
-    let excluded = match devices_offline {
-        0 => String::new(),
-        1 => " (1 offline device excluded)".to_string(),
-        n => format!(" ({n} offline devices excluded)"),
-    };
+pub fn compliance_scope_note(
+    devices_offline: usize,
+    devices_unpatchable: usize,
+    families: PatchFamilies,
+) -> String {
+    let excluded = excluded_clause(devices_offline, devices_unpatchable);
     let families = if families.is_complete() {
         String::new()
     } else {
         format!(", and counts {}", families.label())
     };
-    format!("Compliance covers online devices only{excluded}{families}.")
+    format!("Compliance covers online Windows, macOS and Linux devices only{excluded}{families}.")
+}
+
+/// The parenthetical naming the devices [`rollup_device`] left out, so the reader
+/// can reconcile the compliance table's `Devices` column with `devices_total`:
+/// `devices_total − offline − non-patchable` is the denominator. Empty when nothing
+/// was excluded. Mirrored in `web-rs/src/app/util.rs`.
+fn excluded_clause(offline: usize, unpatchable: usize) -> String {
+    let devices = |n: usize| if n == 1 { "device" } else { "devices" };
+    match (offline, unpatchable) {
+        (0, 0) => String::new(),
+        (n, 0) => format!(" ({n} offline {} excluded)", devices(n)),
+        (0, m) => format!(" ({m} non-patchable {} excluded)", devices(m)),
+        (n, m) => format!(
+            " ({n} offline and {m} non-patchable {} excluded)",
+            devices(n + m)
+        ),
+    }
 }
 
 /// The facets that produced a result, resolved to the names the operator chose them
@@ -1093,9 +1114,19 @@ pub fn compliance_scope_note(devices_offline: usize, families: PatchFamilies) ->
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryScope {
-    /// `(facet, value)` in display order. Never empty — the patch type and the
-    /// status selection always apply.
+    /// `(facet, value)` in display order for the facets that reach **every** sheet
+    /// and section: the device scope and the patch type. Never empty — the patch
+    /// type always applies.
     pub facets: Vec<(&'static str, String)>,
+    /// The facets that narrow only the detail rows — status, severity, search, the
+    /// first-seen window and the install lookback — and so reach the Patches and
+    /// Patch Failures sheets but **not** the compliance, severity, age or reboot
+    /// sections, which are computed from the unnarrowed current feed. Kept apart
+    /// so the exports can say which is which: the in-app Compliance tab dims these
+    /// chips with "Ignored on this tab", and a workbook that listed them beside the
+    /// Compliance sheet with no such note read as "45 pending critical KB5040434
+    /// installs". Never empty — the status selection always applies.
+    pub patch_facets: Vec<(&'static str, String)>,
 }
 
 /// Renders one id facet as a comma-separated name list.
@@ -1191,15 +1222,15 @@ pub fn build_query_scope(
     }
 
     facets.push(("Patch type", families.label().to_string()));
-    facets.push((
+
+    let mut patch_facets = vec![(
         "Status",
         statuses
             .iter()
             .map(|s| s.label())
             .collect::<Vec<_>>()
             .join(", "),
-    ));
-
+    )];
     for (label, value) in [
         ("Severity", severities),
         ("Search", filter.search.clone()),
@@ -1211,11 +1242,14 @@ pub fn build_query_scope(
         ),
     ] {
         if let Some(value) = value {
-            facets.push((label, value));
+            patch_facets.push((label, value));
         }
     }
 
-    QueryScope { facets }
+    QueryScope {
+        facets,
+        patch_facets,
+    }
 }
 
 /// The full result of a patch query. Cached in `AppState.last_result` and read by
@@ -1246,6 +1280,13 @@ pub struct QueryResult {
     /// state the excluded population instead of leaving two different device counts
     /// side by side.
     pub devices_offline: usize,
+    /// How many of `devices_total` are online but not something NinjaOne patch
+    /// management covers ([`Device::is_patchable`]). Excluded from every fleet-health
+    /// rollup alongside the offline devices, and counted separately so the scope
+    /// note can name both: `devices_total − devices_offline − devices_unpatchable`
+    /// is the compliance denominator. Counted over online devices only so the three
+    /// numbers reconcile — an offline switch is in `devices_offline`, not here.
+    pub devices_unpatchable: usize,
     /// Which patch families the fleet-health rollups actually cover, taken from the
     /// query's patch-type facet.
     ///
@@ -1303,6 +1344,13 @@ pub struct QuerySummary {
     /// state the excluded population instead of leaving two different device counts
     /// side by side.
     pub devices_offline: usize,
+    /// How many of `devices_total` are online but not something NinjaOne patch
+    /// management covers ([`Device::is_patchable`]). Excluded from every fleet-health
+    /// rollup alongside the offline devices, and counted separately so the scope
+    /// note can name both: `devices_total − devices_offline − devices_unpatchable`
+    /// is the compliance denominator. Counted over online devices only so the three
+    /// numbers reconcile — an offline switch is in `devices_offline`, not here.
+    pub devices_unpatchable: usize,
     /// Which patch families the fleet-health rollups actually cover, taken from the
     /// query's patch-type facet.
     ///
@@ -1339,6 +1387,7 @@ impl QuerySummary {
             age_buckets: result.age_buckets.clone(),
             devices_total: result.devices_total,
             devices_offline: result.devices_offline,
+            devices_unpatchable: result.devices_unpatchable,
             patch_families: result.patch_families,
             generated_at: result.generated_at.clone(),
             data_fetched_at: result.data_fetched_at.clone(),
@@ -2384,6 +2433,7 @@ mod tests {
             age_buckets: Vec::new(),
             devices_total: 1,
             devices_offline: 0,
+            devices_unpatchable: 0,
             patch_families: PatchFamilies {
                 os: true,
                 software: true,
@@ -2446,6 +2496,7 @@ mod tests {
             age_buckets: Vec::new(),
             devices_total: 2,
             devices_offline: 0,
+            devices_unpatchable: 0,
             patch_families: PatchFamilies {
                 os: true,
                 software: true,
@@ -2706,16 +2757,96 @@ mod tests {
             "OsCompliance",
         );
 
+        // The nested aggregates. The fixture used to leave every one of them empty,
+        // so a renamed field in `FailureGroup`, `OrgSeverity`, `AgeBucket` or
+        // `PatchGroup` reached the webview as a decode error with CI green.
+        let failed_patches = {
+            let mut p = patch(1, "FAILED", "CRITICAL", Some(1));
+            p.installed_timestamp = Some(Utc::now().timestamp() as f64);
+            vec![p]
+        };
+        let failed_rows = build_rows(
+            &by_id,
+            &maps,
+            &[PatchSource {
+                patches: &refs(&failed_patches),
+                type_label: "OS",
+                status_override: None,
+                status_filter: None,
+            }],
+            &FilterParams::default().prepare(),
+        );
+        let failures = build_failures(&failed_rows);
+        assert_keys_present(
+            &serde_json::to_value(&failures[0]).unwrap(),
+            &[
+                "patchType",
+                "kb",
+                "name",
+                "severity",
+                "affectedDevices",
+                "deviceNames",
+                "latestFailure",
+            ],
+            "FailureGroup",
+        );
+
+        let severity_by_org = build_severity_by_org(&refs(&patches), &by_id, &maps);
+        let org_json = serde_json::to_value(&severity_by_org[0]).unwrap();
+        assert_keys_present(&org_json, &["organization", "counts"], "OrgSeverity");
+        assert_keys_present(
+            &org_json["counts"],
+            &[
+                "critical",
+                "important",
+                "security",
+                "moderate",
+                "recommended",
+                "low",
+                "optional",
+                "unknown",
+            ],
+            "SeverityCounts",
+        );
+
+        let age_buckets = build_age_buckets(&refs(&patches), &by_id, Utc::now());
+        assert_keys_present(
+            &serde_json::to_value(&age_buckets[0]).unwrap(),
+            &["label", "count"],
+            "AgeBucket",
+        );
+
+        let groups = build_groups(&rows, GroupBy::Device);
+        let page = slice_groups(&groups, 0, 10);
+        let page_json = serde_json::to_value(&page).unwrap();
+        assert_keys_present(&page_json, &["groups", "total"], "GroupPage");
+        assert_keys_present(
+            &page_json["groups"][0],
+            &[
+                "key",
+                "label",
+                "sublabel",
+                "rows",
+                "devices",
+                "severity",
+                "severityRank",
+                "offline",
+                "needsReboot",
+            ],
+            "PatchGroup",
+        );
+
         let result = QueryResult {
             rows,
             devices: summaries,
             compliance,
-            compliance_by_os: Vec::new(),
-            failures: Vec::new(),
-            severity_by_org: Vec::new(),
-            age_buckets: Vec::new(),
+            compliance_by_os: by_os,
+            failures,
+            severity_by_org,
+            age_buckets,
             devices_total: 1,
             devices_offline: 0,
+            devices_unpatchable: 0,
             patch_families: PatchFamilies {
                 os: true,
                 software: true,
@@ -2737,6 +2868,7 @@ mod tests {
                 "ageBuckets",
                 "devicesTotal",
                 "devicesOffline",
+                "devicesUnpatchable",
                 "patchFamilies",
                 "generatedAt",
                 "dataFetchedAt",
@@ -2755,23 +2887,81 @@ mod tests {
             software: true,
         };
         assert_eq!(
-            compliance_scope_note(0, both),
-            "Compliance covers online devices only."
+            compliance_scope_note(0, 0, both),
+            "Compliance covers online Windows, macOS and Linux devices only."
         );
         assert_eq!(
-            compliance_scope_note(1, both),
-            "Compliance covers online devices only (1 offline device excluded)."
+            compliance_scope_note(1, 0, both),
+            "Compliance covers online Windows, macOS and Linux devices only \
+             (1 offline device excluded)."
+        );
+        assert_eq!(
+            compliance_scope_note(0, 1, both),
+            "Compliance covers online Windows, macOS and Linux devices only \
+             (1 non-patchable device excluded)."
+        );
+        assert_eq!(
+            compliance_scope_note(3, 12, both),
+            "Compliance covers online Windows, macOS and Linux devices only \
+             (3 offline and 12 non-patchable devices excluded)."
         );
         assert_eq!(
             compliance_scope_note(
                 12,
+                0,
                 PatchFamilies {
                     os: true,
                     software: false
                 }
             ),
-            "Compliance covers online devices only (12 offline devices excluded), \
-             and counts OS patches only."
+            "Compliance covers online Windows, macOS and Linux devices only \
+             (12 offline devices excluded), and counts OS patches only."
+        );
+    }
+
+    /// A switch, a printer or a hypervisor is online and carries no patch records,
+    /// so under the offline-only exclusion it scored *compliant* — a fleet of one
+    /// server with a backlog and one switch read 50%, and with no OS-type facet the
+    /// by-OS table opened an "(unknown)" bucket at 100%. The device stays in
+    /// `devices_total` (it is in scope) and is named in the scope note instead.
+    #[test]
+    fn devices_ninjaone_cannot_patch_are_excluded_from_every_fleet_health_rollup() {
+        let server = device(1, 10, "Windows Server 2022");
+        let mut switch = device(2, 10, "Cisco IOS");
+        switch.node_class = Some("NMS_SWITCH".into());
+        let mut unclassed = device(3, 10, "Windows 11");
+        unclassed.node_class = None;
+        let devices = [server, switch, unclassed];
+        let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+        let maps = maps();
+        let patches = vec![patch(1, "MANUAL", "CRITICAL", Some(5))];
+        let refs = refs(&patches);
+        let summaries = build_device_summaries(
+            &devices.iter().collect::<Vec<_>>(),
+            &pending_counts(&refs),
+            &maps,
+        );
+
+        let compliance = build_compliance(&summaries, &refs, &by_id, &maps, 30, Utc::now());
+        let org = &compliance[0];
+        assert_eq!(
+            org.devices_total, 2,
+            "the server and the unclassed device count; the switch does not"
+        );
+        assert_eq!(
+            org.devices_compliant, 1,
+            "only the unclassed device is clean"
+        );
+
+        let by_os = build_compliance_by_os(&summaries, &refs, &by_id, 30, Utc::now());
+        assert!(
+            by_os.iter().all(|b| b.os != "Cisco IOS"),
+            "the switch opens no by-OS bucket: {by_os:?}"
+        );
+        assert!(rollup_device(&by_id, Some(2)).is_none());
+        assert!(
+            rollup_device(&by_id, Some(3)).is_some(),
+            "no class = nothing to prove it out on"
         );
     }
 
@@ -3219,8 +3409,13 @@ mod tests {
         scope
             .facets
             .iter()
+            .chain(&scope.patch_facets)
             .find(|(l, _)| *l == label)
             .map(|(_, v)| v.as_str())
+    }
+
+    fn labels(list: &[(&'static str, String)]) -> Vec<&'static str> {
+        list.iter().map(|(l, _)| *l).collect()
     }
 
     /// An unfiltered export must *say* it is unfiltered. On a printed artifact the
@@ -3303,6 +3498,31 @@ mod tests {
         assert_eq!(
             facet(&scope, "Install history since"),
             Some("2026-04-12 13:20 UTC")
+        );
+
+        // The two tiers, so the exports can say which facets reach the fleet sheets.
+        // `Patch type` is fleet-wide: only the families fetched are in the rollups.
+        assert_eq!(
+            labels(&scope.facets),
+            vec![
+                "Organizations",
+                "Locations",
+                "Device roles",
+                "OS type",
+                "OS name contains",
+                "Patch type",
+            ]
+        );
+        assert_eq!(
+            labels(&scope.patch_facets),
+            vec![
+                "Status",
+                "Severity",
+                "Search",
+                "First seen after",
+                "First seen before",
+                "Install history since",
+            ]
         );
     }
 

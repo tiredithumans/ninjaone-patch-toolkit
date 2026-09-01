@@ -948,18 +948,33 @@ pub(crate) fn selection_label(selected_names: &[String], all_label: &str) -> Str
 /// the tests on both sides pin it. Two things are invisible in a bare percentage and
 /// both change what it means: offline devices are excluded from the rollups entirely,
 /// and only the patch families the query fetched are in them.
-pub(crate) fn compliance_scope_note(devices_offline: usize, families: PatchFamilies) -> String {
-    let excluded = match devices_offline {
-        0 => String::new(),
-        1 => " (1 offline device excluded)".to_string(),
-        n => format!(" ({n} offline devices excluded)"),
-    };
+pub(crate) fn compliance_scope_note(
+    devices_offline: usize,
+    devices_unpatchable: usize,
+    families: PatchFamilies,
+) -> String {
+    let excluded = excluded_clause(devices_offline, devices_unpatchable);
     let families = if families.is_complete() {
         String::new()
     } else {
         format!(", and counts {}", families.label())
     };
-    format!("Compliance covers online devices only{excluded}{families}.")
+    format!("Compliance covers online Windows, macOS and Linux devices only{excluded}{families}.")
+}
+
+/// Mirrors `rows::excluded_clause`: the parenthetical naming the devices the rollups
+/// left out, so `devices_total − offline − non-patchable` reconciles with the table.
+fn excluded_clause(offline: usize, unpatchable: usize) -> String {
+    let devices = |n: usize| if n == 1 { "device" } else { "devices" };
+    match (offline, unpatchable) {
+        (0, 0) => String::new(),
+        (n, 0) => format!(" ({n} offline {} excluded)", devices(n)),
+        (0, m) => format!(" ({m} non-patchable {} excluded)", devices(m)),
+        (n, m) => format!(
+            " ({n} offline and {m} non-patchable {} excluded)",
+            devices(n + m)
+        ),
+    }
 }
 
 /// Formats a compliance percentage at zero decimals **without ever rounding up to
@@ -1008,10 +1023,14 @@ pub(crate) fn filter_chips(f: &AppliedFilters) -> Vec<FilterChip> {
             patch: false,
         });
     }
+    // Device-tier, not patch-tier: only the families the query fetched are in the
+    // fleet-health rollups, so Type narrows Compliance and Needs Reboot as much as it
+    // narrows the rows. Marked `patch: true` it was struck through on those tabs
+    // with "Ignored on this tab" directly above a banner saying the opposite.
     if matches!(f.patch_type.as_str(), "OS" | "SOFTWARE") {
         out.push(FilterChip {
             label: format!("Type: {}", f.patch_type),
-            patch: true,
+            patch: false,
         });
     }
     if !f.statuses.is_empty() {
@@ -2380,27 +2399,41 @@ mod tests {
             software: true,
         };
         assert_eq!(
-            compliance_scope_note(0, both),
-            "Compliance covers online devices only."
+            compliance_scope_note(0, 0, both),
+            "Compliance covers online Windows, macOS and Linux devices only."
         );
         assert_eq!(
-            compliance_scope_note(1, both),
-            "Compliance covers online devices only (1 offline device excluded)."
+            compliance_scope_note(1, 0, both),
+            "Compliance covers online Windows, macOS and Linux devices only \
+             (1 offline device excluded)."
+        );
+        assert_eq!(
+            compliance_scope_note(0, 1, both),
+            "Compliance covers online Windows, macOS and Linux devices only \
+             (1 non-patchable device excluded)."
+        );
+        assert_eq!(
+            compliance_scope_note(3, 12, both),
+            "Compliance covers online Windows, macOS and Linux devices only \
+             (3 offline and 12 non-patchable devices excluded)."
         );
         assert_eq!(
             compliance_scope_note(
                 12,
+                0,
                 PatchFamilies {
                     os: true,
                     software: false
                 }
             ),
-            "Compliance covers online devices only (12 offline devices excluded), \
-             and counts OS patches only."
+            "Compliance covers online Windows, macOS and Linux devices only \
+             (12 offline devices excluded), and counts OS patches only."
         );
         // A missing `patchFamilies` on the wire defaults to neither family, which
         // must read as an incomplete scope rather than a silent whole-backlog claim.
-        assert!(compliance_scope_note(0, PatchFamilies::default()).contains("no patch families"));
+        assert!(
+            compliance_scope_note(0, 0, PatchFamilies::default()).contains("no patch families")
+        );
     }
 
     #[test]
@@ -2452,9 +2485,10 @@ mod tests {
                 "Install history: last 30d",
             ]
         );
-        // The first five facets are device-scope; the rest are patch-tier.
-        assert!(chips.iter().take(5).all(|c| !c.patch));
-        assert!(chips.iter().skip(5).all(|c| c.patch));
+        // The first six facets reach every tab (Type included: only the families
+        // fetched are in the fleet rollups); the rest narrow the rows only.
+        assert!(chips.iter().take(6).all(|c| !c.patch));
+        assert!(chips.iter().skip(6).all(|c| c.patch));
     }
 
     /// Builds an `AuthStatus` in the state the named step leaves it in.

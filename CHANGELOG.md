@@ -21,6 +21,23 @@ version and start a fresh `[Unreleased]`.
   unless it is `REJECTED` or `INSTALLED`. The same records now show as rows too — a FAILED one under
   the Failed status, an untyped one under Pending — where before the Compliance sheet could count a
   patch the Patches sheet could not show.
+- **Compliance no longer counts devices NinjaOne cannot patch.** Switches, printers, hypervisors,
+  cloud monitors and other non-Windows/macOS/Linux device classes are online and carry no patch
+  records, so they scored as compliant and inflated the headline percentage by exactly the share of
+  the fleet that cannot be patched — and, with no OS Type filter, opened an "(unknown)" OS at 100% in
+  the by-OS table. They are now excluded from every fleet-health rollup like offline devices are, and
+  the scope note on the Compliance tab, the report header and the workbook say how many:
+  "Compliance covers online Windows, macOS and Linux devices only (3 offline and 12 non-patchable
+  devices excluded)". The About sheet carries the count too.
+- **The exports now say which filters reach which sheets.** The About sheet and the report header
+  listed Status, Severity, Search and the date windows beside the Compliance and Needs Reboot
+  numbers, which ignore them — a workbook filtered to Severity: Critical read as a critical-only
+  backlog. Both now print the device-scope filters under "Filters (every sheet)" and the row-only
+  ones under "Patch filters (Patches and Patch Failures sheets only)".
+- **The Type chip is no longer struck through on the Compliance and Needs Reboot tabs.** Type does
+  narrow those numbers (only the patch families the query fetched are in them), and the banner on
+  the tab said so while the chip above it said "Ignored on this tab". The Type control also stays
+  visible in the Filters panel on those tabs instead of being folded away with the row-only filters.
 - **The install-history lookback is enforced on the app's side as well as the server's.** The
   exports say "Install history since <date>", so a record NinjaOne returned from outside that window
   is now dropped rather than trusted into the Failures table.

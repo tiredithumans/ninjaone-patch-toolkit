@@ -594,8 +594,14 @@ secrets are **not** stored there — see below).
   population than `devices_total`, and every surface has to say so rather than leave two device
   counts side by side.
   - **One population for *every* fleet-health rollup, via `rows::rollup_device`.** The device must be
-    in the scoped inventory **and** online. Offline devices are excluded because they report no
-    current patch records, so a zero pending count says nothing about them. `accumulate_compliance`
+    in the scoped inventory, online, **and** something NinjaOne patch management covers
+    (`Device::is_patchable` — an allow list of the Windows/macOS/Linux `nodeClass` values,
+    `model::PATCHABLE_NODE_CLASSES`; a device with no class is kept). Offline devices are excluded
+    because they report no current patch records, so a zero pending count says nothing about them;
+    switches, printers, hypervisors and cloud monitors are excluded for the same reason — they are
+    online, carry no patch records, and used to score *compliant*, so 100 servers plus 100 network
+    devices read 25 points better than the servers did. The allow list fails toward exclusion (which
+    every surface states as a count) rather than toward a silently higher percentage. `accumulate_compliance`
     applies it to the device loop *and* the patch loop (the patch loop used to skip it, so an org
     whose devices were all offline read "0 devices · 100% compliant · 45 pending Critical/Important",
     and an orphan patch opened its own zero-device `(unknown)` org). `build_severity_by_org` and
@@ -607,8 +613,11 @@ secrets are **not** stored there — see below).
     one rollup structurally *unable* to apply the exclusion. A new rollup over the current feed goes
     through `rollup_device` too — `severity_and_age_rollups_cover_the_same_devices_compliance_does`
     pins the three against each other.
-  - **`devices_offline` and `patch_families` ride on `QueryResult`/`QuerySummary`** so the note can be
-    stated. `rows::compliance_scope_note` builds the sentence; the Compliance tab
+  - **`devices_offline`, `devices_unpatchable` and `patch_families` ride on `QueryResult`/`QuerySummary`**
+    so the note can be stated: "Compliance covers online Windows, macOS and Linux devices only (N
+    offline and M non-patchable devices excluded)". `devices_unpatchable` counts *online* devices
+    only, so `devices_total − devices_offline − devices_unpatchable` is the compliance denominator
+    and the three numbers reconcile. `rows::compliance_scope_note` builds the sentence; the Compliance tab
     (`ComplianceScopeNote`), the HTML report header and both workbook compliance sheets print it, and
     `web-rs/src/app/util.rs` mirrors it (the crates share no code — both sides are tested). The
     detail sheet carries an **Offline** column for the same reason: a sheet asserting "N offline
@@ -630,6 +639,15 @@ secrets are **not** stored there — see below).
     - `QueryResult`-only, deliberately **not** on `QuerySummary`: the frontend has its own chip row,
       so a second copy over IPC would be a wire field with no reader. This is the documented
       exception to the compact-aggregates lockstep rule above.
+    - **Two tiers, and both exports say which is which.** `QueryScope.facets` holds the facets that
+      narrow every sheet and section (device scope + `Patch type`); `QueryScope.patch_facets` holds
+      the ones that narrow only the detail rows (`Status`, `Severity`, `Search`, the first-seen
+      window, the install lookback) — the compliance, severity, age and reboot sections are computed
+      from the *unnarrowed* current feed. The About sheet prints them under "Filters (every sheet)"
+      and "Patch filters (Patches and Patch Failures sheets only)"; the report under matching
+      captions. The in-app Compliance tab already dimmed those chips with "Ignored on this tab", but
+      a workbook that listed `Severity: CRITICAL` beside the Compliance sheet with no such note read
+      as a critical-only backlog. A new facet goes in the tier its scope actually has.
     - Date bounds are **absolute** (`%Y-%m-%d %H:%M UTC`), with the relative window in parentheses
       when that is the control the operator used — "the last 30 days" silently re-anchors to whenever
       the artifact is read. They are composed backend-side as Unix *seconds*, so they use
@@ -647,7 +665,10 @@ secrets are **not** stored there — see below).
     query asked for are fetched at all (see the whole-fleet prefetch above — a third-party feed runs
     to six figures, so an OS-only query does not page it). That makes "compliant" mean "no pending OS
     patches" on such a query. The tabs and the exports name the families instead of claiming Type is
-    ignored, which is what they used to claim while the chip was struck through.
+    ignored. The `Type` chip is therefore a **device-tier** chip (`filter_chips` marks it
+    `patch: false`), never struck through on the fleet tabs, and the Filters panel renders the Type
+    control *outside* the fold that hides the row-only facets there — for a while the chip said
+    "Ignored on this tab" directly above a banner saying the opposite.
   - **"Compliant" and "Pending Critical/Important" grade differently, on purpose.** Compliant is
     `pending_count == 0` over patches of *any* severity (`is_pending`), while the two SLA columns
     count only rank ≥ Important (`counts_toward_backlog`). A row can legitimately read

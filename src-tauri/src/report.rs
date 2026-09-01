@@ -123,6 +123,7 @@ pub fn render_report(result: &QueryResult) -> String {
         "<p class=\"meta\">{}</p>",
         escape_html(&crate::rows::compliance_scope_note(
             result.devices_offline,
+            result.devices_unpatchable,
             result.patch_families
         ))
     );
@@ -166,20 +167,37 @@ pub fn render_report(result: &QueryResult) -> String {
 /// every number in them describes a different population. Values are escaped like
 /// every other piece of NinjaOne (and operator) text on the page: an organization
 /// name and a free-text search both land here verbatim.
+///
+/// Two lists, because the two tiers reach different sections: the device scope and
+/// patch type narrow everything below, while status, severity, search and the date
+/// windows narrow only the detail rows the failures table is built from — the
+/// compliance, severity and age sections are computed from the unnarrowed current
+/// feed. The in-app Compliance tab says so; a printed header that listed
+/// "Severity: CRITICAL" above those charts with no such note read as a
+/// critical-only backlog.
 fn write_scope(buf: &mut String, scope: &QueryScope) {
-    if scope.facets.is_empty() {
-        return;
+    for (caption, facets) in [
+        ("Filters (every section)", &scope.facets),
+        (
+            "Patch filters (Top patch failures only)",
+            &scope.patch_facets,
+        ),
+    ] {
+        if facets.is_empty() {
+            continue;
+        }
+        let _ = write!(buf, "<p class=\"meta scope-caption\">{caption}</p>");
+        buf.push_str("<dl class=\"scope\">");
+        for (label, value) in facets {
+            let _ = write!(
+                buf,
+                "<dt>{}</dt><dd>{}</dd>",
+                escape_html(label),
+                escape_html(value)
+            );
+        }
+        buf.push_str("</dl>");
     }
-    buf.push_str("<dl class=\"scope\">");
-    for (label, value) in &scope.facets {
-        let _ = write!(
-            buf,
-            "<dt>{}</dt><dd>{}</dd>",
-            escape_html(label),
-            escape_html(value)
-        );
-    }
-    buf.push_str("</dl>");
 }
 
 /// Renders a horizontal compliance-bar SVG from `(label, pct)` rows — shared by the
@@ -473,6 +491,8 @@ mod tests {
             facets: vec![
                 ("Organizations", "Contoso & Co".to_string()),
                 ("Patch type", "OS patches only".to_string()),
+            ],
+            patch_facets: vec![
                 ("Status", "Pending, Failed".to_string()),
                 ("Search", "<script>".to_string()),
             ],
@@ -481,6 +501,14 @@ mod tests {
         assert!(html.contains("<dt>Organizations</dt><dd>Contoso &amp; Co</dd>"));
         assert!(html.contains("<dt>Patch type</dt><dd>OS patches only</dd>"));
         assert!(html.contains("<dt>Status</dt><dd>Pending, Failed</dd>"));
+        // Each tier under a caption naming the sections it reaches, in order.
+        let every = html.find("Filters (every section)").expect("fleet caption");
+        let patch = html
+            .find("Patch filters (Top patch failures only)")
+            .expect("patch caption");
+        let orgs = html.find("<dt>Organizations</dt>").unwrap();
+        let status = html.find("<dt>Status</dt>").unwrap();
+        assert!(every < orgs && orgs < patch && patch < status);
         assert!(
             html.contains("<dd>&lt;script&gt;</dd>") && !html.contains("<dd><script></dd>"),
             "a free-text search reaches the page verbatim and must be escaped"
@@ -749,6 +777,7 @@ mod tests {
             ],
             devices_total: 10,
             devices_offline: 0,
+            devices_unpatchable: 0,
             patch_families: PatchFamilies {
                 os: true,
                 software: true,
@@ -800,6 +829,7 @@ mod tests {
             age_buckets: Vec::new(),
             devices_total: 0,
             devices_offline: 0,
+            devices_unpatchable: 0,
             patch_families: PatchFamilies {
                 os: true,
                 software: true,

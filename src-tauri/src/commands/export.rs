@@ -137,8 +137,11 @@ pub async fn export_patches_xlsx(
     // blocking task and the sheets borrow out of it there, so the only allocation on
     // this path is the reboot subset — which is a filtered projection either way.
     let result = cached_result(&state)?;
-    let scope_note =
-        crate::rows::compliance_scope_note(result.devices_offline, result.patch_families);
+    let scope_note = crate::rows::compliance_scope_note(
+        result.devices_offline,
+        result.devices_unpatchable,
+        result.patch_families,
+    );
 
     // Serializing a six-figure row set into a zipped workbook is seconds of pure CPU
     // plus the file write — both of which would hold a tokio worker for the duration.
@@ -162,6 +165,7 @@ pub async fn export_patches_xlsx(
                 data_fetched_at: &result.data_fetched_at,
                 devices_total: result.devices_total,
                 devices_offline: result.devices_offline,
+                devices_unpatchable: result.devices_unpatchable,
                 scope: &result.scope,
                 scope_note: &scope_note,
             },
@@ -304,6 +308,7 @@ mod tests {
             age_buckets: Vec::new(),
             devices_total: 0,
             devices_offline: 0,
+            devices_unpatchable: 0,
             patch_families: crate::rows::PatchFamilies {
                 os: true,
                 software: true,

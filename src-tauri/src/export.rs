@@ -74,6 +74,7 @@ pub struct WorkbookMeta<'a> {
     pub data_fetched_at: &'a str,
     pub devices_total: usize,
     pub devices_offline: usize,
+    pub devices_unpatchable: usize,
     /// The facets the query ran under. Its `Patch type` entry is where the patch
     /// families are stated — they are not a separate row, because the Type facet and
     /// the rollups' family scope are the same value and two adjacent rows saying it
@@ -188,12 +189,14 @@ fn write_about_sheet(
 ) -> Result<()> {
     let devices_total = meta.devices_total.to_string();
     let devices_offline = meta.devices_offline.to_string();
+    let devices_unpatchable = meta.devices_unpatchable.to_string();
     let detail_rows = detail_rows.to_string();
-    let entries: [(&str, &str); 5] = [
+    let entries: [(&str, &str); 6] = [
         ("Generated", meta.generated_at),
         ("Patch data fetched", meta.data_fetched_at),
         ("Devices in scope", &devices_total),
         ("Offline devices", &devices_offline),
+        ("Non-patchable devices", &devices_unpatchable),
         ("Detail rows", &detail_rows),
     ];
 
@@ -212,21 +215,33 @@ fn write_about_sheet(
         sheet.write_string(row, 1, *value)?;
     }
 
-    // The facets, under their own banded heading. Without them two workbooks off the
-    // same fleet — one scoped to a single org and CRITICAL-only, one unfiltered —
+    // The facets, under their own banded headings. Without them two workbooks off
+    // the same fleet — one scoped to a single org and CRITICAL-only, one unfiltered —
     // are indistinguishable once saved, and every number in both is a different
-    // population.
-    row += 2;
-    sheet
-        .write_string_with_format(row, 0, "Filters", header)
-        .context("write header")?;
-    sheet
-        .write_string_with_format(row, 1, "Value", header)
-        .context("write header")?;
-    for (label, value) in &meta.scope.facets {
-        row += 1;
-        sheet.write_string(row, 0, *label)?;
-        sheet.write_string(row, 1, value)?;
+    // population. Two headings, because the two tiers reach different sheets: the
+    // device scope and patch type narrow every sheet, but Status/Severity/Search and
+    // the date windows narrow only the detail rows. The in-app Compliance tab says
+    // so; a workbook that listed "Severity: CRITICAL" beside the Compliance sheet
+    // without it read as a critical-only backlog.
+    for (heading, facets) in [
+        ("Filters (every sheet)", &meta.scope.facets),
+        (
+            "Patch filters (Patches and Patch Failures sheets only)",
+            &meta.scope.patch_facets,
+        ),
+    ] {
+        row += 2;
+        sheet
+            .write_string_with_format(row, 0, heading, header)
+            .context("write header")?;
+        sheet
+            .write_string_with_format(row, 1, "Value", header)
+            .context("write header")?;
+        for (label, value) in facets {
+            row += 1;
+            sheet.write_string(row, 0, *label)?;
+            sheet.write_string(row, 1, value)?;
+        }
     }
 
     sheet.write_string(row + 2, 0, meta.scope_note)?;
@@ -320,10 +335,13 @@ mod tests {
             data_fetched_at: "2026-05-02 08:40:00 UTC",
             devices_total: 2,
             devices_offline: 1,
+            devices_unpatchable: 1,
             scope: SCOPE.get_or_init(|| QueryScope {
                 facets: vec![
                     ("Organizations", "Contoso".to_string()),
                     ("Patch type", "OS and third-party patches".to_string()),
+                ],
+                patch_facets: vec![
                     ("Status", "Pending, Failed".to_string()),
                     ("Severity", "CRITICAL".to_string()),
                 ],
@@ -449,6 +467,7 @@ mod tests {
             "Patch data fetched|2026-05-02 08:40:00 UTC",
             "Devices in scope|2",
             "Offline devices|1",
+            "Non-patchable devices|1",
             "Detail rows|1",
         ] {
             assert!(
@@ -471,6 +490,16 @@ mod tests {
                 "About sheet is missing the {expected:?} facet:\n{joined}"
             );
         }
+        // And under headings that say which sheets each tier narrows — the row-only
+        // facets listed beside the Compliance sheet with no such note read as a
+        // critical-only backlog.
+        let every = joined.find("Filters (every sheet)").expect("fleet heading");
+        let patch = joined
+            .find("Patch filters (Patches and Patch Failures sheets only)")
+            .expect("patch heading");
+        let status = joined.find("Status|Pending, Failed").unwrap();
+        let orgs = joined.find("Organizations|Contoso").unwrap();
+        assert!(every < orgs && orgs < patch && patch < status);
 
         let _ = std::fs::remove_file(&path);
     }

@@ -627,6 +627,12 @@ fn assemble_result(
         // in-scope device, and `devices_total - devices_offline` is the compliance
         // denominator.
         devices_offline: scoped_devices.iter().filter(|d| d.is_offline()).count(),
+        // Online only, so the three counts reconcile: an offline switch is already
+        // in `devices_offline`.
+        devices_unpatchable: scoped_devices
+            .iter()
+            .filter(|d| !d.is_offline() && !d.is_patchable())
+            .count(),
         patch_families: families,
         // Built from the plan the fetch ran under, so the block describes the query
         // rather than the request — including the install lookback, which is named
@@ -743,6 +749,7 @@ mod tests {
                 age_buckets: Vec::new(),
                 devices_total: 0,
                 devices_offline: 0,
+                devices_unpatchable: 0,
                 patch_families: PatchFamilies {
                     os: true,
                     software: true,
@@ -1450,10 +1457,12 @@ mod tests {
         .await
         .expect("query");
 
+        // Both tiers, flattened: the tiering itself is pinned in `rows.rs`.
         let facets: Vec<(&str, &str)> = result
             .scope
             .facets
             .iter()
+            .chain(&result.scope.patch_facets)
             .map(|(l, v)| (*l, v.as_str()))
             .collect();
         // Resolved through the same lookups the rows are labelled with, so the block

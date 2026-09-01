@@ -130,23 +130,19 @@ pub(crate) fn Filters() -> impl IntoView {
                 <span class="subhead-note">
                     {move || {
                         if fleet() {
-                            "hidden \u{2014} not applicable to Fleet-health tabs"
+                            "Type applies to every tab; the rest are hidden \u{2014} Patches & Failures tabs only"
                         } else {
-                            "Patches & Failures tabs only"
+                            "Type applies to every tab; the rest to Patches & Failures only"
                         }
                     }}
                 </span>
             </div>
-            <Show
-                when=move || !fleet()
-                fallback=|| {
-                    view! {
-                        <p class="filters-hidden-note">
-                            "Patch filters don't affect Compliance or Needs Reboot. Switch to the Patches or Failures tab to use them."
-                        </p>
-                    }
-                }
-            >
+            // Type sits outside the fleet-tab fold because it is not a row-only
+            // facet: only the families the query fetched are in the compliance,
+            // severity, age and reboot rollups, so an OS-only query cannot see a
+            // third-party backlog on any tab. Hiding it here under "Patch filters
+            // don't affect Compliance" said the opposite of what the banner on that
+            // tab says.
             <div class="stacked-filters">
                 <div class="control-group">
                     <span class="chips-label">"Type:"</span>
@@ -168,6 +164,18 @@ pub(crate) fn Filters() -> impl IntoView {
                         })
                         .collect_view()}
                 </div>
+            </div>
+            <Show
+                when=move || !fleet()
+                fallback=|| {
+                    view! {
+                        <p class="filters-hidden-note">
+                            "Status, Severity, Search and the date windows don't affect Compliance or Needs Reboot. Switch to the Patches or Failures tab to use them."
+                        </p>
+                    }
+                }
+            >
+            <div class="stacked-filters">
                 <div class="control-group">
                     <span class="chips-label">"Status:"</span>
                     {STATUS_OPTIONS

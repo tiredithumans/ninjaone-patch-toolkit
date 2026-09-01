@@ -84,7 +84,38 @@ impl Device {
     pub fn is_offline(&self) -> bool {
         self.offline.unwrap_or(false)
     }
+
+    /// Whether NinjaOne patch management can act on this device at all.
+    ///
+    /// Patch management covers Windows, macOS and Linux agents. Everything else in
+    /// the inventory — network gear (`NMS_*`), cloud monitors, agentless VM
+    /// hosts/guests, mobile devices — reports no patch records, so a zero pending
+    /// count says nothing about it; scoring it compliant inflated the headline
+    /// percentage by exactly the share of the fleet that cannot be patched. Written
+    /// as an allow list so a class this crate has never seen fails toward
+    /// *exclusion* — which every compliance surface states as a count — rather than
+    /// toward a silently higher percentage. A device with no `nodeClass` at all is
+    /// kept: there is nothing to prove it out on.
+    pub fn is_patchable(&self) -> bool {
+        match self.node_class.as_deref() {
+            Some(class) => PATCHABLE_NODE_CLASSES
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(class)),
+            None => true,
+        }
+    }
 }
+
+/// The `nodeClass` values NinjaOne patch management covers, from the spec's
+/// `NodeClass` enum. See [`Device::is_patchable`].
+pub const PATCHABLE_NODE_CLASSES: [&str; 6] = [
+    "WINDOWS_SERVER",
+    "WINDOWS_WORKSTATION",
+    "LINUX_SERVER",
+    "LINUX_WORKSTATION",
+    "MAC",
+    "MAC_SERVER",
+];
 
 /// Severity buckets returned by NinjaOne's patch feeds.
 ///

@@ -560,6 +560,7 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64]) -> QueryResult {
         // The sample fleet is all-online and both families are represented, so the
         // demo's scope note reads the same as a whole-fleet desktop query.
         devices_offline: 0,
+        devices_unpatchable: 0,
         patch_families: PatchFamilies {
             os: true,
             software: true,
