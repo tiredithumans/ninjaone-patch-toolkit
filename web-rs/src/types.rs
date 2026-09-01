@@ -270,6 +270,11 @@ pub struct QueryResult {
     /// say so instead of showing two device counts with no explanation.
     #[serde(default)]
     pub devices_offline: usize,
+    /// How many of `devices_total` are online but not something NinjaOne patch
+    /// management covers (switches, printers, hypervisors, cloud monitors). Excluded
+    /// from the rollups like the offline devices, and named in the scope note.
+    #[serde(default)]
+    pub devices_unpatchable: usize,
     /// Which patch families the fleet-health rollups actually cover.
     #[serde(default)]
     pub patch_families: PatchFamilies,

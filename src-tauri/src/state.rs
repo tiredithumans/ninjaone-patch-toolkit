@@ -1154,6 +1154,7 @@ mod tests {
             age_buckets: Vec::new(),
             devices_total: 0,
             devices_offline: 0,
+            devices_unpatchable: 0,
             patch_families: PatchFamilies {
                 os: true,
                 software: true,

@@ -695,7 +695,11 @@ fn ComplianceScopeNote() -> impl IntoView {
                     .with(|r| {
                         r.as_ref()
                             .map(|r| {
-                                util::compliance_scope_note(r.devices_offline, r.patch_families)
+                                util::compliance_scope_note(
+                                    r.devices_offline,
+                                    r.devices_unpatchable,
+                                    r.patch_families,
+                                )
                             })
                             .unwrap_or_default()
                     })
@@ -734,9 +738,9 @@ fn ComplianceTab() -> impl IntoView {
                 // `Type` is listed because it genuinely narrows these numbers: only
                 // the patch families the query fetched are in the rollups, and an
                 // OS-only query cannot see a third-party backlog. Claiming it was
-                // ignored here — which this said, and which the struck-through chip
-                // above still implied — let "100% compliant" mean "no pending OS
-                // patches" with nothing on screen saying so.
+                // ignored here let "100% compliant" mean "no pending OS patches"
+                // with nothing on screen saying so. The chip row agrees: `Type` is a
+                // device-tier chip (`filter_chips`), so it is never struck through.
                 filters="Device scope (Org / Location / Role / OS Type / OS name) and patch Type. Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
             <ComplianceScopeNote/>
