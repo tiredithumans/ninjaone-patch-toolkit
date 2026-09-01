@@ -277,17 +277,19 @@ impl QueryPlan {
 
         // Install *results* ("Installed" and "Failed") route to the
         // `*-patch-installs` history endpoints; the rest (MANUAL/APPROVED/REJECTED)
-        // narrow the current-patch feed for display. A FAILED patch is one whose
-        // install was attempted and failed, so it never appears in the current feed
-        // ("patches for which there were no installation attempts") — only in the
-        // install history.
+        // narrow the current-patch feed for display. The set carries **every**
+        // selected status, install results included: the spec's description says
+        // the current feed holds only "patches for which there were no installation
+        // attempts", but its own titles for the same endpoints are "Pending, Failed
+        // and Rejected … report", and `status` there has no enum. A FAILED record
+        // that does arrive in the current feed is counted against compliance by
+        // `rows::is_pending`, so it must also be *visible* under the Failed
+        // selection — filtering it out of the rows here left a device the rollups
+        // called non-compliant with nothing on the Patches tab to show why. The set
+        // only reaches `build_rows`; the rollups take the unnarrowed feed.
         let want_installs = args.statuses.iter().any(|s| s.is_install_history());
-        let current_status_set: HashSet<&'static str> = args
-            .statuses
-            .iter()
-            .filter(|s| !s.is_install_history())
-            .map(|s| s.api_value())
-            .collect();
+        let current_status_set: HashSet<&'static str> =
+            args.statuses.iter().map(|s| s.api_value()).collect();
         let install_status_set: HashSet<&'static str> = args
             .statuses
             .iter()
@@ -502,20 +504,37 @@ fn assemble_result(
     // Build detail rows from the scoped current families plus the install history.
     // The install sets are owned by this call, so they're borrowed into the same
     // `&[&Patch]` shape the scoped current families use.
-    let os_install_refs: Vec<&Patch> = src.os_installs.iter().collect();
-    let sw_install_refs: Vec<&Patch> = src.sw_installs.iter().collect();
+    //
+    // The lookback window is re-applied here rather than trusted to the server. The
+    // `installedAfter` parameter is typed only as `string` in the spec with no stated
+    // format; Unix seconds is what the widely used community client sends and what
+    // this app has always sent, but nothing in the response says whether the bound
+    // was honored, and the exports print "Install history since <date>" on the
+    // strength of it. Undated records are kept: the window cannot prove them out.
+    let within_window = |p: &&Patch| {
+        p.installed_at()
+            .is_none_or(|t| t.timestamp() >= plan.installed_after)
+    };
+    let os_install_refs: Vec<&Patch> = src.os_installs.iter().filter(within_window).collect();
+    let sw_install_refs: Vec<&Patch> = src.sw_installs.iter().filter(within_window).collect();
     let mut rows = {
         let mut sources = vec![
+            // A current-feed record that omits its status is pending by construction
+            // (see `rows::is_pending`), and every rollup counts it that way. The
+            // override labels it MANUAL so the row join agrees: it matches the
+            // Pending selection and renders as PENDING. With no override it fell
+            // through the status filter and never became a row, so the Compliance
+            // sheet counted patches the Patches sheet could not show.
             PatchSource {
                 patches: &scoped_os_current,
                 type_label: "OS",
-                status_override: None,
+                status_override: Some(PatchStatus::Pending.api_value()),
                 status_filter: Some(&plan.current_status_set),
             },
             PatchSource {
                 patches: &scoped_sw_current,
                 type_label: "SOFTWARE",
-                status_override: None,
+                status_override: Some(PatchStatus::Pending.api_value()),
                 status_filter: Some(&plan.current_status_set),
             },
         ];
@@ -825,10 +844,13 @@ mod tests {
             fixed_now(),
         );
         assert!(history.want_installs);
-        assert!(
-            history.current_status_set.is_empty(),
-            "a FAILED-only query must not narrow the current feed to FAILED, which \
-             would starve the compliance and severity rollups"
+        // The set carries FAILED too: it narrows only the *rows* built from the
+        // current feed (the rollups take the unnarrowed feed), and a FAILED record
+        // that does arrive there has to be visible under the Failed selection.
+        assert_eq!(
+            history.current_status_set,
+            HashSet::from(["FAILED"]),
+            "the current-feed row filter carries every selected status"
         );
 
         let pending = QueryPlan::build(
@@ -1172,6 +1194,155 @@ mod tests {
 
         // No FAILED status was requested, so the failure rollup is empty.
         assert!(result.failures.is_empty());
+    }
+
+    /// The current feed's own endpoint titles promise "Pending, Failed and Rejected"
+    /// records and `status` has no enum, so a FAILED or untyped record can arrive
+    /// there. Both must count against compliance **and** be visible as rows — the
+    /// old allow list scored the device compliant and showed nothing.
+    #[tokio::test]
+    async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false }
+            ])))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    { "deviceId": 10, "kbNumber": "KBFAILED", "status": "FAILED",
+                      "severity": "CRITICAL" },
+                    { "deviceId": 10, "kbNumber": "KBUNTYPED", "severity": "CRITICAL" },
+                    { "deviceId": 10, "kbNumber": "KBREJECTED", "status": "REJECTED",
+                      "severity": "CRITICAL" }
+                ],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patch-installs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let progress = |_: &'static str, _: usize| {};
+        let result = run_query(
+            &client(&server),
+            async { Ok::<_, anyhow::Error>(lookups()) },
+            fleet_devices_via(&client(&server)),
+            fleet_current_via(&client(&server)),
+            30,
+            30,
+            args(
+                PatchType::Os,
+                vec![PatchStatus::Pending, PatchStatus::Failed],
+            ),
+            fixed_now(),
+            &progress,
+        )
+        .await
+        .expect("query");
+
+        let mut statuses: Vec<(Option<&str>, &str)> = result
+            .rows
+            .iter()
+            .map(|r| (r.kb.as_deref(), &*r.status))
+            .collect();
+        statuses.sort();
+        assert_eq!(
+            statuses,
+            vec![(Some("KBFAILED"), "FAILED"), (Some("KBUNTYPED"), "PENDING")],
+            "the FAILED record shows under Failed, the untyped one under Pending, \
+             and the REJECTED one under neither"
+        );
+
+        let org = &result.compliance[0];
+        assert_eq!(org.devices_total, 1);
+        assert_eq!(
+            org.devices_compliant, 0,
+            "two pending CRITICAL patches make the device non-compliant"
+        );
+        assert_eq!(
+            org.pending_critical, 2,
+            "REJECTED is the only status excluded"
+        );
+        assert_eq!(result.devices[0].pending_count, 2);
+    }
+
+    /// The exports print "Install history since <date>" on the strength of the
+    /// `installedAfter` parameter, whose format the spec never states. The window is
+    /// therefore re-applied client-side: a record the server returns from outside it
+    /// is dropped, and an undated one is kept because the window cannot prove it out.
+    #[tokio::test]
+    async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false }
+            ])))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let now = fixed_now().timestamp();
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patch-installs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    { "deviceId": 10, "kbNumber": "KBRECENT", "status": "FAILED",
+                      "installedAt": now - 5 * 86_400 },
+                    { "deviceId": 10, "kbNumber": "KBSTALE", "status": "FAILED",
+                      "installedAt": now - 45 * 86_400 },
+                    { "deviceId": 10, "kbNumber": "KBUNDATED", "status": "FAILED" }
+                ],
+                "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+
+        let progress = |_: &'static str, _: usize| {};
+        let result = run_query(
+            &client(&server),
+            async { Ok::<_, anyhow::Error>(lookups()) },
+            fleet_devices_via(&client(&server)),
+            fleet_current_via(&client(&server)),
+            30,
+            30,
+            args(PatchType::Os, vec![PatchStatus::Failed]),
+            fixed_now(),
+            &progress,
+        )
+        .await
+        .expect("query");
+
+        let mut kbs: Vec<&str> = result.rows.iter().filter_map(|r| r.kb.as_deref()).collect();
+        kbs.sort();
+        assert_eq!(
+            kbs,
+            vec!["KBRECENT", "KBUNDATED"],
+            "a 45-day-old record is outside the 30-day window whatever the server sent"
+        );
     }
 
     #[tokio::test]

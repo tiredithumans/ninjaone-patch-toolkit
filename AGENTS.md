@@ -652,11 +652,20 @@ secrets are **not** stored there — see below).
     `pending_count == 0` over patches of *any* severity (`is_pending`), while the two SLA columns
     count only rank ≥ Important (`counts_toward_backlog`). A row can legitimately read
     "10 devices · 4 compliant · 0 pending Critical/Important".
-  - **A current-feed record with no `status` counts as pending.** `status` is not required on
-    `DeviceOSPatch`/`DeviceSoftwarePatch`, and that feed is defined as the patches with no
-    installation attempt, so an untyped record there is pending by construction. Excluding it
-    understated the backlog and *raised* the percentage — the wrong direction to fail in, and the
-    opposite of what `is_aged` does with an undated patch.
+  - **`rows::is_pending` is an exclude list: a current-feed record is pending unless it is
+    `REJECTED` or `INSTALLED`.** `status` has no enum in the spec and is not required on
+    `DeviceOSPatch`/`DeviceSoftwarePatch`; the feed's description says "no installation attempts"
+    but the same endpoints are titled "Pending, **Failed** and Rejected … report"
+    (`getPendingFailedRejected*`), so `FAILED`, an untyped record, or a value this crate has never
+    seen can all arrive there. The allow list this replaced (`MANUAL | APPROVED | None`) scored such
+    a device *compliant* and dropped its most urgent patch from every rollup — the wrong direction
+    to fail in, and the opposite of what `is_aged` does with an undated patch. Two things keep the
+    rows in step with the rollups: `QueryPlan::current_status_set` carries **every** selected
+    status (it only narrows the rows built from the current feed; the rollups take the unnarrowed
+    feed), so a FAILED current record shows under the Failed selection; and `assemble_result`
+    gives both current sources `status_override = MANUAL`, so an untyped record matches the
+    Pending selection and renders as PENDING instead of being counted by the Compliance sheet and
+    missing from the Patches sheet.
   - **A percentage never rounds up to 100.** `rows::format_pct` (and its `web-rs` mirror) caps
     anything below 100 at 99%, and `pct_cell` does the same at one decimal. Plain `{:.0}%` printed
     "100%" from 99.5% up, so 199 of 200 devices patched read as a clean fleet — the one rounding
@@ -773,9 +782,11 @@ secrets are **not** stored there — see below).
   So **both** `Installed` *and* `Failed` are install *results* and must route to the install-history
   endpoints over the lookback window (`settings.install_window_days`, overridable per query); only
   `Pending`/`Approved`/`Rejected` narrow the current feed. `PatchStatus::is_install_history()` encodes
-  this. Routing `Failed` to the current feed (it never appears there) was a real bug — a FAILED query
-  returned nothing. Current patches are **always** fetched regardless of the status filter (they drive
-  compliance % and pending/reboot counts). See `commands/patches.rs`.
+  this. Routing `Failed` *only* to the current feed was a real bug — a FAILED query returned nothing,
+  because failed installs live in the history. (A `FAILED` record that *does* arrive in the current
+  feed is still counted and shown — see `is_pending` above; the two are not exclusive.) Current
+  patches are **always** fetched regardless of the status filter (they drive compliance % and
+  pending/reboot counts). See `commands/patches.rs`.
   - **Install-status pushdown.** The `*-patch-installs` endpoints honor a server-side `status`
     (`FAILED`/`INSTALLED`). When the operator requests **exactly one** install status, `run_query`
     passes it to `fleet_*_patch_installs` so a FAILED-only (failure-dashboard) query doesn't download
@@ -783,6 +794,12 @@ secrets are **not** stored there — see below).
     records are needed). The client-side `install_status_set` narrowing in `build_rows` stays as a
     backstop. The current feed is **not** status-filtered server-side — narrowing it would starve the
     compliance/severity/age rollups, which need the full `MANUAL`/`APPROVED`/`REJECTED` set.
+  - **The lookback window is re-applied client-side.** `installedAfter` is typed only as `string`
+    in the spec with no stated format. Unix seconds is what the widely used community PowerShell
+    module sends and what this app has always sent, but the response carries no evidence the bound
+    was honored, and both exports print "Install history since <date>" on the strength of it — so
+    `assemble_result` drops install records whose `installedAt` predates `plan.installed_after`
+    (undated records are kept; the window cannot prove them out).
 
 - **camelCase ↔ snake_case across IPC.** Backend arg/result structs sent to/from the frontend carry
   `#[serde(rename_all = "camelCase")]`; `web-rs/src/types.rs` mirrors them. NinjaOne API JSON (e.g.

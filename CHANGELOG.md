@@ -11,6 +11,20 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A device whose patch sits in the current feed as FAILED, or with no status at all, no longer
+  scores as compliant.** The pending rule was an allow list (`MANUAL`, `APPROVED`, or no status), so
+  any other value NinjaOne put on a current-feed record — and its own endpoint titles promise
+  "Pending, Failed and Rejected" ones — counted as "not pending": the device read 100% compliant and
+  the patch appeared in no rollup. It is now an exclude list: everything in the current feed counts
+  unless it is `REJECTED` or `INSTALLED`. The same records now show as rows too — a FAILED one under
+  the Failed status, an untyped one under Pending — where before the Compliance sheet could count a
+  patch the Patches sheet could not show.
+- **The install-history lookback is enforced on the app's side as well as the server's.** The
+  exports say "Install history since <date>", so a record NinjaOne returned from outside that window
+  is now dropped rather than trusted into the Failures table.
+
 ## [0.13.2] - 2026-09-01
 
 ### Fixed
