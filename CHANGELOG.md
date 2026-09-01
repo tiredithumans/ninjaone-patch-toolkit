@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-09-01
+
 ### Fixed
 
 - **A device whose patch sits in the current feed as FAILED, or with no status at all, no longer
