@@ -38,6 +38,52 @@ pub fn document_hidden() -> bool {
         .unwrap_or(false)
 }
 
+/// Reads a remembered UI preference, `None` when the operator has never set one.
+///
+/// `localStorage`, not `settings.json`: this is a per-machine view convenience, not
+/// configuration. Routing one boolean through the settings schema would mean a
+/// backend field, a `SaveSettingsArgs` field, a `SettingsView` field, a mirror in
+/// `types.rs` and an IPC round trip on every toggle. Lives here beside
+/// [`document_hidden`] because it touches `js_sys`, and `util` is JS-free by rule.
+///
+/// Every access is fallible and every failure reads as "no preference": a webview
+/// with site data blocked throws on the accessor itself, and the correct response is
+/// the default view, never a panic.
+pub fn ui_pref(key: &str) -> Option<bool> {
+    let storage =
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("localStorage")).ok()?;
+    let get = js_sys::Reflect::get(&storage, &JsValue::from_str("getItem")).ok()?;
+    let f = get.dyn_ref::<js_sys::Function>()?;
+    let value = f.call1(&storage, &JsValue::from_str(key)).ok()?;
+    match value.as_string()?.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Records a UI preference. Best-effort — a failure costs the operator a remembered
+/// panel state and nothing else.
+pub fn set_ui_pref(key: &str, value: bool) {
+    let Ok(storage) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("localStorage"))
+    else {
+        return;
+    };
+    let Ok(set) = js_sys::Reflect::get(&storage, &JsValue::from_str("setItem")) else {
+        return;
+    };
+    if let Some(f) = set.dyn_ref::<js_sys::Function>() {
+        let _ = f.call2(
+            &storage,
+            &JsValue::from_str(key),
+            &JsValue::from_str(if value { "true" } else { "false" }),
+        );
+    }
+}
+
+/// Storage key for the Filters panel's collapsed state.
+pub const PREF_FILTERS_COLLAPSED: &str = "npt.filtersCollapsed";
+
 #[derive(serde::Deserialize)]
 struct ErrShape {
     message: Option<String>,

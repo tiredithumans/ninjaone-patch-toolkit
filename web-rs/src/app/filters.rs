@@ -30,7 +30,13 @@ pub(crate) fn Filters() -> impl IntoView {
                 <button
                     class="btn btn-ghost filters-toggle"
                     aria-expanded=move || (!state.ui.filters_collapsed.get()).to_string()
-                    on:click=move |_| state.ui.filters_collapsed.update(|c| *c = !*c)
+                    on:click=move |_| {
+                        let next = !state.ui.filters_collapsed.get_untracked();
+                        state.ui.filters_collapsed.set(next);
+                        // An explicit toggle is a preference; remember it so the
+                        // auto-collapse below never overrides the operator again.
+                        api::set_ui_pref(api::PREF_FILTERS_COLLAPSED, next);
+                    }
                 >
                     {move || {
                         if state.ui.filters_collapsed.get() { "Show ▸" } else { "Hide ▾" }
