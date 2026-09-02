@@ -176,51 +176,165 @@ struct CachedResult {
     sorted: Option<(RowSort, Arc<Vec<u32>>)>,
 }
 
-struct LookupCache {
-    at: Instant,
-    tenant: TenantKey,
-    // Held behind `Arc` so a cache hit (and every auto-refresh tick) hands out a
-    // cheap refcount bump instead of deep-cloning three Vecs.
-    orgs: Arc<Vec<Organization>>,
-    locations: Arc<Vec<Location>>,
-    roles: Arc<Vec<Role>>,
-}
-
-struct DeviceCache {
-    at: Instant,
-    tenant: TenantKey,
-    devices: Arc<Vec<Device>>,
-}
-
-/// One whole-fleet current-patch family (OS *or* third-party), cached independently
-/// of the other.
+/// One tenant-stamped, TTL'd, epoch-gated, single-flight cache slot.
 ///
-/// They are separate slots rather than one pair because the two families are wildly
-/// asymmetric — a whole-fleet third-party feed runs to six figures and is usually the
-/// largest single fetch in a query — and `PatchType` lets the operator ask for only
-/// one. Cached as a pair, an OS-only query still paged the entire software feed and
-/// then discarded it, which also made that feed the critical path: an OS-only query
-/// took about as long as an ALL query. Split, each family is fetched only when the
-/// requested `PatchType` includes it, and a later widening to ALL reuses whatever is
-/// already warm.
-struct FamilyCache {
-    at: Instant,
-    tenant: TenantKey,
-    fetched_at: DateTime<Utc>,
-    patches: Arc<Vec<Patch>>,
+/// The same five-step protocol was written out four times in this file — once for
+/// lookups, once for the device inventory, and twice for the current-patch families
+/// via `current_family`. Each copy had to get the same sequence right:
+///
+/// 1. probe the slot (tenant match **and** within the TTL) and return a hit;
+/// 2. take the single-flight gate, so the loser of a race waits instead of paging a
+///    six-figure feed a second time;
+/// 3. re-probe under the gate — this is what turns that wait into a cache hit;
+/// 4. sample the epoch *before* the fetch;
+/// 5. store only if the epoch is unchanged when the slot lock is retaken.
+///
+/// Step 5 is the subtle one and it is not optional: without it, a fetch already in
+/// flight when an invalidation lands writes its pre-invalidation rows straight back
+/// and restarts the TTL on exactly the data the caller wanted gone. The tenant stamp
+/// cannot cover that case, because a sign-out or a post-action invalidation is the
+/// *same* tenant.
+///
+/// Prose did not keep the four copies in step. `lookups_epoch`'s field comment used
+/// to read "Mirrors `devices_epoch`/`current_epoch`, which the lookups cache was
+/// missing" — step 5 was simply absent there until someone noticed, and the lookups
+/// slot also never grew step 2 at all. Both are now structural: a fifth cache cannot
+/// be added without the protocol, because the protocol is the type.
+pub(crate) struct TenantCache<T> {
+    slot: Mutex<Option<CacheEntry<T>>>,
+    /// Bumped by [`TenantCache::invalidate`] before it clears the slot, and re-read
+    /// under the slot lock at the store. Both interleavings of a racing write lose:
+    /// one that stores before the clear is wiped by it, one that stores after sees
+    /// the new epoch and declines.
+    epoch: AtomicU64,
+    /// Held across `.await`, so a `tokio` mutex rather than a `std` one.
+    fetch_lock: tokio::sync::Mutex<()>,
 }
 
-impl FamilyCache {
-    /// Whether this entry may be served for `tenant`. `force` still honors
-    /// [`FORCE_MIN_INTERVAL`] so a fast cadence can't turn into a refetch loop.
-    fn is_fresh(&self, tenant: &TenantKey, force: bool) -> bool {
-        self.tenant == *tenant
-            && self.at.elapsed()
-                < if force {
-                    FORCE_MIN_INTERVAL
-                } else {
-                    CURRENT_PATCHES_TTL
-                }
+struct CacheEntry<T> {
+    /// Monotonic instant the entry was stored, for the TTL comparison. Separate from
+    /// `fetched_at` because a wall clock can move backwards.
+    at: Instant,
+    tenant: TenantKey,
+    /// Behind an `Arc` so a hit is a refcount bump rather than a deep copy of a
+    /// whole-fleet `Vec`.
+    value: Arc<T>,
+    /// Wall-clock fetch time, for the UI's "patch data as of …" label.
+    fetched_at: DateTime<Utc>,
+}
+
+impl<T> Default for TenantCache<T> {
+    fn default() -> Self {
+        Self {
+            slot: Mutex::new(None),
+            epoch: AtomicU64::new(0),
+            fetch_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+impl<T> TenantCache<T> {
+    /// A live entry for `tenant`, or `None` on a miss, a tenant change, or past
+    /// `ttl`. One definition, used by both the pre-lock probe and the post-gate
+    /// re-check so the two cannot disagree about what "fresh" means.
+    fn peek(&self, tenant: &TenantKey, ttl: Duration) -> Option<(Arc<T>, DateTime<Utc>)> {
+        let guard = self.slot.lock().ok()?;
+        let entry = guard.as_ref()?;
+        (entry.tenant == *tenant && entry.at.elapsed() < ttl)
+            .then(|| (entry.value.clone(), entry.fetched_at))
+    }
+
+    /// Serves `tenant`'s entry, fetching it if there isn't a fresh one.
+    ///
+    /// `ttl` is a parameter rather than a field because the current-patch families
+    /// use two: a normal re-filter accepts `CURRENT_PATCHES_TTL`, while a forced
+    /// refresh drops to `FORCE_MIN_INTERVAL` so a fast auto-refresh cadence cannot
+    /// become a refetch loop.
+    ///
+    /// The slot lock is never held across the fetch.
+    async fn get_or_fetch<F, Fut>(
+        &self,
+        tenant: &TenantKey,
+        ttl: Duration,
+        label: &'static str,
+        fetch: F,
+    ) -> Result<(Arc<T>, DateTime<Utc>)>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        if let Some(hit) = self.peek(tenant, ttl) {
+            return Ok(hit);
+        }
+        let _fetching = self.fetch_lock.lock().await;
+        // Re-probe under the gate: the winner of the race has usually stored by now,
+        // which is what makes waiting cheaper than fetching.
+        if let Some(hit) = self.peek(tenant, ttl) {
+            return Ok(hit);
+        }
+        let epoch = self.epoch.load(Ordering::SeqCst);
+        let value = Arc::new(fetch().await?);
+        let fetched_at = Utc::now();
+        if let Ok(mut guard) = self.slot.lock() {
+            if self.epoch.load(Ordering::SeqCst) == epoch {
+                *guard = Some(CacheEntry {
+                    at: Instant::now(),
+                    tenant: tenant.clone(),
+                    value: value.clone(),
+                    fetched_at,
+                });
+            } else {
+                tracing::debug!("{label} invalidated mid-fetch; not caching");
+            }
+        }
+        Ok((value, fetched_at))
+    }
+
+    /// The current epoch, for tests asserting an invalidation happened.
+    #[cfg(test)]
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
+    /// Drops the entry and makes any fetch already in flight decline to store.
+    pub(crate) fn invalidate(&self) {
+        // Bump *before* clearing, so both interleavings of a racing write lose.
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut guard) = self.slot.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// The three reference lists, cached as one value.
+///
+/// One `TenantCache` entry rather than three, because they are fetched together and
+/// are only ever meaningful together — a row labelled with this tenant's orgs and
+/// the previous tenant's locations would be worse than no labels at all.
+struct LookupSet {
+    orgs: Vec<Organization>,
+    locations: Vec<Location>,
+    roles: Vec<Role>,
+}
+
+/// The two current-patch families live in separate `TenantCache` slots rather than
+/// one, because they are wildly asymmetric — a whole-fleet third-party feed runs to
+/// six figures and is usually the largest single fetch in a query — and `PatchType`
+/// lets the operator ask for only one. Cached as a pair, an OS-only query still paged
+/// the entire software feed and then discarded it, which also made that feed the
+/// critical path: an OS-only query took about as long as an ALL query. Split, each
+/// family is fetched only when the requested `PatchType` includes it, and a later
+/// widening to ALL reuses whatever is already warm.
+///
+/// The TTL a family is served under depends on the caller: a re-filter accepts
+/// [`CURRENT_PATCHES_TTL`], a forced refresh drops to [`FORCE_MIN_INTERVAL`] so a
+/// fast auto-refresh cadence cannot become a refetch loop. That is why
+/// [`TenantCache::get_or_fetch`] takes the TTL per call rather than holding one.
+fn current_patches_ttl(force: bool) -> Duration {
+    if force {
+        FORCE_MIN_INTERVAL
+    } else {
+        CURRENT_PATCHES_TTL
     }
 }
 
@@ -247,15 +361,15 @@ pub struct AppState {
     /// as a miss, so a forgotten clear can't serve the previous tenant's rows.
     last_result: Mutex<Option<CachedResult>>,
     /// Near-static lookups (orgs/locations/roles) cached with a short TTL.
-    lookups_cache: Mutex<Option<LookupCache>>,
+    lookups_cache: TenantCache<LookupSet>,
     /// Whole-fleet device inventory cached with a long TTL ([`DEVICE_TTL`]).
-    fleet_devices_cache: Mutex<Option<DeviceCache>>,
+    fleet_devices_cache: TenantCache<Vec<Device>>,
     /// Whole-fleet current OS patches, cached so a re-filter recomputes without a
     /// refetch; refreshed on force or past [`CURRENT_PATCHES_TTL`].
-    fleet_current_os: Mutex<Option<FamilyCache>>,
+    fleet_current_os: TenantCache<Vec<Patch>>,
     /// Whole-fleet current third-party patches. Held apart from the OS family so a
-    /// query that doesn't ask for it never pays to fetch it — see [`FamilyCache`].
-    fleet_current_sw: Mutex<Option<FamilyCache>>,
+    /// query that doesn't ask for it never pays to fetch it.
+    fleet_current_sw: TenantCache<Vec<Patch>>,
     /// Dispatched action jobs, stamped with the tenant they belong to. Mutable and
     /// long-lived — it outlives the IPC call that created it — so it carries the
     /// same tenant check as `last_result`: a tenant switch reads as a miss, and a
@@ -274,22 +388,9 @@ pub struct AppState {
     /// display hint for dropping stale progress events — a stale or malicious
     /// frontend must not be able to decide which result is authoritative.
     query_generation: AtomicU64,
-    /// Bumped by [`AppState::invalidate_fleet_devices`], and re-read under the slot
-    /// lock before a fetch stores. Without it, a whole-fleet fetch that started
-    /// before an invalidation could complete after it and write pre-action data back
-    /// into the slot the invalidation had just cleared — restarting [`DEVICE_TTL`] on
-    /// exactly the rows the caller wanted gone. `TenantKey` cannot cover this: it is
-    /// the same tenant.
-    /// Bumped by [`AppState::clear_lookups_cache`] before it clears the slot, and
-    /// re-read under the slot lock at the store in [`AppState::lookups`], so a fetch
-    /// already in flight cannot write its pre-invalidation rows back. Mirrors
-    /// `devices_epoch`/`current_epoch`, which the lookups cache was missing.
-    lookups_epoch: AtomicU64,
-    devices_epoch: AtomicU64,
-    /// The same guard for both current-patch families. Bumped by
-    /// [`AppState::invalidate_current_patches`], which a mutating action calls — and
-    /// whose whole purpose is defeated if an in-flight fetch stores over it.
-    current_epoch: AtomicU64,
+    /// The lookups/devices/current-patch slots each own their own epoch and
+    /// single-flight gate inside [`TenantCache`]; only the result cache, whose
+    /// protocol is generation-gated rather than TTL-gated, still keeps one here.
     /// The same guard for the result cache, which was the one tenant-scoped slot
     /// without it. `clear_last_result` used to clear the slot bare, so a whole-fleet
     /// query still in flight at sign-out redeemed a token whose generation and tenant
@@ -298,15 +399,6 @@ pub struct AppState {
     /// served them to whoever signed in next. `TenantKey` cannot cover this either:
     /// a second operator on the same instance is the same tenant.
     result_epoch: AtomicU64,
-    /// Single-flight gates for the two whole-fleet fetches, mirroring
-    /// `AuthState::refresh_lock`. Queries overlap routinely, and on a cold cache both
-    /// would otherwise page the entire inventory / third-party feed independently —
-    /// the largest fetch in the app, run twice. A waiter re-checks the cache after
-    /// acquiring and normally finds the winner's rows already there. Held across
-    /// `.await`, so these are `tokio` mutexes; the `std` ones above are not.
-    devices_fetch_lock: tokio::sync::Mutex<()>,
-    os_fetch_lock: tokio::sync::Mutex<()>,
-    sw_fetch_lock: tokio::sync::Mutex<()>,
     /// At most one poller at a time, so a burst of batches doesn't spawn N tasks
     /// all hammering `/activities`. Held behind an [`Arc`] so [`JobPollerClaim`] can
     /// own a handle and clear it on drop.
@@ -342,20 +434,14 @@ impl AppState {
             api,
             settings: Mutex::new(settings),
             last_result: Mutex::new(None),
-            lookups_cache: Mutex::new(None),
-            fleet_devices_cache: Mutex::new(None),
-            fleet_current_os: Mutex::new(None),
-            fleet_current_sw: Mutex::new(None),
+            lookups_cache: TenantCache::default(),
+            fleet_devices_cache: TenantCache::default(),
+            fleet_current_os: TenantCache::default(),
+            fleet_current_sw: TenantCache::default(),
             jobs: Mutex::new(None),
             job_seq: AtomicU64::new(1),
             query_generation: AtomicU64::new(0),
-            lookups_epoch: AtomicU64::new(0),
-            devices_epoch: AtomicU64::new(0),
-            current_epoch: AtomicU64::new(0),
             result_epoch: AtomicU64::new(0),
-            devices_fetch_lock: tokio::sync::Mutex::new(()),
-            os_fetch_lock: tokio::sync::Mutex::new(()),
-            sw_fetch_lock: tokio::sync::Mutex::new(()),
             job_poller_running: Arc::new(AtomicBool::new(false)),
             pending_confirm: Mutex::new(None),
         })
@@ -400,52 +486,43 @@ impl AppState {
         &self,
     ) -> Result<(Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>)> {
         let key = self.tenant_key();
-        if let Ok(guard) = self.lookups_cache.lock()
-            && let Some(c) = guard.as_ref()
-            && c.tenant == key
-            && c.at.elapsed() < LOOKUP_TTL
-        {
-            return Ok((c.orgs.clone(), c.locations.clone(), c.roles.clone()));
-        }
-        // Sampled before the fetch and re-checked under the slot lock at the store.
-        let epoch = self.lookups_epoch.load(Ordering::SeqCst);
-        let (orgs, locations, roles) = tokio::try_join!(
-            self.api.organizations(),
-            async {
-                // Locations only supply optional row labels, so a failure here is
-                // non-fatal — fall back to none, but warn so a tenant-wide locations
-                // outage isn't silently rendered as blank location names.
-                Ok::<_, anyhow::Error>(match self.api.all_locations().await {
-                    Ok(locs) => locs,
-                    Err(e) => {
-                        warn!(error = %e, "locations fetch failed; rows will omit location names");
-                        Vec::new()
-                    }
+        let (set, _) = self
+            .lookups_cache
+            .get_or_fetch(&key, LOOKUP_TTL, "lookups", || async {
+                let (orgs, locations, roles) = tokio::try_join!(
+                    self.api.organizations(),
+                    async {
+                        // Locations only supply optional row labels, so a failure
+                        // here is non-fatal — fall back to none, but warn so a
+                        // tenant-wide locations outage isn't silently rendered as
+                        // blank location names.
+                        Ok::<_, anyhow::Error>(match self.api.all_locations().await {
+                            Ok(locs) => locs,
+                            Err(e) => {
+                                warn!(error = %e, "locations fetch failed; rows will omit location names");
+                                Vec::new()
+                            }
+                        })
+                    },
+                    self.api.roles(),
+                )?;
+                Ok(LookupSet {
+                    orgs,
+                    locations,
+                    roles,
                 })
-            },
-            self.api.roles(),
-        )?;
-        let (orgs, locations, roles) = (Arc::new(orgs), Arc::new(locations), Arc::new(roles));
-        if let Ok(mut guard) = self.lookups_cache.lock() {
-            // Epoch re-check under the slot lock, exactly as `fleet_devices` and
-            // `current_family` do. Storing unconditionally let a fetch that was
-            // already in flight when `clear_lookups_cache` ran write its
-            // pre-invalidation rows straight back and restart LOOKUP_TTL on them —
-            // the tenant stamp cannot catch that, since a same-tenant sign-out is
-            // the case it happens on.
-            if self.lookups_epoch.load(Ordering::SeqCst) == epoch {
-                *guard = Some(LookupCache {
-                    at: Instant::now(),
-                    tenant: key,
-                    orgs: orgs.clone(),
-                    locations: locations.clone(),
-                    roles: roles.clone(),
-                });
-            } else {
-                tracing::debug!("lookups invalidated mid-fetch; not caching");
-            }
-        }
-        Ok((orgs, locations, roles))
+            })
+            .await?;
+        // The three lists are cached as one entry but handed out separately, because
+        // `list_orgs`/`list_locations`/`list_roles` each want only their own. Cloning
+        // out of the shared `Arc<LookupSet>` costs one Vec copy per call; these are
+        // the small near-static lookups, not the whole-fleet feeds, and the
+        // alternative is leaking `LookupSet` into five call sites.
+        Ok((
+            Arc::new(set.orgs.clone()),
+            Arc::new(set.locations.clone()),
+            Arc::new(set.roles.clone()),
+        ))
     }
 
     /// Whole-fleet device inventory (no `df`), served from a long-TTL cache so
@@ -457,41 +534,13 @@ impl AppState {
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Arc<Vec<Device>>> {
         let key = self.tenant_key();
-        if let Some(hit) = self.cached_devices(&key) {
-            return Ok(hit);
-        }
-        // Single-flight: the loser of the race waits here rather than paging the
-        // whole inventory a second time, then finds the winner's rows on the
-        // re-check below.
-        let _fetching = self.devices_fetch_lock.lock().await;
-        if let Some(hit) = self.cached_devices(&key) {
-            return Ok(hit);
-        }
-        // Sampled *before* the fetch and re-checked under the slot lock at the store,
-        // so an `invalidate_fleet_devices` landing during the await wins.
-        let epoch = self.devices_epoch.load(Ordering::SeqCst);
-        let devices = Arc::new(self.api.devices(None, on_progress).await?);
-        if let Ok(mut guard) = self.fleet_devices_cache.lock() {
-            if self.devices_epoch.load(Ordering::SeqCst) == epoch {
-                *guard = Some(DeviceCache {
-                    at: Instant::now(),
-                    tenant: key,
-                    devices: devices.clone(),
-                });
-            } else {
-                tracing::debug!("device inventory invalidated mid-fetch; not caching");
-            }
-        }
+        let (devices, _) = self
+            .fleet_devices_cache
+            .get_or_fetch(&key, DEVICE_TTL, "device inventory", || {
+                self.api.devices(None, on_progress)
+            })
+            .await?;
         Ok(devices)
-    }
-
-    /// A live device-cache entry for `tenant`, or `None` on a miss / past
-    /// [`DEVICE_TTL`]. Split out so the pre-lock probe and the post-lock re-check in
-    /// [`Self::fleet_devices`] cannot drift apart.
-    fn cached_devices(&self, tenant: &TenantKey) -> Option<Arc<Vec<Device>>> {
-        let guard = self.fleet_devices_cache.lock().ok()?;
-        let c = guard.as_ref()?;
-        (c.tenant == *tenant && c.at.elapsed() < DEVICE_TTL).then(|| c.devices.clone())
     }
 
     /// Whole-fleet current patches (no `df`) for the requested families, cached so a
@@ -527,11 +576,11 @@ impl AppState {
             async {
                 match include_os {
                     true => self
-                        .current_family(
-                            &self.fleet_current_os,
-                            &self.os_fetch_lock,
+                        .fleet_current_os
+                        .get_or_fetch(
                             &key,
-                            force,
+                            current_patches_ttl(force),
+                            "current OS patches",
                             || self.api.fleet_os_patches(None, None, on_os),
                         )
                         .await
@@ -542,11 +591,11 @@ impl AppState {
             async {
                 match include_sw {
                     true => self
-                        .current_family(
-                            &self.fleet_current_sw,
-                            &self.sw_fetch_lock,
+                        .fleet_current_sw
+                        .get_or_fetch(
                             &key,
-                            force,
+                            current_patches_ttl(force),
+                            "current software patches",
                             || self.api.fleet_software_patches(None, None, on_sw),
                         )
                         .await
@@ -580,81 +629,17 @@ impl AppState {
         })
     }
 
-    /// Serves one current-patch family from its slot, fetching it at most once
-    /// across concurrent callers.
-    ///
-    /// Three guards compose here, in this order: the cheap pre-lock probe, the
-    /// single-flight gate (so the loser waits instead of re-paging a six-figure
-    /// feed), and the re-check under that gate — which is what turns the wait into a
-    /// cache hit. The store is then epoch-gated for the same reason
-    /// [`Self::fleet_devices`] is: a mutating action's `invalidate_current_patches`
-    /// landing during the await must not be undone by this write, or
-    /// [`CURRENT_PATCHES_TTL`] restarts on pre-action rows.
-    async fn current_family<F, Fut>(
-        &self,
-        slot: &Mutex<Option<FamilyCache>>,
-        fetch_lock: &tokio::sync::Mutex<()>,
-        key: &TenantKey,
-        force: bool,
-        fetch: F,
-    ) -> Result<(Arc<Vec<Patch>>, DateTime<Utc>)>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<Vec<Patch>>>,
-    {
-        if let Some(hit) = Self::fresh_family(slot, key, force) {
-            return Ok(hit);
-        }
-        let _fetching = fetch_lock.lock().await;
-        if let Some(hit) = Self::fresh_family(slot, key, force) {
-            return Ok(hit);
-        }
-        let epoch = self.current_epoch.load(Ordering::SeqCst);
-        let patches = Arc::new(fetch().await?);
-        let now = Utc::now();
-        if let Ok(mut guard) = slot.lock() {
-            if self.current_epoch.load(Ordering::SeqCst) == epoch {
-                *guard = Some(FamilyCache {
-                    at: Instant::now(),
-                    tenant: key.clone(),
-                    fetched_at: now,
-                    patches: patches.clone(),
-                });
-            } else {
-                tracing::debug!("current patches invalidated mid-fetch; not caching");
-            }
-        }
-        Ok((patches, now))
-    }
-
-    /// A live entry in one family slot, or `None` on a miss / stale. Shared by the
-    /// probe and the post-gate re-check so the two cannot disagree.
-    fn fresh_family(
-        slot: &Mutex<Option<FamilyCache>>,
-        key: &TenantKey,
-        force: bool,
-    ) -> Option<(Arc<Vec<Patch>>, DateTime<Utc>)> {
-        let guard = slot.lock().ok()?;
-        let c = guard.as_ref()?;
-        c.is_fresh(key, force)
-            .then(|| (c.patches.clone(), c.fetched_at))
-    }
-
     /// Drops cached lookups so a different tenant (after sign-out or an instance
     /// change) doesn't see stale org/location/role names. Also drops the whole-fleet
     /// device/patch caches, which are likewise tenant-scoped.
     pub fn clear_lookups_cache(&self) {
-        // Bump *before* clearing, so both interleavings lose the racing write: a
-        // fetch that stores before the clear is wiped by it, and one that stores
-        // after sees the new epoch and declines. This slot used to be cleared bare,
-        // which is precisely what the comment below says is wrong for the other two
-        // — an in-flight lookups fetch wrote its rows straight back and restarted
-        // LOOKUP_TTL on them. The tenant stamp cannot catch it, because the case it
-        // happens on (a same-tenant sign-out) has the same stamp.
-        self.lookups_epoch.fetch_add(1, Ordering::SeqCst);
-        if let Ok(mut guard) = self.lookups_cache.lock() {
-            *guard = None;
-        }
+        // Bump-then-clear, so both interleavings of a racing write lose. This slot
+        // used to be cleared bare — an in-flight lookups fetch wrote its rows
+        // straight back and restarted LOOKUP_TTL on them, and the tenant stamp
+        // cannot catch it because the case it happens on (a same-tenant sign-out)
+        // has the same stamp. That ordering now lives in `TenantCache::invalidate`
+        // rather than being restated per slot.
+        self.lookups_cache.invalidate();
         // Through the epoch-bumping invalidators, not by clearing the slots here — a
         // tenant switch is exactly when a long whole-fleet fetch is likely still in
         // flight, and a bare clear would let it store its rows straight back.
@@ -879,35 +864,27 @@ impl AppState {
     /// it also drops the 15-minute device inventory and the org/location/role
     /// lookups, neither of which a patch action can affect.
     pub fn invalidate_current_patches(&self) {
-        // Bumped *before* the slots are cleared. A fetch that is about to store
-        // re-reads the epoch under the slot lock, so whichever order the two
-        // interleave it sees the bump and drops its write — clearing alone would
-        // leave the window this method exists to close.
-        self.current_epoch.fetch_add(1, Ordering::SeqCst);
-        for slot in [&self.fleet_current_os, &self.fleet_current_sw] {
-            if let Ok(mut guard) = slot.lock() {
-                *guard = None;
-            }
-        }
+        // Each family owns its own epoch; `invalidate` bumps before clearing so a
+        // fetch about to store sees the bump and drops its write.
+        self.fleet_current_os.invalidate();
+        self.fleet_current_sw.invalidate();
     }
 
     /// Drops **only** the device inventory. A reboot flips `os.needsReboot`, and
     /// [`DEVICE_TTL`] is 15 minutes — long enough to render the reboot invisible.
     pub fn invalidate_fleet_devices(&self) {
-        // Same ordering as `invalidate_current_patches`: bump, then clear.
-        self.devices_epoch.fetch_add(1, Ordering::SeqCst);
-        if let Ok(mut guard) = self.fleet_devices_cache.lock() {
-            *guard = None;
-        }
+        self.fleet_devices_cache.invalidate();
     }
 
-    /// The two cache epochs, for tests that assert an invalidation did (or did
-    /// not) happen without racing a fetch.
+    /// The device and current-patch cache epochs, for tests that assert an
+    /// invalidation did (or did not) happen without racing a fetch. Both families
+    /// share one number because `invalidate_current_patches` always bumps them
+    /// together; the OS slot's is the representative.
     #[cfg(test)]
     pub(crate) fn cache_epochs(&self) -> (u64, u64) {
         (
-            self.devices_epoch.load(Ordering::SeqCst),
-            self.current_epoch.load(Ordering::SeqCst),
+            self.fleet_devices_cache.epoch(),
+            self.fleet_current_os.epoch(),
         )
     }
 
@@ -1115,20 +1092,14 @@ impl AppState {
             api,
             settings: Mutex::new(settings),
             last_result: Mutex::new(None),
-            lookups_cache: Mutex::new(None),
-            fleet_devices_cache: Mutex::new(None),
-            fleet_current_os: Mutex::new(None),
-            fleet_current_sw: Mutex::new(None),
+            lookups_cache: TenantCache::default(),
+            fleet_devices_cache: TenantCache::default(),
+            fleet_current_os: TenantCache::default(),
+            fleet_current_sw: TenantCache::default(),
             jobs: Mutex::new(None),
             job_seq: AtomicU64::new(1),
             query_generation: AtomicU64::new(0),
-            lookups_epoch: AtomicU64::new(0),
-            devices_epoch: AtomicU64::new(0),
-            current_epoch: AtomicU64::new(0),
             result_epoch: AtomicU64::new(0),
-            devices_fetch_lock: tokio::sync::Mutex::new(()),
-            os_fetch_lock: tokio::sync::Mutex::new(()),
-            sw_fetch_lock: tokio::sync::Mutex::new(()),
             job_poller_running: Arc::new(AtomicBool::new(false)),
             pending_confirm: Mutex::new(None),
         }

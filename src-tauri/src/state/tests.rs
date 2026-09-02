@@ -312,6 +312,56 @@ async fn an_invalidation_during_a_fetch_is_not_undone_by_that_fetch() {
     );
 }
 
+/// The lookups slot had an epoch gate but no single-flight gate, so concurrent
+/// callers on a cold cache each paged the three reference lists independently.
+/// Recorded as a deferred finding ("real but low impact — the three lookup calls
+/// are small and the 5-minute TTL means the cold window is rare") and closed for
+/// free by `TenantCache`: the gate is part of the protocol, so a slot cannot be
+/// declared without it.
+#[tokio::test]
+async fn concurrent_lookups_on_a_cold_cache_fetch_once() {
+    use std::time::Duration as StdDuration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    for p in [
+        "/api/v2/organizations",
+        "/api/v2/locations",
+        "/api/v2/roles",
+    ] {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([]))
+                    // Long enough that all three callers are inside the fetch
+                    // window together; without the gate each would issue its own.
+                    .set_delay(StdDuration::from_millis(150)),
+            )
+            .mount(&server)
+            .await;
+    }
+    let state = Arc::new(AppState::seeded(server.uri()));
+
+    let mut tasks = Vec::new();
+    for _ in 0..3 {
+        let state = state.clone();
+        tasks.push(tokio::spawn(async move {
+            state.lookups().await.expect("concurrent lookups")
+        }));
+    }
+    for t in tasks {
+        t.await.expect("join");
+    }
+
+    assert_eq!(
+        hits(&server, "/api/v2/organizations").await,
+        1,
+        "three concurrent callers on a cold cache must page the lookups once"
+    );
+}
+
 /// Same race, on the lookups slot. `clear_lookups_cache` cleared it bare while
 /// `lookups()` stored unconditionally after its await, so a fetch already in
 /// flight wrote its pre-invalidation rows straight back and restarted LOOKUP_TTL

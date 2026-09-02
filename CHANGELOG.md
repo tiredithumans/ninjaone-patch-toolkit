@@ -11,6 +11,23 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The cache protocol is one type instead of four hand-written copies.** Every TTL'd slot —
+  lookups, the device inventory, and both current-patch families — restated the same five steps:
+  probe, single-flight gate, re-probe, sample the epoch before the fetch, store only if the epoch
+  is unchanged. Prose did not keep them in step: the lookups slot was missing the epoch re-check
+  until someone noticed, and never had a single-flight gate at all. `TenantCache<T>` now owns all
+  five, so a fifth cache cannot be declared without the protocol. `AppState` drops from 18
+  hand-managed synchronization primitives to 8 plus four cache fields.
+
+### Fixed
+
+- **Concurrent callers on a cold lookups cache now fetch once.** The slot had an epoch gate but no
+  single-flight gate, so three overlapping queries each paged organizations, locations and roles
+  independently. Closed by the `TenantCache` migration and pinned by
+  `concurrent_lookups_on_a_cold_cache_fetch_once`.
+
 ### Added
 
 - **`THIRD-PARTY-LICENSES.md` and `just licenses`.** `deny.toml` gated which licenses may enter

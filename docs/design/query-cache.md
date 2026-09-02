@@ -4,6 +4,41 @@ Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#convention
 Code: `src-tauri/src/state.rs` (`AppState`), `src-tauri/src/commands/patches.rs`
 (`query_patches`, `run_query`, `assemble_result`), `src-tauri/src/rows/`.
 
+## One cache protocol, one type
+
+`TenantCache<T>` (`state.rs`) owns the whole five-step protocol every TTL'd slot needs:
+
+1. probe the slot — tenant match **and** within the TTL — and return a hit;
+2. take the single-flight gate, so the loser of a race waits instead of paging a
+   six-figure feed a second time;
+3. re-probe under the gate, which is what turns that wait into a cache hit;
+4. sample the epoch *before* the fetch;
+5. store only if the epoch is unchanged when the slot lock is retaken.
+
+Step 5 is the subtle one. Without it, a fetch already in flight when an invalidation
+lands writes its pre-invalidation rows straight back and restarts the TTL on exactly
+the data the caller wanted gone — and the tenant stamp cannot cover it, because a
+sign-out or a post-action invalidation is the *same* tenant.
+
+This was written out four times: lookups, the device inventory, and the two
+current-patch families. Prose did not keep the copies in step. `lookups_epoch`'s own
+field comment read "Mirrors `devices_epoch`/`current_epoch`, which the lookups cache
+was missing" — step 5 was absent there until someone noticed, and step 2 was never
+added at all, so concurrent callers on a cold cache each paged the reference lists
+independently. Both are now structural: a fifth cache cannot be declared without the
+protocol, because the protocol *is* the type.
+
+`AppState` went from 18 hand-managed synchronization primitives (8 `std` mutexes,
+3 `tokio` mutexes, 6 `AtomicU64`, 1 `AtomicBool`) to 8 plus four `TenantCache`
+fields.
+
+**`last_result` deliberately stays outside it.** Its protocol is *generation*-gated,
+not TTL-gated: `begin_query` issues a `QueryToken` claimed before any fetch and
+redeemed at the store, so a superseded result is dropped by ordering rather than by
+age. It also carries the sort/group memos, which are derived from exactly those rows.
+Forcing it into `TenantCache` would mean a TTL it does not have and a value type that
+is really a small state machine — see the sections above.
+
 ## The cache is the single source of truth for export, the report, and paging
 
 `query_patches` caches the full `QueryResult` in `AppState.last_result` (a `Mutex`) on success

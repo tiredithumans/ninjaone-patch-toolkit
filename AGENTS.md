@@ -145,6 +145,10 @@ Backend — commands, cache, concurrency:
   `QuerySummary`.** Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
   demo's `assemble`, and `serialized_shapes_carry_every_frontend_required_key`. `QueryScope` is the
   one `QueryResult`-only exception. → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
+- **Every TTL'd cache slot is a `TenantCache<T>`** — it owns the tenant stamp, TTL,
+  single-flight gate, and the epoch sampled before the fetch and re-checked at the store.
+  Never open-code that protocol for a new slot; `last_result` is the one exception and is
+  generation-gated instead. → `docs/design/query-cache.md#one-cache-protocol-one-type`
 - **Devices and current patches are fetched whole-fleet and scoped client-side** via
   `PreparedFilter::device_allowed`; the OS and third-party families are separate cache slots and
   only the requested family is fetched. Stores are epoch-gated and fetches are single-flight per
