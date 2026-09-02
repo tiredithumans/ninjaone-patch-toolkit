@@ -6,30 +6,35 @@ argument-hint: "[feature description] — e.g., 'add feature export per-org comp
 
 # Feature — scaffold branches, commands, and IPC wrappers for new features
 
-Create a complete feature scaffolding: branch → backend command + handler → frontend IPC wrapper →
-wiring. Follow the repo's conventions and run verification at each step.
+Branch → backend command → handler registration → `ipc!` wrapper → (optional) UI → verify.
+Follow the patterns in AGENTS.md ("Common patterns"); the reasoning behind each rule is in
+`docs/design/`.
 
 ## 0. Determine scope & naming
 
-- From the argument (or ask): what is the feature?
-  - New IPC command → extend or add a file in `src-tauri/src/commands/<domain>.rs` + a wrapper in
-    `web-rs/src/api.rs`.
-  - New NinjaOne API call → add to `src-tauri/src/api/` (`devices.rs` / `patches.rs` / `lookups.rs`).
-  - New UI surface → a component/view in `web-rs/src/app.rs` (single-crate Leptos app).
-- Determine the Conventional Commits scope: `desktop`, `web`, `api`, `auth`, `export`, `filter`.
-- Suggest branch name: `<type>/<short-slug>` (e.g., `feat/org-compliance-export`).
+- What kind of change?
+  - **New IPC command** → `src-tauri/src/commands/<domain>.rs` + `ipc!` in `web-rs/src/api.rs`.
+  - **New NinjaOne API call** → a method on `NinjaApiClient` in `src-tauri/src/api/<domain>.rs`
+    using `get_paginated` / `request_raw`; verify the endpoint against the spec first.
+  - **New device action** → the 4-step pattern in AGENTS.md (POST via `post_action`/`post_json`,
+    `ActionKind` variant with `is_mutating`/`supports_dry_run`, dispatch in `send_action`,
+    button in `ACTION_GROUPS`) and the `web-rs/src/types.rs` mirror.
+  - **New filter facet** → device facet in `PreparedFilter::device_allowed`, patch facet as a
+    client-side `*_allowed()`; then the `QueryScope` tier it belongs to.
+  - **New UI surface** → a component in the matching `web-rs/src/app/<module>.rs`; any logic
+    worth asserting goes in `web-rs/src/app/util/` as a free function with a test.
+- Conventional Commits scope: `desktop`, `web`, `api`, `auth`, `export`, `filter`, `settings`,
+  `ci`, `docs`.
+- Branch name: `<type>/<short-slug>` (e.g. `feat/org-compliance-export`).
 
 ## 1. Branch
 
 ```bash
 git checkout -b <type>/<short-slug> origin/main
 ```
-If on `main`, this creates a clean branch. If already on one, suggest rebasing.
 
-## 2. Scaffolding — backend command (`src-tauri/src/commands/<domain>.rs`)
+## 2. Backend command (`src-tauri/src/commands/<domain>.rs`)
 
-Add or extend a handler under the matching module (`auth` / `lookups` / `patches` / `export` /
-`settings`). Use the repo pattern:
 ```rust
 use tauri::State;
 
@@ -39,76 +44,73 @@ use crate::state::AppState;
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MyArgs {
-    // frontend args arrive camelCase
+    // arrives camelCase from the frontend
 }
 
 #[tauri::command]
-pub async fn my_command(
-    state: State<'_, AppState>,
-    args: MyArgs,
-) -> Result<MyResult, UiError> {
-    // ... implementation; map errors with .map_err(UiError::from)
+pub async fn my_command(state: State<'_, AppState>, args: MyArgs) -> Result<MyResult, UiError> {
+    // .map_err(UiError::from); take settings_snapshot() before any .await;
+    // CPU-bound or blocking work goes on spawn_blocking.
 }
 ```
 
-- `#[tauri::command]`, `State<'_, AppState>` first, `Result<T, UiError>` out (`UiError` serializes to
-  `{ message }` for the frontend toast).
-- Domain types live in `src-tauri/src/model.rs`; row/rollup builders in `rows.rs`; the NinjaOne `df`
-  device-filter builder in `filter.rs`.
-- If the command needs the API client: `state.api.clone()` (see `commands/patches.rs`).
+- `async` only if the handler awaits something; a handler over in-process state is a plain
+  `pub fn`.
+- A mutating handler must call `require_actions_enabled` first —
+  `every_mutating_command_checks_that_actions_are_enabled` fails otherwise.
+- Anything that reads query rows goes through `state.with_current_result` /
+  `current_result_handle`, never a second copy of the rows.
 
-## 3. Register the handler (`src-tauri/src/lib.rs`)
+## 3. Register (`src-tauri/src/lib.rs`)
 
-Add to `tauri::generate_handler![]`:
+Add `commands::<domain>::my_command,` to `tauri::generate_handler![]`.
+
+## 4. Frontend wrapper (`web-rs/src/api.rs`)
+
 ```rust
-.invoke_handler(tauri::generate_handler![
-    // ... existing handlers
-    commands::<domain>::my_command,
-])
+ipc!(my_command(args: MyArgs) -> MyResult);
+// or, when the wrapper reads better under another name:
+ipc!(short_name as "my_command", (args: MyArgs) -> MyResult);
 ```
 
-## 4. Create the frontend wrapper (`web-rs/src/api.rs`)
+The macro derives the command string and the camelCase arg keys from the wrapper's name and
+parameters. Mirror `MyArgs` / `MyResult` in `web-rs/src/types.rs` (plain `String` for backend
+`Arc<str>`), and if the result rides on `QuerySummary`, add the key to
+`serialized_shapes_carry_every_frontend_required_key` and to `demo.rs`'s `assemble`.
 
-Add a typed `async fn` that calls `invoke(...)`. The arg object's keys must match the Rust fn
-parameter names (camelCase). If the param is a single struct named `args`, wrap it:
-```rust
-pub async fn my_command(args: MyArgs) -> Result<MyResult, String> {
-    #[derive(Serialize)]
-    struct Wrap { args: MyArgs }
-    invoke("my_command", args_of(&Wrap { args })).await
-}
-```
-Mirror the request/response types in `web-rs/src/types.rs` (kept in sync with `src-tauri/src/model.rs`
-and the command's arg/result structs).
+## 5. UI (optional)
 
-## 5. If a UI surface — wire it into `web-rs/src/app.rs`
+- Call `api::my_command(...)` from a signal-driven handler in `web-rs/src/app/state.rs` or the
+  component module; render in `web-rs/src/app/<module>.rs`. CSS is global `web-rs/styles.css`.
+- A new dialog calls `modal::focus_trap()` inside the closure that creates it.
 
-- Add the component/handler and call the new `api::my_command(...)`.
-- CSS is plain global `web-rs/styles.css` (BEM-ish names).
+## 6. Verify
 
-## 6. Verify scaffolding passes
+`just verify` (both crates). If a hook or skill changed, also `.claude/hooks/test.sh`.
+The `command-parity-check.sh` hook reports a missing registration or wrapper after each edit to
+the chain.
 
-Run `just verify` (fmt-check → clippy → test → web-check → web-clippy) and report issues. A
-frontend-only change still needs `just web-check` + `just web-clippy`.
+## 7. Docs
 
-## 7. Output format
+- Add a line under `## [Unreleased]` in `CHANGELOG.md` for user-facing changes.
+- New rule or invariant → one line in AGENTS.md pointing at the rationale in the matching
+  `docs/design/<domain>.md`. New module → the AGENTS.md repo map.
+
+## Output format
 
 ```
 feature: created scaffold for <type>/<short-slug>
 
-## Changes
-- ✅ Branch created: `<type>/<short-slug>` from `origin/main`
-- ✅ Backend handler: `src-tauri/src/commands/<domain>.rs`
-- ✅ Handler registered in `src-tauri/src/lib.rs` (`generate_handler![]`)
-- ✅ Frontend wrapper: `web-rs/src/api.rs` (calls `invoke("my_command", …)`)
-- ✅ Shared types mirrored in `web-rs/src/types.rs`
+- ✅ Branch `<type>/<short-slug>` from origin/main
+- ✅ Handler `src-tauri/src/commands/<domain>.rs::my_command` (+ generate_handler![])
+- ✅ `ipc!(my_command(...))` in `web-rs/src/api.rs`, types mirrored in `web-rs/src/types.rs`
+- ✅ `just verify` green
 
-## Next steps
-Write the implementation in `src-tauri/src/commands/<domain>.rs` and fill in the types.
+Next: implement the body and add the test that pins the new behavior.
 ```
 
 ## Failure handling
 
-- If `generate_handler![]` already has the handler → warn (skip duplicate).
-- If `command-parity-check.sh` warns about a missing invoke wrapper → add one to `web-rs/src/api.rs`.
-- New dependency → check the crate's `Cargo.lock` for conflicts before adding; prefer existing deps.
+- Handler already registered → skip, say so.
+- Parity hook warns → add the missing half before verifying.
+- New dependency → it must not enter `web-rs` if it is a server crate; check `just deny` policy.
