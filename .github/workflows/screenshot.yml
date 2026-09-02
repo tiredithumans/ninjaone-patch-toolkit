@@ -12,16 +12,13 @@ name: Screenshot
 # of them superseded — and merging the oldest would have reverted the README image to
 # an older render.
 #
-# Getting the required checks to report is why the last step has two paths. A PR opened
-# with the default `GITHUB_TOKEN` *does* raise `pull_request`, but GitHub parks that run
-# at `action_required` until a human approves it — the anti-recursion guard — so not one
-# check posts, and `main` requires four. That is why #138 sat unmergeable until it was
-# closed and reopened by hand. So on `GITHUB_TOKEN` this job dispatches `ci.yml` at the
-# branch itself: `workflow_dispatch` is one of the two events exempt from that guard,
-# and the checks the dispatched run posts land on the same head SHA branch protection
-# reads. If `SCREENSHOT_PAT` is set (a fine-grained PAT with `contents: write` and
-# `pull-requests: write`) the push is a real identity, the PR's own run is never gated,
-# and no dispatch is needed.
+# If `SCREENSHOT_PAT` is set (a fine-grained PAT with `contents: write` and
+# `pull-requests: write`), the branch is pushed and the PR opened as that identity so
+# the required CI checks actually run. With the default `GITHUB_TOKEN` they do not:
+# GitHub deliberately suppresses workflow triggers for events raised by that token to
+# prevent recursion, so the PR sits with zero checks and — because `main` requires
+# four — can never be merged without an admin override. The run still succeeds in
+# that case and prints how to kick the checks off by hand.
 on:
   workflow_dispatch:
   release:
@@ -31,8 +28,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  # Dispatching ci.yml at the PR branch — see the note above.
-  actions: write
 
 concurrency:
   group: screenshot
@@ -118,12 +113,6 @@ jobs:
 
           echo "::notice title=Screenshot PR::${url}"
 
-          # With a PAT the PR's own run is ungated and already reporting. Without one it
-          # is parked at action_required for good, so dispatch the same gates by hand.
           if [ "$HAVE_PAT" = "no" ]; then
-            if gh workflow run ci.yml --ref "$BRANCH"; then
-              echo "::notice title=CI dispatched::Ran ci.yml against ${BRANCH}; its checks report on the PR head SHA. The gated pull_request run stays unapproved and posts nothing."
-            else
-              echo "::warning title=Dispatch ci.yml by hand::Could not dispatch ci.yml, so the required checks will not report and the PR cannot merge. Run: gh workflow run ci.yml --ref ${BRANCH}"
-            fi
+            echo "::warning title=CI will not run on this PR::Pushed with GITHUB_TOKEN, so GitHub suppresses the pull_request trigger and the required checks never report — the PR cannot merge as-is. Close and reopen it from a user account to trigger CI, or set a SCREENSHOT_PAT secret so this workflow pushes as a real identity."
           fi

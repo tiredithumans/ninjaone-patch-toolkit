@@ -48,31 +48,6 @@ image silently fails to refresh. That is the exact hole `selfsigned` 2 → 5 fel
 The trade-off is deliberate: a break now lands on `main` green and is caught at tag time instead
 of in review.
 
-### Why the screenshot PR dispatches `ci.yml` at itself
-
-`screenshot.yml` opens its PR with `GITHUB_TOKEN`, and that PR **cannot merge on its own**. The
-`pull_request` event does fire, but GitHub parks a run raised by that token at `action_required`
-until a human approves it — the guard against a workflow endlessly re-triggering itself. A parked
-run posts no check runs, `main` requires four, and the merge box reads `BLOCKED` with an empty
-check list. PR #138 sat that way through two releases; closing and reopening it from a user
-account was the manual escape hatch.
-
-`workflow_dispatch` and `repository_dispatch` are the only two events exempt from that guard, so
-the workflow dispatches `ci.yml` at the branch it just pushed. Branch protection matches required
-contexts by **name against the PR's head SHA** and does not care which event produced them, so the
-dispatched run's `Backend (src-tauri)`, `Frontend (Leptos/WASM)`, `actionlint` and `cargo-audit`
-satisfy it. The parked `pull_request` run stays parked and harmless.
-
-One cost: `changes` forces `code=true` off a `pull_request` event, so a dispatched run builds the
-full 3-OS matrix for a PNG instead of skipping to the docs path. Accepted — this fires on release
-publish and manual dispatch, a handful of times a year, and the alternative is teaching `changes`
-to diff a dispatched ref against `main` for one caller.
-
-Setting a `SCREENSHOT_PAT` secret (fine-grained, `contents: write` + `pull-requests: write`) makes
-all of this moot: the push is a real identity, so the PR's own run is never gated and the workflow
-skips the dispatch. The dispatch path exists so the repo needs no credential that can expire
-silently.
-
 ## Release gate (GitHub-side)
 
 `release.yml`'s `verify` job runs `just verify` on the tagged commit and `create-release` `needs:`
