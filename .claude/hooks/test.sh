@@ -76,7 +76,11 @@ cp "$project/src-tauri/src/lib.rs" "$tmp/src-tauri/src/lib.rs"
 grep -v 'list_node_classes' "$project/web-rs/src/api.rs" > "$tmp/web-rs/src/api.rs"
 CLAUDE_PROJECT_DIR="$tmp" run_hook command-parity-check.sh \
   "$(printf '{"tool_input":{"file_path":"%s/src-tauri/src/lib.rs"}}' "$tmp")"
-expect_contains "parity: missing wrapper is reported" '`list_node_classes` has no ipc! wrapper'
+# The hook backquotes the command name; build the needle so the backticks stay
+# literal without shellcheck reading them as a command substitution.
+bt='\140'
+expect_contains "parity: missing wrapper is reported" \
+  "$(printf "%blist_node_classes%b has no ipc! wrapper" "$bt" "$bt")"
 rm -rf "$tmp"
 
 # --- agents-md-staleness-check -----------------------------------------------

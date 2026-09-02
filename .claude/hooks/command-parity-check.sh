@@ -77,7 +77,7 @@ done
 # and only an explicitly renamed wrapper (`ipc!(short as "long", …)`) still
 # carries a quoted literal. Matching only the literal warned on every command.
 for c in $declared; do
-  if ! grep -qE "^[[:space:]]*(ipc!\()?[[:space:]]*$c[[:space:]]*(\(|as[[:space:]])|\"$c\"" "$bindings_file" 2>/dev/null; then
+  if ! grep -qE "^[[:space:]]*(ipc!\()?[[:space:]]*${c}[[:space:]]*(\(|as[[:space:]])|\"${c}\"" "$bindings_file" 2>/dev/null; then
     out="${out}[command-parity] \`$c\` has no ipc! wrapper in web-rs/src/api.rs — add the typed wrapper.\n"
   fi
 done
