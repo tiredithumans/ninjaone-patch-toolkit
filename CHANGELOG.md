@@ -61,6 +61,15 @@ version and start a fresh `[Unreleased]`.
   mapping for sinks to the bottom of the severity sort and disappears whenever the severity facet
   is active. `build_rows` now logs one line per distinct unmapped value per query — visible because
   there is now a log file for it to be visible in.
+- **A Trend tab — the app now has a time dimension.** Every other surface renders *now*: each query
+  destructively replaced the single cached result, so "is the backlog shrinking?" and "did last
+  night's window work?" — the two questions a patching team actually has — had no answer. Each
+  completed query now appends one rollup line to `run-history.jsonl` (~15 KB, owner-only, trimmed
+  at 4,000 lines), and the **Trend** tab charts compliance, pending patches, aged criticals and
+  devices needing reboot across them. Rollups, not row snapshots: a normalized row snapshot of a
+  large fleet is ~16 MB against ~15 KB here, and per-device history is a database's job. Runs that
+  measured different things — another tenant, a different patch family, a filtered scope — are
+  excluded from the line rather than silently averaged in.
 
 ### Added
 

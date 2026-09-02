@@ -5,6 +5,7 @@ mod commands;
 mod error;
 mod export;
 mod filter;
+mod history;
 mod model;
 mod paths;
 mod report;
@@ -105,6 +106,7 @@ pub fn run() {
             commands::export::export_patches_xlsx,
             commands::export::export_report_html,
             commands::diagnostics::read_action_audit,
+            commands::diagnostics::read_run_history,
             commands::diagnostics::open_diagnostics_folder,
             commands::update::check_for_update,
             commands::update::install_update,

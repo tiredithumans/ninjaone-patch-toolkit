@@ -1,7 +1,7 @@
 //! Display formatting: counts, labels, durations, the summary line, the
 //! compliance scope note, percentages, CSS-class pickers and the aged badge.
 
-use crate::types::{JobReport, PatchFamilies};
+use crate::types::{JobReport, PatchFamilies, RunRecord};
 
 use super::super::Tab;
 
@@ -79,15 +79,19 @@ pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts, generated_at: &str) -> S
             group_thousands(c.devices_total),
         ),
         // Jobs describes dispatched actions, not the query result, so the query's
-        // counts and generation time would be actively misleading here.
+        // counts and generation time would be actively misleading here. Trend is the
+        // same: it reads the run-history file, which spans many queries and has no
+        // single generation time.
         Tab::Jobs => return "Dispatched actions".to_string(),
+        Tab::Trend => return "Fleet health over time".to_string(),
     };
     format!("{head} \u{00b7} generated {generated_at}")
 }
 
 /// Fleet-health tabs (Compliance, Needs Reboot) reflect the device scope only and
 /// ignore the patch filters; Filtered-results tabs (Patches, Failures) honor them.
-/// Jobs is neither — it shows dispatch history, not query output.
+/// Jobs and Trend are neither — they show dispatch history and run history, not the
+/// output of the current query.
 pub(crate) fn is_fleet_tab(tab: Tab) -> bool {
     matches!(tab, Tab::Compliance | Tab::Reboot)
 }
@@ -208,4 +212,57 @@ pub(crate) fn aged_badge(aged: usize) -> (&'static str, String, &'static str) {
     } else {
         ("", aged.to_string(), "")
     }
+}
+
+/// The runs that belong on one trend line, newest last.
+///
+/// History accumulates every completed query, and those queries did not all measure
+/// the same thing: an OS-only run against a filtered scope is a different series
+/// than a whole-fleet ALL run. Charting them together would read as the backlog
+/// halving overnight when all that changed was the Type chip. So the newest record
+/// defines the series and only records comparable with it are kept.
+///
+/// Returns at most `limit` records, keeping the most recent.
+pub(crate) fn trend_series(history: &[RunRecord], limit: usize) -> Vec<RunRecord> {
+    let Some(newest) = history.last() else {
+        return Vec::new();
+    };
+    let mut series: Vec<RunRecord> = history
+        .iter()
+        .filter(|r| r.comparable_with(newest))
+        .cloned()
+        .collect();
+    if series.len() > limit {
+        series.drain(..series.len() - limit);
+    }
+    series
+}
+
+/// `(x, y)` points in a 0..=1 box for a sparkline over `values`, oldest first.
+///
+/// Y is inverted (0 is the top) so callers can use it as an SVG coordinate directly.
+/// A flat series is drawn down the middle rather than divided by a zero range.
+pub(crate) fn sparkline_points(values: &[f64]) -> Vec<(f64, f64)> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    if values.len() == 1 {
+        return vec![(0.5, 0.5)];
+    }
+    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let range = max - min;
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let x = i as f64 / (values.len() - 1) as f64;
+            let y = if range <= f64::EPSILON {
+                0.5
+            } else {
+                1.0 - (v - min) / range
+            };
+            (x, y)
+        })
+        .collect()
 }

@@ -58,6 +58,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── scope.rs                 # QueryScope export provenance
 │   ├── table.rs                 # TableCell / TableColumn / format_pct — the shared column definition
 │   └── tests.rs
+├── src/history.rs               # append-only run-history.jsonl (one rollup line per query) + RunRecord
 ├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / by OS / Needs-Reboot / Failures / About)
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets)

@@ -287,6 +287,12 @@ ipc!(
 );
 
 ipc!(
+    /// Reads the run-history trend, oldest first. One rollup line per completed
+    /// query — the only thing in this app with a time dimension.
+    read_run_history() -> Vec<RunRecord>
+);
+
+ipc!(
     /// Reveals the rolling log directory in the platform file manager and returns
     /// its path, so a bug report can carry evidence. Resolves to the path even when
     /// the reveal itself is what the operator needs to read out.

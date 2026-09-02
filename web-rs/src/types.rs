@@ -812,3 +812,56 @@ pub struct AuditRecord {
     /// Written by a build that used the pre-`paths::app_dir` directory.
     pub legacy: bool,
 }
+
+/// One completed query's fleet-health numbers, from the run-history trail. Mirrors
+/// `history::RunRecord`. Every field is a scalar whose meaning is stable across app
+/// versions — derived values (percentages) are recomputed here, never frozen on disk.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunRecord {
+    pub at: String,
+    pub instance: String,
+    pub devices_total: usize,
+    pub devices_offline: usize,
+    pub devices_unpatchable: usize,
+    pub devices_compliant: usize,
+    pub devices_in_scope: usize,
+    pub rows_total: usize,
+    pub pending_critical: usize,
+    pub aged_critical: usize,
+    pub failures: usize,
+    pub needs_reboot: usize,
+    pub os_patches: bool,
+    pub software_patches: bool,
+    pub scoped: bool,
+}
+
+impl RunRecord {
+    /// Compliance over the population the rollups cover. `None` for an empty scope
+    /// rather than 0% — an empty scope is not a fleet at zero compliance, and
+    /// charting it as one is the same class of lie as rounding 99.5% up to 100.
+    /// Mirrors `history::RunRecord::compliance_pct`.
+    pub fn compliance_pct(&self) -> Option<f64> {
+        (self.devices_in_scope > 0)
+            .then(|| self.devices_compliant as f64 * 100.0 / self.devices_in_scope as f64)
+    }
+
+    /// Which families these numbers cover, in the same words `PatchFamilies::label`
+    /// uses so the trend header and the compliance scope note agree.
+    pub fn patch_families_label(&self) -> &'static str {
+        PatchFamilies {
+            os: self.os_patches,
+            software: self.software_patches,
+        }
+        .label()
+    }
+
+    /// Whether two records measured the same thing, and so belong on one trend line.
+    /// Mirrors `history::RunRecord::comparable_with`.
+    pub fn comparable_with(&self, other: &Self) -> bool {
+        self.instance == other.instance
+            && self.os_patches == other.os_patches
+            && self.software_patches == other.software_patches
+            && self.scoped == other.scoped
+    }
+}
