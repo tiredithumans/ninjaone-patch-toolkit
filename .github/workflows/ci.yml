@@ -146,15 +146,10 @@ jobs:
       # web-rs is a separate wasm32 crate the backend `rust` job's clippy never
       # reaches — run the same gates `just verify` runs, in the same order, then
       # additionally prove it builds through Trunk (the `before*Command` path Tauri
-      # uses, which `just verify` does not cover).
-      #
-      # `web-check` is listed explicitly even though `web-build` subsumes it: the
-      # justfile and AGENTS.md both name it as part of the canonical chain, and a
-      # CI sequence that quietly differs from the documented one is how the two
-      # drift. It is also the faster failure — a type error surfaces here rather
-      # than after Trunk's bundling.
-      - name: check
-        run: just web-check
+      # uses, which `just verify` does not cover). There is no separate `web-check`
+      # step: clippy performs the same type-check first, so a type error surfaces
+      # here just as early, and keeping the sequence identical to `just verify` is
+      # what stops the two from drifting.
       - name: clippy
         run: just web-clippy
       - name: build

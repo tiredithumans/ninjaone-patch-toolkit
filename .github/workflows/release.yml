@@ -117,7 +117,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf
 
-      # `just verify` includes web-check/web-clippy/web-test, and the backend
+      # `just verify` includes web-clippy/web-test, and the backend
       # build needs a dist directory to embed even though we are not bundling.
       - name: Stub frontend dist
         run: |
