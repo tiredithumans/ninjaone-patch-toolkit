@@ -38,6 +38,39 @@ Pick a strong password. The command prints the public key; that string goes into
   backup). **Losing the key permanently breaks auto-update for every installed copy** —
   users would have to notice on their own and manually download the next release.
 
+## Succession (the one unrecoverable failure)
+
+Everything else in this repo can be rebuilt from the source tree. The signing key cannot.
+If it is lost, **every installed copy is permanently orphaned from updates** — there is no
+recovery path, because each install verifies against the public key baked into the binary
+it already has. This is a single-maintainer project, so write the answers down here and
+keep them current:
+
+- **Who holds the private key and password**, and where the offline backup lives (password
+  manager entry, sealed backup, safe). Name the location, not just "a password manager".
+- **Who else can reach it** if the maintainer is unavailable — an emergency-access contact
+  on the password-manager vault is the least-effort version of this and takes minutes to
+  configure.
+- **When the backup was last restore-tested.** An untested backup is not a backup. Once a
+  year, restore the key file to a scratch directory and confirm `cargo tauri signer sign`
+  accepts the password; that is the whole drill.
+
+| | |
+|---|---|
+| Key holder | *(fill in)* |
+| Offline backup location | *(fill in)* |
+| Emergency access | *(fill in)* |
+| Last restore test | *(fill in)* |
+
+**Known gap:** nothing verifies that the private key in `TAURI_SIGNING_PRIVATE_KEY` still
+matches the public key baked into `src-tauri/tauri.conf.json`. If the two ever diverge —
+a secret rotated without a transition release, a typo'd paste — the build succeeds, the
+release publishes, and every install silently rejects the update; the first signal is a
+user reporting that updates stopped. The check is to verify a built artifact's `.sig`
+against the baked `pubkey` (Tauri wraps a minisign signature in base64) as a post-build
+step in `release.yml`. Not yet implemented, and it should not be added without exercising
+it against a real release — a signing check that is itself wrong fails every release.
+
 ## Rotation (compromise or precaution)
 
 Rotation must bridge installs that verify with the *old* key. The order matters:

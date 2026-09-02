@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Runs the same gates CI runs, before anything leaves the machine.
+#
+# `just verify` is the list — the recipe, not a hand-typed copy of it, so local
+# and CI cannot drift. Skipped when nothing under the two crates changed against
+# the upstream branch, since a docs-only push should not pay a full Rust build.
+#
+# Set SKIP_VERIFY=1 to push anyway (a WIP branch, or a machine without the wasm
+# target installed). CI is still the authority.
+
+set -uo pipefail
+
+[ "${SKIP_VERIFY:-0}" = "1" ] && exit 0
+command -v just >/dev/null 2>&1 || exit 0
+
+base=$(git merge-base HEAD "@{upstream}" 2>/dev/null || git rev-parse HEAD~1 2>/dev/null || echo "")
+if [ -n "$base" ] && git diff --quiet "$base" HEAD -- src-tauri web-rs 2>/dev/null; then
+  exit 0
+fi
+
+echo "[pre-push] just verify (SKIP_VERIFY=1 to bypass)"
+if ! just verify; then
+  echo "[pre-push] verify failed — push aborted." >&2
+  exit 1
+fi

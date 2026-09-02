@@ -1,0 +1,29 @@
+# cargo-about configuration for THIRD-PARTY-LICENSES.md (`just licenses`).
+#
+# deny.toml is the *inbound* gate — which licenses may enter the dependency tree.
+# This is the outbound half: the bundle statically links hundreds of crates whose
+# terms require reproducing their copyright notices in a distribution, and nothing
+# generated that notice. Procurement at any enterprise customer asks for it.
+#
+# `accepted` is deny.toml's `[licenses] allow` list, verbatim. Two hand-maintained
+# copies of one policy is exactly the drift this repo keeps finding, so
+# `scripts/check-license-lists.sh` fails CI if they diverge.
+accepted = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# ring vendors its own license layout that cargo-about cannot infer.
+workarounds = ["ring"]
