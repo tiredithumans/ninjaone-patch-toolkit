@@ -1,6 +1,6 @@
 [package]
 name = "ninjaone-patch-toolkit"
-version = "0.13.4"
+version = "0.13.5"
 edition = "2024"
 rust-version = "1.98"
 description = "PKCE-authenticated NinjaOne patching-operations toolkit (Tauri 2 + Leptos)"

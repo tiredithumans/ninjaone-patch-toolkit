@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-09-02
+
 ### Changed
 
 - **MSRV and the pinned toolchain move to Rust 1.98** (`rust-toolchain.toml`, both crates'
