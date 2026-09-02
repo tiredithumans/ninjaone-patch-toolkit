@@ -81,9 +81,31 @@ pub(crate) fn ActionBar() -> impl IntoView {
                                         };
                                         view! {
                                             <button
-                                                class="btn btn-sm"
+                                                // The two untargeted applies reach
+                                                // past the selection, so they read
+                                                // differently from every other
+                                                // button rather than relying on the
+                                                // heading above them.
+                                                class=if kind.exceeds_selection() {
+                                                    "btn btn-sm btn-wide-radius"
+                                                } else {
+                                                    "btn btn-sm"
+                                                }
+                                                // The accessible name is the full
+                                                // sentence, so a screen reader says
+                                                // what the button reaches instead of
+                                                // just "OS", and the tooltip agrees.
+                                                aria-label=move || {
+                                                    format!("{}. {}", kind.label(), kind.blast_radius())
+                                                }
                                                 title=move || {
-                                                    why().unwrap_or_else(|| kind.label().to_string())
+                                                    why().unwrap_or_else(|| {
+                                                        format!(
+                                                            "{}. {}",
+                                                            kind.label(),
+                                                            kind.blast_radius(),
+                                                        )
+                                                    })
                                                 }
                                                 prop:disabled=move || why().is_some()
                                                 on:click=move |_| state.open_plan(kind)
@@ -101,9 +123,20 @@ pub(crate) fn ActionBar() -> impl IntoView {
                     <span class="action-group-label">"Restart"</span>
                     <button
                         class="btn btn-sm"
+                        aria-label=format!(
+                            "{}. {}",
+                            ActionKind::Reboot.label(),
+                            ActionKind::Reboot.blast_radius(),
+                        )
                         title=move || {
                             disabled_reason()
-                                .unwrap_or_else(|| ActionKind::Reboot.label().to_string())
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "{}. {}",
+                                        ActionKind::Reboot.label(),
+                                        ActionKind::Reboot.blast_radius(),
+                                    )
+                                })
                         }
                         prop:disabled=move || disabled_reason().is_some()
                         on:click=move |_| state.open_plan(ActionKind::Reboot)
@@ -311,18 +344,22 @@ const ACTION_GROUPS: [(&str, &[(ActionKind, &str)]); 3] = [
             (ActionKind::SoftwarePatchScan, "Software"),
         ],
     ),
+    // The two Install rows differ by blast radius, and that difference used to live
+    // only in these headings — at 11px, muted, above two pairs of buttons all
+    // reading "OS" and "Software". The button text now carries it too: "All OS"
+    // cannot be misread as the targeted one at a glance the way a bare "OS" could.
     (
         "Install all approved patches",
         &[
-            (ActionKind::OsPatchApply, "OS"),
-            (ActionKind::SoftwarePatchApply, "Software"),
+            (ActionKind::OsPatchApply, "All OS"),
+            (ActionKind::SoftwarePatchApply, "All Software"),
         ],
     ),
     (
         "Install only the selected patches",
         &[
-            (ActionKind::OsPatchRemediate, "OS"),
-            (ActionKind::SoftwarePatchRemediate, "Software"),
+            (ActionKind::OsPatchRemediate, "Selected OS"),
+            (ActionKind::SoftwarePatchRemediate, "Selected Software"),
         ],
     ),
 ];
@@ -397,6 +434,17 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                         on:keydown=move |ev| on_tab(&ev)
                     >
                         <h3 id="confirm-action-title">{plan.summary.clone()}</h3>
+
+                        // First line, before any device list or warning: what this
+                        // action reaches. The dialog previously opened with the
+                        // organizations affected, which answers "where" but never
+                        // "how much" — and for the two native applies the honest
+                        // answer is "more than you selected".
+                        <p class=if kind.exceeds_selection() {
+                            "confirm-radius confirm-radius-wide"
+                        } else {
+                            "confirm-radius"
+                        }>{kind.blast_radius()}</p>
 
                         {(!plan.organizations.is_empty())
                             .then(|| {

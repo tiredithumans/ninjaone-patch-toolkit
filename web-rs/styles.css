@@ -1688,3 +1688,24 @@ tbody tr:hover {
   color: var(--text);
 }
 .jobs-heading:first-of-type { margin-top: 8px; }
+/* The two native applies install a device's whole approved backlog regardless of
+   the selection. That reach used to be carried only by the 11px group heading
+   above them, so the buttons themselves now read as the wider action. */
+.btn-wide-radius {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.btn-wide-radius:disabled {
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+/* Blast radius as the confirm dialog's first line, above the device list. */
+.confirm-radius {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+}
+.confirm-radius-wide {
+  color: var(--warn);
+  font-weight: 600;
+}

@@ -141,7 +141,10 @@ is the single most important thing to know here, so read
 [Install all vs install only the selected](#install-all-vs-install-only-the-selected) before
 using either.
 
-The action bar groups the buttons by **mechanism**, because that is what decides the blast radius:
+The action bar groups the buttons by **mechanism**, because that is what decides the blast radius —
+and each button names its own reach (*All OS* installs everything approved; *Selected OS* installs
+only what you ticked), states it in full in its tooltip, and repeats it as the first line of the
+confirmation dialog:
 
 | Action bar group | Action | Endpoint | Notes |
 |---|---|---|---|

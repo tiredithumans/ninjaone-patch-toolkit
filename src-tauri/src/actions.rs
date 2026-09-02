@@ -58,6 +58,22 @@ impl ActionKind {
         }
     }
 
+    /// Whether this action's reach is wider than the operator's selection.
+    ///
+    /// True only for the two native apply endpoints. NinjaOne has no per-patch apply,
+    /// so `/patch/{os,software}/apply` takes no target list and installs the device's
+    /// entire approved backlog — ticking one row and pressing it installs everything
+    /// approved on that device. `plan()` already warns when this is paired with a
+    /// partial selection; this is the same fact in a form the *UI* can render, so the
+    /// button and the confirm dialog can state the reach instead of leaving it to an
+    /// 11px group heading and the README. Mirrored in `web-rs/src/types.rs`.
+    pub fn exceeds_selection(self) -> bool {
+        // Defined as "has a targeted counterpart" rather than by its own `matches!`
+        // list: the two are the same set by construction, and a third apply
+        // mechanism should not be able to appear in one list and not the other.
+        self.targeted_counterpart().is_some()
+    }
+
     /// Whether this changes the device. Drives the confirmation gate, the
     /// blast-radius cap, and the maintenance-window check — a scan only refreshes
     /// NinjaOne's view of what the device needs, so it is exempt from all three.
@@ -480,11 +496,14 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
         }
     }
 
+    // A reboot, an untargeted apply (which installs a whole approved backlog and so
+    // routinely reboots), or a script told to reboot. The apply half was spelled as
+    // its own `matches!` list naming the same two kinds as `targeted_counterpart`;
+    // `exceeds_selection` is now that one definition.
     let reboot_expected = !dry_run
-        && (matches!(
-            input.kind,
-            ActionKind::Reboot | ActionKind::OsPatchApply | ActionKind::SoftwarePatchApply
-        ) || (input.kind.runs_a_script() && input.reboot == RebootChoice::Auto));
+        && (input.kind == ActionKind::Reboot
+            || input.kind.exceeds_selection()
+            || (input.kind.runs_a_script() && input.reboot == RebootChoice::Auto));
     if reboot_expected {
         warnings.push(match input.reboot_mode {
             Some(RebootMode::Forced) => format!(
