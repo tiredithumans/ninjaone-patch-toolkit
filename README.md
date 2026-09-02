@@ -220,7 +220,12 @@ code and links you to the activity/job ID to look the run up in the NinjaOne con
 - The app requests read‑only (`monitoring`) scope unless **Patch actions** is enabled, which
   adds `management`. Turning the feature off returns it to read‑only at the next sign‑in.
 - Every dispatched action is appended to `action-audit.jsonl` beside `settings.json`, with
-  credential‑shaped script parameters redacted. Tokens are never written there.
+  credential‑shaped script parameters redacted. Tokens are never written there. The
+  **Jobs** tab renders it under *Audit trail*; unlike the per-session job list it survives a
+  restart and **Clear history** does not touch it.
+- Rolling daily logs are written to `logs/` in the same directory (seven days kept).
+  **Settings → Open diagnostics folder** reveals them — that is what to attach to a bug report,
+  since a bundled app launched from Finder or the Start menu has nowhere for stdout to go.
 
 ## Updates
 

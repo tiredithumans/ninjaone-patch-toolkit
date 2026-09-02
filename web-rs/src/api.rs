@@ -232,6 +232,21 @@ pub fn on_action_progress(mut handler: impl FnMut(ActionProgressEvent) + 'static
     cb.forget();
 }
 
+// --- Diagnostics -------------------------------------------------------------
+
+ipc!(
+    /// Reads the durable action-audit trail, newest first. The in-memory job list
+    /// (`list_jobs`) is per-session and clearable; this is what survives a restart.
+    read_action_audit() -> Vec<AuditRecord>
+);
+
+ipc!(
+    /// Reveals the rolling log directory in the platform file manager and returns
+    /// its path, so a bug report can carry evidence. Resolves to the path even when
+    /// the reveal itself is what the operator needs to read out.
+    open_diagnostics_folder() -> String
+);
+
 // --- Updates -----------------------------------------------------------------
 
 ipc!(check_for_update() -> Option<UpdateInfo>);

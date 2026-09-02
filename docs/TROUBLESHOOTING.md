@@ -150,7 +150,17 @@ dialog open too long) invalidates the approval. Re-open the action and confirm a
 - `action-audit.jsonl` sits beside it and records one line per dispatched action, written
   before the request goes out and again when it settles. Script parameters that look like
   credentials (`*pass*`, `*secret*`, `*token*`, `*key*`) are redacted; tokens are never
-  written there. Delete it freely — nothing reads it back.
+  written there. The **Jobs** tab renders it under *Audit trail*, so it can be read without
+  leaving the app; deleting the file discards that history.
+- `logs/` holds the rolling daily log files (seven days kept), and **Settings → Open
+  diagnostics folder** reveals it. Attach the relevant day to a bug report. `RUST_LOG` still
+  raises the level for anyone running the binary from a terminal.
+
+> **Upgrading from 0.13.5 or earlier?** `action-audit.jsonl` used to be written to a
+> *different* config directory than `settings.json` (`ninjaone-patch-toolkit` rather than
+> `io.github.tiredithumans.NinjaOnePatchToolkit`), despite the docs saying otherwise. New
+> records go beside `settings.json`; the old file is still read, so the **Audit trail** view
+> shows history from both.
 
 ## Build & run (contributors)
 

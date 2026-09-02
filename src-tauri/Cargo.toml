@@ -60,6 +60,9 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 sha2 = "0.11"
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
 tracing = "0.1"
+# Rolling daily log files. Used without the `non-blocking` writer on purpose (see
+# `init_tracing`), so this pulls in no extra runtime machinery.
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5"
 urlencoding = "2.1"

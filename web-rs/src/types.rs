@@ -748,3 +748,22 @@ pub struct ActionProgressEvent {
     #[serde(default)]
     pub jobs: Vec<JobReport>,
 }
+
+/// One dispatched action from the durable audit trail. Mirrors
+/// `commands::diagnostics::AuditRecord`; every field is tolerant because the log is
+/// append-only across app versions and older records predate newer fields.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AuditRecord {
+    pub timestamp: String,
+    pub kind: String,
+    pub device_name: String,
+    pub organization: String,
+    pub detail: String,
+    pub outcome: String,
+    pub dry_run: bool,
+    pub batch_id: Option<u64>,
+    pub exit_code: Option<i32>,
+    /// Written by a build that used the pre-`paths::app_dir` directory.
+    pub legacy: bool,
+}
