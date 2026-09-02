@@ -27,14 +27,16 @@ The single source of truth for how the code is structured and the conventions
 every contributor (human or AI assistant) follows is **[AGENTS.md](./AGENTS.md)**.
 Read it before your first change — it covers the Tauri command pattern, the IPC
 arg-shape rule, the keyring/secrets boundary, the `df` filter split, WASM gating,
-and the project's other load-bearing gotchas.
+and the project's other gotchas. The *reasoning* behind each rule lives in
+[`docs/design/`](./docs/design/README.md), one note per domain — read the note for
+the area you are changing.
 
 ## Before you open a pull request
 
 Run the same gates CI runs, and make sure they pass:
 
 ```bash
-just verify            # fmt-check → clippy → test → web-check → web-clippy
+just verify            # every gate CI runs, in CI's order
 ```
 
 - **Keep changes focused.** Solve one logical thing per PR; smaller diffs review

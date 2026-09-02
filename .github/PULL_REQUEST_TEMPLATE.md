@@ -11,10 +11,10 @@ Closes #
 <!-- Commands run / views exercised. For behavior you can't unit-test, say how you
      verified it (e.g. `just dev` and exercised the affected view). -->
 
-- [ ] `just verify` passes (fmt-check → clippy → test → web-check → web-clippy)
+- [ ] `just verify` passes
 - [ ] Added/updated tests for the changed behavior
-- [ ] Updated README / AGENTS.md sections for any surface I changed (per the
-      "Keeping this file up to date" rules)
+- [ ] Updated AGENTS.md / docs/design / README for any surface I changed (per
+      AGENTS.md's "Keeping this file up to date" rules)
 
 ## Notes for reviewers
 
