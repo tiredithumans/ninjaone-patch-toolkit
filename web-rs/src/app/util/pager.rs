@@ -19,6 +19,23 @@ pub(crate) fn clamp_page(stored: usize, page_count: usize) -> usize {
     stored.min(page_count.saturating_sub(1))
 }
 
+/// The total that bounds the stored page index, chosen by which collection the
+/// active view actually renders: the grouped view pages group headers, the flat
+/// view pages rows.
+///
+/// One signal (`patches_page`) indexes both collections, so nothing in the state
+/// model says which one is being paged — every site that clamps or sizes the pager
+/// has to decide, and they must agree. They did not: the query-completion path
+/// clamped against `rows_total` unconditionally and then handed that index to
+/// `fetch_groups`. Groups are never more numerous than rows, so the row-derived
+/// bound is always the looser one — a silent auto-refresh in grouped view could ask
+/// for a group page past the end, render nothing, and leave the pager reading a
+/// confident "Page N of M" over an empty table. That is the same failure the rest of
+/// this module was extracted to stop, one caller further up.
+pub(crate) fn paged_total(grouped: bool, rows_total: usize, groups_total: usize) -> usize {
+    if grouped { groups_total } else { rows_total }
+}
+
 /// Half-open `[start, end)` item range shown on `page`, clamped to `total`.
 pub(crate) fn page_bounds(page: usize, page_size: usize, total: usize) -> (usize, usize) {
     let start = (page * page_size).min(total);

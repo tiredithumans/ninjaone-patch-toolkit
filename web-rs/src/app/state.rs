@@ -822,34 +822,48 @@ impl AppState {
             match outcome {
                 Ok(r) => {
                     // Jump back to page 1 on a manual run; an auto-refresh keeps the
-                    // current page, clamped in case the new result is shorter.
-                    let page_count = r.rows_total.div_ceil(PATCHES_PAGE_SIZE).max(1);
+                    // current page, clamped in case the new result is shorter. The
+                    // bound comes from whichever collection this view pages — see
+                    // `util::paged_total`, which is also what sizes the pager itself,
+                    // so the two cannot disagree about how many pages exist.
+                    let grouped = self.query.group_by.get_untracked().is_some();
+                    let total = util::paged_total(
+                        grouped,
+                        r.rows_total,
+                        self.query.groups_total.get_untracked(),
+                    );
                     let page = if silent {
-                        self.query.patches_page.get_untracked().min(page_count - 1)
+                        util::clamp_page(
+                            self.query.patches_page.get_untracked(),
+                            util::page_count(total, PATCHES_PAGE_SIZE),
+                        )
                     } else {
                         // A manual run returns to page 1 in the canonical order.
                         self.query.patches_sort.set(None);
                         0
                     };
                     self.query.patches_page.set(page);
-                    // Page 0 ships inline with the summary (canonical order), so seed
-                    // it directly; a later page — or a silent refresh with an active
-                    // sort — is fetched instead.
-                    if page == 0 && self.query.patches_sort.get_untracked().is_none() {
-                        self.query.page_rows.set(r.rows.clone());
-                    } else {
-                        self.fetch_page(page);
-                    }
-                    // A grouped view is built from group headers and per-group member
-                    // pages, none of which ride along with the summary — so without
-                    // this the previous query's headers and cached members stayed on
-                    // screen against the new result's counts, and re-ticking a
-                    // checkbox could select a device/patch pair that isn't in the
-                    // current result at all.
-                    if self.query.group_by.get_untracked().is_some() {
+                    // Fetch only the collection the active view renders, mirroring
+                    // `set_group_by`. A grouped view is built from group headers and
+                    // per-group member pages, none of which ride along with the
+                    // summary — so without this the previous query's headers and
+                    // cached members stayed on screen against the new result's counts,
+                    // and re-ticking a checkbox could select a device/patch pair that
+                    // isn't in the current result at all. The flat rows behind a
+                    // grouped view are never drawn, so fetching them alongside was a
+                    // wasted round trip on every auto-refresh tick; switching back to
+                    // flat re-fetches page 0 through `set_group_by`.
+                    if grouped {
                         self.query.expanded.update(|e| e.clear());
                         self.query.members.update(|m| m.clear());
                         self.fetch_groups(page);
+                    } else if page == 0 && self.query.patches_sort.get_untracked().is_none() {
+                        // Page 0 ships inline with the summary (canonical order), so
+                        // seed it directly; a later page — or a silent refresh with an
+                        // active sort — is fetched instead.
+                        self.query.page_rows.set(r.rows.clone());
+                    } else {
+                        self.fetch_page(page);
                     }
                     self.query.result.set(Some(r));
                     self.query.applied_filters.set(Some(snapshot));
@@ -932,10 +946,23 @@ impl AppState {
         spawn_local(async move {
             match api::get_patch_groups(group_by, page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE).await
             {
-                Ok(page) => {
-                    self.query.groups.set(page.groups);
-                    self.query.groups_total.set(page.total);
+                Ok(response) => {
+                    self.query.groups_total.set(response.total);
                     self.query.query_error.set(None);
+                    // The caller could only bound `page` by the *previous* result's
+                    // group total; this response carries the real one. If the new
+                    // result is shorter the request was past the end and came back
+                    // empty, so land on the last real page instead of showing an
+                    // empty table. Re-entrant exactly once: the retry is issued
+                    // against the total we just stored, so its own clamp is a no-op.
+                    let clamped =
+                        util::clamp_page(page, util::page_count(response.total, PATCHES_PAGE_SIZE));
+                    if clamped != page {
+                        self.query.patches_page.set(clamped);
+                        self.fetch_groups(clamped);
+                        return;
+                    }
+                    self.query.groups.set(response.groups);
                 }
                 Err(e) => {
                     self.query.query_error.set(Some(e.clone()));
