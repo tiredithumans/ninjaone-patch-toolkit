@@ -11,6 +11,19 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **Rolling diagnostic logs, and a button that reveals them.** `init_tracing` wrote to stdout
+  only, which a bundled `.app` launched from Finder or an `.msi` from the Start menu discards
+  entirely — so a field bug report arrived with no evidence beyond the write-path audit log.
+  A daily-rotating file layer now writes to `logs/` beside `settings.json` (seven days kept), and
+  **Settings → Open diagnostics folder** reveals it.
+- **The action audit trail is readable in the app.** `action-audit.jsonl` has always been written
+  — append-only, redacted, owner-only, before the request goes out — but nothing could read it
+  back, so restarting after a batch of reboots left no in-app record that it happened. The
+  **Jobs** tab now renders it under *Audit trail*, newest first. It survives a restart and
+  **Clear history** (which only clears the live session list) does not touch it.
+
 ### Fixed
 
 - **A silent auto-refresh in a grouped view could strand the table on an empty page.** The
@@ -23,6 +36,13 @@ version and start a fresh `[Unreleased]`.
 - **A grouped view no longer fetches the flat rows behind it.** They are never rendered, so every
   auto-refresh tick spent an extra IPC round trip on them. Switching back to Flat still refetches
   page 0 through `set_group_by`, as before.
+- **The audit log was written to a different directory than `settings.json`.** `settings.rs` and
+  `actions/audit.rs` each resolved their own `ProjectDirs`, with different qualifiers — on macOS,
+  `io.github.tiredithumans.NinjaOnePatchToolkit` versus `ninjaone-patch-toolkit`. The README and
+  `docs/TROUBLESHOOTING.md` both said the two sat side by side, and both were wrong; an operator
+  looking for their audit trail was sent to the wrong folder. A new `paths` module is now the only
+  place the qualifier is written down, pinned by `app_dir_is_single_sourced`. Records written by
+  older builds are still read, so no dispatch history is lost on upgrade.
 
 ## [0.13.5] - 2026-09-02
 

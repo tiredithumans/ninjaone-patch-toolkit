@@ -760,11 +760,14 @@ pub(crate) fn JobsTable() -> impl IntoView {
                 <button
                     class="btn btn-sm"
                     prop:disabled=move || state.actions.jobs.with(Vec::is_empty)
+                    title="Clears this session's live job list. The audit trail below is permanent and is not affected."
                     on:click=move |_| state.clear_job_history()
                 >
                     "Clear history"
                 </button>
             </div>
+
+            <h3 class="jobs-heading">"This session"</h3>
 
             {move || {
                 let jobs = state.actions.jobs.get();
@@ -832,6 +835,117 @@ pub(crate) fn JobsTable() -> impl IntoView {
                 }
                     .into_any()
             }}
+
+            <AuditTrail/>
         </div>
+    }
+}
+
+/// The durable half of the Jobs tab: `action-audit.jsonl` rendered in the app.
+///
+/// The write path has always kept this record — append-only, parameters redacted,
+/// written owner-only before the request goes out so a crash mid-batch still leaves
+/// evidence. Nothing could read it back, so restarting the app after rebooting 25
+/// servers left no in-app trace that it had happened, and the only durable answer to
+/// "what did we do last Tuesday" was to find the file by hand.
+#[component]
+fn AuditTrail() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let records = RwSignal::new(Vec::<AuditRecord>::new());
+    let loaded = RwSignal::new(false);
+
+    let load = move || {
+        if !api::is_tauri() {
+            loaded.set(true);
+            return;
+        }
+        spawn_local(async move {
+            match api::read_action_audit().await {
+                Ok(rows) => {
+                    records.set(rows);
+                    loaded.set(true);
+                }
+                Err(e) => {
+                    loaded.set(true);
+                    state.notify(Toast::err(e));
+                }
+            }
+        });
+    };
+    // Read once when the tab first renders; the file only changes when this app
+    // writes to it, and a dispatch already refreshes the live list above.
+    load();
+
+    view! {
+        <h3 class="jobs-heading">
+            "Audit trail"
+            <button
+                class="btn btn-sm"
+                title="Re-read action-audit.jsonl from disk"
+                on:click=move |_| load()
+            >
+                "Reload"
+            </button>
+        </h3>
+        <p class="chips-label">
+            "Every dispatch this install has ever made, newest first. Written before the request "
+            "goes out, so an action that never reported back still appears. Not affected by "
+            "\"Clear history\"."
+        </p>
+        {move || {
+            if !loaded.get() {
+                return view! { <p class="empty">"Reading the audit trail…"</p> }.into_any();
+            }
+            let rows = records.get();
+            if rows.is_empty() {
+                return view! {
+                    <p class="empty">"No dispatches recorded on this install yet."</p>
+                }
+                    .into_any();
+            }
+            view! {
+                <div class="table-wrap">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">"When"</th>
+                                <th scope="col">"Device"</th>
+                                <th scope="col">"Organization"</th>
+                                <th scope="col">"Action"</th>
+                                <th scope="col">"Mode"</th>
+                                <th scope="col">"Outcome"</th>
+                                <th scope="col">"Exit"</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows
+                                .into_iter()
+                                .map(|r| {
+                                    view! {
+                                        <tr>
+                                            <td>{r.timestamp.clone()}</td>
+                                            <td>{r.device_name.clone()}</td>
+                                            <td>{r.organization.clone()}</td>
+                                            <td>{r.detail.clone()}</td>
+                                            <td>
+                                                {if r.dry_run { "Dry run" } else { "Live" }}
+                                            </td>
+                                            <td>{r.outcome.clone()}</td>
+                                            <td>
+                                                {r
+                                                    .exit_code
+                                                    .map(|c| c.to_string())
+                                                    .unwrap_or_default()}
+                                            </td>
+                                        </tr>
+                                    }
+                                })
+                                .collect_view()}
+                        </tbody>
+                    </table>
+                </div>
+            }
+                .into_any()
+        }}
     }
 }

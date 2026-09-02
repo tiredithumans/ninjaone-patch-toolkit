@@ -1676,3 +1676,15 @@ tbody tr:hover {
   font-size: 12px;
   color: var(--muted);
 }
+
+/* Jobs tab section headings — the live session list and the durable audit trail
+   are two different things and were previously one undifferentiated table. */
+.jobs-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 22px 0 4px;
+  font-size: 0.95rem;
+  color: var(--text);
+}
+.jobs-heading:first-of-type { margin-top: 8px; }

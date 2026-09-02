@@ -225,6 +225,24 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                         if state.updates.update_busy.get() { "Checking…" } else { "Check for updates" }
                     }}
                 </button>
+                // Logs are the only evidence a bug report can carry: stdout goes
+                // nowhere for a bundled app launched from Finder or the Start menu,
+                // and an operator will not relaunch their patching tool from a shell.
+                <button
+                    class="btn btn-ghost"
+                    prop:disabled=move || !api::is_tauri()
+                    title="Opens the folder holding this app's rolling log files, to attach to a bug report"
+                    on:click=move |_| {
+                        spawn_local(async move {
+                            match api::open_diagnostics_folder().await {
+                                Ok(path) => state.notify(Toast::ok(format!("Diagnostics: {path}"))),
+                                Err(e) => state.notify(Toast::err(e)),
+                            }
+                        });
+                    }
+                >
+                    "Open diagnostics folder"
+                </button>
             </div>
             <p class="app-version">
                 {concat!("NinjaOne Patch Toolkit v", env!("CARGO_PKG_VERSION"))}

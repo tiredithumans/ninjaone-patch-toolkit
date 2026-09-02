@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -215,9 +214,9 @@ impl Settings {
 }
 
 fn settings_path() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("io.github", "tiredithumans", "NinjaOnePatchToolkit")
-        .context("locate project config dir")?;
-    Ok(dirs.config_dir().join("settings.json"))
+    Ok(crate::paths::app_dir()
+        .context("locate project config dir")?
+        .join("settings.json"))
 }
 
 #[cfg(test)]

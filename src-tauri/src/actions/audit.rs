@@ -18,6 +18,9 @@ use tracing::warn;
 
 use super::{ActionKind, JobState};
 
+/// The log's filename now lives in `paths::audit_path`, which single-sources the
+/// whole location; this copy only names temp files in the tests below.
+#[cfg(test)]
 const AUDIT_FILE: &str = "action-audit.jsonl";
 
 /// Key fragments whose `key=value` token gets its value replaced. Matched
@@ -112,8 +115,7 @@ fn is_sensitive(key: &str) -> bool {
 }
 
 fn audit_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "ninjaone-patch-toolkit")
-        .map(|d| d.config_dir().join(AUDIT_FILE))
+    crate::paths::audit_path().ok()
 }
 
 /// Appends every record in `entries`, opening the log once.
