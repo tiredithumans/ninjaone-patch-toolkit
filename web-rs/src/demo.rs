@@ -150,6 +150,11 @@ fn row(
             // The sample fleet is all online; the demo's action controls are
             // disabled anyway, so this never changes what it shows.
             offline: false,
+            // Set on the row, the way the backend sets it, so `group_rows` reads it
+            // off the row rather than looking the device name up in a side table.
+            // A name is not an identity, and that lookup was also the reason a demo
+            // group header could disagree with the backend's.
+            needs_reboot: REBOOT_DEVICE_NAMES.contains(&device),
             patch_type: patch_type.to_string(),
             kb: opt(kb),
             name: name.to_string(),
@@ -686,10 +691,6 @@ pub fn group_key(row: &PatchRow, group_by: GroupBy) -> String {
 /// device groups ordered by worst severity then org/device, patch groups by blast
 /// radius then severity.
 pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
-    // The sample has no device inventory, so the reboot flag comes from the same
-    // list the Needs Reboot tab renders — which is what keeps the two consistent.
-    let reboot_devices: std::collections::HashSet<&str> =
-        REBOOT_DEVICE_NAMES.iter().copied().collect();
     let mut order: Vec<String> = Vec::new();
     let mut acc: BTreeMap<String, PatchGroup> = BTreeMap::new();
     let mut devices: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
@@ -712,13 +713,15 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 devices: 0,
                 severity: r.severity.clone(),
                 severity_rank: rank,
-                // Copied from the group's first row, as the backend's `build_groups`
-                // copies them from the first row's device. These were hardcoded
-                // `false`, so a demo group header claimed every device was online and
-                // needed no reboot even when the row said otherwise — the offline
-                // badge and the reboot hint were unreachable in the demo.
-                offline: r.offline,
-                needs_reboot: reboot_devices.contains(r.device_name.as_str()),
+                // Device state, so it belongs to a *device* group only. Every row of
+                // a device agrees, hence taking the first. A patch group spans many
+                // devices, so "is it offline" has no single answer and the backend
+                // deliberately claims neither — a header reading "offline" over a
+                // patch installed on forty machines would be meaningless. Copying the
+                // first row's state into a patch group is what
+                // `grouping_matches_the_backend_byte_for_byte` caught.
+                offline: matches!(group_by, GroupBy::Device) && r.offline,
+                needs_reboot: matches!(group_by, GroupBy::Device) && r.needs_reboot,
             }
         });
         entry.rows += 1;
@@ -1041,6 +1044,74 @@ mod tests {
         assert!(sample_locations(&[999]).is_empty());
         assert_eq!(sample_locations(&[]).len(), LOCATIONS.len());
         assert!(sample_locations(&[1, 2]).len() > sample_locations(&[1]).len());
+    }
+
+    /// The grouping this module re-implements, asserted against the backend's own
+    /// output rather than against a hand-written expectation.
+    ///
+    /// The property tests below say device groups lead with the worst severity and
+    /// patch groups partition the rows — both of which a wrong implementation can
+    /// satisfy. Commit cc33b0a is the proof: demo group headers hardcoded
+    /// `offline: false` / `needs_reboot: false`, and demo search matched substrings
+    /// where the backend strips a `KB` prefix. Every property test stayed green.
+    ///
+    /// The fixture is emitted by `rows::tests::demo_grouping_fixture_is_current`, so
+    /// neither side can move without the other going red, and the expectation is the
+    /// backend itself rather than someone's memory of it.
+    #[test]
+    fn grouping_matches_the_backend_byte_for_byte() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fixture {
+            rows: Vec<PatchRow>,
+            by_device: Vec<PatchGroup>,
+            by_patch: Vec<PatchGroup>,
+            keys_by_device: Vec<String>,
+            keys_by_patch: Vec<String>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!("../tests/backend-grouping.json"))
+            .expect("the committed backend fixture parses");
+
+        for (group_by, expected, expected_keys) in [
+            (GroupBy::Device, &fixture.by_device, &fixture.keys_by_device),
+            (GroupBy::Patch, &fixture.by_patch, &fixture.keys_by_patch),
+        ] {
+            let actual = group_rows(&fixture.rows, group_by);
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "{group_by:?}: group count differs from the backend"
+            );
+            for (got, want) in actual.iter().zip(expected) {
+                // Compared field by field so a failure names the field, which is how
+                // the hardcoded offline/needs_reboot bug would have read.
+                assert_eq!(got.key, want.key, "{group_by:?} key");
+                assert_eq!(got.label, want.label, "{group_by:?} label");
+                assert_eq!(got.sublabel, want.sublabel, "{group_by:?} sublabel");
+                assert_eq!(got.rows, want.rows, "{group_by:?} rows");
+                assert_eq!(got.devices, want.devices, "{group_by:?} devices");
+                assert_eq!(got.severity, want.severity, "{group_by:?} severity");
+                assert_eq!(
+                    got.severity_rank, want.severity_rank,
+                    "{group_by:?} severity_rank"
+                );
+                assert_eq!(got.offline, want.offline, "{group_by:?} offline");
+                assert_eq!(
+                    got.needs_reboot, want.needs_reboot,
+                    "{group_by:?} needs_reboot"
+                );
+            }
+            let keys: Vec<String> = fixture
+                .rows
+                .iter()
+                .map(|r| group_key(r, group_by))
+                .collect();
+            assert_eq!(
+                &keys, expected_keys,
+                "{group_by:?}: group_key must produce the backend's opaque keys — the \
+                 frontend echoes them back to get_patch_group_members"
+            );
+        }
     }
 
     #[test]

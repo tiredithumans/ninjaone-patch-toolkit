@@ -27,6 +27,19 @@ version and start a fresh `[Unreleased]`.
   single-flight gate, so three overlapping queries each paged organizations, locations and roles
   independently. Closed by the `TenantCache` migration and pinned by
   `concurrent_lookups_on_a_cold_cache_fetch_once`.
+### Fixed
+
+- **The browser demo's grouped view disagreed with the backend, and nothing could tell.**
+  `web-rs/src/demo.rs` re-implements grouping by hand, and its tests asserted *properties* — that
+  device groups lead with the worst severity, that patch groups partition the rows — which a wrong
+  implementation can satisfy. A backend test now emits its real grouping output for a shared input
+  to `web-rs/tests/backend-grouping.json`, and the demo asserts byte-equality against it. That
+  immediately found two divergences: a patch group inherited its first row's `offline` /
+  `needsReboot`, which the backend deliberately leaves false (a patch spans many devices, so the
+  header claims neither), and the demo recovered the reboot flag by looking the device *name* up in
+  a side table — because the frontend's `PatchRow` mirror omitted `needsReboot` even though the
+  backend has always sent it. The mirror now carries it and both halves read the same field off the
+  same row.
 
 ### Added
 
