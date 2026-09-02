@@ -48,6 +48,22 @@ version and start a fresh `[Unreleased]`.
 
 ### Added
 
+- **The NinjaOne API contract is pinned and checked weekly.** Every backend test mocks the vendor
+  against hand-written fixtures, so the suite asserted what this build *believes* the API returns,
+  not what it returns — and `AGENTS.md`'s instruction to verify shapes against the spec was gated
+  by nothing. That is the bug class 0.13.3 shipped four fixes for. `docs/api/ninjaone-surface.md`
+  is now a committed digest of the 17 endpoints and the schema fields the toolkit branches on, and
+  a `ninjaone-contract` CI job re-derives it from the published spec weekly and fails on a diff.
+  The digest records that `DeviceOSPatch.severity`, `.status` and `.type` are **free-form strings
+  with no declared enum** — the vendor promises nothing there, which is exactly why the parsers
+  must stay total.
+- **Unrecognised severity values are now reported.** A value NinjaOne adds that this build has no
+  mapping for sinks to the bottom of the severity sort and disappears whenever the severity facet
+  is active. `build_rows` now logs one line per distinct unmapped value per query — visible because
+  there is now a log file for it to be visible in.
+
+### Added
+
 - **Rolling diagnostic logs, and a button that reveals them.** `init_tracing` wrote to stdout
   only, which a bundled `.app` launched from Finder or an `.msi` from the Start menu discards
   entirely — so a field bug report arrived with no evidence beyond the write-path audit log.

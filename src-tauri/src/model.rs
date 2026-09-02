@@ -143,6 +143,23 @@ impl Severity {
     /// field: uppercase MSRC values (`CRITICAL`, `IMPORTANT`, `OPTIONAL`, `NONE`)
     /// alongside lowercase engine values (`critical`, `security`, `optional`,
     /// `recommended`, `unknown`).
+    /// Whether `raw` is a value this build has no mapping for.
+    ///
+    /// Distinct from "maps to [`Unknown`](Self::Unknown)": NinjaOne really does send
+    /// `unknown`, and an unrated patch is a legitimate state the severity facet can
+    /// select. This is the *other* case — a value the vendor added that this build
+    /// has never seen, which silently sinks to the bottom of the severity sort and
+    /// disappears whenever the facet is active.
+    ///
+    /// It matters because the spec declares `DeviceOSPatch.severity` as a free-form
+    /// string with no enum (see `docs/api/ninjaone-surface.md`), so the vendor
+    /// promises nothing about this vocabulary and the mapping cannot be exhaustive
+    /// by construction. `build_rows` reports these once per distinct value.
+    pub fn is_unmapped(raw: &str) -> bool {
+        !matches!(raw.to_ascii_uppercase().as_str(), "UNKNOWN" | "")
+            && Self::from_raw(raw) == Self::Unknown
+    }
+
     pub fn from_raw(raw: &str) -> Self {
         match raw.to_ascii_uppercase().as_str() {
             "CRITICAL" => Self::Critical,
@@ -678,6 +695,45 @@ mod tests {
         assert_eq!(Severity::from_raw("Critical"), Severity::Critical);
         assert_eq!(Severity::from_raw("important"), Severity::Important);
         assert_eq!(Severity::from_raw("garbage"), Severity::Unknown);
+    }
+
+    /// `docs/api/ninjaone-surface.md` records that `DeviceOSPatch.severity` is a
+    /// free-form string with no enum, so the vendor promises nothing about this
+    /// vocabulary. `is_unmapped` separates "NinjaOne told us it is unrated" — a real,
+    /// selectable state — from "NinjaOne sent something this build has never seen",
+    /// which is the case worth a log line.
+    #[test]
+    fn an_unrated_patch_is_not_the_same_as_an_unrecognised_severity() {
+        // Genuinely unrated: NinjaOne's own word for it, and the empty case.
+        assert!(!Severity::is_unmapped("unknown"));
+        assert!(!Severity::is_unmapped("UNKNOWN"));
+        assert!(!Severity::is_unmapped(""));
+        // Every alias the build handles.
+        for raw in [
+            "CRITICAL",
+            "IMPORTANT",
+            "HIGH",
+            "SECURITY",
+            "MODERATE",
+            "MEDIUM",
+            "RECOMMENDED",
+            "LOW",
+            "OPTIONAL",
+            "NONE",
+            "critical",
+            "security",
+        ] {
+            assert!(!Severity::is_unmapped(raw), "{raw} is mapped");
+        }
+        // A value the vendor could add tomorrow. It maps to Unknown either way; the
+        // point is that this build can tell it apart from a real "unknown" and say so.
+        for raw in ["ELEVATED", "SEV1", "major"] {
+            assert!(
+                Severity::is_unmapped(raw),
+                "{raw} should report as unmapped"
+            );
+            assert_eq!(Severity::from_raw(raw), Severity::Unknown);
+        }
     }
 
     /// `HIGH`, `MEDIUM` and `NONE` are aliases the doc comment above `from_raw`

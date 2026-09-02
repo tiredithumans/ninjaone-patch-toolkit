@@ -2,13 +2,13 @@
 //! per-device label bundle, and `build_rows`, which produces the flat
 //! `PatchRow`s every table, export and rollup reads.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
 use crate::filter::PreparedFilter;
-use crate::model::{Device, Location, Organization, Patch, PatchRow, Role};
+use crate::model::{Device, Location, Organization, Patch, PatchRow, Role, Severity};
 
 /// Placeholder for a name the join could not resolve — an orphan device, a device
 /// reporting no OS, or a patch whose organization is not in the lookups.
@@ -183,6 +183,10 @@ pub fn build_rows(
     let mut labels: HashMap<Option<i64>, DeviceLabels> = HashMap::new();
     // Reused across every row; see `Patch::write_display_name`.
     let mut name_buf = String::new();
+    // Severity values NinjaOne sent that this build has no mapping for. A set, and
+    // reported after the loop, so a six-figure fleet logs one line per distinct
+    // value rather than one per row.
+    let mut unmapped_severities: BTreeSet<String> = BTreeSet::new();
     for source in sources {
         for patch in source.patches {
             if let Some(allowed) = source.status_filter {
@@ -236,6 +240,17 @@ pub fn build_rows(
             }
 
             let severity = patch.severity_enum();
+            // A vendor value this build has no mapping for sinks to the bottom of
+            // the severity sort and vanishes whenever the facet is active. The spec
+            // declares this field as a free-form string, so the mapping cannot be
+            // exhaustive by construction — collected here and reported once per
+            // distinct value rather than per row, so a fleet does not write millions
+            // of identical warnings.
+            if let Some(raw) = patch.severity.as_deref()
+                && Severity::is_unmapped(raw)
+            {
+                unmapped_severities.insert(raw.to_string());
+            }
             if !prepared.severity_allowed(severity) {
                 continue;
             }
@@ -282,5 +297,18 @@ pub fn build_rows(
             });
         }
     }
+    if !unmapped_severities.is_empty() {
+        // Visible because there is now a log file to be visible in. Every backend
+        // test mocks NinjaOne against hand-written fixtures, so the suite asserts
+        // what this build believes the vendor sends; a new severity value passes
+        // every test green and quietly drops those patches out of the facet.
+        tracing::warn!(
+            values = ?unmapped_severities,
+            "NinjaOne returned severity values this build has no mapping for; \
+             those patches sort as Unknown and are excluded whenever the severity \
+             facet is active"
+        );
+    }
+
     rows
 }
