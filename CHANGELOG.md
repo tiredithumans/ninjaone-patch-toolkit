@@ -11,6 +11,19 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A silent auto-refresh in a grouped view could strand the table on an empty page.** The
+  query-completion path sized the page bound from `rows_total` unconditionally and then handed that
+  index to the *group* fetch. Grouping only collapses rows, so the row-derived bound is always the
+  looser one: with 40,000 rows in 400 groups, a stored page 7 is in range for rows and three pages
+  past the end for groups — the grouped table rendered nothing while the pager read "Page 8 of 400".
+  Both the pager and the completion path now take their bound from `util::paged_total`, and
+  `fetch_groups` re-clamps once the response carries the real total.
+- **A grouped view no longer fetches the flat rows behind it.** They are never rendered, so every
+  auto-refresh tick spent an extra IPC round trip on them. Switching back to Flat still refetches
+  page 0 through `set_group_by`, as before.
+
 ## [0.13.5] - 2026-09-02
 
 ### Changed

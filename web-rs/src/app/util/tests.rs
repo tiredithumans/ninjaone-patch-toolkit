@@ -111,6 +111,34 @@ fn clamp_page_pulls_a_stale_index_back_into_range() {
 }
 
 #[test]
+fn the_paged_total_follows_the_view_not_the_row_count() {
+    // Grouping only ever collapses rows, so `groups_total <= rows_total` and the
+    // row-derived bound is always the looser of the two. Clamping a grouped page
+    // against it is what let a silent refresh ask for a group page past the end.
+    assert_eq!(paged_total(false, 40_000, 400), 40_000, "flat pages rows");
+    assert_eq!(paged_total(true, 40_000, 400), 400, "grouped pages headers");
+
+    // The bug this pins: 40,000 rows is 400 pages, 400 groups is 4. A stored index
+    // of 7 is in range for the row bound and three pages past the end for the group
+    // bound — the grouped table renders nothing while the pager reads "Page 8 of 400".
+    let stale = 7;
+    assert_eq!(
+        clamp_page(stale, page_count(paged_total(true, 40_000, 400), 100)),
+        3,
+        "the grouped bound pulls the stale index back to the last real page"
+    );
+    assert_eq!(
+        clamp_page(stale, page_count(paged_total(false, 40_000, 400), 100)),
+        stale,
+        "the same index is legitimately in range for the flat view"
+    );
+
+    // An empty result of either shape still has one page, index 0.
+    assert_eq!(paged_total(true, 0, 0), 0);
+    assert_eq!(clamp_page(9, page_count(paged_total(true, 0, 0), 100)), 0);
+}
+
+#[test]
 fn page_bounds_clamp_to_the_total() {
     assert_eq!(page_bounds(0, 100, 250), (0, 100));
     assert_eq!(page_bounds(1, 100, 250), (100, 200));

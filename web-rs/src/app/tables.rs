@@ -241,13 +241,7 @@ fn PatchesTable() -> impl IntoView {
     // left ~98% of groups unreachable — it read "Page 1 of 400" off 40,000 rows
     // while the grouped view only ever rendered the first 100 groups, and every
     // Next click fetched rows that were rendered nowhere.
-    let total = move || {
-        if grouped() {
-            state.query.groups_total.get()
-        } else {
-            rows_total()
-        }
-    };
+    let total = move || util::paged_total(grouped(), rows_total(), state.query.groups_total.get());
     // Pager arithmetic lives in `util` so it can be host-tested; this component only
     // wires signals to it. The clamp matters because the stored page outlives the
     // result it was chosen against (an auto-refresh returning fewer rows, or a
