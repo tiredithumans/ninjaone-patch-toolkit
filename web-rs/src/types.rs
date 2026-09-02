@@ -114,6 +114,15 @@ pub struct PatchRow {
     /// NinjaOne queues an action for an offline device rather than rejecting it, so
     /// the selection surfaces this to explain why a target may be skipped.
     pub offline: bool,
+    /// Whether the row's device is flagged for reboot.
+    ///
+    /// The backend has always sent this; the mirror omitted it, so a grouped view
+    /// could not derive its header flag from the rows it was grouping. The browser
+    /// demo compensated with a side table keyed by device *name* — which is both a
+    /// demo-only crutch and fragile, since a name is not an identity. Mirrored now,
+    /// so both halves read the same field off the same row.
+    #[serde(default)]
+    pub needs_reboot: bool,
     pub patch_type: String,
     pub kb: Option<String>,
     pub name: String,
