@@ -482,6 +482,51 @@ impl ActionKind {
         }
     }
 
+    /// What this action actually reaches, in the operator's terms.
+    ///
+    /// The blast radius used to live only in an 11px muted `ACTION_GROUPS` heading
+    /// above a pair of buttons both labelled "OS" and "Software", and in ~35 lines
+    /// of README prose calling the distinction "the single most important thing to
+    /// know here". Two buttons that differ by *installs the three KBs you ticked*
+    /// versus *installs this device's entire approved backlog* were separated by the
+    /// smallest, dimmest text on screen. Documentation was compensating for an
+    /// affordance that was not there.
+    ///
+    /// Used three ways so the reach is unmissable however the operator reads: the
+    /// button's accessible name and tooltip, and the confirmation dialog's first
+    /// line.
+    pub fn blast_radius(self) -> &'static str {
+        match self {
+            Self::OsPatchScan | Self::SoftwarePatchScan => {
+                "Scans the device. Installs nothing and changes nothing."
+            }
+            Self::OsPatchApply => {
+                "Installs EVERY approved OS patch on each selected device — not just the rows you ticked."
+            }
+            Self::SoftwarePatchApply => {
+                "Installs EVERY approved software patch on each selected device — not just the rows you ticked."
+            }
+            Self::OsPatchRemediate => {
+                "Installs only the OS patches you ticked, and each device receives only its own."
+            }
+            Self::SoftwarePatchRemediate => {
+                "Installs only the software patches you ticked, and each device receives only its own."
+            }
+            Self::Reboot => "Restarts each selected device.",
+            Self::Script => "Runs the chosen library script on each selected device.",
+        }
+    }
+
+    /// Whether this action's reach is wider than the operator's selection.
+    ///
+    /// True only for the two native apply endpoints, which take no target list —
+    /// NinjaOne has no per-patch apply, so `/patch/{os,software}/apply` installs the
+    /// device's whole approved backlog. Drives the warning styling that makes those
+    /// two buttons read differently from every other one.
+    pub fn exceeds_selection(self) -> bool {
+        matches!(self, Self::OsPatchApply | Self::SoftwarePatchApply)
+    }
+
     /// Mirrors the backend rule: scans don't change the device, so they need no
     /// confirmation. Display-only here — the backend enforces it for real.
     pub fn is_mutating(self) -> bool {

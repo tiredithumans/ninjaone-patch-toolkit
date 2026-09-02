@@ -1517,6 +1517,45 @@ fn shared_run_options_reach_script_kinds_only() {
     }
 }
 
+/// Every kind must describe its own reach, and the two that install more than the
+/// operator ticked must say so. This is the affordance that replaced an 11px muted
+/// group heading as the only thing distinguishing "installs the three KBs you
+/// ticked" from "installs this device's entire approved backlog".
+#[test]
+fn every_action_states_its_blast_radius_and_the_wide_ones_say_so() {
+    for kind in ActionKind::ALL {
+        let radius = kind.blast_radius();
+        assert!(!radius.is_empty(), "{kind:?} has no blast radius sentence");
+        assert!(
+            radius.ends_with('.'),
+            "{kind:?} blast radius reads as a sentence in the confirm dialog"
+        );
+        if kind.exceeds_selection() {
+            assert!(
+                radius.contains("EVERY"),
+                "{kind:?} reaches past the selection, so its sentence must say so \
+                 in a way that survives being skimmed: {radius}"
+            );
+        }
+        if !kind.is_mutating() {
+            assert!(
+                radius.contains("nothing"),
+                "{kind:?} changes nothing and should say so: {radius}"
+            );
+        }
+    }
+    // Both native applies, and only those.
+    let wide: Vec<_> = ActionKind::ALL
+        .into_iter()
+        .filter(|k| k.exceeds_selection())
+        .collect();
+    assert_eq!(
+        wide.len(),
+        2,
+        "only the two native applies exceed the selection"
+    );
+}
+
 /// A blank Run-as must not become `Some("")` — the backend hashes it into the
 /// confirm token and would send an empty execution identity.
 #[test]
@@ -1540,18 +1579,41 @@ fn a_blank_run_as_is_omitted_rather_than_sent_empty() {
 /// silently dropped the warning that distinguishes Apply-all from Apply-selected.
 #[test]
 fn the_mirrored_action_predicates_match_the_backend_table() {
-    // kind, is_mutating, can_reboot, is_remediation, runs_a_script
+    // kind, is_mutating, can_reboot, is_remediation, runs_a_script, exceeds_selection
     let table = [
-        (ActionKind::OsPatchScan, false, false, false, false),
-        (ActionKind::SoftwarePatchScan, false, false, false, false),
-        (ActionKind::OsPatchApply, true, true, false, false),
-        (ActionKind::SoftwarePatchApply, true, true, false, false),
-        (ActionKind::OsPatchRemediate, true, true, true, true),
-        (ActionKind::SoftwarePatchRemediate, true, true, true, true),
-        (ActionKind::Reboot, true, true, false, false),
-        (ActionKind::Script, true, true, false, true),
+        (ActionKind::OsPatchScan, false, false, false, false, false),
+        (
+            ActionKind::SoftwarePatchScan,
+            false,
+            false,
+            false,
+            false,
+            false,
+        ),
+        // The two native applies are the only kinds that reach past the selection:
+        // NinjaOne has no per-patch apply endpoint.
+        (ActionKind::OsPatchApply, true, true, false, false, true),
+        (
+            ActionKind::SoftwarePatchApply,
+            true,
+            true,
+            false,
+            false,
+            true,
+        ),
+        (ActionKind::OsPatchRemediate, true, true, true, true, false),
+        (
+            ActionKind::SoftwarePatchRemediate,
+            true,
+            true,
+            true,
+            true,
+            false,
+        ),
+        (ActionKind::Reboot, true, true, false, false, false),
+        (ActionKind::Script, true, true, false, true, false),
     ];
-    for (kind, mutating, reboot, remediation, script) in table {
+    for (kind, mutating, reboot, remediation, script, wide) in table {
         assert_eq!(kind.is_mutating(), mutating, "{kind:?} is_mutating");
         assert_eq!(kind.can_reboot(), reboot, "{kind:?} can_reboot");
         assert_eq!(
@@ -1560,6 +1622,7 @@ fn the_mirrored_action_predicates_match_the_backend_table() {
             "{kind:?} is_remediation"
         );
         assert_eq!(kind.runs_a_script(), script, "{kind:?} runs_a_script");
+        assert_eq!(kind.exceeds_selection(), wide, "{kind:?} exceeds_selection");
     }
     assert_eq!(
         table.len(),

@@ -23,6 +23,17 @@ version and start a fresh `[Unreleased]`.
   back, so restarting after a batch of reboots left no in-app record that it happened. The
   **Jobs** tab now renders it under *Audit trail*, newest first. It survives a restart and
   **Clear history** (which only clears the live session list) does not touch it.
+### Changed
+
+- **The action buttons now carry their own blast radius.** "Install all approved patches" and
+  "Install only the selected patches" both showed a pair of buttons reading *OS* and *Software*;
+  the difference between installing the three KBs you ticked and installing a device's entire
+  approved backlog was carried by an 11px muted group heading and ~35 lines of README prose. The
+  buttons now read **All OS** / **All Software** and **Selected OS** / **Selected Software**, the
+  two untargeted ones are styled as the wider action, every button's accessible name and tooltip
+  is the full sentence ("Apply all OS patches. Installs EVERY approved OS patch on each selected
+  device — not just the rows you ticked."), and the confirmation dialog opens with that sentence
+  before the device list.
 
 ### Fixed
 
