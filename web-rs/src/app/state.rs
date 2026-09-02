@@ -90,6 +90,10 @@ pub(crate) struct SessionState {
     /// Running in a plain browser with no Tauri backend — the GitHub Pages demo.
     /// Disables the backend-only actions (sign-in, live query, export).
     pub(super) web_mode: RwSignal<bool>,
+    /// A *desktop* build found no `window.__TAURI__`. Distinct from `web_mode`,
+    /// which is the same observation in a build where it is expected and fine.
+    /// Replaces the whole UI with an error rather than falling back to sample data.
+    pub(super) backend_missing: RwSignal<bool>,
 }
 
 impl SessionState {
@@ -99,6 +103,7 @@ impl SessionState {
             signing_in: RwSignal::new(false),
             demo: RwSignal::new(false),
             web_mode: RwSignal::new(false),
+            backend_missing: RwSignal::new(false),
         }
     }
 

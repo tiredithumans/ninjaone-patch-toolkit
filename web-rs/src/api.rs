@@ -27,6 +27,25 @@ pub fn is_tauri() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether this bundle was built to be loaded by the Tauri webview, as opposed to
+/// served as the browser demo.
+///
+/// [`is_tauri`] can only report what it *found*; it cannot report what the build
+/// *expected*, and that difference is a safety property. Without it the absence of
+/// `__TAURI__` is indistinguishable from "this is the demo", so the one un-retried
+/// `Reflect::get` at startup is the only thing standing between a patching operator
+/// and a screen of invented orgs, devices and patches. Tauri injects the global
+/// before page script so the window is not currently reachable — but "not currently
+/// reachable" is not a guarantee to rest a fleet decision on, and the failure is
+/// silent apart from a banner.
+///
+/// Set by `tauri.conf.json`'s `beforeDevCommand` / `beforeBuildCommand`, which pass
+/// `--features desktop` to Trunk. The browser and GitHub Pages builds
+/// (`just web-build`, `just web-build-pages`) deliberately do not.
+pub const fn is_desktop_build() -> bool {
+    cfg!(feature = "desktop")
+}
+
 /// Whether the document is currently hidden (window minimized, or the tab in the
 /// background). Used to skip auto-refresh ticks nobody is there to read. Falls back
 /// to `false` — a missing `document` must never *suppress* a refresh, only ever fail

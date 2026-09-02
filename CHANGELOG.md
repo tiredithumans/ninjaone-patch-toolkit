@@ -137,6 +137,14 @@ version and start a fresh `[Unreleased]`.
   looking for their audit trail was sent to the wrong folder. A new `paths` module is now the only
   place the qualifier is written down, pinned by `app_dir_is_single_sourced`. Records written by
   older builds are still read, so no dispatch history is lost on upgrade.
+- **The desktop build no longer falls back to sample data when its backend is missing.** The
+  frontend decided between the real app and the demo on one un-retried `Reflect::get` for
+  `window.__TAURI__` at startup, and a miss meant demo mode — a screen of invented orgs, devices
+  and KBs behind a banner, in a tool whose output decides which production servers get rebooted.
+  A runtime probe can only report what it found, never what the build expected, so the Tauri
+  before-commands now pass `--features desktop` and `api::is_desktop_build()` makes the miss a
+  hard error with an explanatory screen instead. The browser and GitHub Pages builds are unchanged
+  and still demo on a miss, which is correct there.
 
 ## [0.13.5] - 2026-09-02
 
