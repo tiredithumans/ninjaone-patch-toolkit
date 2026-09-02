@@ -6,12 +6,12 @@
   "build": {
     "beforeDevCommand": {
       "cwd": "../web-rs",
-      "script": "trunk serve"
+      "script": "trunk serve --features desktop"
     },
     "devUrl": "http://localhost:8080",
     "beforeBuildCommand": {
       "cwd": "../web-rs",
-      "script": "trunk build --release"
+      "script": "trunk build --release --features desktop"
     },
     "frontendDist": "../web-rs/dist"
   },

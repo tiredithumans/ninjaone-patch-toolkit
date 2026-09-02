@@ -108,6 +108,13 @@ pub fn App() -> impl IntoView {
                 }
             }
         });
+    } else if api::is_desktop_build() {
+        // The desktop bundle expected a backend and did not find one. Demo data is
+        // the wrong fallback here and always was: this app's output is used to decide
+        // which production servers get patched or rebooted, so a screen of invented
+        // orgs and KBs behind a banner is a worse failure than no screen at all.
+        // Stop before any sample data is loaded and say what happened.
+        state.session.backend_missing.set(true);
     } else {
         // Browser/Pages demo: there is no backend, so every IPC call would fail.
         // Enter demo mode (facets seeded from the sample) but leave the results
@@ -189,6 +196,24 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
+        <Show when=move || state.session.backend_missing.get()>
+            <main>
+                <section class="panel backend-missing" role="alert">
+                    <h2>"The app could not reach its backend"</h2>
+                    <p>
+                        "This is the desktop build, so it expects a Tauri backend and found none. "
+                        "It will not show sample data in place of your fleet — every number here is "
+                        "used to decide which production servers get patched or rebooted, and "
+                        "invented ones behind a banner are worse than none."
+                    </p>
+                    <p class="chips-label">
+                        "Quit and relaunch the app. If it keeps happening, the install is damaged — "
+                        "reinstall from the releases page."
+                    </p>
+                </section>
+            </main>
+        </Show>
+        <Show when=move || !state.session.backend_missing.get()>
         <main>
             <Header/>
             <Show when=move || state.session.demo.get()>
@@ -206,5 +231,6 @@ pub fn App() -> impl IntoView {
             <UpdateSplash/>
             <ConfirmActionModal/>
         </main>
+        </Show>
     }
 }

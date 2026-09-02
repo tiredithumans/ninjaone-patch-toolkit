@@ -1749,3 +1749,15 @@ tbody tr:hover {
   font-variant-numeric: tabular-nums;
 }
 .trend-now { color: var(--text); font-weight: 600; }
+/* Desktop build with no reachable Tauri backend. Replaces the whole UI rather than
+   sitting above it: the point is that no fleet numbers are on screen at all, so
+   there is nothing for this to annotate. See app.rs's `backend_missing` branch. */
+.backend-missing {
+  max-width: 60ch;
+  margin: 15vh auto 0;
+  border-color: var(--danger);
+}
+.backend-missing h2 {
+  color: var(--danger);
+  margin-top: 0;
+}

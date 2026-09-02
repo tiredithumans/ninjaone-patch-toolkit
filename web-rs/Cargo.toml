@@ -7,6 +7,14 @@ description = "Leptos CSR frontend for the NinjaOne Patch Toolkit"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+# Marks the bundle as the one the Tauri webview loads. Additive and off by default,
+# so every plain `cargo`/`trunk` invocation still builds the browser demo; only
+# tauri.conf.json's before-commands turn it on. With it, a missing `window.__TAURI__`
+# is a hard error instead of a silent fall back to sample data — see
+# `api::is_desktop_build`.
+desktop = []
+
 [dependencies]
 leptos = { version = "0.8", features = ["csr"] }
 wasm-bindgen = "0.2"
