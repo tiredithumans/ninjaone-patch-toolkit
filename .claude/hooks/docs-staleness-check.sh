@@ -46,15 +46,14 @@ case "$rel" in
   *.lock) exit 0 ;;
 esac
 
-# Map the edited path to the README section most likely to lag behind. Order
-# matters: the first match wins, so put narrower patterns ahead of broader ones.
-# The hint string is the surface the agent should re-skim — it's a suggestion,
-# not an assertion that the doc is wrong.
+# Map the edited path to the README section most likely to lag behind. Only the
+# packaging / prerequisite / auth-setup surfaces are listed: source modules used
+# to be here too (commands, rows, filter, export), but most edits there are
+# internal and the reminder fired on nearly every backend change, which is how a
+# one-line hint becomes noise the agent learns to skip. The PR template carries
+# the docs checkbox for the rest.
 hint=""
 case "$rel" in
-  src-tauri/src/commands/*|src-tauri/src/export.rs|src-tauri/src/filter.rs|src-tauri/src/rows.rs)
-    hint="README.md (Features)"
-    ;;
   src-tauri/src/auth.rs)
     hint="README.md (NinjaOne setup / Security)"
     ;;

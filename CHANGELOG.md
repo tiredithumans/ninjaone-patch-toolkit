@@ -11,6 +11,32 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Agent instructions split into a contract and design notes.** `AGENTS.md` shrank from 82 KB
+  to under 25 KB and now states each rule in a line or two with the file and test that enforce
+  it; the rationale and history moved to `docs/design/*.md`, one note per subsystem. The
+  staleness hook warns when the contract passes 30 KB.
+- **`rows.rs` and the frontend `util.rs` split by concern** (`src-tauri/src/rows/` and
+  `web-rs/src/app/util/`), and the large inline test modules of `auth.rs`, `state.rs`,
+  `commands/patches.rs`, `rows` and `util` moved to sibling `tests.rs` files. No behavior change.
+- **`just verify` no longer runs `web-check`**; `web-clippy` performs the same type-check first.
+  CI's frontend job mirrors the chain.
+- Skills, `CONTRIBUTING.md` and the PR template point at `just verify` instead of enumerating the
+  gate list, and the five skills describe the current code (the `ipc!` macro, the `web-rs/src/app/`
+  modules, conditional OAuth scope, the patch-action surface).
+
+### Fixed
+
+- **`command-parity-check.sh` warned on every command** since the `ipc!` macro replaced the quoted
+  invoke strings it looked for; it now recognizes the macro form. `.claude/hooks/test.sh` exercises
+  every hook against fixed payloads so this cannot silently recur.
+- Removed the `list_presets` command, which the frontend never called — the parity hook's first
+  true positive once it worked (presets already ride on the settings view and the save/delete
+  responses).
+- The docs-staleness hook no longer asks for a README re-skim on every internal backend edit; it
+  fires only for packaging, prerequisite and auth-setup surfaces.
+
 ## [0.13.3] - 2026-09-01
 
 ### Fixed

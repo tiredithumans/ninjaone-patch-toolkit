@@ -111,7 +111,7 @@ Sign-in hanging, a 404, an empty export, or blank fields? See
 
 ```sh
 just build        # distributable bundles (.dmg/.app, .msi/.nsis, AppImage)
-just verify       # fmt-check + clippy + tests + wasm check + wasm clippy
+just verify       # every CI gate (format, lint, tests — both crates)
 just test         # backend unit + wiremock integration tests
 just coverage     # backend test coverage (cargo-llvm-cov) → summary + lcov report
 ```

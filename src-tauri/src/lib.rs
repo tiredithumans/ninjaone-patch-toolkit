@@ -53,7 +53,6 @@ pub fn run() {
             commands::auth::reauthorize,
             commands::settings::get_settings,
             commands::settings::save_settings,
-            commands::settings::list_presets,
             commands::settings::save_preset,
             commands::settings::delete_preset,
             commands::lookups::list_orgs,
