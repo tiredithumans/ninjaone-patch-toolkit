@@ -1,0 +1,11 @@
+# Generated fixtures are compared byte-for-byte by the tests that produce them, so
+# their line endings must not depend on the checkout platform. Without this, git's
+# autocrlf gives a Windows runner CRLF on disk while the generator emits LF, and
+# `demo_grouping_fixture_is_current` fails on every Windows build for a difference
+# that is not in the data.
+*.json text eol=lf
+web-rs/tests/*.json text eol=lf
+
+# Shell scripts must stay LF or they will not execute.
+*.sh text eol=lf
+.githooks/* text eol=lf

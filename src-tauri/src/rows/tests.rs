@@ -1972,7 +1972,14 @@ fn demo_grouping_fixture_is_current() {
         std::fs::write(DEMO_MIRROR_FIXTURE, &rendered).expect("write the fixture");
         return;
     }
-    let committed = std::fs::read_to_string(DEMO_MIRROR_FIXTURE).unwrap_or_default();
+    // Normalized before comparing: a Windows checkout can hand this back with CRLF
+    // (`.gitattributes` pins the file to LF, but a clone predating that — or a
+    // core.autocrlf override — still would). The fixture's *content* is what this
+    // asserts, and a line ending is not content. Failing on it would make the gate
+    // noise on one platform, which teaches everyone to ignore it.
+    let committed = std::fs::read_to_string(DEMO_MIRROR_FIXTURE)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
     assert_eq!(
         committed, rendered,
         "{DEMO_MIRROR_FIXTURE} is stale. The backend's grouping output changed, so \
