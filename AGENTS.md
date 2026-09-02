@@ -17,7 +17,7 @@ enforces it. The **rationale** behind each rule lives in [`docs/design/`](./docs
 | Item | Detail |
 |---|---|
 | **Task runner** | `just` — recipes in `/justfile`; Tauri's `before{Dev,Build}Command` call Trunk directly. |
-| **Setup / Dev** | `just dev` (`cargo tauri dev`; auto-starts `trunk serve` on `:8080`). |
+| **Setup / Dev** | `just setup` once per clone (installs `.githooks`), then `just dev` (`cargo tauri dev`; auto-starts `trunk serve` on `:8080`). |
 | **Verify** | `just verify` — every gate CI runs; the justfile is the list. |
 | **Crates** | `src-tauri` (backend) + `web-rs` (frontend WASM). No cargo workspace. |
 | **IPC** | Global `window.__TAURI__.core.invoke` (`withGlobalTauri`), wrapped in `web-rs/src/api.rs`. |
@@ -87,7 +87,8 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 docs/design/                     # rationale behind the rules below, one note per domain
 docs/RELEASING.md · docs/TROUBLESHOOTING.md
 scripts/                         # screenshot capture tooling (Playwright; not shipped) + changelog-notes.sh
-.claude/hooks/                   # commit validator, command parity, AGENTS.md/README staleness, secrets scan; test.sh self-tests them
+.githooks/                       # commit-msg (conventional commits) + pre-push (just verify); installed by `just setup`
+.claude/hooks/                   # the same commit rule plus command parity, AGENTS.md/README staleness, secrets scan; test.sh self-tests them (run in CI)
 .github/workflows/               # ci.yml · codeql.yml · pages.yml · release.yml · screenshot.yml
 ```
 

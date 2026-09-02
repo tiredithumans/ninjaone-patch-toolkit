@@ -262,7 +262,68 @@ jobs:
       # broken hook is caught here, not when it silently fails to fire. shellcheck is
       # preinstalled on the ubuntu-latest runner.
       - name: shellcheck
-        run: shellcheck .claude/hooks/*.sh
+        run: shellcheck .claude/hooks/*.sh .githooks/* scripts/*.sh
+      # The hooks' own self-tests. `test.sh` records that a parity assertion was
+      # wrong for months precisely because nothing ran it — shellcheck proves the
+      # scripts parse, not that they still decide correctly.
+      - name: hook self-tests
+        run: .claude/hooks/test.sh
+
+  commits:
+    name: Conventional commits
+    runs-on: ubuntu-latest
+    # PR commits only: `main` carries squash-merge subjects that already passed
+    # here, and merge commits from before this gate existed must not fail it.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # The same rule as .githooks/commit-msg, applied to everyone. That hook needs
+      # `just setup` in each clone (core.hooksPath is local config and cannot be
+      # committed), so this is the gate for a contributor who never ran it.
+      - name: Check commit subjects
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          fail=0
+          while IFS= read -r subject; do
+            case "$subject" in
+              "Merge "*|"Revert "*|"fixup!"*|"squash!"*|"amend!"*|"") continue ;;
+            esac
+            if printf '%s' "$subject" | grep -Eq '^(feat|fix|docs|chore|refactor|test|build|ci|perf|style|revert|deps)(\([^)]+\))?!?: .+$'; then
+              echo "ok   $subject"
+            else
+              echo "FAIL $subject" >&2
+              fail=1
+            fi
+          done < <(git log --format=%s "$BASE..$HEAD")
+          exit "$fail"
+
+  licenses:
+    name: Third-party licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # deny.toml gates which licenses may come IN; this is the outbound half —
+      # the bundle statically links crates whose terms require reproducing their
+      # notices in a distribution. Two hand-maintained copies of one policy is the
+      # drift this repo keeps finding, so the lists are checked against each other
+      # before the notice is regenerated.
+      - name: License policy lists agree
+        run: ./scripts/check-license-lists.sh
+      - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        with:
+          tool: just,cargo-about
+      - name: THIRD-PARTY-LICENSES.md is current
+        run: |
+          just licenses
+          if ! git diff --quiet -- THIRD-PARTY-LICENSES.md; then
+            echo "THIRD-PARTY-LICENSES.md is stale — run 'just licenses' and commit." >&2
+            git diff --stat -- THIRD-PARTY-LICENSES.md >&2
+            exit 1
+          fi
 
   audit:
     name: cargo-audit

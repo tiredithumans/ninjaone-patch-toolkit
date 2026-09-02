@@ -1,0 +1,25 @@
+# Third-party licenses
+
+The NinjaOne Patch Toolkit is distributed under [MIT](LICENSE-MIT) OR
+[Apache-2.0](LICENSE-APACHE). The binary statically links the crates below, whose
+licenses require their copyright notices be reproduced in a distribution.
+
+Regenerate with `just licenses`. Do not edit by hand.
+
+{{#each overview}}
+- {{name}} ({{count}} {{#if (eq count 1)}}crate{{else}}crates{{/if}})
+{{/each}}
+
+{{#each licenses}}
+## {{name}}
+
+Used by:
+{{#each used_by}}
+- [{{crate.name}} {{crate.version}}]({{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}})
+{{/each}}
+
+```
+{{text}}
+```
+
+{{/each}}

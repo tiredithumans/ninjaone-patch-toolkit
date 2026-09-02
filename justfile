@@ -9,6 +9,15 @@ wasm := "wasm32-unknown-unknown"
 default:
     @just --list
 
+# Install the repo's git hooks (conventional-commit subjects, pre-push verify).
+# Run once per clone. `core.hooksPath` is per-repository local config, so it cannot
+# be committed — which is exactly why the enforcement used to live only in
+# `.claude/`, and so applied only inside a Claude Code session. The `commits` CI job
+# catches anyone who never runs this.
+setup:
+    git config core.hooksPath .githooks
+    @echo "git hooks installed (.githooks). Set SKIP_VERIFY=1 to bypass pre-push."
+
 # --- Daily development -------------------------------------------------------
 # Frontend recipes pass `--config web-rs/Trunk.toml` so trunk resolves paths from
 # web-rs/ without a shell `cd`, keeping them portable across sh and PowerShell.
@@ -100,6 +109,15 @@ deny:
 # Same license/supply-chain policy for the frontend tree.
 web-deny:
     cargo deny --manifest-path web-rs/Cargo.toml --config deny.toml check licenses bans sources
+
+# Regenerate THIRD-PARTY-LICENSES.md from the dependency tree (requires
+# `cargo install cargo-about`). Both crates ship inside one bundle, so both trees
+# are listed. deny.toml gates which licenses are *allowed* in; this is the outbound
+# half — most of those licenses require reproducing their copyright notices in a
+# distribution, and a statically linked binary distributes them all.
+licenses:
+    cargo about generate --manifest-path src-tauri/Cargo.toml -o THIRD-PARTY-LICENSES.md about.hbs
+    @echo "wrote THIRD-PARTY-LICENSES.md"
 
 # --- Release / packaging -----------------------------------------------------
 

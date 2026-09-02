@@ -13,6 +13,24 @@ version and start a fresh `[Unreleased]`.
 
 ### Added
 
+- **`THIRD-PARTY-LICENSES.md` and `just licenses`.** `deny.toml` gated which licenses may enter
+  the dependency tree; nothing produced the outbound notice. The bundle statically links 602
+  crates across nine license families, most of whose terms require reproducing their copyright
+  notices in a distribution. CI regenerates it and fails if the committed copy is stale.
+- **Portable git hooks (`just setup`).** The conventional-commit rule, the command-parity check
+  and the staleness reminders all lived in `.claude/` and fired only inside a Claude Code session
+  — no git hooks were installed, `core.hooksPath` was unset, and CI linted the hook scripts
+  without ever running them. `.githooks/commit-msg` and `.githooks/pre-push` now enforce the same
+  rules from git, a `Conventional commits` CI job catches anyone who skips `just setup`, and the
+  hooks' own self-tests run in CI.
+- **A succession section in `docs/RELEASING.md`.** The minisign private key is the one
+  unrecoverable asset in the project: lose it and every installed copy is permanently orphaned
+  from updates. The runbook now records who holds it, who can reach it, and an annual
+  restore-test — plus the known gap that nothing verifies the CI secret still matches the public
+  key baked into shipped binaries.
+
+### Added
+
 - **Rolling diagnostic logs, and a button that reveals them.** `init_tracing` wrote to stdout
   only, which a bundled `.app` launched from Finder or an `.msi` from the Start menu discards
   entirely — so a field bug report arrived with no evidence beyond the write-path audit log.

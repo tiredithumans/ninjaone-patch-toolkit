@@ -6,6 +6,16 @@ changes** so we can agree on the approach before you invest time.
 
 By participating you agree to abide by our [Code of Conduct](./CODE_OF_CONDUCT.md).
 
+## Setup
+
+```sh
+just setup    # installs the repo's git hooks (conventional-commit subjects, pre-push `just verify`)
+```
+
+`core.hooksPath` is per-clone local config and cannot be committed, so this is a one-time
+step per checkout. The `Conventional commits` CI job enforces the same rule for anyone who
+skips it.
+
 ## Getting set up
 
 Prerequisites and the run/build commands live in the [README](./README.md). The
