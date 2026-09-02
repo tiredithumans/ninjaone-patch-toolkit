@@ -250,11 +250,6 @@ pub fn save_settings(
     })
 }
 
-#[tauri::command]
-pub fn list_presets(state: State<'_, AppState>) -> Vec<Preset> {
-    state.settings_snapshot().presets
-}
-
 /// Upserts a preset by name.
 #[tauri::command]
 pub fn save_preset(state: State<'_, AppState>, preset: Preset) -> Result<Vec<Preset>, UiError> {
