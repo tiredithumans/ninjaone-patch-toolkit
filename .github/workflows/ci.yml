@@ -6,7 +6,9 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Weekly RustSec database refresh so we catch advisories filed after merge.
+    # Weekly RustSec database refresh so we catch advisories filed after merge,
+    # and the weekly NinjaOne API-contract check (`ninjaone-contract`) — the vendor
+    # ships on its own cadence, so a spec change has to be noticed on ours.
     - cron: "0 6 * * 1"
 
 # A new push to the same branch/PR supersedes the in-flight run — without this
@@ -324,6 +326,48 @@ jobs:
             git diff --stat -- THIRD-PARTY-LICENSES.md >&2
             exit 1
           fi
+
+  ninjaone-contract:
+    name: NinjaOne API contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Every backend test mocks NinjaOne against hand-written fixtures, so the suite
+      # asserts what this build BELIEVES the API returns, not what it returns. The
+      # 0.13.3 `is_pending` bug was exactly that: the code assumed an allow-list of
+      # three statuses while the vendor's own endpoint titles promise more. Nothing
+      # gated AGENTS.md's instruction to verify shapes against the spec.
+      #
+      # This re-derives the digest of the surface we consume and fails when it moves.
+      # A failure is not necessarily a break — it is the signal to read the diff and
+      # decide whether a vendor change invalidates an assumption in model.rs,
+      # filter.rs or rows/.
+      - name: Fetch the published spec
+        run: |
+          curl -sSfL --retry 3 --retry-delay 5 \
+            -o /tmp/ninjaone-spec.yaml \
+            https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml
+      - name: Re-derive the surface digest
+        run: python3 scripts/ninjaone-spec-digest.py /tmp/ninjaone-spec.yaml > /tmp/surface.md
+      - name: Compare against the committed snapshot
+        run: |
+          if diff -u docs/api/ninjaone-surface.md /tmp/surface.md; then
+            echo "NinjaOne's API surface is unchanged."
+            exit 0
+          fi
+          cat >&2 <<'MSG'
+
+          NinjaOne's published spec no longer matches docs/api/ninjaone-surface.md.
+
+          Read the diff above and decide what it means:
+            * a new enum value on a field the code branches on -> check
+              Severity::from_raw, rows::is_pending, actions::is_action_activity
+            * a field that became free-form -> the parser must stay total
+            * a removed or renamed endpoint -> a code path is already broken
+          Then run:  python3 scripts/ninjaone-spec-digest.py <spec> > docs/api/ninjaone-surface.md
+          and commit the result with the reasoning in the message.
+          MSG
+          exit 1
 
   audit:
     name: cargo-audit
