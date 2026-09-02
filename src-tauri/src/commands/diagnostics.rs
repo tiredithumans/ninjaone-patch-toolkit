@@ -131,6 +131,20 @@ fn parse_line(line: &str, legacy: bool) -> Option<AuditRecord> {
     })
 }
 
+/// Reads the run-history trend, oldest first.
+///
+/// The app can otherwise only render *now*: each query destructively replaces the
+/// single cached result, so "is the backlog shrinking" and "did last night's window
+/// work" — the two questions a patching team actually has — were unanswerable.
+/// Rollups only, deliberately; see `history` for why storing rows instead would cost
+/// about a thousand times more for a capability nobody asked for.
+#[tauri::command]
+pub async fn read_run_history() -> Result<Vec<crate::history::RunRecord>, UiError> {
+    tokio::task::spawn_blocking(crate::history::read_all)
+        .await
+        .map_err(|e| UiError::new(format!("reading the run history panicked: {e}")))
+}
+
 /// Opens the diagnostics directory in the platform file manager.
 ///
 /// Reveals the folder rather than a single file: which log a maintainer needs

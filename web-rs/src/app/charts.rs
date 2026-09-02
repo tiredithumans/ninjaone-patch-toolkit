@@ -11,7 +11,7 @@
 use leptos::prelude::*;
 
 use super::AppState;
-use super::util::{format_pct, severity_raw};
+use super::util::{self, format_pct, group_thousands, severity_raw};
 use crate::types::{OrgSeverity, SeverityCounts};
 
 /// Severity bands in most-to-least-urgent order: display label, the CSS class that
@@ -514,5 +514,85 @@ mod tests {
     #[test]
     fn severity_segments_empty_when_no_pending() {
         assert!(severity_segments(&SeverityCounts::default(), 400.0).is_empty());
+    }
+}
+
+/// One sparkline plus its first/last values. Deliberately not axis-labelled: the
+/// question is the direction and the endpoints, and a dense axis on a four-up row of
+/// small charts reads as noise.
+#[component]
+pub(crate) fn TrendLine(
+    title: &'static str,
+    unit: &'static str,
+    values: Vec<f64>,
+) -> impl IntoView {
+    let points = util::sparkline_points(&values);
+    // 0..=1 from the helper, scaled into the drawing box with room for the endpoint
+    // marker's radius so it is never clipped at the edge.
+    let path = points
+        .iter()
+        .enumerate()
+        .map(|(i, (x, y))| {
+            let cmd = if i == 0 { "M" } else { "L" };
+            format!("{cmd} {:.1} {:.1}", 6.0 + x * 288.0, 6.0 + y * 48.0)
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let first = values.first().copied().unwrap_or(0.0);
+    let last = values.last().copied().unwrap_or(0.0);
+    let delta = last - first;
+    let end = points.last().copied().unwrap_or((0.5, 0.5));
+    // "Better" is direction-dependent: more compliance is good, more of everything
+    // else here is bad.
+    let good = if title == "Compliance" {
+        delta > 0.0
+    } else {
+        delta < 0.0
+    };
+    let delta_class = if delta.abs() < f64::EPSILON {
+        "trend-delta"
+    } else if good {
+        "trend-delta trend-better"
+    } else {
+        "trend-delta trend-worse"
+    };
+    let fmt = move |v: f64| {
+        if unit == "%" {
+            format!("{v:.1}{unit}")
+        } else {
+            group_thousands(v.round() as usize)
+        }
+    };
+
+    view! {
+        <div class="trend-card">
+            <div class="trend-head">
+                <span class="trend-title">{title}</span>
+                <span class=delta_class>
+                    {format!(
+                        "{}{}",
+                        if delta > 0.0 { "+" } else { "" },
+                        if unit == "%" {
+                            format!("{delta:.1}{unit}")
+                        } else {
+                            format!("{:+.0}", delta)
+                        },
+                    )}
+                </span>
+            </div>
+            <svg class="trend-spark" viewBox="0 0 300 60" role="img" aria-label=format!(
+                "{title}: {} then {}", fmt(first), fmt(last),
+            )>
+                <path d=path fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linejoin="round" stroke-linecap="round"/>
+                <circle cx=format!("{:.1}", 6.0 + end.0 * 288.0)
+                    cy=format!("{:.1}", 6.0 + end.1 * 48.0)
+                    r="3.5" fill="currentColor"/>
+            </svg>
+            <div class="trend-foot">
+                <span>{fmt(first)}</span>
+                <span class="trend-now">{fmt(last)}</span>
+            </div>
+        </div>
     }
 }

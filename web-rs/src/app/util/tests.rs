@@ -5,7 +5,7 @@ use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
     ActionKind, AuthStatus, JobReport, JobState, Location, Organization, PatchFamilies, PatchRow,
-    RebootChoice, RebootMode, RowSort, RowSortKey,
+    RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -817,6 +817,89 @@ fn summary_line_is_tab_aware() {
 }
 
 #[test]
+fn a_sparkline_maps_values_into_a_unit_box_with_y_inverted() {
+    // Two points, ascending: first at the bottom (y=1), last at the top (y=0).
+    let p = sparkline_points(&[0.0, 10.0]);
+    assert_eq!(p, vec![(0.0, 1.0), (1.0, 0.0)]);
+
+    // A flat series has no range to divide by; draw it down the middle rather than
+    // producing NaN and an empty path.
+    let flat = sparkline_points(&[5.0, 5.0, 5.0]);
+    assert_eq!(flat, vec![(0.0, 0.5), (0.5, 0.5), (1.0, 0.5)]);
+
+    assert!(sparkline_points(&[]).is_empty());
+    assert_eq!(sparkline_points(&[7.0]), vec![(0.5, 0.5)]);
+}
+
+/// History accumulates every completed query, and they did not all measure the same
+/// thing. Charting an OS-only run beside an ALL run would read as the backlog
+/// halving overnight when all that changed was the Type chip.
+#[test]
+fn a_trend_line_only_carries_runs_that_measured_the_same_thing() {
+    let base = RunRecord {
+        instance: "https://app.ninjarmm.com".into(),
+        os_patches: true,
+        software_patches: true,
+        scoped: false,
+        rows_total: 100,
+        ..RunRecord::default()
+    };
+    let os_only = RunRecord {
+        software_patches: false,
+        rows_total: 40,
+        ..base.clone()
+    };
+    let filtered = RunRecord {
+        scoped: true,
+        rows_total: 10,
+        ..base.clone()
+    };
+    let other_tenant = RunRecord {
+        instance: "https://eu.ninjarmm.com".into(),
+        ..base.clone()
+    };
+    let newest = RunRecord {
+        rows_total: 90,
+        ..base.clone()
+    };
+
+    // The newest record defines the series.
+    let history = vec![
+        os_only,
+        other_tenant,
+        base.clone(),
+        filtered,
+        newest.clone(),
+    ];
+    let series = trend_series(&history, 60);
+    assert_eq!(
+        series.len(),
+        2,
+        "only the two comparable whole-fleet ALL runs"
+    );
+    assert_eq!(series[0].rows_total, 100);
+    assert_eq!(series[1].rows_total, 90, "newest last");
+
+    assert!(trend_series(&[], 60).is_empty());
+}
+
+/// The limit keeps the most recent runs, not the first ones.
+#[test]
+fn a_long_history_keeps_its_newest_runs() {
+    let runs: Vec<RunRecord> = (0..10)
+        .map(|i| RunRecord {
+            rows_total: i,
+            ..RunRecord::default()
+        })
+        .collect();
+    let series = trend_series(&runs, 3);
+    assert_eq!(
+        series.iter().map(|r| r.rows_total).collect::<Vec<_>>(),
+        vec![7, 8, 9]
+    );
+}
+
+#[test]
 fn is_fleet_tab_flags_compliance_and_reboot() {
     assert!(is_fleet_tab(Tab::Compliance));
     assert!(is_fleet_tab(Tab::Reboot));
@@ -824,6 +907,9 @@ fn is_fleet_tab_flags_compliance_and_reboot() {
     assert!(!is_fleet_tab(Tab::Failures));
     // Jobs is neither tier — it doesn't reflect the query at all.
     assert!(!is_fleet_tab(Tab::Jobs));
+    // Trend reads the run-history file, which spans many queries — the current
+    // query's filters describe none of it.
+    assert!(!is_fleet_tab(Tab::Trend));
 }
 
 fn job(kind: ActionKind, dry_run: bool) -> JobReport {

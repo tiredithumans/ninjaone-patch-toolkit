@@ -21,7 +21,7 @@ mod update;
 pub(crate) mod util;
 
 use actions::{ActionBar, ConfirmActionModal, JobsTable, ReauthorizeLink};
-use charts::{ComplianceByOsBars, ComplianceCharts};
+use charts::{ComplianceByOsBars, ComplianceCharts, TrendLine};
 use controls::RunControls;
 use filters::Filters;
 use header::Header;

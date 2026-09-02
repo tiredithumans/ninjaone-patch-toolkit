@@ -14,6 +14,7 @@ pub(crate) enum Tab {
     Compliance,
     Reboot,
     Failures,
+    Trend,
     Jobs,
 }
 

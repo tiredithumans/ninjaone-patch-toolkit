@@ -155,6 +155,14 @@ pub async fn query_patches(
     // full result in the tenant-stamped cache for paging (`get_patch_rows`) and
     // export — moving it in rather than cloning every row.
     let summary = QuerySummary::from_result(&result, FIRST_PAGE_ROWS);
+
+    // One rollup line per completed query, so the app has a time dimension at all.
+    // Written before the store: this records what this query *measured*, which is
+    // true whether or not the result went on to win the cache — a superseded run
+    // still observed the fleet. Off the runtime, per the concurrency rule.
+    let entry = crate::history::RunRecord::from_result(&result, &settings.instance_base_url);
+    tokio::task::spawn_blocking(move || crate::history::record(&entry));
+
     summary_for(
         state.store_last_result_if_current(token, result),
         summary,

@@ -62,6 +62,7 @@ pub(crate) fn Results() -> impl IntoView {
                     <span class="tab-group-label">"Fleet health"</span>
                     <TabButton this=Tab::Compliance label="Compliance"/>
                     <TabButton this=Tab::Reboot label="Needs Reboot"/>
+                    <TabButton this=Tab::Trend label="Trend"/>
                 </div>
                 <span class="tab-divider" aria-hidden="true"></span>
                 <div class="tab-group">
@@ -112,6 +113,7 @@ pub(crate) fn Results() -> impl IntoView {
                     Tab::Compliance => view! { <ComplianceTab/> }.into_any(),
                     Tab::Reboot => view! { <RebootTable/> }.into_any(),
                     Tab::Failures => view! { <FailuresTable/> }.into_any(),
+                    Tab::Trend => view! { <TrendTab/> }.into_any(),
                     Tab::Jobs => view! { <JobsTable/> }.into_any(),
                 }}
             </div>
@@ -126,6 +128,7 @@ fn tab_dom_id(tab: Tab) -> &'static str {
         Tab::Compliance => "tab-compliance",
         Tab::Reboot => "tab-reboot",
         Tab::Failures => "tab-failures",
+        Tab::Trend => "tab-trend",
         Tab::Jobs => "tab-jobs",
     }
 }
@@ -160,7 +163,7 @@ fn AppliedFilterChips() -> impl IntoView {
         // describing that query would claim a scope the tab doesn't have.
         <Show when=move || {
             state.query.applied_filters.with(|a| a.is_some())
-                && state.ui.active_tab.get() != Tab::Jobs
+                && !matches!(state.ui.active_tab.get(), Tab::Jobs | Tab::Trend)
         }>
             <div
                 class="applied-filters"
@@ -1091,5 +1094,100 @@ fn RebootTable() -> impl IntoView {
                 </table>
             </div>
         </Show>
+    }
+}
+
+/// Fleet trend over the run history — the only view in this app with a time axis.
+///
+/// Every other surface renders *now*: each query destructively replaces the cached
+/// result, so "is the backlog shrinking" and "did last night's window work" had no
+/// answer. This reads `run-history.jsonl`, one rollup line per completed query.
+#[component]
+pub(crate) fn TrendTab() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let history = RwSignal::new(Vec::<RunRecord>::new());
+    let loaded = RwSignal::new(false);
+
+    let load = move || {
+        if !api::is_tauri() {
+            loaded.set(true);
+            return;
+        }
+        spawn_local(async move {
+            match api::read_run_history().await {
+                Ok(rows) => {
+                    history.set(rows);
+                    loaded.set(true);
+                }
+                Err(e) => {
+                    loaded.set(true);
+                    state.notify(Toast::err(e));
+                }
+            }
+        });
+    };
+    load();
+
+    // Only runs that measured the same thing as the newest one; see `trend_series`.
+    let series = move || util::trend_series(&history.get(), 60);
+
+    view! {
+        <div class="trend">
+            <div class="jobs-toolbar">
+                <button class="btn btn-sm" on:click=move |_| load()>
+                    "Reload"
+                </button>
+            </div>
+            {move || {
+                if !loaded.get() {
+                    return view! { <p class="empty">"Reading run history…"</p> }.into_any();
+                }
+                let runs = series();
+                if runs.len() < 2 {
+                    return view! {
+                        <p class="empty">
+                            "Not enough history yet. Every completed query appends one line; "
+                            "run a couple more and the trend appears here."
+                        </p>
+                    }
+                        .into_any();
+                }
+                let newest = runs[runs.len() - 1].clone();
+                let oldest = runs[0].clone();
+                view! {
+                    <p class="chips-label">
+                        {format!(
+                            "{} runs · {} → {} · {}{}",
+                            runs.len(),
+                            oldest.at.clone(),
+                            newest.at.clone(),
+                            newest.patch_families_label(),
+                            if newest.scoped { ", filtered scope" } else { ", whole fleet" },
+                        )}
+                    </p>
+                    <TrendLine
+                        title="Compliance"
+                        unit="%"
+                        values={runs.iter().filter_map(|r| r.compliance_pct()).collect::<Vec<_>>()}
+                    />
+                    <TrendLine
+                        title="Pending patches"
+                        unit=""
+                        values={runs.iter().map(|r| r.rows_total as f64).collect::<Vec<_>>()}
+                    />
+                    <TrendLine
+                        title="Aged criticals"
+                        unit=""
+                        values={runs.iter().map(|r| r.aged_critical as f64).collect::<Vec<_>>()}
+                    />
+                    <TrendLine
+                        title="Devices needing reboot"
+                        unit=""
+                        values={runs.iter().map(|r| r.needs_reboot as f64).collect::<Vec<_>>()}
+                    />
+                }
+                    .into_any()
+            }}
+        </div>
     }
 }
