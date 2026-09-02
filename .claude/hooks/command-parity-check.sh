@@ -6,7 +6,7 @@
 #
 #   1. `#[tauri::command]` fns declared under src-tauri/src/commands/
 #   2. entries in the `tauri::generate_handler![]` list in src-tauri/src/lib.rs
-#   3. a `"command_name"` invoke string literal in web-rs/src/api.rs
+#   3. an `ipc!(command_name…)` wrapper (or `as "command_name"`) in web-rs/src/api.rs
 #
 # Any gap is printed to stderr so it lands in the agent's next-turn context.
 # Mid-edit gaps are expected (the steps land one file at a time) — the output
@@ -70,10 +70,15 @@ for c in $(comm -13 <(printf '%s\n' "$declared") <(printf '%s\n' "$registered"))
   out="${out}[command-parity] \`$c\` is in generate_handler![] but no #[tauri::command] fn with that name was found under src-tauri/src/commands/.\n"
 done
 
-# Declared but no frontend invoke string → no typed wrapper calls it.
+# Declared but no frontend wrapper → nothing typed can call it. The wrappers are
+# declared through the `ipc!` macro, which builds the command string with
+# `stringify!` from the wrapper's own name, so the name appears at the start of
+# a line — either `ipc!(name(` on one line or `    name(` on the continuation —
+# and only an explicitly renamed wrapper (`ipc!(short as "long", …)`) still
+# carries a quoted literal. Matching only the literal warned on every command.
 for c in $declared; do
-  if ! grep -qF "\"$c\"" "$bindings_file" 2>/dev/null; then
-    out="${out}[command-parity] \`$c\` has no \"$c\" invoke string in web-rs/src/api.rs — add the typed wrapper.\n"
+  if ! grep -qE "^[[:space:]]*(ipc!\()?[[:space:]]*$c[[:space:]]*(\(|as[[:space:]])|\"$c\"" "$bindings_file" 2>/dev/null; then
+    out="${out}[command-parity] \`$c\` has no ipc! wrapper in web-rs/src/api.rs — add the typed wrapper.\n"
   fi
 done
 

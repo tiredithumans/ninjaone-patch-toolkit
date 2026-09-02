@@ -28,9 +28,22 @@ case "$file" in
   *)  rel="$file" ;;
 esac
 
-# AGENTS.md edits never need a reminder about themselves.
+# AGENTS.md edits never need a reminder about themselves — but they do get a
+# size check. The file loads into every session and every subagent, so bytes
+# here are paid on every turn; the contract stays short and the rationale lives
+# in docs/design/. A reminder without a number did not hold (the file grew 5x
+# in ten weeks after its last trim), hence the budget.
+AGENTS_MD_BUDGET_BYTES=${AGENTS_MD_BUDGET_BYTES:-30000}
 case "$rel" in
-  AGENTS.md|CLAUDE.md) exit 0 ;;
+  AGENTS.md)
+    project="${CLAUDE_PROJECT_DIR:-$PWD}"
+    size=$(wc -c < "$project/AGENTS.md" 2>/dev/null | tr -d ' ')
+    if [ -n "$size" ] && [ "$size" -gt "$AGENTS_MD_BUDGET_BYTES" ]; then
+      printf '[agents-md-check] AGENTS.md is %s bytes, over the %s-byte budget. Keep the rule here and move the rationale to docs/design/.\n' "$size" "$AGENTS_MD_BUDGET_BYTES" >&2
+    fi
+    exit 0
+    ;;
+  CLAUDE.md) exit 0 ;;
 esac
 
 # Structural surfaces. Editing any of these is the trigger for "consider
