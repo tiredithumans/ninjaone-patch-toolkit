@@ -154,7 +154,7 @@ dialog open too long) invalidates the approval. Re-open the action and confirm a
 
 ## Build & run (contributors)
 
-- Needs Rust **1.96** with the `wasm32-unknown-unknown` target (pinned in
+- Needs Rust **1.98** with the `wasm32-unknown-unknown` target (pinned in
   `rust-toolchain.toml`), `trunk`, the Tauri CLI, and a matching `wasm-bindgen-cli`.
 - On Linux, install the webview deps (`libwebkit2gtk-4.1-dev`, …) — see the CI workflow
   for the exact list.

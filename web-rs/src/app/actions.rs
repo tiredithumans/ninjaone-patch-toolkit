@@ -6,8 +6,6 @@
 //! while `commands::actions` is what actually refuses it. A confirmation dialog
 //! that exists only in WASM is not a guardrail.
 
-use leptos::prelude::*;
-
 use super::*;
 
 /// Reboot modes offered in the confirm dialog, as (value, label).

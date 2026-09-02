@@ -3,7 +3,7 @@
 A **native Rust desktop app for patching-operations teams**. It authenticates to the NinjaOne
 Public API with **OAuth 2.0 + PKCE**, filters the fleet, lists per-server patches, computes
 compliance / reboot / SLA rollups, and exports to Excel. Tauri 2 backend + Leptos 0.8 (CSR/WASM)
-frontend, **edition 2024**, MSRV **1.96** (`rust-toolchain.toml`).
+frontend, **edition 2024**, MSRV **1.98** (`rust-toolchain.toml`).
 
 Unlike a workspace, the two crates are **independent**: `src-tauri/` (backend, native target) and
 `web-rs/` (frontend, `wasm32-unknown-unknown`) each have their own `Cargo.toml` + `Cargo.lock`.

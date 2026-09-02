@@ -11,6 +11,27 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **MSRV and the pinned toolchain move to Rust 1.98** (`rust-toolchain.toml`, both crates'
+  `rust-version`, the `dtolnay/rust-toolchain` SHA in all five workflows, and the prerequisite
+  lines in the README, `CONTRIBUTING.md` and `docs/TROUBLESHOOTING.md`).
+- **Dependencies refreshed in both crates.** Backend: `keyring` 4.1 -> 4.2, `open` 5.4.1 -> 5.4.3,
+  `tauri-plugin-dialog` 2.7.2 -> 2.7.3, `tauri-plugin-updater` 2.10 -> 2.11, plus 35 transitive
+  bumps; the `open` and `tokio` manifest floors were raised to the versions actually resolved
+  (5.4, 1.53). Frontend: seven transitive bumps. The screenshot tooling's npm deps were already
+  current.
+- **The `cargo-audit` ignore list is empty again.** Both quick-xml DoS advisories
+  (`RUSTSEC-2026-0194`, `RUSTSEC-2026-0195`) met the revisit condition written next to them —
+  `calamine` and `plist` now resolve quick-xml 0.41 — so the entries were dropped rather than left
+  to rot.
+
+### Fixed
+
+- Removed nine redundant `use leptos::prelude::*;` imports under `web-rs/src/app/`. Each module
+  also globs `use super::*`, which already re-exports `app.rs`'s prelude import; Rust 1.98's
+  `unused_imports` detects the shadowing and `web-clippy` runs with `-D warnings`.
+
 ## [0.13.4] - 2026-09-01
 
 ### Changed

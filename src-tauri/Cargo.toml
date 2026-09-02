@@ -2,7 +2,7 @@
 name = "ninjaone-patch-toolkit"
 version = "0.13.4"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.98"
 description = "PKCE-authenticated NinjaOne patching-operations toolkit (Tauri 2 + Leptos)"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -37,7 +37,7 @@ base64 = { version = "0.23", default-features = false, features = ["std"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 keyring = "4"
-open = "5.3"
+open = "5.4"
 rand = "0.10"
 # `default-features = false` pins the TLS backend to rustls, but it also drops
 # reqwest's other defaults — `charset`, `http2`, and `system-proxy` — so each is
@@ -58,7 +58,7 @@ serde = { version = "1.0", features = ["derive"] }
 # See `api::parse_page`.
 serde_json = { version = "1.0", features = ["raw_value"] }
 sha2 = "0.11"
-tokio = { version = "1.42", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5"
