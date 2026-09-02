@@ -9,7 +9,14 @@
 //   SCREENSHOT_DIST  static dir to serve   (default: web-rs/dist)
 //   SCREENSHOT_OUT   output PNG path        (default: docs/images/screenshot.png)
 //   SCREENSHOT_URL   capture this URL instead of serving DIST (e.g. the live demo)
-//   SCREENSHOT_W / SCREENSHOT_H  CSS viewport size (default 1360x1040, the wide
+//   SCREENSHOT_W / SCREENSHOT_H  CSS viewport size (default 1360x1000 — deliberately
+//                                the app's own default window size from
+//                                tauri.conf.json, so the marketing image shows what
+//                                an operator actually gets. It used to be 1040, taller
+//                                than the shipped window, and still cut off above the
+//                                first table row: the capture was widened to reach the
+//                                rows and never did. The fix was the layout, not the
+//                                viewport. The wide
 //                                desktop layout, tall enough to show the filters,
 //                                controls, and the first patch rows — narrow widths
 //                                give the stacked mobile layout); SCREENSHOT_DSF
@@ -29,7 +36,7 @@ const DIST = process.env.SCREENSHOT_DIST || "web-rs/dist";
 const OUT = process.env.SCREENSHOT_OUT || "docs/images/screenshot.png";
 const REMOTE = process.env.SCREENSHOT_URL || "";
 const WIDTH = Number(process.env.SCREENSHOT_W || 1360);
-const HEIGHT = Number(process.env.SCREENSHOT_H || 1040);
+const HEIGHT = Number(process.env.SCREENSHOT_H || 1000);
 const DSF = Number(process.env.SCREENSHOT_DSF || 1);
 
 // Absolute DIST root — the build output is enumerated under it into an allowlist.

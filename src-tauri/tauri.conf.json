@@ -21,9 +21,9 @@
       {
         "title": "NinjaOne Patch Toolkit",
         "width": 1360,
-        "height": 860,
+        "height": 1000,
         "minWidth": 1024,
-        "minHeight": 640
+        "minHeight": 720
       }
     ],
     "security": {

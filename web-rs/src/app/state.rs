@@ -412,7 +412,14 @@ impl UiState {
             toast: RwSignal::new(None),
             toast_gen: RwSignal::new(0),
             show_settings: RwSignal::new(false),
-            filters_collapsed: RwSignal::new(false),
+            // Starts from the operator's remembered choice. `None` (never chosen)
+            // opens expanded so the controls are discoverable on a first launch;
+            // `run_query` collapses it once the first result lands, because at that
+            // moment the table is what they came for and the panel is ~487px of the
+            // window standing in front of it.
+            filters_collapsed: RwSignal::new(
+                api::ui_pref(api::PREF_FILTERS_COLLAPSED).unwrap_or(false),
+            ),
             active_tab: RwSignal::new(Tab::Patches),
         }
     }
@@ -864,6 +871,15 @@ impl AppState {
                         self.query.page_rows.set(r.rows.clone());
                     } else {
                         self.fetch_page(page);
+                    }
+                    // Reclaim the fold. The filter panel is ~487px tall and always
+                    // opened expanded, so on the app's own default window not one
+                    // patch row was visible on first paint — the operator scrolled
+                    // past the controls to reach the thing they ran the query for.
+                    // Only when they have expressed no preference: an explicit
+                    // toggle is remembered and always wins.
+                    if !silent && api::ui_pref(api::PREF_FILTERS_COLLAPSED).is_none() {
+                        self.ui.filters_collapsed.set(true);
                     }
                     self.query.result.set(Some(r));
                     self.query.applied_filters.set(Some(snapshot));
@@ -1471,6 +1487,24 @@ impl AppState {
                 auth.as_ref(),
             )
         })
+    }
+
+    /// Whether the action bar should be rendered at all.
+    ///
+    /// Distinct from [`can_act`](Self::can_act), which is whether the buttons work.
+    /// An install that never switched patch actions on in Settings is a read-only
+    /// reporting tool, and ~95px of permanently disabled dispatch controls sat above
+    /// the table on every query — in a layout where the table was already below the
+    /// fold. Demo and browser mode keep it: the hosted page showing an action
+    /// surface it cannot use is an honest advertisement, and hiding it there would
+    /// make the demo misrepresent the product.
+    pub(super) fn action_surface_visible(self) -> bool {
+        self.session.web_mode.get()
+            || self.session.demo.get()
+            || self
+                .session
+                .auth
+                .with(|a| a.as_ref().is_some_and(|a| a.actions_enabled))
     }
 
     /// Whether the action affordances should be live. The backend re-checks all of

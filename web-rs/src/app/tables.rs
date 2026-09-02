@@ -310,7 +310,9 @@ fn PatchesTable() -> impl IntoView {
                         </button>
                     </div>
                 </Show>
-                <ActionBar/>
+                <Show when=move || state.action_surface_visible()>
+                    <ActionBar/>
+                </Show>
                 <ViewModeSwitch/>
                 <Show when=move || state.query.group_by.get().is_some()>
                     <GroupedPatches/>

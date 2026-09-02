@@ -34,6 +34,16 @@ version and start a fresh `[Unreleased]`.
   is the full sentence ("Apply all OS patches. Installs EVERY approved OS patch on each selected
   device — not just the rows you ticked."), and the confirmation dialog opens with that sentence
   before the device list.
+- **The results table is visible without scrolling.** At the app's own default window size not one
+  patch row was on screen after a query: an always-expanded ~487px filter panel, the controls
+  strip, the tab bar, a chip row, a scope banner and the action bar all sat above it. (The
+  marketing screenshot was captured 180px *taller* than the shipped window specifically to reach
+  "the first patch rows", and still cut off above them.) Three changes: the default window is
+  1360×1000 rather than 1360×860 (minimum 1024×720), the Filters panel collapses itself once the
+  first result lands and remembers an explicit Show/Hide choice across launches, and the action bar
+  is not rendered at all when **Patch actions** is off in Settings — a read-only install was
+  carrying ~95px of permanently disabled dispatch controls. The screenshot tooling now defaults to
+  the app's real window size so the two cannot disagree again.
 
 ### Fixed
 
