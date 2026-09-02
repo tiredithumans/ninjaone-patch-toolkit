@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-09-01
+
 ### Changed
 
 - **Agent instructions split into a contract and design notes.** `AGENTS.md` shrank from 82 KB
