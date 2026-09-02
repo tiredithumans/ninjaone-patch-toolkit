@@ -7168,7 +7168,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- [ninjaone-patch-toolkit 0.13.5](https://crates.io/crates/ninjaone-patch-toolkit)
+- [ninjaone-patch-toolkit 0.14.0](https://crates.io/crates/ninjaone-patch-toolkit)
 - [block2 0.6.2](https://github.com/madsmtm/objc2)
 - [brotli-decompressor 5.0.3](https://github.com/dropbox/rust-brotli-decompressor)
 - [cargo_toml 0.22.3](https://gitlab.com/lib.rs/cargo_toml)

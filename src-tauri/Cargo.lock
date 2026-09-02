@@ -2659,7 +2659,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "ninjaone-patch-toolkit"
-version = "0.13.5"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

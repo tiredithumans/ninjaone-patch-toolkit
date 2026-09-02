@@ -11,38 +11,42 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
-### Changed
-
-- **The cache protocol is one type instead of four hand-written copies.** Every TTL'd slot —
-  lookups, the device inventory, and both current-patch families — restated the same five steps:
-  probe, single-flight gate, re-probe, sample the epoch before the fetch, store only if the epoch
-  is unchanged. Prose did not keep them in step: the lookups slot was missing the epoch re-check
-  until someone noticed, and never had a single-flight gate at all. `TenantCache<T>` now owns all
-  five, so a fifth cache cannot be declared without the protocol. `AppState` drops from 18
-  hand-managed synchronization primitives to 8 plus four cache fields.
-
-### Fixed
-
-- **Concurrent callers on a cold lookups cache now fetch once.** The slot had an epoch gate but no
-  single-flight gate, so three overlapping queries each paged organizations, locations and roles
-  independently. Closed by the `TenantCache` migration and pinned by
-  `concurrent_lookups_on_a_cold_cache_fetch_once`.
-### Fixed
-
-- **The browser demo's grouped view disagreed with the backend, and nothing could tell.**
-  `web-rs/src/demo.rs` re-implements grouping by hand, and its tests asserted *properties* — that
-  device groups lead with the worst severity, that patch groups partition the rows — which a wrong
-  implementation can satisfy. A backend test now emits its real grouping output for a shared input
-  to `web-rs/tests/backend-grouping.json`, and the demo asserts byte-equality against it. That
-  immediately found two divergences: a patch group inherited its first row's `offline` /
-  `needsReboot`, which the backend deliberately leaves false (a patch spans many devices, so the
-  header claims neither), and the demo recovered the reboot flag by looking the device *name* up in
-  a side table — because the frontend's `PatchRow` mirror omitted `needsReboot` even though the
-  backend has always sent it. The mirror now carries it and both halves read the same field off the
-  same row.
+## [0.14.0] - 2026-09-02
 
 ### Added
 
+- **A Trend tab — the app now has a time dimension.** Every other surface renders *now*: each query
+  destructively replaced the single cached result, so "is the backlog shrinking?" and "did last
+  night's window work?" — the two questions a patching team actually has — had no answer. Each
+  completed query now appends one rollup line to `run-history.jsonl` (~15 KB, owner-only, trimmed
+  at 4,000 lines), and the **Trend** tab charts compliance, pending patches, aged criticals and
+  devices needing reboot across them. Rollups, not row snapshots: a normalized row snapshot of a
+  large fleet is ~16 MB against ~15 KB here, and per-device history is a database's job. Runs that
+  measured different things — another tenant, a different patch family, a filtered scope — are
+  excluded from the line rather than silently averaged in.
+- **Rolling diagnostic logs, and a button that reveals them.** `init_tracing` wrote to stdout
+  only, which a bundled `.app` launched from Finder or an `.msi` from the Start menu discards
+  entirely — so a field bug report arrived with no evidence beyond the write-path audit log.
+  A daily-rotating file layer now writes to `logs/` beside `settings.json` (seven days kept), and
+  **Settings → Open diagnostics folder** reveals it.
+- **The action audit trail is readable in the app.** `action-audit.jsonl` has always been written
+  — append-only, redacted, owner-only, before the request goes out — but nothing could read it
+  back, so restarting after a batch of reboots left no in-app record that it happened. The
+  **Jobs** tab now renders it under *Audit trail*, newest first. It survives a restart and
+  **Clear history** (which only clears the live session list) does not touch it.
+- **Unrecognised severity values are now reported.** A value NinjaOne adds that this build has no
+  mapping for sinks to the bottom of the severity sort and disappears whenever the severity facet
+  is active. `build_rows` now logs one line per distinct unmapped value per query — visible because
+  there is now a log file for it to be visible in.
+- **The NinjaOne API contract is pinned and checked weekly.** Every backend test mocks the vendor
+  against hand-written fixtures, so the suite asserted what this build *believes* the API returns,
+  not what it returns — and `AGENTS.md`'s instruction to verify shapes against the spec was gated
+  by nothing. That is the bug class 0.13.3 shipped four fixes for. `docs/api/ninjaone-surface.md`
+  is now a committed digest of the 17 endpoints and the schema fields the toolkit branches on, and
+  a `ninjaone-contract` CI job re-derives it from the published spec weekly and fails on a diff.
+  The digest records that `DeviceOSPatch.severity`, `.status` and `.type` are **free-form strings
+  with no declared enum** — the vendor promises nothing there, which is exactly why the parsers
+  must stay total.
 - **`THIRD-PARTY-LICENSES.md` and `just licenses`.** `deny.toml` gated which licenses may enter
   the dependency tree; nothing produced the outbound notice. The bundle statically links 602
   crates across nine license families, most of whose terms require reproducing their copyright
@@ -59,54 +63,8 @@ version and start a fresh `[Unreleased]`.
   restore-test — plus the known gap that nothing verifies the CI secret still matches the public
   key baked into shipped binaries.
 
-### Added
-
-- **The NinjaOne API contract is pinned and checked weekly.** Every backend test mocks the vendor
-  against hand-written fixtures, so the suite asserted what this build *believes* the API returns,
-  not what it returns — and `AGENTS.md`'s instruction to verify shapes against the spec was gated
-  by nothing. That is the bug class 0.13.3 shipped four fixes for. `docs/api/ninjaone-surface.md`
-  is now a committed digest of the 17 endpoints and the schema fields the toolkit branches on, and
-  a `ninjaone-contract` CI job re-derives it from the published spec weekly and fails on a diff.
-  The digest records that `DeviceOSPatch.severity`, `.status` and `.type` are **free-form strings
-  with no declared enum** — the vendor promises nothing there, which is exactly why the parsers
-  must stay total.
-- **Unrecognised severity values are now reported.** A value NinjaOne adds that this build has no
-  mapping for sinks to the bottom of the severity sort and disappears whenever the severity facet
-  is active. `build_rows` now logs one line per distinct unmapped value per query — visible because
-  there is now a log file for it to be visible in.
-- **A Trend tab — the app now has a time dimension.** Every other surface renders *now*: each query
-  destructively replaced the single cached result, so "is the backlog shrinking?" and "did last
-  night's window work?" — the two questions a patching team actually has — had no answer. Each
-  completed query now appends one rollup line to `run-history.jsonl` (~15 KB, owner-only, trimmed
-  at 4,000 lines), and the **Trend** tab charts compliance, pending patches, aged criticals and
-  devices needing reboot across them. Rollups, not row snapshots: a normalized row snapshot of a
-  large fleet is ~16 MB against ~15 KB here, and per-device history is a database's job. Runs that
-  measured different things — another tenant, a different patch family, a filtered scope — are
-  excluded from the line rather than silently averaged in.
-
-### Added
-
-- **Rolling diagnostic logs, and a button that reveals them.** `init_tracing` wrote to stdout
-  only, which a bundled `.app` launched from Finder or an `.msi` from the Start menu discards
-  entirely — so a field bug report arrived with no evidence beyond the write-path audit log.
-  A daily-rotating file layer now writes to `logs/` beside `settings.json` (seven days kept), and
-  **Settings → Open diagnostics folder** reveals it.
-- **The action audit trail is readable in the app.** `action-audit.jsonl` has always been written
-  — append-only, redacted, owner-only, before the request goes out — but nothing could read it
-  back, so restarting after a batch of reboots left no in-app record that it happened. The
-  **Jobs** tab now renders it under *Audit trail*, newest first. It survives a restart and
-  **Clear history** (which only clears the live session list) does not touch it.
 ### Changed
 
-- **The action buttons now carry their own blast radius.** "Install all approved patches" and
-  "Install only the selected patches" both showed a pair of buttons reading *OS* and *Software*;
-  the difference between installing the three KBs you ticked and installing a device's entire
-  approved backlog was carried by an 11px muted group heading and ~35 lines of README prose. The
-  buttons now read **All OS** / **All Software** and **Selected OS** / **Selected Software**, the
-  two untargeted ones are styled as the wider action, every button's accessible name and tooltip
-  is the full sentence ("Apply all OS patches. Installs EVERY approved OS patch on each selected
-  device — not just the rows you ticked."), and the confirmation dialog opens with that sentence
-  before the device list.
 - **The results table is visible without scrolling.** At the app's own default window size not one
   patch row was on screen after a query: an always-expanded ~487px filter panel, the controls
   strip, the tab bar, a chip row, a scope banner and the action bar all sat above it. (The
@@ -117,9 +75,33 @@ version and start a fresh `[Unreleased]`.
   is not rendered at all when **Patch actions** is off in Settings — a read-only install was
   carrying ~95px of permanently disabled dispatch controls. The screenshot tooling now defaults to
   the app's real window size so the two cannot disagree again.
+- **The action buttons now carry their own blast radius.** "Install all approved patches" and
+  "Install only the selected patches" both showed a pair of buttons reading *OS* and *Software*;
+  the difference between installing the three KBs you ticked and installing a device's entire
+  approved backlog was carried by an 11px muted group heading and ~35 lines of README prose. The
+  buttons now read **All OS** / **All Software** and **Selected OS** / **Selected Software**, the
+  two untargeted ones are styled as the wider action, every button's accessible name and tooltip
+  is the full sentence ("Apply all OS patches. Installs EVERY approved OS patch on each selected
+  device — not just the rows you ticked."), and the confirmation dialog opens with that sentence
+  before the device list.
+- **The cache protocol is one type instead of four hand-written copies.** Every TTL'd slot —
+  lookups, the device inventory, and both current-patch families — restated the same five steps:
+  probe, single-flight gate, re-probe, sample the epoch before the fetch, store only if the epoch
+  is unchanged. Prose did not keep them in step: the lookups slot was missing the epoch re-check
+  until someone noticed, and never had a single-flight gate at all. `TenantCache<T>` now owns all
+  five, so a fifth cache cannot be declared without the protocol. `AppState` drops from 18
+  hand-managed synchronization primitives to 8 plus four cache fields.
 
 ### Fixed
 
+- **The desktop build no longer falls back to sample data when its backend is missing.** The
+  frontend decided between the real app and the demo on one un-retried `Reflect::get` for
+  `window.__TAURI__` at startup, and a miss meant demo mode — a screen of invented orgs, devices
+  and KBs behind a banner, in a tool whose output decides which production servers get rebooted.
+  A runtime probe can only report what it found, never what the build expected, so the Tauri
+  before-commands now pass `--features desktop` and `api::is_desktop_build()` makes the miss a
+  hard error with an explanatory screen instead. The browser and GitHub Pages builds are unchanged
+  and still demo on a miss, which is correct there.
 - **A silent auto-refresh in a grouped view could strand the table on an empty page.** The
   query-completion path sized the page bound from `rows_total` unconditionally and then handed that
   index to the *group* fetch. Grouping only collapses rows, so the row-derived bound is always the
@@ -137,14 +119,21 @@ version and start a fresh `[Unreleased]`.
   looking for their audit trail was sent to the wrong folder. A new `paths` module is now the only
   place the qualifier is written down, pinned by `app_dir_is_single_sourced`. Records written by
   older builds are still read, so no dispatch history is lost on upgrade.
-- **The desktop build no longer falls back to sample data when its backend is missing.** The
-  frontend decided between the real app and the demo on one un-retried `Reflect::get` for
-  `window.__TAURI__` at startup, and a miss meant demo mode — a screen of invented orgs, devices
-  and KBs behind a banner, in a tool whose output decides which production servers get rebooted.
-  A runtime probe can only report what it found, never what the build expected, so the Tauri
-  before-commands now pass `--features desktop` and `api::is_desktop_build()` makes the miss a
-  hard error with an explanatory screen instead. The browser and GitHub Pages builds are unchanged
-  and still demo on a miss, which is correct there.
+- **The browser demo's grouped view disagreed with the backend, and nothing could tell.**
+  `web-rs/src/demo.rs` re-implements grouping by hand, and its tests asserted *properties* — that
+  device groups lead with the worst severity, that patch groups partition the rows — which a wrong
+  implementation can satisfy. A backend test now emits its real grouping output for a shared input
+  to `web-rs/tests/backend-grouping.json`, and the demo asserts byte-equality against it. That
+  immediately found two divergences: a patch group inherited its first row's `offline` /
+  `needsReboot`, which the backend deliberately leaves false (a patch spans many devices, so the
+  header claims neither), and the demo recovered the reboot flag by looking the device *name* up in
+  a side table — because the frontend's `PatchRow` mirror omitted `needsReboot` even though the
+  backend has always sent it. The mirror now carries it and both halves read the same field off the
+  same row.
+- **Concurrent callers on a cold lookups cache now fetch once.** The slot had an epoch gate but no
+  single-flight gate, so three overlapping queries each paged organizations, locations and roles
+  independently. Closed by the `TenantCache` migration and pinned by
+  `concurrent_lookups_on_a_cold_cache_fetch_once`.
 
 ## [0.13.5] - 2026-09-02
 
