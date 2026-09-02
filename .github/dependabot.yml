@@ -24,7 +24,7 @@ updates:
     ignore:
       # dtolnay/rust-toolchain encodes the *toolchain* in the ref: upstream ships
       # one rolling `v1` tag and publishes toolchain versions as branches, so our
-      # `@<sha> # 1.96.0` pin is a commit on the 1.96.0 branch with no semver tag
+      # `@<sha> # 1.98.0` pin is a commit on the 1.98.0 branch with no semver tag
       # containing it. Dependabot can't map that SHA back to a version and errors
       # the whole github-actions job (`unknown_error`), which reports the weekly
       # run as failed even though the other action bumps land fine. Bumping this

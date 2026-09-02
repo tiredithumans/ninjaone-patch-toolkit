@@ -87,7 +87,7 @@ Copy the generated **Client ID** (and the **Client Secret** only if you chose `W
 
 ## Prerequisites
 
-- Rust **1.96** with the `wasm32-unknown-unknown` target (pinned in `rust-toolchain.toml`).
+- Rust **1.98** with the `wasm32-unknown-unknown` target (pinned in `rust-toolchain.toml`).
 - [`trunk`](https://trunkrs.dev), the Tauri CLI (`cargo install tauri-cli`), and a matching
   `wasm-bindgen-cli` (`cargo install wasm-bindgen-cli --version <lockfile version>`).
 - Platform webview deps (WebKitGTK on Linux; bundled on macOS/Windows).

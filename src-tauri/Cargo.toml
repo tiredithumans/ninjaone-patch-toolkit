@@ -2,7 +2,7 @@
 name = "ninjaone-patch-toolkit"
 version = "0.13.4"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.98"
 description = "PKCE-authenticated NinjaOne patching-operations toolkit (Tauri 2 + Leptos)"
 license = "MIT OR Apache-2.0"
 publish = false

@@ -1,7 +1,5 @@
 use std::collections::BTreeSet;
 
-use leptos::prelude::*;
-
 use super::*;
 
 /// Patches-table columns as (header label, sort key), in display order.

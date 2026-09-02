@@ -1,5 +1,3 @@
-use leptos::prelude::*;
-
 use super::*;
 
 #[component]

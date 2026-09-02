@@ -2,7 +2,7 @@
 name = "ninjaone-patch-toolkit-web"
 version = "0.13.4"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.98"
 description = "Leptos CSR frontend for the NinjaOne Patch Toolkit"
 license = "MIT OR Apache-2.0"
 publish = false
