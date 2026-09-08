@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-08
+
 ### Fixed
 
 - **Third-party patch counts were roughly a tenth of the real figure.** Every `/queries/*` fetch
