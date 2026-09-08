@@ -34,14 +34,34 @@ paged type is a compile error rather than a silently non-advancing cursor.
 `decode_response` handles the body — extracted from a ~300-line `request_raw` so the policy can be
 tested without a server.
 
-## Both pagination branches require forward progress
+## Both pagination branches require forward progress — and neither may stop quietly
 
-The `after` branch stops unless the max row id advances; the envelope branch stops when the
-server echoes back the same cursor it was handed on a *full* page. Without the latter, an endpoint
-that never advances its cursor loops forever, re-fetching the same rows. Note also that
-`REPORTING_PAGE_SIZE = 5000` rests on the envelope branch tolerating a server-side cap, **not** on
-a documented ceiling: the four patch endpoints declare `pageSize` with no maximum (the
-`maximum: 10000` in the spec is on `/queries/logged-on-users`, which this app never calls).
+The `after` branch stops unless the max row id advances; the envelope branch stops unless the
+**whole** cursor advances. Without those, an endpoint that never advances its cursor loops forever,
+re-fetching the same rows.
+
+**Compare the whole cursor, never its `name`.** NinjaOne's `/queries/*` cursor is
+`{ name, offset, count, expires }`, and those endpoints accept exactly one paging parameter —
+`cursor`, documented as "Cursor name". The position therefore lives server-side keyed by that name,
+which makes `name` a *stable handle for the whole scan* rather than a per-page token. `next_cursor`
+returns a [`PageCursor`] carrying the `offset` alongside the name for exactly this reason: reading
+the cursor as its name alone made page 2 compare equal to page 1, tripped the guard, and returned
+`2 × pageSize` rows as the whole feed. That is invisible on an OS feed short enough never to reach
+page 2, and roughly a 10x undercount on a six-figure third-party one — on the Patches table, the
+compliance rollups, both exports and the charts at once, since all of them read the same cached
+vector. Every cursor fixture in the suite changed the name per page, which is why CI could not see
+it; `a_stable_cursor_name_with_an_advancing_offset_is_progress_not_a_stall` pins the real shape.
+
+**A stall is an error, not a short read.** When the cursor genuinely does not advance, the loop
+bails rather than returning `Ok(all)`. The rows in hand are a partial fleet, and handing them back
+as success is indistinguishable from a complete fetch at every call site above — the same reasoning
+the unreadable-cursor arm below already applies. The exits that *are* legitimate ends of paging log
+`path`, `rows`, `pages` and which arm fired at `info`, so a fetch's size is recoverable from the
+rolling log when a number needs reconciling against NinjaOne's own reports.
+
+Note also that `REPORTING_PAGE_SIZE = 5000` rests on the envelope branch tolerating a server-side
+cap, **not** on a documented ceiling: the four patch endpoints declare `pageSize` with no maximum
+(the `maximum: 10000` in the spec is on `/queries/logged-on-users`, which this app never calls).
 
 ## An unreadable `cursor` is an error, not end-of-pages
 

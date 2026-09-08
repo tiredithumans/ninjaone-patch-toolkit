@@ -12,7 +12,7 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::auth::AuthState;
 use crate::error::truncate_body;
@@ -281,19 +281,27 @@ impl NinjaApiClient {
     ) -> Result<Vec<T>> {
         let mut all: Vec<T> = Vec::new();
         let mut seen_ids: HashSet<i64> = HashSet::new();
-        let mut cursor: Option<String> = None;
+        let mut cursor: Option<PageCursor> = None;
         let mut after: Option<i64> = None;
+        // Reported at every exit. A short read is otherwise indistinguishable from a
+        // complete one at every call site above this function, and a whole-fleet feed
+        // that stops early understates every number derived from it.
+        let mut pages: u32 = 0;
 
         loop {
             let mut query: Vec<(&str, String)> = base_query.to_vec();
             query.push(("pageSize", page_size.to_string()));
             if let Some(c) = &cursor {
-                query.push(("cursor", c.clone()));
+                // `cursor` is the only paging parameter these endpoints accept — the
+                // offset that rides beside the name in the response is server-side
+                // state, keyed by that name. See [`PageCursor`].
+                query.push(("cursor", c.name.clone()));
             }
             if let Some(a) = after {
                 query.push(("after", a.to_string()));
             }
 
+            pages += 1;
             match self.request_page::<T>(path, &query).await? {
                 PageBody::Array(items) => {
                     let len = items.len();
@@ -319,11 +327,22 @@ impl NinjaApiClient {
                     // the largest id seen; stop if it can't move forward (no id, or
                     // no new rows) so a misbehaving endpoint can't loop forever.
                     if len < page_size as usize {
+                        info!(path, rows = all.len(), pages, exit = "short page", "paged");
                         return Ok(all);
                     }
                     match max_id {
                         Some(id) if Some(id) != after => after = Some(id),
-                        _ => return Ok(all),
+                        // A *full* page that cannot move the `after` cursor — no ids
+                        // on the rows, or none newer than the ones already seen — is
+                        // a stalled scan, not the end of one. Reported rather than
+                        // returned: `all` holds a partial fleet here, and handing it
+                        // back as `Ok` is what makes an undercount invisible.
+                        _ => bail!(
+                            "{path} returned a full page of {len} rows that did not advance the \
+                             `after` cursor; stopping at {} rows rather than reporting a partial \
+                             fleet as complete",
+                            all.len()
+                        ),
                     }
                 }
                 PageBody::Envelope {
@@ -342,6 +361,7 @@ impl NinjaApiClient {
                     // `{"cursor": {}}` ends the fetch rather than tripping the
                     // malformed-shape error below.
                     if page_len == 0 {
+                        info!(path, rows = all.len(), pages, exit = "empty page", "paged");
                         return Ok(all);
                     }
                     match next_cursor(next.as_ref())? {
@@ -352,20 +372,34 @@ impl NinjaApiClient {
                         // growing `all` without bound. The array branch was hardened
                         // against exactly this; the envelope branch stopped only on
                         // an empty page.
-                        Some(c) if Some(&c) == cursor.as_ref() => {
-                            warn!(
+                        //
+                        // Compared as a whole rather than by `name`: NinjaOne's cursor
+                        // is a stable handle plus an advancing `offset`, so matching on
+                        // the name alone read an advancing scan as a stalled one and
+                        // cut every feed off after its second page. See [`PageCursor`].
+                        Some(c) if Some(&c) == cursor.as_ref() => bail!(
+                            "{path} returned a full page of {page_len} rows alongside the very \
+                             cursor it was handed ({c:?}); stopping at {} rows rather than \
+                             reporting a partial fleet as complete",
+                            all.len()
+                        ),
+                        Some(c) => cursor = Some(c),
+                        None => {
+                            info!(
                                 path,
                                 rows = all.len(),
-                                "the server echoed an unchanged cursor on a full page; \
-                                 stopping rather than re-fetching it forever"
+                                pages,
+                                exit = "cursor exhausted",
+                                "paged"
                             );
                             return Ok(all);
                         }
-                        Some(c) => cursor = Some(c),
-                        None => return Ok(all),
                     }
                 }
-                PageBody::Empty => return Ok(all),
+                PageBody::Empty => {
+                    info!(path, rows = all.len(), pages, exit = "empty body", "paged");
+                    return Ok(all);
+                }
             }
         }
     }
@@ -594,7 +628,29 @@ fn backoff(attempt: u8) -> Duration {
     Duration::from_secs(2u64.pow(attempt as u32))
 }
 
-/// Extracts the next-page token from a `cursor` field that may be a string or an
+/// One page-to-page cursor: the token the next request echoes back, plus the
+/// position that rides alongside it.
+///
+/// NinjaOne's `/queries/*` cursor is `{ name, offset, count, expires }`, and those
+/// endpoints accept exactly one paging parameter — `cursor`, documented as "Cursor
+/// name". The position therefore lives *server-side*, keyed by that name, which
+/// makes `name` a stable handle for the whole scan rather than a per-page token.
+///
+/// That is why forward progress is measured against the **pair**. Comparing `name`
+/// alone made an advancing scan look like a stalled one, so the loop stopped at its
+/// second page and handed back 2 × `pageSize` rows as if they were the whole feed —
+/// invisible on a short OS feed, and a ~10x undercount on a six-figure third-party
+/// one, on every surface that reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PageCursor {
+    /// Echoed back as `cursor`; the only paging parameter these endpoints take.
+    name: String,
+    /// The server's position within the scan. `None` for a bare-string cursor,
+    /// which carries no position and so can only signal progress by changing.
+    offset: Option<i64>,
+}
+
+/// Extracts the next-page cursor from a `cursor` field that may be a string or an
 /// object `{ "name": "...", "offset": N }`.
 ///
 /// `Ok(None)` means "no more pages"; `Err` means the cursor is a shape we cannot
@@ -605,15 +661,25 @@ fn backoff(attempt: u8) -> Duration {
 /// derived from it. The sibling `results` handling already bails loudly on a
 /// malformed envelope for exactly this reason; this arm used to return `None` and
 /// stop silently.
-fn next_cursor(value: Option<&Value>) -> Result<Option<String>> {
+fn next_cursor(value: Option<&Value>) -> Result<Option<PageCursor>> {
     let Some(value) = value else {
         return Ok(None);
     };
+    let named = |name: &str, offset: Option<i64>| {
+        (!name.is_empty()).then(|| PageCursor {
+            name: name.to_string(),
+            offset,
+        })
+    };
     match value {
         Value::Null => Ok(None),
-        Value::String(s) => Ok(Some(s.clone()).filter(|s| !s.is_empty())),
+        Value::String(s) => Ok(named(s, None)),
         Value::Object(obj) => match obj.get("name") {
-            Some(Value::String(s)) => Ok(Some(s.clone()).filter(|s| !s.is_empty())),
+            // `offset` is read for the forward-progress check only — it is never
+            // sent back, because these endpoints have no `offset` parameter. A
+            // missing or non-integer offset simply leaves the name to carry the
+            // comparison on its own, exactly as a bare-string cursor does.
+            Some(Value::String(s)) => Ok(named(s, obj.get("offset").and_then(Value::as_i64))),
             // An object cursor whose `name` is absent or not a string is not
             // "finished" — it is a shape this client does not understand.
             other => bail!(
@@ -754,8 +820,8 @@ mod tests {
         };
         assert_eq!(results[0].name, "Beta");
         assert_eq!(
-            next_cursor(cursor.as_ref()).unwrap().as_deref(),
-            Some("tok")
+            next_cursor(cursor.as_ref()).unwrap().map(|c| c.name),
+            Some("tok".to_string())
         );
 
         // 204 is handled before the body is read; these are the on-the-wire forms.
@@ -823,7 +889,10 @@ mod tests {
     fn next_cursor_reads_string() {
         assert_eq!(
             next_cursor(Some(&json!("abc"))).unwrap(),
-            Some("abc".to_string())
+            Some(PageCursor {
+                name: "abc".to_string(),
+                offset: None
+            })
         );
         assert_eq!(next_cursor(Some(&json!(""))).unwrap(), None);
     }
@@ -831,10 +900,44 @@ mod tests {
     #[test]
     fn next_cursor_reads_object_name() {
         let v = json!({ "name": "tok-42", "offset": 500, "count": 500 });
-        assert_eq!(next_cursor(Some(&v)).unwrap(), Some("tok-42".to_string()));
+        assert_eq!(
+            next_cursor(Some(&v)).unwrap(),
+            Some(PageCursor {
+                name: "tok-42".to_string(),
+                offset: Some(500)
+            })
+        );
         // An explicitly empty name is a real end-of-pages signal.
         let done = json!({ "name": "", "offset": 1000 });
         assert_eq!(next_cursor(Some(&done)).unwrap(), None);
+    }
+
+    /// The position is what separates an advancing scan from a stalled one, so it
+    /// has to survive into the value the loop compares. NinjaOne keys the scan
+    /// server-side by `name` and moves `offset`, so a cursor read as its name alone
+    /// compares equal on page 2 and stops the fetch there.
+    #[test]
+    fn an_object_cursor_carries_its_offset_into_the_progress_check() {
+        let page1 = next_cursor(Some(&json!({ "name": "scan-7", "offset": 5000 })))
+            .unwrap()
+            .expect("a live cursor");
+        let page2 = next_cursor(Some(&json!({ "name": "scan-7", "offset": 10000 })))
+            .unwrap()
+            .expect("a live cursor");
+        assert_eq!(page1.name, page2.name, "the handle is stable by design");
+        assert_ne!(page1, page2, "an advancing offset must read as progress");
+
+        // A genuinely stalled scan — same handle, same position — must still compare
+        // equal, so the loop-prevention guard keeps working.
+        let stalled = next_cursor(Some(&json!({ "name": "scan-7", "offset": 5000 })))
+            .unwrap()
+            .expect("a live cursor");
+        assert_eq!(page1, stalled);
+
+        // A bare string has no position to advance, so the name carries it alone.
+        let bare = next_cursor(Some(&json!("tok"))).unwrap();
+        assert_eq!(bare, next_cursor(Some(&json!("tok"))).unwrap());
+        assert_ne!(bare, next_cursor(Some(&json!("tok-2"))).unwrap());
     }
 
     #[test]
@@ -984,6 +1087,135 @@ mod tests {
             patches.len(),
             2,
             "must follow the cursor past the first page"
+        );
+    }
+
+    /// The whole third-party undercount, in one fixture.
+    ///
+    /// NinjaOne keys a `/queries/*` scan server-side by a **stable** cursor `name`
+    /// and advances the `offset` beside it — `cursor` is the only paging parameter
+    /// the endpoint accepts, so the position cannot travel any other way. Reading
+    /// that cursor as its name alone made page 2 compare equal to page 1, which
+    /// tripped the forward-progress guard and returned two pages as if they were the
+    /// whole feed. Every other cursor fixture in this file changes the name per page,
+    /// which is exactly why nothing caught it: on a short OS feed the guard is never
+    /// reached, while a six-figure third-party feed was cut to 2 x `pageSize`.
+    ///
+    /// The rows are real `DeviceSoftwarePatch` bodies, so this also pins the wire
+    /// shape: `title` -> `name`, `impact` -> `severity`, and no `kbNumber` anywhere.
+    #[tokio::test]
+    async fn a_stable_cursor_name_with_an_advancing_offset_is_progress_not_a_stall() {
+        use crate::auth::AuthState;
+        use crate::model::software_patch_json;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+        /// A server whose cursor name never changes, because the scan it names is
+        /// server-side state rather than a per-page token.
+        struct StableNameCursor {
+            served: AtomicUsize,
+        }
+
+        impl Respond for StableNameCursor {
+            fn respond(&self, _: &Request) -> ResponseTemplate {
+                let n = self.served.fetch_add(1, Ordering::SeqCst);
+                let cursor = match n {
+                    // Two live pages, then a terminal empty name.
+                    0 | 1 => json!({
+                        "name": "scan-7",
+                        "offset": (n + 1) * 5000,
+                        "count": 5000,
+                    }),
+                    _ => json!({ "name": "", "offset": 15000 }),
+                };
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "results": [software_patch_json(
+                        (n + 1) as i64,
+                        "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                        "Google Chrome 141.0.7390.55",
+                        "RECOMMENDED",
+                        "APPROVED",
+                    )],
+                    "cursor": cursor,
+                }))
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/software-patches"))
+            .respond_with(StableNameCursor {
+                served: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        let client = NinjaApiClient::new(http, auth);
+
+        let patches = client
+            .fleet_software_patches(None, None, None)
+            .await
+            .expect("software patches call");
+
+        assert_eq!(
+            patches.len(),
+            3,
+            "a stable cursor name whose offset advances must keep paging; \
+             stopping at 2 pages is the third-party undercount"
+        );
+        // The vendor's software keys, through the aliases that are the only ones
+        // that bind: `title` and `impact`. No fixture exercised these before.
+        assert_eq!(
+            patches[0].name.as_deref(),
+            Some("Google Chrome 141.0.7390.55")
+        );
+        assert_eq!(
+            patches[0].severity_enum(),
+            crate::model::Severity::Recommended
+        );
+        assert_eq!(patches[0].status.as_deref(), Some("APPROVED"));
+        assert_eq!(patches[0].device_id, Some(1));
+        // Third-party records carry no KB, and no product version or vendor field
+        // exists on the schema at all — the display name is the title alone.
+        assert!(patches[0].kb_number.is_none());
+        assert!(patches[0].version.is_none());
+        assert!(patches[0].product_vendor.is_none());
+    }
+
+    /// The guard still has to stop a genuinely stalled scan, or an endpoint that
+    /// echoes its cursor back unchanged loops forever, re-fetching the same rows.
+    /// It reports rather than returning, because the rows in hand are a partial
+    /// fleet and every count derived from them would be understated silently.
+    #[tokio::test]
+    async fn a_cursor_that_never_advances_is_an_error_not_a_short_read() {
+        use crate::auth::AuthState;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/software-patches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{ "deviceId": 1, "title": "7-Zip 24.09" }],
+                "cursor": { "name": "scan-7", "offset": 5000 },
+            })))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        let client = NinjaApiClient::new(http, auth);
+
+        let err = client
+            .fleet_software_patches(None, None, None)
+            .await
+            .expect_err("a stalled cursor must be reported, not returned as a short read");
+        assert!(
+            err.to_string().contains("cursor it was handed"),
+            "unexpected error: {err}"
         );
     }
 

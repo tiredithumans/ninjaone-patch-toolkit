@@ -208,8 +208,10 @@ NinjaOne API client:
 
 - **Every call goes through `NinjaApiClient`** (`get_paginated` / `request_raw`); retry is the pure
   `retry_for`; paginated bodies parse once via `parse_page` + `PagedRow`. → `docs/design/api-client.md`
-- **Both pagination branches require forward progress; an unreadable cursor is an error, not
-  end-of-pages; 5xx/connect retries are `Idempotent`-only.** → `docs/design/api-client.md#both-pagination-branches-require-forward-progress`
+- **Both pagination branches require forward progress, measured against the *whole* cursor** —
+  NinjaOne's `name` is a stable handle and the position rides in `offset`, so comparing the name
+  alone truncated every feed at 2 pages. **A stall is an error, not a short read; an unreadable
+  cursor is an error, not end-of-pages; 5xx/connect retries are `Idempotent`-only.** → `docs/design/api-client.md#both-pagination-branches-require-forward-progress--and-neither-may-stop-quietly`
 - **reqwest has `default-features = false`; keep `gzip`, `http2`, `system-proxy`, `charset`.** → `docs/design/api-client.md#reqwests-default-features-are-off-so-every-one-it-drops-must-be-re-added-explicitly`
 
 Filter:

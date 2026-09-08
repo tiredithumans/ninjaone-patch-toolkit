@@ -13,6 +13,18 @@ version and start a fresh `[Unreleased]`.
 
 ### Fixed
 
+- **Third-party patch counts were roughly a tenth of the real figure.** Every `/queries/*` fetch
+  stopped after its second page. NinjaOne names a paginated scan with a cursor whose `name` stays
+  the same for the whole scan while its `offset` advances, and the client compared only the name —
+  so page 2 looked like a cursor that had stalled, and paging stopped there with the rows collected
+  so far returned as though they were the entire feed. OS patches were unaffected on most fleets
+  because that feed fits inside the first page or two; the third-party feed runs to six figures, so
+  the Patches table, the compliance rollups, both exports and the severity charts all read from the
+  same truncated data. Introduced in 0.13.0.
+- **A truncated fetch could no longer pass for a complete one.** A scan that genuinely fails to
+  advance is now reported as an error instead of quietly returning a partial fleet, and every
+  normal end of paging records how many rows and pages it read, so a figure can be reconciled
+  against NinjaOne's own reports from the log.
 - **Patch records were matched against field names NinjaOne does not send.** `productName`,
   `productVersion`, `vendor`, `publisher` and five others appear on neither patch schema; the two
   that carry third-party data — `title` and `impact` — are now the documented mapping, and the
