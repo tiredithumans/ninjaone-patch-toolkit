@@ -11,7 +11,7 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
-## [0.14.1] - 2026-09-08
+## [0.14.2] - 2026-09-08
 
 ### Fixed
 
