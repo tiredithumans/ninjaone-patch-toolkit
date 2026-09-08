@@ -273,12 +273,23 @@ async fn fleet_devices_via(c: &NinjaApiClient) -> anyhow::Result<Arc<Vec<Device>
 }
 
 /// The whole-fleet current-patches future, backed by the test's
-/// `/queries/os-patches` mock (software-patches is left empty — the OS feed is
-/// what these joins assert). `fetched_at` is fixed for determinism.
+/// `/queries/os-patches` mock. The software half is empty here because these tests
+/// mount no software mock; the family that carries the six-figure feed is covered
+/// by [`fleet_current_both_via`] instead — for a long time it was covered by
+/// nothing at all. `fetched_at` is fixed for determinism.
 async fn fleet_current_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPatches> {
     Ok(CurrentPatches {
         os: Arc::new(c.fleet_os_patches(None, None, None).await?),
         sw: Arc::new(Vec::new()),
+        fetched_at: fixed_now(),
+    })
+}
+
+/// [`fleet_current_via`] with both families actually fetched, as production does.
+async fn fleet_current_both_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPatches> {
+    Ok(CurrentPatches {
+        os: Arc::new(c.fleet_os_patches(None, None, None).await?),
+        sw: Arc::new(c.fleet_software_patches(None, None, None).await?),
         fetched_at: fixed_now(),
     })
 }
@@ -1002,4 +1013,136 @@ fn the_page_limit_is_capped() {
         "a caller cannot ask for more than the cap"
     );
     assert_eq!(clamp_page(usize::MAX), MAX_PAGE_LIMIT);
+}
+
+/// The software family, end to end: wire shape -> join -> rows -> rollups.
+///
+/// No test in this file had ever put a third-party record through `run_query` —
+/// `fleet_current_via` hardcoded an empty software vector and every case asked for
+/// `PatchType::Os` — so the `"SOFTWARE"` `PatchSource`, the `chain(&scoped_sw_current)`
+/// that feeds compliance/severity/age, and every software-only binding were dead
+/// code under test while the feed itself carried most of the fleet's patches.
+#[tokio::test]
+async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "id": 10, "systemName": "web-01", "organizationId": 1,
+                "offline": false, "os": { "name": "Windows Server 2022", "needsReboot": false }
+            },
+            {
+                "id": 20, "systemName": "web-02", "organizationId": 1,
+                "offline": false, "os": { "name": "Windows Server 2019", "needsReboot": false }
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    // One pending OS patch, on device 10 only.
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "deviceId": 10, "kbNumber": "KB1", "status": "MANUAL",
+                  "severity": "CRITICAL", "timestamp": fixed_now().timestamp() }
+            ],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+
+    // Two third-party records in the vendor's own shape, on device 20: one pending,
+    // one approved. Only the pending one may become a row under statuses=[Pending].
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                crate::model::software_patch_json(
+                    20,
+                    "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                    "Google Chrome 141.0.7390.55",
+                    "CRITICAL",
+                    "MANUAL",
+                ),
+                crate::model::software_patch_json(
+                    20,
+                    "1c9d6b2a-8e31-4f77-b0a5-6d3c9e1f4a08",
+                    "7-Zip 24.09",
+                    "RECOMMENDED",
+                    "APPROVED",
+                ),
+            ],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+
+    let progress = |_: &'static str, _: usize| {};
+    let result = run_query(
+        &client(&server),
+        async { Ok::<_, anyhow::Error>(lookups()) },
+        fleet_devices_via(&client(&server)),
+        fleet_current_both_via(&client(&server)),
+        30,
+        30,
+        args(PatchType::All, vec![PatchStatus::Pending]),
+        fixed_now(),
+        &progress,
+    )
+    .await
+    .expect("query");
+
+    // One row per family; the APPROVED third-party record is filtered out.
+    assert_eq!(result.rows.len(), 2, "both families must reach build_rows");
+    let sw = result
+        .rows
+        .iter()
+        .find(|r| r.patch_type == "SOFTWARE")
+        .expect("a third-party row");
+    // `title` -> name and `impact` -> severity are the only two aliases the software
+    // schema needs, and no fixture exercised either of them before.
+    assert_eq!(&*sw.name, "Google Chrome 141.0.7390.55");
+    assert_eq!(sw.severity, "Critical");
+    assert_eq!(&*sw.status, "PENDING");
+    assert_eq!(sw.device_id, 20);
+    // No KB, and no version or vendor field exists on the schema to fold into the
+    // display name — the title stands alone.
+    assert!(sw.kb.is_none());
+
+    // Both families were asked for, so every surface says so rather than quietly
+    // describing an OS-only fleet.
+    assert!(result.patch_families.os && result.patch_families.software);
+
+    // The rollups see the third-party record too: device 20's only pending patch is
+    // the software one, so it must not be scored compliant.
+    let alpha = &result.compliance[0];
+    assert_eq!(alpha.devices_total, 2);
+    assert_eq!(
+        alpha.devices_compliant, 0,
+        "a device whose only pending patch is third-party is not compliant"
+    );
+    assert_eq!(
+        alpha.pending_critical, 2,
+        "the CRITICAL third-party patch counts toward the backlog beside the OS one"
+    );
+
+    // And the compact aggregates that ride on the summary.
+    let summary = QuerySummary::from_result(&result, FIRST_PAGE_ROWS);
+    assert_eq!(
+        summary.severity_by_org[0].counts.critical, 2,
+        "severity-by-org covers both families"
+    );
+    // Three, not two: the Status facet narrows only the detail rows, while the
+    // rollups take the unnarrowed feed and `is_pending` is an exclude list, so the
+    // APPROVED third-party record is counted here and shown as no row. That tiering
+    // is deliberate — pinned here so a software fixture can never make it look like
+    // a leak.
+    assert_eq!(
+        summary.age_buckets.iter().map(|b| b.count).sum::<usize>(),
+        3,
+        "the age histogram covers both families, over the unnarrowed feed"
+    );
 }

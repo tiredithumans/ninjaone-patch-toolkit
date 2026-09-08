@@ -21,7 +21,7 @@ enforces it. The **rationale** behind each rule lives in [`docs/design/`](./docs
 | **Verify** | `just verify` — every gate CI runs; the justfile is the list. |
 | **Crates** | `src-tauri` (backend) + `web-rs` (frontend WASM). No cargo workspace. |
 | **IPC** | Global `window.__TAURI__.core.invoke` (`withGlobalTauri`), wrapped in `web-rs/src/api.rs`. |
-| **NinjaOne spec** | `docs/api/ninjaone-surface.md` is the committed digest of the surface we consume; the weekly `ninjaone-contract` CI job fails when the vendor's spec moves. Verify shapes/params/enums there or in <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> — never infer them. |
+| **NinjaOne spec** | `docs/api/ninjaone-surface.md` is the committed digest of the surface we consume; the weekly `ninjaone-contract` CI job fails when the vendor's spec moves. Verify shapes/params/enums there or in <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> — never infer them. A fixture must emit the vendor's keys, not the ones the code hopes for: `DeviceSoftwarePatch` is `title`/`impact`/`productIdentifier` and **no** `kbNumber` — build it with `model::software_patch_json`. |
 
 ## Skills
 
@@ -208,8 +208,10 @@ NinjaOne API client:
 
 - **Every call goes through `NinjaApiClient`** (`get_paginated` / `request_raw`); retry is the pure
   `retry_for`; paginated bodies parse once via `parse_page` + `PagedRow`. → `docs/design/api-client.md`
-- **Both pagination branches require forward progress; an unreadable cursor is an error, not
-  end-of-pages; 5xx/connect retries are `Idempotent`-only.** → `docs/design/api-client.md#both-pagination-branches-require-forward-progress`
+- **Both pagination branches require forward progress, measured against the *whole* cursor** —
+  NinjaOne's `name` is a stable handle and the position rides in `offset`, so comparing the name
+  alone truncated every feed at 2 pages. **A stall is an error, not a short read; an unreadable
+  cursor is an error, not end-of-pages; 5xx/connect retries are `Idempotent`-only.** → `docs/design/api-client.md#both-pagination-branches-require-forward-progress--and-neither-may-stop-quietly`
 - **reqwest has `default-features = false`; keep `gzip`, `http2`, `system-proxy`, `charset`.** → `docs/design/api-client.md#reqwests-default-features-are-off-so-every-one-it-drops-must-be-re-added-explicitly`
 
 Filter:

@@ -62,8 +62,13 @@ SCHEMAS = [
 # Fields whose vocabulary the toolkit branches on. A value the code does not handle
 # is a silent misread; a field with NO enum is a different and equally important
 # fact — it means the vendor promises nothing and the parser must stay total.
+#
+# `impact` is here because `DeviceSoftwarePatch` declares no `severity` at all: the
+# third-party grade arrives only through `Patch::severity`'s `impact` alias, so
+# leaving it out pointed this gate at a field the software feed never sends while the
+# one it does send moved unwatched.
 BRANCHED_FIELDS = [
-    "severity", "status", "type", "activityResult", "statusCode", "rebootMode",
+    "severity", "impact", "status", "type", "activityResult", "statusCode", "rebootMode",
 ]
 
 
