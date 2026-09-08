@@ -161,19 +161,38 @@ async fn patch_feed_server() -> wiremock::MockServer {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
-    for p in [
-        "/api/v2/queries/os-patches",
-        "/api/v2/queries/software-patches",
-    ] {
-        Mock::given(method("GET"))
-            .and(path(p))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "results": [{ "id": 1, "deviceId": 1, "kbNumber": "KB1" }],
-                "cursor": ""
-            })))
-            .mount(&server)
-            .await;
-    }
+    // Each family answers in its OWN wire shape. Serving an OS-shaped body from the
+    // software URL — which this did, `kbNumber` and all — proves only that the slot
+    // plumbing works, on a record `/queries/software-patches` cannot emit.
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{
+                "id": "6f8b1a5e-2c44-4d0e-9a1b-77c2d4f0a913",
+                "deviceId": 1,
+                "kbNumber": "KB5040434",
+                "name": "Cumulative Update",
+                "severity": "CRITICAL",
+                "status": "MANUAL",
+            }],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [crate::model::software_patch_json(
+                1,
+                "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "Google Chrome 141.0.7390.55",
+                "RECOMMENDED",
+                "APPROVED",
+            )],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
     server
 }
 
@@ -208,6 +227,35 @@ async fn an_os_only_query_never_fetches_the_third_party_feed() {
         0,
         "software-patches must not be requested at all"
     );
+}
+
+/// The mirror of the OS-only test. Every `fleet_current_patches` call in this file
+/// used to request the OS family, so the third-party slot's own TTL, epoch gate and
+/// single-flight gate were never exercised on their own — and it is the third-party
+/// slot that carries the six-figure feed.
+#[tokio::test]
+async fn a_software_only_query_never_fetches_the_os_feed() {
+    let server = patch_feed_server().await;
+    let state = AppState::seeded(server.uri());
+
+    let current = state
+        .fleet_current_patches(false, false, true, None, None)
+        .await
+        .expect("software-only fetch");
+
+    assert_eq!(current.sw.len(), 1, "the requested family is fetched");
+    assert!(current.os.is_empty(), "the unrequested family stays empty");
+    assert_eq!(
+        hits(&server, "/api/v2/queries/os-patches").await,
+        0,
+        "os-patches must not be requested at all"
+    );
+    // The software wire shape, through the two aliases that are the only ones that
+    // bind: `title` -> name and `impact` -> severity, with no KB anywhere.
+    let patch = &current.sw[0];
+    assert_eq!(patch.name.as_deref(), Some("Google Chrome 141.0.7390.55"));
+    assert_eq!(patch.severity_enum(), crate::model::Severity::Recommended);
+    assert!(patch.kb_number.is_none());
 }
 
 #[tokio::test]

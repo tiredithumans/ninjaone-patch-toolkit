@@ -207,26 +207,43 @@ impl Severity {
     }
 }
 
+/// One patch record, from either family's feed.
+///
+/// The aliases here are the vendor's two spellings, not guesses. `DeviceOSPatch` is
+/// `{ id, name, severity, status, type, installedAt, deviceId, timestamp, kbNumber }`
+/// and `DeviceSoftwarePatch` is
+/// `{ id, productIdentifier, title, impact, status, type, installedAt, deviceId, timestamp }`;
+/// the `*-patch-installs` endpoints return those same two schemas. This once aliased
+/// `productName`, `product`, `displayName`, `productVersion`, `ver`, `vendor`,
+/// `publisher`, `severityLevel` and `priority` as well — none of which appears on
+/// either schema. Speculative aliases are worse than none: they read as "the mapping
+/// is covered" while no fixture and no CI gate can tell whether any of them ever bound.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Patch {
     #[serde(default)]
     pub device_id: Option<i64>,
+    /// `DeviceOSPatch` only. Third-party records carry no KB — no alias exists
+    /// because no field on `DeviceSoftwarePatch` holds one.
     #[serde(default)]
     pub kb_number: Option<String>,
-    #[serde(
-        default,
-        alias = "productName",
-        alias = "title",
-        alias = "product",
-        alias = "displayName"
-    )]
+    /// `name` on `DeviceOSPatch`, `title` on `DeviceSoftwarePatch`. Those are the
+    /// only two keys either schema declares for it.
+    #[serde(default, alias = "title")]
     pub name: Option<String>,
-    #[serde(default, alias = "productVersion", alias = "ver")]
+    /// Always `None` in practice: **neither** patch schema declares a version. The
+    /// third-party feed folds the version into `title` ("Google Chrome 141.0.7390.55"),
+    /// which is why a software row's display name is its title alone.
+    #[serde(default)]
     pub version: Option<String>,
-    #[serde(default, alias = "vendor", alias = "publisher")]
+    /// Always `None` in practice, for the same reason as [`Patch::version`] —
+    /// no vendor or publisher field exists on either patch schema.
+    #[serde(default)]
     pub product_vendor: Option<String>,
-    #[serde(default, alias = "impact", alias = "severityLevel", alias = "priority")]
+    /// `severity` on `DeviceOSPatch`, `impact` on `DeviceSoftwarePatch` — the
+    /// software schema declares no `severity` property at all, so this alias is the
+    /// only path by which a third-party patch is ever graded.
+    #[serde(default, alias = "impact")]
     pub severity: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
@@ -311,6 +328,36 @@ impl Patch {
 fn unix_to_datetime(ts: f64) -> Option<DateTime<Utc>> {
     let secs = if ts >= 1e11 { ts / 1000.0 } else { ts };
     DateTime::<Utc>::from_timestamp(secs as i64, 0)
+}
+
+/// One `DeviceSoftwarePatch` exactly as the vendor spec declares it, for tests.
+///
+/// A third-party record carries `title` and `impact` where an OS record carries
+/// `name` and `severity`, carries a `productIdentifier` uuid, and carries **no**
+/// `kbNumber`, `productName`, `productVersion` or `vendor` — those last three are
+/// on neither patch schema. Every software fixture in this crate builds on this one
+/// definition, because fixtures shaped to what the code expects rather than to what
+/// NinjaOne sends prove only that the (possibly wrong) mapping works: that is the
+/// `releaseDate` incident, and it is why the software feed's undercount survived a
+/// green suite.
+#[cfg(test)]
+pub(crate) fn software_patch_json(
+    device_id: i64,
+    product_identifier: &str,
+    title: &str,
+    impact: &str,
+    status: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+        "productIdentifier": product_identifier,
+        "title": title,
+        "impact": impact,
+        "status": status,
+        "type": "PATCH",
+        "deviceId": device_id,
+        "timestamp": 1_750_000_000.0,
+    })
 }
 
 /// Patch family the operator wants to list. Selects which API endpoints to query.

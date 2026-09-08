@@ -108,6 +108,7 @@ For each field the toolkit branches on: the vocabulary the spec declares, or **f
 
 ### `DeviceSoftwarePatch`
 
+- `impact` — **free-form string**, no enum declared
 - `status` — **free-form string**, no enum declared
 - `type` — **free-form string**, no enum declared
 

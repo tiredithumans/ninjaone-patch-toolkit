@@ -21,7 +21,7 @@ enforces it. The **rationale** behind each rule lives in [`docs/design/`](./docs
 | **Verify** | `just verify` — every gate CI runs; the justfile is the list. |
 | **Crates** | `src-tauri` (backend) + `web-rs` (frontend WASM). No cargo workspace. |
 | **IPC** | Global `window.__TAURI__.core.invoke` (`withGlobalTauri`), wrapped in `web-rs/src/api.rs`. |
-| **NinjaOne spec** | `docs/api/ninjaone-surface.md` is the committed digest of the surface we consume; the weekly `ninjaone-contract` CI job fails when the vendor's spec moves. Verify shapes/params/enums there or in <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> — never infer them. |
+| **NinjaOne spec** | `docs/api/ninjaone-surface.md` is the committed digest of the surface we consume; the weekly `ninjaone-contract` CI job fails when the vendor's spec moves. Verify shapes/params/enums there or in <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> — never infer them. A fixture must emit the vendor's keys, not the ones the code hopes for: `DeviceSoftwarePatch` is `title`/`impact`/`productIdentifier` and **no** `kbNumber` — build it with `model::software_patch_json`. |
 
 ## Skills
 

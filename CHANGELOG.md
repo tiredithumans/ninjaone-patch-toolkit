@@ -11,6 +11,14 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Patch records were matched against field names NinjaOne does not send.** `productName`,
+  `productVersion`, `vendor`, `publisher` and five others appear on neither patch schema; the two
+  that carry third-party data — `title` and `impact` — are now the documented mapping, and the
+  weekly API-contract check watches `impact`, which it previously could not see at all.
+
+
 ## [0.14.0] - 2026-09-02
 
 ### Added
