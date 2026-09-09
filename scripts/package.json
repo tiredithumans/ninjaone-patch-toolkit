@@ -9,7 +9,7 @@
     "test": "node --test \"*.test.mjs\""
   },
   "devDependencies": {
-    "playwright": "1.62.1",
+    "playwright": "1.63.0",
     "selfsigned": "5.5.0"
   }
 }
