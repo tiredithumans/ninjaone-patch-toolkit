@@ -11,6 +11,23 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependencies refreshed in both crates.** No manifest requirement moved — every direct
+  dependency in both crates was already at its latest major — so this is a lockfile refresh: 52
+  transitive bumps in the backend (`reqwest` 0.13.4 -> 0.13.5, `rustls` 0.23.43 -> 0.23.45,
+  `rust_xlsxwriter` 0.99.0 -> 0.99.1, `open` 5.4.3 -> 5.4.4, `wasm-bindgen` 0.2.127 -> 0.2.128,
+  `jiff` 0.2.35 -> 0.2.37 among them) and 13 in the frontend. `plist` now resolves quick-xml 0.42
+  while `calamine` stays on 0.41; both audit clean, so the `cargo-audit` ignore list stays empty.
+- **CI action pins moved to their current releases.** `dtolnay/rust-toolchain` 1.98.0 -> 1.98.1 —
+  the latest 1.98.x stable, which `rust-toolchain.toml`'s `1.98` channel already resolves to, so
+  MSRV is unchanged; `taiki-e/install-action` v2.87.2 -> v2.87.13; `actions/deploy-pages` v5.0.0
+  -> v5.0.1; `github/codeql-action` v4.37.9 -> v4.38.0. The other seven pinned actions were
+  already current.
+- **Screenshot tooling: `playwright` 1.62.1 -> 1.63.0** (`selfsigned` 5.5.0 was already current).
+  Dev/CI only — not shipped with the app.
+- **`THIRD-PARTY-LICENSES.md` regenerated** for the refreshed tree.
+
 ## [0.14.2] - 2026-09-08
 
 ### Fixed
