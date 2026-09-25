@@ -6255,7 +6255,7 @@ THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRES
 ## MIT License
 
 Used by:
-- [rand 0.10.2](https://github.com/rust-random/rand)
+- [rand 0.10.3](https://github.com/rust-random/rand)
 
 ```
 Copyright 2018 Developers of the Rand project
@@ -7263,12 +7263,12 @@ Used by:
 - [tauri-macros 2.6.3](https://github.com/tauri-apps/tauri)
 - [tauri-plugin-dialog 2.7.3](https://github.com/tauri-apps/plugins-workspace)
 - [tauri-plugin-fs 2.5.2](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin-updater 2.11.0](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-updater 2.12.0](https://github.com/tauri-apps/plugins-workspace)
 - [tauri-plugin 2.6.3](https://github.com/tauri-apps/tauri)
 - [tauri-runtime-wry 2.11.4](https://github.com/tauri-apps/tauri)
 - [tauri-runtime 2.11.3](https://github.com/tauri-apps/tauri)
 - [tauri-utils 2.9.3](https://github.com/tauri-apps/tauri)
-- [tauri 2.11.5](https://github.com/tauri-apps/tauri)
+- [tauri 2.11.6](https://github.com/tauri-apps/tauri)
 - [unic-char-property 0.9.0](https://github.com/open-i18n/rust-unic/)
 - [unic-char-range 0.9.0](https://github.com/open-i18n/rust-unic/)
 - [unic-common 0.9.0](https://github.com/open-i18n/rust-unic/)
