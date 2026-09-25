@@ -6,7 +6,7 @@ licenses require their copyright notices be reproduced in a distribution.
 
 Regenerate with `just licenses`. Do not edit by hand.
 
-- MIT License (543 crates)
+- MIT License (541 crates)
 - ISC License (20 crates)
 - Unicode License v3 (19 crates)
 - Apache License 2.0 (9 crates)
@@ -1243,7 +1243,7 @@ limitations under the License.
 ## BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
 
 Used by:
-- [encoding_rs 0.8.41](https://github.com/hsivonen/encoding_rs)
+- [encoding_rs 0.8.42](https://github.com/hsivonen/encoding_rs)
 
 ```
 // Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
@@ -1387,7 +1387,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&
 ## BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
 
 Used by:
-- [encoding_rs 0.8.41](https://github.com/hsivonen/encoding_rs)
+- [encoding_rs 0.8.42](https://github.com/hsivonen/encoding_rs)
 
 ```
 Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
@@ -2525,23 +2525,23 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- [cc 1.4.6](https://github.com/rust-lang/cc-rs)
-- [cfg-if 1.0.4](https://github.com/rust-lang/cfg-if)
+- [cc 1.5.1](https://github.com/rust-lang/cc-rs)
+- [cfg-if 1.0.5](https://github.com/rust-lang/cfg-if)
 - [cmake 0.1.58](https://github.com/rust-lang/cmake-rs)
 - [filetime 0.2.29](https://github.com/alexcrichton/filetime)
-- [find-msvc-tools 0.1.12](https://github.com/rust-lang/cc-rs)
+- [find-msvc-tools 0.1.14](https://github.com/rust-lang/cc-rs)
 - [jobserver 0.1.35](https://github.com/rust-lang/jobserver-rs)
-- [js-sys 0.3.105](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys)
+- [js-sys 0.3.106](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys)
 - [openssl-probe 0.2.1](https://github.com/rustls/openssl-probe)
 - [pkg-config 0.3.34](https://github.com/rust-lang/pkg-config-rs)
 - [socket2 0.6.5](https://github.com/rust-lang/socket2)
 - [toml_datetime 0.6.3](https://github.com/toml-rs/toml)
-- [wasm-bindgen-futures 0.4.78](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures)
-- [wasm-bindgen-macro-support 0.2.128](https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support)
-- [wasm-bindgen-macro 0.2.128](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro)
-- [wasm-bindgen-shared 0.2.128](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared)
-- [wasm-bindgen 0.2.128](https://github.com/wasm-bindgen/wasm-bindgen)
-- [web-sys 0.3.105](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys)
+- [wasm-bindgen-futures 0.4.79](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures)
+- [wasm-bindgen-macro-support 0.2.129](https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support)
+- [wasm-bindgen-macro 0.2.129](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro)
+- [wasm-bindgen-shared 0.2.129](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared)
+- [wasm-bindgen 0.2.129](https://github.com/wasm-bindgen/wasm-bindgen)
+- [web-sys 0.3.106](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys)
 
 ```
 Copyright (c) 2014 Alex Crichton
@@ -3478,7 +3478,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- [hyper-rustls 0.27.9](https://github.com/rustls/hyper-rustls)
+- [hyper-rustls 0.27.10](https://github.com/rustls/hyper-rustls)
 - [rustls-native-certs 0.8.4](https://github.com/rustls/rustls-native-certs)
 - [rustls 0.23.45](https://github.com/rustls/rustls)
 
@@ -4476,7 +4476,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- [smallvec 1.16.1](https://github.com/servo/rust-smallvec)
+- [smallvec 1.16.2](https://github.com/servo/rust-smallvec)
 
 ```
 Copyright (c) 2018 The Servo Project Developers
@@ -5691,7 +5691,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- [hyper-util 0.1.20](https://github.com/hyperium/hyper-util)
+- [hyper-util 0.1.21](https://github.com/hyperium/hyper-util)
 
 ```
 Copyright (c) 2023-2025 Sean McArthur
@@ -6223,7 +6223,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- [synstructure 0.13.2](https://github.com/mystor/synstructure)
+- [synstructure 0.14.0](https://github.com/mystor/synstructure)
 
 ```
 Copyright 2016 Nika Layzell
@@ -6290,23 +6290,6 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- [multiversion-macros 0.9.0](https://github.com/calebzulawski/multiversion)
-- [multiversion 0.9.0](https://github.com/calebzulawski/multiversion)
-
-```
-Copyright 2019 Caleb Zulawski
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the &quot;Software&quot;), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-```
-
-## MIT License
-
-Used by:
 - [softbuffer 0.4.8](https://github.com/rust-windowing/softbuffer)
 
 ```
@@ -6337,7 +6320,7 @@ SOFTWARE.
 
 Used by:
 - [codepage 0.1.3](https://github.com/hsivonen/codepage)
-- [encoding_rs 0.8.41](https://github.com/hsivonen/encoding_rs)
+- [encoding_rs 0.8.42](https://github.com/hsivonen/encoding_rs)
 - [multiversion_no_op 1.0.0](https://github.com/hsivonen/multiversion_no_op)
 - [utf8_iter 1.0.4](https://github.com/hsivonen/utf8_iter)
 
@@ -7004,7 +6987,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- [rustls-platform-verifier 0.7.0](https://github.com/rustls/rustls-platform-verifier)
+- [rustls-platform-verifier 0.7.1](https://github.com/rustls/rustls-platform-verifier)
 
 ```
 MIT License
@@ -7124,7 +7107,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- [libredox 0.1.24](https://gitlab.redox-os.org/redox-os/libredox.git)
+- [libredox 0.1.25](https://gitlab.redox-os.org/redox-os/libredox.git)
 
 ```
 MIT License
@@ -7256,8 +7239,7 @@ Used by:
 - [r-efi 5.3.0](https://github.com/r-efi/r-efi)
 - [r-efi 6.0.0](https://github.com/r-efi/r-efi)
 - [rust_xlsxwriter 0.99.1](https://github.com/jmcnamara/rust_xlsxwriter)
-- [rustls-platform-verifier-android 0.1.1](https://github.com/rustls/rustls-platform-verifier)
-- [siphasher 1.0.3](https://github.com/jedisct1/rust-siphash)
+- [rustls-platform-verifier-android 0.2.0](https://github.com/rustls/rustls-platform-verifier)
 - [tauri-build 2.6.3](https://github.com/tauri-apps/tauri)
 - [tauri-codegen 2.6.3](https://github.com/tauri-apps/tauri)
 - [tauri-macros 2.6.3](https://github.com/tauri-apps/tauri)
@@ -7646,7 +7628,7 @@ Used by:
 - [proc-macro-crate 3.5.0](https://github.com/bkchr/proc-macro-crate)
 - [proc-macro2 1.0.107](https://github.com/dtolnay/proc-macro2)
 - [quote 1.0.47](https://github.com/dtolnay/quote)
-- [rustix 1.1.4](https://github.com/bytecodealliance/rustix)
+- [rustix 1.1.5](https://github.com/bytecodealliance/rustix)
 - [rustversion 1.0.23](https://github.com/dtolnay/rustversion)
 - [semver 1.0.28](https://github.com/dtolnay/semver)
 - [serde-untagged 0.1.9](https://github.com/dtolnay/serde-untagged)
@@ -7660,15 +7642,15 @@ Used by:
 - [simd_cesu8 1.2.0](https://github.com/seancroach/simd_cesu8)
 - [syn 1.0.109](https://github.com/dtolnay/syn)
 - [syn 2.0.119](https://github.com/dtolnay/syn)
-- [syn 3.0.5](https://github.com/dtolnay/syn)
+- [syn 3.0.6](https://github.com/dtolnay/syn)
 - [system-deps 6.2.2](https://github.com/gdesmott/system-deps)
 - [thiserror-impl 1.0.69](https://github.com/dtolnay/thiserror)
-- [thiserror-impl 2.0.20](https://github.com/dtolnay/thiserror)
+- [thiserror-impl 2.0.21](https://github.com/dtolnay/thiserror)
 - [thiserror 1.0.69](https://github.com/dtolnay/thiserror)
-- [thiserror 2.0.20](https://github.com/dtolnay/thiserror)
+- [thiserror 2.0.21](https://github.com/dtolnay/thiserror)
 - [typed-path 0.12.3](https://github.com/chipsenkbeil/typed-path)
 - [typeid 1.0.3](https://github.com/dtolnay/typeid)
-- [unicode-ident 1.0.24](https://github.com/dtolnay/unicode-ident)
+- [unicode-ident 1.0.26](https://github.com/dtolnay/unicode-ident)
 - [wasi 0.11.1+wasi-snapshot-preview1](https://github.com/bytecodealliance/wasi)
 - [wasip2 1.0.4+wasi-0.2.12](https://github.com/bytecodealliance/wasi-rs)
 - [wasm-streams 0.5.0](https://github.com/MattiasBuelens/wasm-streams/)
@@ -7732,6 +7714,32 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
 LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+```
+
+## MIT License
+
+Used by:
+- [siphasher 1.0.4](https://github.com/jedisct1/rust-siphash)
+
+```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ```
 
@@ -8363,7 +8371,7 @@ THE SOFTWARE.
 ## MIT License
 
 Used by:
-- [redox_users 0.5.2](https://gitlab.redox-os.org/redox-os/users)
+- [redox_users 0.5.3](https://gitlab.redox-os.org/redox-os/users)
 
 ```
 The MIT License (MIT)
@@ -8424,8 +8432,8 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- [async-compression 0.4.47](https://github.com/Nullus157/async-compression)
-- [compression-codecs 0.4.42](https://github.com/Nullus157/async-compression)
+- [async-compression 0.4.48](https://github.com/Nullus157/async-compression)
+- [compression-codecs 0.4.43](https://github.com/Nullus157/async-compression)
 - [compression-core 0.4.33](https://github.com/Nullus157/async-compression)
 
 ```
@@ -10009,7 +10017,7 @@ Exhibit B - &quot;Incompatible With Secondary Licenses&quot; Notice
 ## Unicode License v3
 
 Used by:
-- [unicode-ident 1.0.24](https://github.com/dtolnay/unicode-ident)
+- [unicode-ident 1.0.26](https://github.com/dtolnay/unicode-ident)
 
 ```
 UNICODE LICENSE V3
@@ -10068,9 +10076,9 @@ Used by:
 - [potential_utf 0.1.6](https://github.com/unicode-org/icu4x)
 - [tinystr 0.8.4](https://github.com/unicode-org/icu4x)
 - [writeable 0.6.4](https://github.com/unicode-org/icu4x)
-- [yoke-derive 0.8.2](https://github.com/unicode-org/icu4x)
+- [yoke-derive 0.8.3](https://github.com/unicode-org/icu4x)
 - [yoke 0.8.3](https://github.com/unicode-org/icu4x)
-- [zerofrom-derive 0.1.7](https://github.com/unicode-org/icu4x)
+- [zerofrom-derive 0.1.8](https://github.com/unicode-org/icu4x)
 - [zerofrom 0.1.8](https://github.com/unicode-org/icu4x)
 - [zerotrie 0.2.5](https://github.com/unicode-org/icu4x)
 - [zerovec-derive 0.11.6](https://github.com/unicode-org/icu4x)
@@ -10129,7 +10137,7 @@ ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation a
 ## zlib License
 
 Used by:
-- [zlib-rs 0.6.7](https://github.com/trifectatechfoundation/zlib-rs)
+- [zlib-rs 0.6.8](https://github.com/trifectatechfoundation/zlib-rs)
 
 ```
 (C) 2024 Trifecta Tech Foundation 
