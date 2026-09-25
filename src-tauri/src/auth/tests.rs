@@ -731,16 +731,22 @@ fn logging_an_authorize_url_drops_everything_secret() {
     let logged = url_without_query(auth_url);
 
     assert_eq!(logged, "https://app.ninjarmm.com/ws/oauth/authorize");
-    for secret in [
+    // The failure message names the fragment by position, not by value: echoing
+    // the matched text into a panic message is what CodeQL's cleartext-logging
+    // query flags, and the list is short enough to find by index.
+    for (index, fragment) in [
         "state",
         "super-secret-nonce",
         "code_challenge",
         "Zm9vYmFy",
         "abc123",
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         assert!(
-            !logged.contains(secret),
-            "{secret} must not reach the log stream"
+            !logged.contains(fragment),
+            "authorize-URL fragment #{index} must not reach the log stream"
         );
     }
 }
