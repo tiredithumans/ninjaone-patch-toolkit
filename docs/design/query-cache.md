@@ -101,8 +101,8 @@ The three paging commands all return empty on a cache miss. A miss is a normal t
 switch, sign-out, superseded query); the frontend already renders its own empty state from the
 absent result.
 
-`get_patch_rows` also takes an optional `sort` (`rows::RowSort`), applied through
-`AppState::with_sorted_result` — the cached rows themselves are never reordered; their canonical
+`get_patch_rows` also takes an optional `sort` (`rows::RowSort`), applied through the memoized
+order described below — the cached rows themselves are never reordered; their canonical
 severity/org/device order feeds the export and the summary's inline first page.
 
 ## Both derived views are memoized inside the cache slot
@@ -114,16 +114,33 @@ Paging a sorted view once re-sorted every cached row on **every page request**, 
 export also takes. Both memos live *inside* the slot, so replacing or clearing the result drops
 them in the same operation and there is no second staleness protocol to get wrong.
 
+**The memo is read and written under the lock, but built outside it.** `AppState::sort_memo` /
+`group_memo` return a `Memo { result, memo }` — an `Arc` handle plus the memo if one exists — for
+two refcount bumps under the mutex. On a miss the command builds the order or grouping on
+`spawn_blocking` over that handle and offers it back via `store_sort_memo` / `store_group_memo`,
+which keep it **only if `Arc::ptr_eq` says the slot still holds the same result** (a query can
+land, or a sign-out clear the slot, mid-build; a permutation over the old rows would page the new
+ones in a meaningless order). The first version built the memo inside the lock, from an `async`
+command with no `.await`: the first sorted page of a six-figure fleet ran the whole sweep on a
+tokio worker holding the mutex every paging command and the export take. `get_patch_group_members`
+scans every row for its key, so it too runs on a handle in `spawn_blocking`.
+
 ## Grouping is backend-side too
 
 The Patches tab's *By device* / *By patch* modes go through `get_patch_groups` (headers + total,
-`rows::group_page`) and `get_patch_group_members` (one group's rows, `rows::group_member_page`).
+`rows::build_groups` memoized, then `rows::slice_groups`) and `get_patch_group_members` (one group's rows, `rows::group_member_page`).
 The frontend only ever holds one page, so it cannot group a fleet it has never seen — never
 regroup `page_rows` client-side. Group headers carry **no** members: a by-patch group can span the
 whole fleet, so members load on expand, capped at `GROUP_MEMBER_LIMIT`. `rows::group_key` is the
 identity the frontend echoes back, so no per-request state is kept backend-side and a stale key
 matches nothing. `demo.rs` mirrors `group_key`/`build_groups` by hand for the browser demo — keep
 the two in step.
+
+Rows whose patch record carried no `deviceId` get `PatchRow.device_id = rows::ORPHAN_DEVICE_ID`
+(0 — NinjaOne ids start at 1). They still share one *By device* bucket, but its `device_id` is
+`None`, so it offers nothing to dispatch against, and neither `build_groups` nor `build_failures`
+counts the sentinel as a device: it used to be one phantom machine in every patch group and failure
+count its records touched, and a device group whose `device_id` was `Some(0)`.
 
 ## Compact aggregates ride in the summary, not the rows
 

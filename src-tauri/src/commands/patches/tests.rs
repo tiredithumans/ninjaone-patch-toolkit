@@ -240,7 +240,7 @@ fn the_requested_patch_type_decides_which_families_are_fetched() {
     assert!(all.include_os && all.include_sw);
 }
 
-/// A fixed clock so the release/install windows, SLA aging, and `generated_at`
+/// A fixed clock so the first-seen/install windows, SLA aging, and `generated_at`
 /// are deterministic regardless of when the test runs.
 fn fixed_now() -> DateTime<Utc> {
     DateTime::from_timestamp(1_700_000_000, 0).unwrap() // 2023-11-14T22:13:20Z

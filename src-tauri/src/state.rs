@@ -9,9 +9,12 @@ use tracing::warn;
 use crate::actions::{JobReport, MAX_JOBS};
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::auth::AuthState;
+#[cfg(test)]
 use crate::model::PatchRow;
 use crate::model::{Device, Location, Organization, Patch, Role};
-use crate::rows::{GroupBy, PatchGroup, QueryResult, RowSort, build_groups, sort_order};
+#[cfg(test)]
+use crate::rows::sort_order;
+use crate::rows::{GroupBy, PatchGroup, QueryResult, RowSort};
 use crate::settings::Settings;
 
 /// How long a confirmation token issued by `plan_action` stays usable. Short
@@ -174,6 +177,13 @@ struct CachedResult {
     /// export takes too. Kept inside the slot so replacing or clearing the result
     /// drops it in the same operation.
     sorted: Option<(RowSort, Arc<Vec<u32>>)>,
+}
+
+/// What [`AppState::sort_memo`] / [`AppState::group_memo`] hand back: a handle on
+/// the cached result, and the memo for the requested view when one is already built.
+pub struct Memo<T> {
+    pub result: Arc<QueryResult>,
+    pub memo: Option<Arc<T>>,
 }
 
 /// One tenant-stamped, TTL'd, epoch-gated, single-flight cache slot.
@@ -767,77 +777,103 @@ impl AppState {
         })
     }
 
-    /// Runs `f` against the cached rows and the index permutation for `sort`,
-    /// building that permutation at most once per sort.
+    /// Phase one of a memoized read: a handle on the current tenant's result plus
+    /// the sort order memoized for `sort`, if there is one. The lock is held for two
+    /// `Arc` bumps.
     ///
-    /// `None` passes `None` through rather than materializing an identity
-    /// permutation — the unsorted view is already in cache order, and a fleet that
-    /// never asked to be re-sorted should not pay four bytes a row to say so.
-    ///
-    /// Mirrors [`Self::with_grouped_result`], including reading as a miss on a tenant
-    /// switch.
+    /// The memo used to be *built* here, under the lock: the first sorted page of a
+    /// six-figure fleet ran the whole `O(n log n)` sweep holding the mutex every
+    /// paging command and the export take, on an async worker. Now a miss hands back
+    /// the handle; the caller builds the order off the runtime
+    /// (`spawn_blocking`) and offers it back through [`Self::store_sort_memo`].
+    pub fn sort_memo(&self, sort: RowSort) -> Result<Option<Memo<Vec<u32>>>, CachePoisoned> {
+        self.memo(|c| match &c.sorted {
+            Some((s, o)) if *s == sort => Some(Arc::clone(o)),
+            _ => None,
+        })
+    }
+
+    /// Phase two: keeps `order` as the memo for `sort` — **only** if `result` is
+    /// still the cached result. A query that finished (or a sign-out that landed)
+    /// while the order was being built has replaced or cleared the slot, and an
+    /// index permutation over the old rows would page the new ones in a meaningless
+    /// order. Checked by identity (`Arc::ptr_eq`), which is exact: the slot never
+    /// re-wraps a result it already holds.
+    pub fn store_sort_memo(&self, result: &Arc<QueryResult>, sort: RowSort, order: Arc<Vec<u32>>) {
+        self.store_memo(result, |c| c.sorted = Some((sort, order)));
+    }
+
+    /// [`Self::sort_memo`] for the grouping: the handle plus the groups memoized for
+    /// `group_by`, if any. Same reason and same two-phase shape.
+    pub fn group_memo(
+        &self,
+        group_by: GroupBy,
+    ) -> Result<Option<Memo<Vec<PatchGroup>>>, CachePoisoned> {
+        self.memo(|c| match &c.groups {
+            Some((g, v)) if *g == group_by => Some(Arc::clone(v)),
+            _ => None,
+        })
+    }
+
+    /// [`Self::store_sort_memo`] for the grouping, with the same identity check.
+    pub fn store_group_memo(
+        &self,
+        result: &Arc<QueryResult>,
+        group_by: GroupBy,
+        groups: Arc<Vec<PatchGroup>>,
+    ) {
+        self.store_memo(result, |c| c.groups = Some((group_by, groups)));
+    }
+
+    fn memo<T>(
+        &self,
+        read: impl FnOnce(&CachedResult) -> Option<Arc<T>>,
+    ) -> Result<Option<Memo<T>>, CachePoisoned> {
+        let key = self.tenant_key();
+        let guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
+        Ok(match guard.as_ref() {
+            Some(c) if c.tenant == key => Some(Memo {
+                result: Arc::clone(&c.result),
+                memo: read(c),
+            }),
+            _ => None,
+        })
+    }
+
+    fn store_memo(&self, result: &Arc<QueryResult>, write: impl FnOnce(&mut CachedResult)) {
+        let key = self.tenant_key();
+        if let Ok(mut guard) = self.last_result.lock()
+            && let Some(cached) = guard.as_mut()
+            && cached.tenant == key
+            && Arc::ptr_eq(&cached.result, result)
+        {
+            write(cached);
+        }
+    }
+
+    /// Both phases of [`Self::sort_memo`] composed synchronously, building the order
+    /// on the calling thread with the lock released. The paging command does the
+    /// same with the build on `spawn_blocking`; this is the form the memo tests use.
+    #[cfg(test)]
     pub fn with_sorted_result<T>(
         &self,
         sort: Option<RowSort>,
         f: impl FnOnce(&[PatchRow], Option<&[u32]>) -> T,
     ) -> Result<Option<T>, CachePoisoned> {
-        let key = self.tenant_key();
-        let mut guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
-        let Some(cached) = guard.as_mut() else {
-            return Ok(None);
-        };
-        if cached.tenant != key {
-            return Ok(None);
-        }
         let Some(sort) = sort else {
-            return Ok(Some(f(&cached.result.rows, None)));
+            return Ok(self
+                .current_result_handle()?
+                .map(|result| f(&result.rows, None)));
         };
-        // Built and bound in one step. This used to repopulate the memo and then
-        // re-read it with `.expect("just populated")` — a panic inside a held guard,
-        // which poisons the slot and takes export, the report and all three paging
-        // commands down with it. That exact pattern was deliberately removed from
-        // `append_jobs`; there is no reason to keep it here.
-        let order = match &cached.sorted {
-            Some((s, o)) if *s == sort => Arc::clone(o),
-            _ => {
-                let o = Arc::new(sort_order(&cached.result.rows, sort));
-                cached.sorted = Some((sort, Arc::clone(&o)));
-                o
-            }
-        };
-        Ok(Some(f(&cached.result.rows, Some(&order))))
-    }
-
-    /// Runs `f` against one page of group headers, building the grouping only when
-    /// the memo does not already hold this `group_by`.
-    ///
-    /// Same tenant check and same lock as [`Self::with_current_result`]; the memo is
-    /// stored inside the result, so replacing or clearing the result discards it
-    /// automatically. Switching between *By device* and *By patch* rebuilds once and
-    /// then pages freely, which is the access pattern the Patches tab actually has.
-    pub fn with_grouped_result<T>(
-        &self,
-        group_by: GroupBy,
-        f: impl FnOnce(&[PatchGroup]) -> T,
-    ) -> Result<Option<T>, CachePoisoned> {
-        let key = self.tenant_key();
-        let mut guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
-        let Some(cached) = guard.as_mut() else {
+        let Some(Memo { result, memo }) = self.sort_memo(sort)? else {
             return Ok(None);
         };
-        if cached.tenant != key {
-            return Ok(None);
-        }
-        // Same non-panicking shape as `with_sorted_result`.
-        let groups = match &cached.groups {
-            Some((g, v)) if *g == group_by => Arc::clone(v),
-            _ => {
-                let v = Arc::new(build_groups(&cached.result.rows, group_by));
-                cached.groups = Some((group_by, Arc::clone(&v)));
-                v
-            }
-        };
-        Ok(Some(f(&groups)))
+        let order = memo.unwrap_or_else(|| {
+            let order = Arc::new(sort_order(&result.rows, sort));
+            self.store_sort_memo(&result, sort, Arc::clone(&order));
+            order
+        });
+        Ok(Some(f(&result.rows, Some(&order))))
     }
 
     /// Drops the cached query result after sign-out or an instance change. The tenant
