@@ -58,10 +58,10 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
 │   ├── groups.rs                # grouping, sorting, paging over the cache
 │   ├── scope.rs                 # QueryScope export provenance
-│   ├── table.rs                 # TableCell / TableColumn / format_pct — the shared column definition
+│   ├── table.rs                 # TableCell / TableColumn / format_pct / clamp_cell / join_capped — the shared column definition
 │   └── tests.rs
 ├── src/history.rs               # append-only run-history.jsonl (one rollup line per query) + RunRecord
-├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / by OS / Needs-Reboot / Failures / About)
+├── src/export.rs                # rust_xlsxwriter workbook (Patches [+ Patches (n) past the row limit] / Compliance / by OS / Needs-Reboot / Failures / About)
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
@@ -141,14 +141,16 @@ Backend — commands, cache, concurrency:
   wire-format change; update both sides. → `docs/design/frontend.md#ipc-arg-shape--keys-match-rust-fn-parameter-names-camelcase`
 - **`AppState.last_result` is the single source of truth for paging, export and the HTML report.**
   Write via `store_last_result_if_current(token, result)`, read via `with_current_result` /
-  `current_result_handle`; never touch the slot directly. → `docs/design/query-cache.md`
+  `current_result_handle` (memos via `sort_memo` / `group_memo` + `store_*_memo`); never touch
+  the slot directly. → `docs/design/query-cache.md`
 - **Claim the `QueryToken` (`begin_query`) before any fetch and redeem it at the store.** A
   superseded or tenant-drifted result is dropped. `StoreOutcome::Superseded` still returns the
   summary; `TenantChanged`/`Poisoned` are errors (`commands::patches::summary_for`). → `docs/design/query-cache.md#the-write-is-generation--and-tenant-gated`
 - **Tenant switch, sign-out, sign-in and re-authorize all call `clear_session()`** on the frontend
   and `clear_session_state` on the backend. → `docs/design/query-cache.md#a-tenant-switch-a-sign-out-a-sign-in-and-a-re-authorization-all-clear-the-frontend`
 - **Paging/grouping/sorting commands return empty on a cache miss, never an error.** Sorted and
-  grouped views are memoized inside `CachedResult`; the cached rows are never reordered. Group
+  grouped views are memoized inside `CachedResult`, built on `spawn_blocking` and stored only if
+  `Arc::ptr_eq` still holds; the cached rows are never reordered. Group
   headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
 - **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`) ride on both `QueryResult` and
   `QuerySummary`.** Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
