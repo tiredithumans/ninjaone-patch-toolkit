@@ -119,31 +119,6 @@ pub(crate) fn ActionBar() -> impl IntoView {
                         }
                     })
                     .collect_view()}
-                <div class="action-group">
-                    <span class="action-group-label">"Restart"</span>
-                    <button
-                        class="btn btn-sm"
-                        aria-label=format!(
-                            "{}. {}",
-                            ActionKind::Reboot.label(),
-                            ActionKind::Reboot.blast_radius(),
-                        )
-                        title=move || {
-                            disabled_reason()
-                                .unwrap_or_else(|| {
-                                    format!(
-                                        "{}. {}",
-                                        ActionKind::Reboot.label(),
-                                        ActionKind::Reboot.blast_radius(),
-                                    )
-                                })
-                        }
-                        prop:disabled=move || disabled_reason().is_some()
-                        on:click=move |_| state.open_plan(ActionKind::Reboot)
-                    >
-                        "Reboot…"
-                    </button>
-                </div>
             </div>
 
             // Which patches "Install only the selected patches" would actually send,
@@ -342,7 +317,12 @@ pub(crate) fn ReauthorizeLink() -> impl IntoView {
 /// endpoint, which has no per-patch variant, and "selected" is a library script that
 /// receives a target list. Presenting them as one "Apply" button meant the ticked
 /// rows looked like they narrowed an apply that in fact ignored them.
-const ACTION_GROUPS: [(&str, &[(ActionKind, &str)]); 3] = [
+///
+/// Every dispatch button comes from here, Reboot included, so each one gets the
+/// same tooltip, accessible name and disabled-reason stacking. Reboot's mode and
+/// reason are *not* per-button: they are the shared run options rendered once
+/// below, like Run as and Dry run.
+const ACTION_GROUPS: [(&str, &[(ActionKind, &str)]); 4] = [
     (
         "Scan",
         &[
@@ -368,6 +348,7 @@ const ACTION_GROUPS: [(&str, &[(ActionKind, &str)]); 3] = [
             (ActionKind::SoftwarePatchRemediate, "Selected Software"),
         ],
     ),
+    ("Restart", &[(ActionKind::Reboot, "Reboot…")]),
 ];
 
 /// Confirmation modal. Shows exactly what will happen — including the literal

@@ -5,15 +5,9 @@ use super::*;
 #[component]
 pub(crate) fn RunControls() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // One save dialog at a time: each export opens a native Save dialog, and a
-    // double-click used to stack two of them over the same workbook.
+    // One save dialog at a time, shared by both exports: each opens a native Save
+    // dialog, and a double-click used to stack two of them over the same workbook.
     let exporting = RwSignal::new(false);
-    let export_disabled = move || {
-        exporting.get()
-            || state.query.result.with(|r| r.is_none())
-            || state.session.web_mode.get()
-            || state.session.demo.get()
-    };
 
     view! {
         <section class="panel">
@@ -35,62 +29,8 @@ pub(crate) fn RunControls() -> impl IntoView {
                         }
                     }}
                 </button>
-                <button
-                    class="btn"
-                    prop:disabled=export_disabled
-                    title=move || {
-                        if state.session.web_mode.get() || state.session.demo.get() {
-                            "Excel export needs a live query in the desktop app"
-                        } else {
-                            ""
-                        }
-                    }
-                    on:click=move |_| {
-                        if exporting.get_untracked() {
-                            return;
-                        }
-                        exporting.set(true);
-                        spawn_local(async move {
-                            match api::export_patches().await {
-                                Ok(Some(p)) => state.notify(Toast::ok(format!("Exported to {p}"))),
-                                Ok(None) => {}
-                                Err(e) => state.notify(Toast::err(e)),
-                            }
-                            exporting.set(false);
-                        });
-                    }
-                >
-                    "Export to Excel"
-                </button>
-                <button
-                    class="btn"
-                    prop:disabled=export_disabled
-                    title=move || {
-                        if state.session.web_mode.get() || state.session.demo.get() {
-                            "The HTML report needs a live query in the desktop app"
-                        } else {
-                            ""
-                        }
-                    }
-                    on:click=move |_| {
-                        if exporting.get_untracked() {
-                            return;
-                        }
-                        exporting.set(true);
-                        spawn_local(async move {
-                            match api::export_report().await {
-                                Ok(Some(p)) => {
-                                    state.notify(Toast::ok(format!("Report saved to {p}")))
-                                }
-                                Ok(None) => {}
-                                Err(e) => state.notify(Toast::err(e)),
-                            }
-                            exporting.set(false);
-                        });
-                    }
-                >
-                    "Export report"
-                </button>
+                <ExportButton kind=Export::Workbook exporting=exporting/>
+                <ExportButton kind=Export::Report exporting=exporting/>
                 <Show when=move || state.run.refreshing.get()>
                     <span class="chips-label">"↻ refreshing…"</span>
                 </Show>
@@ -197,6 +137,80 @@ pub(crate) fn RunControls() -> impl IntoView {
                 </p>
             </Show>
         </section>
+    }
+}
+
+/// The two exports of the cached result. Both write through a native Save dialog
+/// and need a live query in the desktop app; they differ only in the command and
+/// the wording.
+#[derive(Clone, Copy)]
+enum Export {
+    Workbook,
+    Report,
+}
+
+impl Export {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Workbook => "Export to Excel",
+            Self::Report => "Export report",
+        }
+    }
+
+    /// Tooltip in the browser demo, where there is no backend to export from.
+    fn web_title(self) -> &'static str {
+        match self {
+            Self::Workbook => "Excel export needs a live query in the desktop app",
+            Self::Report => "The HTML report needs a live query in the desktop app",
+        }
+    }
+
+    fn saved(self, path: &str) -> String {
+        match self {
+            Self::Workbook => format!("Exported to {path}"),
+            Self::Report => format!("Report saved to {path}"),
+        }
+    }
+
+    /// `Ok(None)` is the operator cancelling the Save dialog.
+    async fn save(self) -> Result<Option<String>, String> {
+        match self {
+            Self::Workbook => api::export_patches().await,
+            Self::Report => api::export_report().await,
+        }
+    }
+}
+
+/// One export button. `exporting` is owned by the caller and shared by every
+/// export, so a click on either is refused while any Save dialog is open.
+#[component]
+fn ExportButton(kind: Export, exporting: RwSignal<bool>) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let web_only = move || state.session.web_mode.get() || state.session.demo.get();
+    view! {
+        <button
+            class="btn"
+            prop:disabled=move || {
+                exporting.get() || state.query.result.with(|r| r.is_none()) || web_only()
+            }
+            title=move || if web_only() { kind.web_title() } else { "" }
+            on:click=move |_| {
+                if exporting.get_untracked() {
+                    return;
+                }
+                exporting.set(true);
+                spawn_local(async move {
+                    match kind.save().await {
+                        Ok(Some(p)) => state.notify(Toast::ok(kind.saved(&p))),
+                        Ok(None) => {}
+                        Err(e) => state.notify(Toast::err(e)),
+                    }
+                    exporting.set(false);
+                });
+            }
+        >
+            {kind.label()}
+        </button>
     }
 }
 

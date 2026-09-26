@@ -121,8 +121,10 @@ unit-tested, so `verify` still leans on `web-clippy` (which type-checks the wasm
 by any test.
 
 Put such logic in the `util` module (`web-rs/src/app/util/`) as a free function and test it
-there. The same rule covers `state.rs`, which is not a component file and has no test module —
-anything in it worth asserting moves to `util` rather than staying unreachable. What lives in
+there. The same rule covers `state.rs` and the `impl AppState` files under `state/` (one per
+concern: `query`, `view`, `selection`, `actions`, `lookups`, `presets`), which are not component
+files and have no test module — anything in them worth asserting moves to `util` rather than
+staying unreachable. What lives in
 `util` for this reason:
 
 - `filter_params` (the `FilterParams` mapping behind *every* query, lifted out of
