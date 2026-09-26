@@ -1,6 +1,7 @@
 use anyhow::Result;
 
-use super::{DEFAULT_PAGE_SIZE, NinjaApiClient, ProgressFn};
+use super::paging::DEFAULT_PAGE_SIZE;
+use super::{NinjaApiClient, ProgressFn};
 use crate::model::Device;
 
 impl NinjaApiClient {
