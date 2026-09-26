@@ -11,6 +11,7 @@ name: "ninjaone-patch-toolkit CodeQL config"
 paths-ignore:
   - "**/target"
   - "web-rs/dist"
+  - "scripts/node_modules"
 
 # Default ("code-scanning") query suite — keeps false-positive noise low.
 # `security-extended` is a later toggle if broader coverage is wanted.
