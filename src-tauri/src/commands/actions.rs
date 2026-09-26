@@ -28,10 +28,11 @@ use crate::actions::{
     ActionKind, ActionPlan, JobReport, JobState, PlanInput, PlannedTarget, RebootChoice, audit,
     fmt_ts, plan,
 };
-use crate::api::NinjaApiClient;
 use crate::api::actions::{ScriptDispatch, ScriptRef};
+use crate::api::{NinjaApiClient, is_outcome_unknown};
 use crate::error::UiError;
-use crate::model::{AutomationScript, Device, PatchType, RebootMode};
+use crate::model::{AutomationScript, PatchType, RebootMode};
+use crate::settings::ActionSettings;
 use crate::state::AppState;
 
 /// How often the poller re-reads the activity feed for unresolved jobs.
@@ -62,8 +63,9 @@ pub struct ActionRequest {
     #[serde(default)]
     pub script_name: Option<String>,
     /// Forwarded to NinjaOne verbatim and shown character-for-character in the
-    /// confirmation dialog. When absent for a script, it is composed from
-    /// `targets` + `reboot`.
+    /// confirmation dialog. Honored only for `Script` (see `typed_parameters`); when
+    /// absent, each device's string is composed from its `device_targets` +
+    /// `reboot` + `dry_run`.
     #[serde(default)]
     pub parameters: Option<String>,
     #[serde(default)]
@@ -167,7 +169,17 @@ fn require_actions_enabled(state: &AppState) -> Result<(), UiError> {
 /// under one blast radius validated under a wider one; `run_as` selects the
 /// execution identity sent to NinjaOne, so an approval for `system` validated after
 /// being switched to a stored credential.
-fn request_hash(req: &ActionRequest, parameters: &str, script: Option<&ScriptRef>) -> String {
+///
+/// Where the request and what is dispatched can differ, the *resolved* value is
+/// hashed: the script (a remediation kind's comes from Settings) and the run-as
+/// identity (a blank request means the Settings default — hashing the request's
+/// blank let the default change between review and confirm under one approval).
+fn request_hash(
+    req: &ActionRequest,
+    parameters: &str,
+    script: Option<&ScriptRef>,
+    run_as: Option<&str>,
+) -> String {
     let ActionRequest {
         kind,
         device_ids,
@@ -182,7 +194,8 @@ fn request_hash(req: &ActionRequest, parameters: &str, script: Option<&ScriptRef
         // The *effective* parameters are hashed via the `parameters` argument, which
         // is what actually goes on the wire.
         parameters: _,
-        run_as,
+        // Hashed as resolved, via the `run_as` argument.
+        run_as: _,
         reboot,
         reboot_mode,
         reason: _,
@@ -193,9 +206,11 @@ fn request_hash(req: &ActionRequest, parameters: &str, script: Option<&ScriptRef
         confirm_token: _,
     } = req;
 
+    // Sorted, but *not* de-duplicated: a repeated id is a second dispatch to that
+    // device, so `[5, 5]` must not hash like `[5]`. (`plan()` blocks a repeat
+    // outright; this keeps the hash from ever vouching for one.)
     let mut ids = device_ids.clone();
     ids.sort_unstable();
-    ids.dedup();
 
     let mut hasher = Sha256::new();
     // Every field is followed by a separator byte that cannot occur in the encoded
@@ -228,7 +243,14 @@ fn request_hash(req: &ActionRequest, parameters: &str, script: Option<&ScriptRef
         .as_bytes(),
     );
     field(parameters.as_bytes());
-    field(run_as.as_deref().unwrap_or_default().as_bytes());
+    // Length-prefixed so `None` (a native endpoint, which sends no identity) and an
+    // empty resolved default cannot hash alike.
+    field(
+        run_as
+            .map(|r| format!("{}:{r}", r.len()))
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     field(format!("{reboot:?}").as_bytes());
     field(format!("{reboot_mode:?}").as_bytes());
     field(&[u8::from(*include_offline)]);
@@ -267,17 +289,7 @@ fn per_device_parameters(req: &ActionRequest) -> BTreeMap<i64, String> {
     if !req.kind.runs_a_script() {
         return BTreeMap::new();
     }
-    // A hand-written string is batch-wide by nature and is sent verbatim — the
-    // toolkit never rewrites what the operator typed. The remediation kinds have no
-    // field to type it in, and honoring one there would silently discard the
-    // per-device targeting that is their entire purpose.
-    if !req.kind.is_remediation()
-        && let Some(verbatim) = req
-            .parameters
-            .as_ref()
-            .map(|p| p.trim())
-            .filter(|p| !p.is_empty())
-    {
+    if let Some(verbatim) = typed_parameters(req) {
         return req
             .device_ids
             .iter()
@@ -297,6 +309,57 @@ fn per_device_parameters(req: &ActionRequest) -> BTreeMap<i64, String> {
             )
         })
         .collect()
+}
+
+/// The hand-typed `parameters` string, if this request sends one.
+///
+/// A hand-written string is batch-wide by nature and is sent verbatim — the toolkit
+/// never rewrites what the operator typed. Only `Script` honors one: the remediation
+/// kinds have no field to type it in, and honoring one there would silently discard
+/// the per-device targeting that is their entire purpose.
+fn typed_parameters(req: &ActionRequest) -> Option<&str> {
+    if req.kind != ActionKind::Script {
+        return None;
+    }
+    req.parameters
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+}
+
+/// The targets [`per_device_parameters`] will compose into parameter strings — only
+/// those of devices in the request, and none when nothing is composed (a native
+/// endpoint, or a typed string sent verbatim). This is what `plan()` checks, so the
+/// guardrails see exactly the targets that reach NinjaOne.
+fn composed_targets(req: &ActionRequest) -> Vec<&str> {
+    if !req.kind.runs_a_script() || typed_parameters(req).is_some() {
+        return Vec::new();
+    }
+    // Only the targets belonging to devices actually in this request count — a
+    // frontend that left stale entries in the map must not satisfy the "something is
+    // selected" guardrail with patches for devices it is not dispatching to.
+    req.device_ids
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|id| req.device_targets.get(id))
+        .flatten()
+        .map(String::as_str)
+        .collect()
+}
+
+/// The execution identity a script-running request is dispatched with, `None` for
+/// the native endpoints (they run as NinjaOne's agent). A blank Run-as means the
+/// Settings default, resolved here once so the confirmation binds and the dispatch
+/// sends the same value — `run_action` used to re-read Settings after the token
+/// check, so the default could change under an approval.
+fn resolve_run_as(req: &ActionRequest, settings: &ActionSettings) -> Option<String> {
+    req.kind.runs_a_script().then(|| {
+        req.run_as
+            .clone()
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or_else(|| settings.run_as.clone())
+    })
 }
 
 /// The per-device parameters as one canonical string, for the confirmation hash.
@@ -400,49 +463,52 @@ struct PlannedAction {
     /// Device id → the `parameters` string that device will be sent.
     parameters: BTreeMap<i64, String>,
     script: Option<ScriptRef>,
+    /// The identity sent as `runAs`, after defaulting a blank request to Settings.
+    /// `None` for the native endpoints.
+    run_as: Option<String>,
+}
+
+impl PlannedAction {
+    /// The confirmation fingerprint of `req` as planned here.
+    fn hash(&self, req: &ActionRequest) -> String {
+        request_hash(
+            req,
+            &canonical_parameters(&self.parameters),
+            self.script.as_ref(),
+            self.run_as.as_deref(),
+        )
+    }
 }
 
 /// Shared planning path for `plan_action` and `run_action`, so the two can never
 /// disagree about what the guardrails say.
 async fn build_plan(state: &AppState, req: &ActionRequest) -> Result<PlannedAction, UiError> {
-    let settings = state.settings_snapshot();
-    let devices: Vec<Device> = state
-        .fleet_devices(None)
-        .await
-        .map_err(UiError::from)?
-        .as_ref()
-        .clone();
-    let (orgs, _, _) = state.lookups().await.map_err(UiError::from)?;
-    let org_names: HashMap<i64, String> = orgs.iter().map(|o| (o.id, o.name.clone())).collect();
+    let settings = state.settings_snapshot().actions;
+    // Borrowed out of the warm caches: this runs on every plan *and* every confirm,
+    // and used to deep-clone the whole fleet (and all three lookup lists) to read it.
+    let devices = state.fleet_devices(None).await.map_err(UiError::from)?;
+    let org_names = state.org_names().await.map_err(UiError::from)?;
 
-    // Only the targets belonging to devices actually in this request count — a
-    // frontend that left stale entries in the map must not satisfy the "something is
-    // selected" guardrail with patches for devices it is not dispatching to.
-    let target_count = req
-        .device_ids
-        .iter()
-        .filter_map(|id| req.device_targets.get(id))
-        .map(|t| t.len())
-        .sum();
-
+    let targets = composed_targets(req);
     let mut p = plan(PlanInput {
         kind: req.kind,
         device_ids: &req.device_ids,
         devices: &devices,
         org_names: &org_names,
-        settings: &settings.actions,
+        settings: &settings,
         include_offline: req.include_offline,
         override_window: req.override_window,
         reboot_mode: req.reboot_mode,
         reboot: req.reboot,
         dry_run: req.dry_run,
-        target_count,
+        targets: &targets,
         now: Local::now(),
     });
 
     let parameters = per_device_parameters(req);
     p.parameters_preview = parameters_preview(&parameters, &p.eligible);
-    let script = resolve_script(req, &settings.actions);
+    let script = resolve_script(req, &settings);
+    let run_as = resolve_run_as(req, &settings);
 
     // Request-shape problems the pure planner can't see, since they depend on
     // settings and on which script was picked.
@@ -483,6 +549,7 @@ async fn build_plan(state: &AppState, req: &ActionRequest) -> Result<PlannedActi
         plan: p,
         parameters,
         script,
+        run_as,
     })
 }
 
@@ -493,24 +560,15 @@ pub async fn plan_action(
     request: ActionRequest,
 ) -> Result<ActionPlan, UiError> {
     require_actions_enabled(&state)?;
-    let PlannedAction {
-        mut plan,
-        parameters,
-        script,
-    } = build_plan(&state, &request).await?;
+    let planned = build_plan(&state, &request).await?;
+    let hash = planned.hash(&request);
+    let mut plan = planned.plan;
 
     // A blocked plan has nothing to confirm, so it gets no token. Scans are not
     // mutating and skip confirmation entirely.
     if !plan.is_blocked() && request.kind.is_mutating() {
         let token = random_token();
-        state.store_pending_confirm(
-            token.clone(),
-            request_hash(
-                &request,
-                &canonical_parameters(&parameters),
-                script.as_ref(),
-            ),
-        );
+        state.store_pending_confirm(token.clone(), hash);
         plan.confirm_token = Some(token);
     }
     Ok(plan)
@@ -526,38 +584,31 @@ pub async fn run_action(
     require_actions_enabled(&state)?;
 
     // Re-plan rather than trusting anything the frontend computed.
-    let PlannedAction {
-        plan: p,
-        parameters,
-        script,
-    } = build_plan(&state, &request).await?;
-    if p.is_blocked() {
-        return Err(UiError::new(p.blockers.join(" ")));
+    let planned = build_plan(&state, &request).await?;
+    if planned.plan.is_blocked() {
+        return Err(UiError::new(planned.plan.blockers.join(" ")));
     }
 
     if request.kind.is_mutating() {
         let token = request.confirm_token.as_deref().unwrap_or_default();
-        if !state.consume_confirm_token(
-            token,
-            &request_hash(
-                &request,
-                &canonical_parameters(&parameters),
-                script.as_ref(),
-            ),
-        ) {
+        if !state.consume_confirm_token(token, &planned.hash(&request)) {
             return Err(UiError::new(
                 "This action was not confirmed, or the confirmation expired or no longer matches \
                  the selection. Review the plan and confirm again.",
             ));
         }
     }
+    let PlannedAction {
+        plan: p,
+        parameters,
+        script,
+        run_as,
+    } = planned;
 
     let settings = state.settings_snapshot();
-    let run_as = request
-        .run_as
-        .clone()
-        .filter(|r| !r.trim().is_empty())
-        .unwrap_or_else(|| settings.actions.run_as.clone());
+    // The identity the approval was bound to — never re-read from Settings here. The
+    // native endpoints take none.
+    let run_as = run_as.unwrap_or_default();
     let detail = action_detail(&request);
 
     let (batch_id, id_base) = state.next_job_ids(p.eligible.len() + p.skipped.len());
@@ -807,9 +858,41 @@ async fn dispatch_one(
     }])
     .await;
 
-    let _permit = sem.acquire().await;
-    let outcome = send_action(ctx, target.device_id).await;
+    let outcome = {
+        let _permit = sem.acquire().await;
+        send_action(ctx, target.device_id).await
+    };
+    record_dispatch(&mut job, outcome, Utc::now());
 
+    // A job settled at dispatch (NinjaOne rejected the request outright) never
+    // reaches the poller, which writes every other closing record — so without this
+    // the trail could not tell "rejected at send time" from "sent, and never
+    // reported back".
+    if job.state.is_terminal() {
+        audit::record_off_runtime(vec![audit::AuditEntry::closing(
+            &job,
+            ctx.instance.clone(),
+            ctx.client_id.clone(),
+        )])
+        .await;
+    }
+    job
+}
+
+/// Records what the dispatch POST said on the job.
+///
+/// Classified on the error's *type*: [`is_outcome_unknown`] marks every failure
+/// after which the action may still have reached NinjaOne (a transport failure after
+/// send, a 5xx, an unreadable 2xx body). Those become `Unknown` — polled, never
+/// auto-retried. This used to match `"may already"` in the message, a phrase only
+/// the timeout arm produced, so a gateway 5xx on an apply read as a definite failure
+/// while the device could be installing patches. Anything else — a 4xx, a connect
+/// failure, a refusal in `send_action` — is a definite `Failed`.
+fn record_dispatch(
+    job: &mut JobReport,
+    outcome: anyhow::Result<Option<ScriptDispatch>>,
+    now: chrono::DateTime<Utc>,
+) {
     match outcome {
         Ok(dispatch) => {
             if let Some(d) = dispatch {
@@ -818,20 +901,9 @@ async fn dispatch_one(
             }
             job.state = JobState::Running;
         }
-        Err(err) => {
-            let msg = err.to_string();
-            // A timed-out POST may already be queued on the device, so it is
-            // recorded as Unknown — polled, but never auto-retried.
-            job.state = if msg.contains("may already") {
-                JobState::Unknown(msg)
-            } else {
-                let failed = JobState::Failed(msg);
-                job.finish(failed.clone(), Utc::now());
-                failed
-            };
-        }
+        Err(err) if is_outcome_unknown(&err) => job.state = JobState::Unknown(err.to_string()),
+        Err(err) => job.finish(JobState::Failed(err.to_string()), now),
     }
-    job
 }
 
 /// The POST itself, per [`ActionKind`].
@@ -1083,24 +1155,12 @@ fn spawn_job_poller(app: &AppHandle) {
             // batch at a time, so a per-job write reopened the log once per device.
             let closing = settled
                 .iter()
-                .map(|job| audit::AuditEntry {
-                    timestamp: audit::now_stamp(),
-                    instance: settings.instance_base_url.clone(),
-                    client_id: settings.client_id.clone(),
-                    batch_id: job.batch_id,
-                    job_id: job.id,
-                    kind: job.kind,
-                    device_id: job.device_id,
-                    device_name: job.device_name.clone(),
-                    organization: job.organization.clone(),
-                    detail: job.detail.clone(),
-                    parameters: None,
-                    dry_run: job.dry_run,
-                    confirm_token_prefix: None,
-                    outcome: audit::AuditEntry::outcome_of(&job.state),
-                    activity_id: job.activity_id,
-                    series_uid: job.series_uid.clone(),
-                    exit_code: job.exit_code,
+                .map(|job| {
+                    audit::AuditEntry::closing(
+                        job,
+                        settings.instance_base_url.clone(),
+                        settings.client_id.clone(),
+                    )
                 })
                 .collect();
             audit::record_off_runtime(closing).await;
@@ -1188,9 +1248,182 @@ mod tests {
     use super::*;
 
     /// `request_hash` with no resolved script, which is every case except the two
-    /// remediation kinds.
+    /// remediation kinds, and the request's own run-as taken as resolved.
     fn hash(req: &ActionRequest, parameters: &str) -> String {
-        request_hash(req, parameters, None)
+        request_hash(req, parameters, None, req.run_as.as_deref())
+    }
+
+    /// A blank Run-as resolves to the Settings default, and it is that resolved
+    /// value the approval binds: `run_action` used to fall back to Settings *after*
+    /// the token check, so the default could change between review and confirm
+    /// and dispatch under the old approval as a different identity.
+    #[test]
+    fn the_confirmation_binds_the_resolved_run_as_default() {
+        let req = request(ActionKind::Script, vec![1]);
+        let as_system = ActionSettings {
+            run_as: "system".into(),
+            ..ActionSettings::default()
+        };
+        let as_admin = ActionSettings {
+            run_as: "domain-admin".into(),
+            ..ActionSettings::default()
+        };
+        assert_eq!(resolve_run_as(&req, &as_system).as_deref(), Some("system"));
+        let blank = ActionRequest {
+            run_as: Some("  ".into()),
+            ..req.clone()
+        };
+        assert_eq!(
+            resolve_run_as(&blank, &as_admin).as_deref(),
+            Some("domain-admin")
+        );
+        // An explicit choice wins over the default.
+        let explicit = ActionRequest {
+            run_as: Some("local-admin".into()),
+            ..req.clone()
+        };
+        assert_eq!(
+            resolve_run_as(&explicit, &as_admin).as_deref(),
+            Some("local-admin")
+        );
+
+        let bound =
+            |s: &ActionSettings| request_hash(&req, "", None, resolve_run_as(&req, s).as_deref());
+        assert_ne!(
+            bound(&as_system),
+            bound(&as_admin),
+            "a changed Settings default must invalidate an approval for a blank Run-as"
+        );
+
+        // The native endpoints run as NinjaOne's agent, so they carry no identity —
+        // and none must hash like an empty default.
+        assert_eq!(
+            resolve_run_as(&request(ActionKind::Reboot, vec![1]), &as_system),
+            None
+        );
+        assert_ne!(
+            request_hash(&req, "", None, None),
+            request_hash(&req, "", None, Some("")),
+        );
+    }
+
+    /// The hash used to sort *and de-duplicate* the ids, so an approval for `[5]`
+    /// validated `[5, 5]` — a second run on the same machine.
+    #[test]
+    fn request_hash_does_not_collapse_a_repeated_device() {
+        assert_ne!(
+            hash(&request(ActionKind::Reboot, vec![5]), ""),
+            hash(&request(ActionKind::Reboot, vec![5, 5]), "")
+        );
+    }
+
+    /// Every ambiguous failure of an acting POST is `Unknown` (polled, never
+    /// replayed) — classified by type, not by a phrase only the timeout message
+    /// carried. A rejection is `Failed` and finished.
+    #[test]
+    fn a_dispatch_outcome_is_classified_by_the_error_type() {
+        use crate::api::OutcomeUnknown;
+        let now = Utc::now();
+        let job = || JobReport {
+            id: 1,
+            batch_id: 1,
+            device_id: 7,
+            device_name: "srv-1".into(),
+            organization: "Contoso".into(),
+            kind: ActionKind::OsPatchApply,
+            detail: "Apply all OS patches".into(),
+            dry_run: false,
+            state: JobState::Queued,
+            dispatched_at: fmt_ts(now),
+            dispatched_ts: now.timestamp(),
+            finished_at: None,
+            duration_seconds: None,
+            activity_id: None,
+            series_uid: None,
+            exit_code: None,
+        };
+
+        let mut unknown = job();
+        record_dispatch(
+            &mut unknown,
+            Err(
+                anyhow::Error::new(OutcomeUnknown("NinjaOne answered 502".into()))
+                    .context("dispatching to srv-1"),
+            ),
+            now,
+        );
+        assert!(
+            matches!(unknown.state, JobState::Unknown(_)),
+            "{:?}",
+            unknown.state
+        );
+        assert!(
+            !unknown.state.is_terminal(),
+            "an unknown job is still polled"
+        );
+        assert_eq!(unknown.finished_at, None);
+
+        let mut rejected = job();
+        record_dispatch(
+            &mut rejected,
+            Err(anyhow::anyhow!(
+                "POST … failed (400 Bad Request): not applicable — the action may already be queued"
+            )),
+            now,
+        );
+        assert!(
+            matches!(rejected.state, JobState::Failed(_)),
+            "a rejection is not unknown however it is worded: {:?}",
+            rejected.state
+        );
+        assert!(rejected.finished_at.is_some());
+
+        let mut sent = job();
+        record_dispatch(
+            &mut sent,
+            Ok(Some(ScriptDispatch {
+                activity_id: Some(900),
+                ..ScriptDispatch::default()
+            })),
+            now,
+        );
+        assert_eq!(sent.state, JobState::Running);
+        assert_eq!(sent.activity_id, Some(900));
+    }
+
+    /// `plan()` validates exactly the targets that will be composed into a
+    /// parameter string: those of the requested devices, and none when the string is
+    /// typed by hand or the kind takes no parameters.
+    #[test]
+    fn composed_targets_are_what_reaches_the_parameter_string() {
+        let mut req = request(ActionKind::OsPatchRemediate, vec![1, 2]);
+        req.device_targets = HashMap::from([
+            (1, vec!["KB1".into()]),
+            (2, vec!["KB2".into(), "KB3".into()]),
+            // Not in the request: must not count.
+            (9, vec!["123 dryRun=false".into()]),
+        ]);
+        let mut got = composed_targets(&req);
+        got.sort_unstable();
+        assert_eq!(got, vec!["KB1", "KB2", "KB3"]);
+
+        let native = ActionRequest {
+            kind: ActionKind::OsPatchApply,
+            ..req.clone()
+        };
+        assert!(composed_targets(&native).is_empty());
+
+        let typed = ActionRequest {
+            kind: ActionKind::Script,
+            parameters: Some("-Verbose".into()),
+            ..req.clone()
+        };
+        assert!(composed_targets(&typed).is_empty());
+        let composed_script = ActionRequest {
+            kind: ActionKind::Script,
+            ..req
+        };
+        assert_eq!(composed_targets(&composed_script).len(), 3);
     }
 
     fn request(kind: ActionKind, ids: Vec<i64>) -> ActionRequest {
@@ -1474,8 +1707,8 @@ mod tests {
         // The resolved script is not in the request at all for these kinds, so it is
         // hashed separately — an id edited in Settings mid-dialog must invalidate.
         assert_ne!(
-            request_hash(&a, &canon(&a), Some(&ScriptRef::Script { id: 42 })),
-            request_hash(&a, &canon(&a), Some(&ScriptRef::Script { id: 43 })),
+            request_hash(&a, &canon(&a), Some(&ScriptRef::Script { id: 42 }), None),
+            request_hash(&a, &canon(&a), Some(&ScriptRef::Script { id: 43 }), None),
             "the resolved remediation script must bind"
         );
     }

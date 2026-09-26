@@ -185,9 +185,11 @@ pub enum JobState {
     Completed,
     Failed(String),
     TimedOut,
-    /// The dispatch POST timed out *after* the body was sent, so NinjaOne may or
-    /// may not have queued it. Never auto-retried — a replay could run the script
-    /// twice — but still polled, in case the activity feed resolves it.
+    /// The dispatch POST failed in a way that cannot tell "rejected" from
+    /// "accepted" — a timeout or a connection lost after send, a 5xx, an unreadable
+    /// 2xx body (`api::OutcomeUnknown`) — so NinjaOne may or may not have queued it.
+    /// Never auto-retried — a replay could run the script twice — but still polled,
+    /// in case the activity feed resolves it.
     Unknown(String),
     /// A guardrail stopped this target before anything was sent.
     Skipped(String),
@@ -325,9 +327,11 @@ pub struct PlanInput<'a> {
     /// Distinct from `reboot_mode`, which addresses the reboot endpoint.
     pub reboot: RebootChoice,
     pub dry_run: bool,
-    /// How many patches the operator ticked, in total. Only the remediation kinds
-    /// read it — they have nothing to install without one.
-    pub target_count: usize,
+    /// Every target that will be composed into a parameter string, across the
+    /// requested devices — empty when nothing is composed (a native endpoint, or
+    /// hand-typed parameters). The remediation kinds need at least one; the
+    /// KB-encoded kinds need each to be a KB number (see [`kb_number`]).
+    pub targets: &'a [&'a str],
     /// Injected so the maintenance-window check is testable.
     pub now: DateTime<Local>,
 }
@@ -386,6 +390,50 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
 
     if eligible.is_empty() {
         blockers.push("No eligible devices — nothing would be dispatched.".into());
+    }
+    // A repeated id would be dispatched to once per occurrence — the same script run
+    // twice on one machine — while the operator's selection names it once. The
+    // confirmation hash used to de-duplicate the ids, so an approval for `[5]`
+    // validated `[5, 5]`; refusing the request is what keeps the two in agreement.
+    let mut seen = HashSet::new();
+    let duplicates: BTreeSet<i64> = input
+        .device_ids
+        .iter()
+        .copied()
+        .filter(|id| !seen.insert(*id))
+        .collect();
+    if !duplicates.is_empty() {
+        blockers.push(format!(
+            "The request lists device(s) {} more than once, so they would be dispatched to \
+             repeatedly. Clear the selection and select the devices again.",
+            duplicates
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    // NinjaOne splits `parameters` on spaces into `key=value` tokens, so a KB target
+    // is spliced into the string unquoted: "123 dryRun=false" would add a key of its
+    // own. The frontend only sends `kbNumber`s, but the backend is the boundary.
+    if uses_kb_encoding(input.kind) {
+        let malformed: BTreeSet<&str> = input
+            .targets
+            .iter()
+            .copied()
+            .filter(|t| kb_number(t).is_none())
+            .collect();
+        if !malformed.is_empty() {
+            blockers.push(format!(
+                "Not a KB number: {}. OS patches are targeted by KB (e.g. KB5040434); \
+                 re-select the patch rows.",
+                malformed
+                    .iter()
+                    .map(|t| format!("\"{t}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
     }
     if input.kind.is_mutating() {
         if eligible.len() > s.max_devices_per_action {
@@ -482,7 +530,7 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
                     .unwrap_or_default()
             ));
         }
-        if input.target_count == 0 {
+        if input.targets.is_empty() {
             blockers.push(format!(
                 "No patches selected — this would run the remediation script with an empty target \
                  list and install nothing. Tick the patch rows to install.{}",
@@ -606,58 +654,86 @@ pub fn build_parameters(
 ) -> String {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let reboot = reboot.script_value();
-    match kind {
-        ActionKind::SoftwarePatchApply
-        | ActionKind::SoftwarePatchScan
-        | ActionKind::SoftwarePatchRemediate => {
-            let encoded = STANDARD.encode(targets.join("|"));
-            format!("productAllowListB64={encoded} rebootBehavior={reboot} dryRun={dry_run}")
-        }
-        _ => {
-            let kbs = targets
-                .iter()
-                .map(|k| k.trim().trim_start_matches("KB").trim_start_matches("kb"))
-                .filter(|k| !k.is_empty())
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("kbAllowList={kbs} rebootBehavior={reboot} dryRun={dry_run}")
-        }
+    if uses_kb_encoding(kind) {
+        // `plan()` blocks anything that is not a KB number; dropping it here as well
+        // means a target can never reach the unquoted, space-split string even if a
+        // new caller skips the planner.
+        let kbs = targets
+            .iter()
+            .filter_map(|k| kb_number(k))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("kbAllowList={kbs} rebootBehavior={reboot} dryRun={dry_run}")
+    } else {
+        let encoded = STANDARD.encode(targets.join("|"));
+        format!("productAllowListB64={encoded} rebootBehavior={reboot} dryRun={dry_run}")
     }
 }
 
-/// Whether an activity type is one a dispatched action can produce.
+/// Whether [`build_parameters`] sends this kind's targets as a bare `kbAllowList`
+/// rather than base64-encoded product titles. Everything but the software family —
+/// including a hand-picked `Script`, whose per-KB targeting is OS-only.
+fn uses_kb_encoding(kind: ActionKind) -> bool {
+    !matches!(
+        kind,
+        ActionKind::SoftwarePatchApply
+            | ActionKind::SoftwarePatchScan
+            | ActionKind::SoftwarePatchRemediate
+    )
+}
+
+/// The digits of a KB target — `KB5040434`, `kb5040434` or `5040434` — or `None`
+/// for anything else, which must not be spliced into a space-split parameter string.
+fn kb_number(target: &str) -> Option<&str> {
+    let t = target.trim();
+    let digits = match t.get(..2) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("kb") => &t[2..],
+        _ => t,
+    };
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(digits)
+}
+
+/// Whether an activity type is one that `kind` can produce.
 ///
 /// The third correlation tier is the *only* path open to the native endpoints
-/// (`scan`/`apply`/`reboot`), which return no correlator at all — and those emit
-/// `PATCH_MANAGEMENT`, `SOFTWARE_PATCH_MANAGEMENT` and `SYSTEM` activities, none of
-/// which this accepted. A script emits `SCRIPTING`; `SCRIPT`, the value the filter
-/// was written against, is not in the spec's `activityType` enum at all, so every
-/// job whose dispatch response omitted an id or uid sat unmatched until it timed
-/// out. `SCRIPT` is kept anyway — an accepted-but-never-sent value costs nothing,
-/// while a missing one costs a hung job.
-fn is_action_activity(activity_type: Option<&str>) -> bool {
-    matches!(
-        activity_type,
-        Some(
-            "SCRIPTING"
-                | "SCRIPT"
-                | "ACTION"
-                | "ACTIONSET"
-                | "CONDITION_ACTION"
-                | "CONDITION_ACTIONSET"
-                | "PATCH_MANAGEMENT"
-                | "SOFTWARE_PATCH_MANAGEMENT"
-                | "SCHEDULED_TASK"
-                | "SYSTEM"
-        )
-    )
+/// (`scan`/`apply`/`reboot`), which return no correlator at all, so the type is most
+/// of what that tier has to go on — and it is chosen per kind:
+///
+/// * an OS scan/apply emits `PATCH_MANAGEMENT`, a software one
+///   `SOFTWARE_PATCH_MANAGEMENT`;
+/// * a reboot emits `SYSTEM`;
+/// * a script — hand-picked or a remediation — emits `SCRIPTING` for a library
+///   script and `ACTION`/`ACTIONSET` for a built-in. `SCRIPT` is not in the spec's
+///   `activityType` enum but is kept: an accepted-but-never-sent value costs
+///   nothing, while a missing one costs a hung job.
+///
+/// This used to be one list for every kind, including the broad `SYSTEM`,
+/// `CONDITION_ACTION`/`CONDITION_ACTIONSET` and `SCHEDULED_TASK`. The last three are
+/// NinjaOne's own policy and scheduler runs, not anything this app dispatched, so a
+/// condition firing on the device after a dispatch could resolve a script job with
+/// its verdict — and an OS apply could be resolved by a software apply's activity,
+/// or a script by an unrelated `SYSTEM` event.
+fn is_action_activity(kind: ActionKind, activity_type: Option<&str>) -> bool {
+    let Some(t) = activity_type else {
+        return false;
+    };
+    match kind {
+        ActionKind::OsPatchScan | ActionKind::OsPatchApply => t == "PATCH_MANAGEMENT",
+        ActionKind::SoftwarePatchScan | ActionKind::SoftwarePatchApply => {
+            t == "SOFTWARE_PATCH_MANAGEMENT"
+        }
+        ActionKind::Reboot => t == "SYSTEM",
+        ActionKind::Script | ActionKind::OsPatchRemediate | ActionKind::SoftwarePatchRemediate => {
+            matches!(t, "SCRIPTING" | "SCRIPT" | "ACTION" | "ACTIONSET")
+        }
+    }
 }
 
 /// Finds the activity that corresponds to a dispatched job.
 ///
 /// Three tiers, most to least certain: the exact activity id the dispatch returned,
-/// the activity series uid, then the newest script activity on that device since
-/// dispatch. The middle tier is what makes an id-less dispatch response usable —
+/// the activity series uid, then the newest activity on that device since dispatch
+/// of a type the job's kind emits (see [`is_action_activity`]). The middle tier is what makes an id-less dispatch response usable —
 /// several tenants return only a `jobUid`.
 ///
 /// `claimed` carries the activity ids already bound to *other* jobs, and only the
@@ -690,7 +766,7 @@ pub fn match_activity<'a>(
     let floor = (job.dispatched_ts - 5) as f64;
     activities
         .iter()
-        .filter(|a| is_action_activity(a.activity_type.as_deref()))
+        .filter(|a| is_action_activity(job.kind, a.activity_type.as_deref()))
         .filter(|a| a.activity_time.unwrap_or(0.0) >= floor)
         // An activity with no id cannot be tracked, so it cannot be excluded either;
         // it stays eligible exactly as before.
@@ -814,7 +890,7 @@ mod tests {
             dry_run: false,
             // Enough that the remediation kinds aren't blocked for an empty
             // selection; the tests that care about that set it explicitly.
-            target_count: 1,
+            targets: &["KB5040434"],
             now: inside_window(),
         }
     }
@@ -1099,7 +1175,7 @@ mod tests {
             // Script configured, but nothing ticked.
             let configured = with_scripts();
             let p = plan(PlanInput {
-                target_count: 0,
+                targets: &[],
                 ..input(kind, &ids, &devices, &names, &configured)
             });
             assert!(
@@ -1237,6 +1313,116 @@ mod tests {
         assert_eq!(p.skipped[0].device_id, 99);
     }
 
+    /// The confirm hash de-duplicated the ids while `plan()` and the dispatch loop
+    /// did not, so an approval for `[5]` validated `[5, 5]` — two runs on one
+    /// machine. Scans are not exempt: the request itself is malformed.
+    #[test]
+    fn a_device_listed_twice_is_a_blocker() {
+        let devices = vec![device(5, "srv-a", 1, false), device(6, "srv-b", 1, false)];
+        let ids = [5, 6, 5, 5];
+        let names = orgs();
+        let settings = ActionSettings::default();
+
+        for kind in [ActionKind::Reboot, ActionKind::OsPatchScan] {
+            let p = plan(input(kind, &ids, &devices, &names, &settings));
+            assert!(
+                p.blockers
+                    .iter()
+                    .any(|b| b.contains("device(s) 5 more than once")),
+                "{kind:?}: {:?}",
+                p.blockers
+            );
+        }
+        let p = plan(input(
+            ActionKind::Reboot,
+            &[5, 6],
+            &devices,
+            &names,
+            &settings,
+        ));
+        assert!(!p.blockers.iter().any(|b| b.contains("more than once")));
+    }
+
+    /// NinjaOne splits `parameters` on spaces, so a KB target is an injection
+    /// point: "123 dryRun=false" would add a key of its own to the string. Every
+    /// KB-encoded kind refuses anything but a KB number; the software kinds send
+    /// base64 and are unaffected.
+    #[test]
+    fn a_target_that_is_not_a_kb_number_blocks_a_kb_encoded_dispatch() {
+        let devices = vec![device(1, "srv-a", 1, false)];
+        let ids = [1];
+        let names = orgs();
+        let settings = with_scripts();
+        let bad: &[&str] = &["KB5040434", "123 dryRun=false", "kb12,34", ""];
+
+        for kind in [ActionKind::OsPatchRemediate, ActionKind::Script] {
+            let p = plan(PlanInput {
+                targets: bad,
+                ..input(kind, &ids, &devices, &names, &settings)
+            });
+            let b = p
+                .blockers
+                .iter()
+                .find(|b| b.contains("Not a KB number"))
+                .unwrap_or_else(|| panic!("{kind:?}: {:?}", p.blockers));
+            assert!(b.contains("\"123 dryRun=false\""), "{b}");
+            assert!(b.contains("\"kb12,34\""), "{b}");
+            assert!(!b.contains("\"KB5040434\""), "a valid KB is not named: {b}");
+        }
+
+        let p = plan(PlanInput {
+            targets: &["Google Chrome", "7-Zip 23.01 (x64)"],
+            ..input(
+                ActionKind::SoftwarePatchRemediate,
+                &ids,
+                &devices,
+                &names,
+                &settings,
+            )
+        });
+        assert!(!p.is_blocked(), "{:?}", p.blockers);
+
+        let p = plan(PlanInput {
+            targets: &["KB5040434", "kb5041580", "5041581", " Kb1 "],
+            ..input(
+                ActionKind::OsPatchRemediate,
+                &ids,
+                &devices,
+                &names,
+                &settings,
+            )
+        });
+        assert!(!p.is_blocked(), "{:?}", p.blockers);
+    }
+
+    #[test]
+    fn kb_number_accepts_only_digits_after_an_optional_kb_prefix() {
+        for (raw, want) in [
+            ("KB5040434", Some("5040434")),
+            ("kb5040434", Some("5040434")),
+            ("Kb5040434", Some("5040434")),
+            (" 5040434 ", Some("5040434")),
+            ("KB", None),
+            ("", None),
+            ("5040434 dryRun=false", None),
+            ("KB50404a", None),
+            ("KBKB1", None),
+            ("١٢٣", None),
+        ] {
+            assert_eq!(kb_number(raw), want, "{raw:?}");
+        }
+        // Defense in depth: a malformed target never reaches the string either.
+        assert_eq!(
+            build_parameters(
+                ActionKind::OsPatchRemediate,
+                &["5040434 dryRun=false".into(), "kb1".into()],
+                RebootChoice::Never,
+                true,
+            ),
+            "kbAllowList=1 rebootBehavior=Never dryRun=true"
+        );
+    }
+
     #[test]
     fn build_parameters_sets_dry_run_flag() {
         let targets = vec!["KB5040434".to_string(), "5041580".to_string()];
@@ -1360,33 +1546,95 @@ mod tests {
     }
 
     /// The native endpoints return no correlator, so the activity-type heuristic is
-    /// their only path to resolving — and the types they emit were not on the list.
+    /// their only path to resolving — and each kind accepts exactly the types it
+    /// emits, not every type any kind might. A single shared list let a `SYSTEM`
+    /// event resolve a script, and a software apply resolve an OS apply.
     #[test]
-    fn the_native_patch_endpoints_activity_types_are_matchable() {
+    fn each_kind_matches_only_the_activity_types_it_emits() {
         let now = Utc::now().timestamp();
-        for kind in [
+        let script_types = &["SCRIPTING", "SCRIPT", "ACTION", "ACTIONSET"][..];
+        let all = [
             "PATCH_MANAGEMENT",
             "SOFTWARE_PATCH_MANAGEMENT",
-            "SCRIPTING",
             "SYSTEM",
+            "SCRIPTING",
+            "SCRIPT",
+            "ACTION",
+            "ACTIONSET",
+            // NinjaOne's own policy and scheduler runs: never a dispatched job's.
+            "CONDITION_ACTION",
+            "CONDITION_ACTIONSET",
+            "SCHEDULED_TASK",
+            "SPLASHTOP_CONNECTION_INITIATED",
+        ];
+        for (kind, accepted) in [
+            (ActionKind::OsPatchScan, &["PATCH_MANAGEMENT"][..]),
+            (ActionKind::OsPatchApply, &["PATCH_MANAGEMENT"][..]),
+            (
+                ActionKind::SoftwarePatchScan,
+                &["SOFTWARE_PATCH_MANAGEMENT"][..],
+            ),
+            (
+                ActionKind::SoftwarePatchApply,
+                &["SOFTWARE_PATCH_MANAGEMENT"][..],
+            ),
+            (ActionKind::Reboot, &["SYSTEM"][..]),
+            (ActionKind::Script, script_types),
+            (ActionKind::OsPatchRemediate, script_types),
+            (ActionKind::SoftwarePatchRemediate, script_types),
         ] {
-            let j = job(None, None, now);
-            let list = vec![activity(
-                json!({ "id": 1, "activityType": kind, "activityTime": now as f64 }),
-            )];
-            assert_eq!(
-                match_activity(&list, &j, &HashSet::new()).and_then(|a| a.id),
-                Some(1),
-                "{kind} must be correlatable"
-            );
+            let j = JobReport {
+                kind,
+                ..job(None, None, now)
+            };
+            for t in all {
+                let list = vec![activity(
+                    json!({ "id": 1, "activityType": t, "activityTime": now as f64 }),
+                )];
+                assert_eq!(
+                    match_activity(&list, &j, &HashSet::new()).is_some(),
+                    accepted.contains(&t),
+                    "{kind:?} vs {t}"
+                );
+            }
         }
-        // Unrelated feed noise on the same device still must not be claimed.
-        let j = job(None, None, now);
-        let noise = vec![activity(
-            json!({ "id": 2, "activityType": "SPLASHTOP_CONNECTION_INITIATED",
-                    "activityTime": now as f64 }),
-        )];
-        assert!(match_activity(&noise, &j, &HashSet::new()).is_none());
+    }
+
+    /// An OS apply and a software apply to one device, back to back: neither has a
+    /// correlator, and each must land on its own family's activity.
+    #[test]
+    fn back_to_back_os_and_software_applies_resolve_to_their_own_activities() {
+        let now = Utc::now();
+        let ts = now.timestamp();
+        let list = vec![
+            activity(json!({
+                "id": 502, "activityType": "SOFTWARE_PATCH_MANAGEMENT",
+                "activityTime": ts as f64,
+                "statusCode": "COMPLETED", "activityResult": "FAILURE",
+            })),
+            activity(json!({
+                "id": 501, "activityType": "PATCH_MANAGEMENT",
+                "activityTime": (ts - 2) as f64,
+                "statusCode": "COMPLETED", "activityResult": "SUCCESS",
+            })),
+        ];
+        let mut claimed = HashSet::new();
+        let mut os = JobReport {
+            kind: ActionKind::OsPatchApply,
+            ..job(None, None, ts - 10)
+        };
+        let mut sw = JobReport {
+            id: 2,
+            kind: ActionKind::SoftwarePatchApply,
+            ..job(None, None, ts - 9)
+        };
+        advance_job(&mut os, &list, now, &mut claimed);
+        advance_job(&mut sw, &list, now, &mut claimed);
+
+        assert_eq!(os.activity_id, Some(501));
+        assert_eq!(os.state, JobState::Completed);
+        assert_eq!(sw.activity_id, Some(502));
+        assert!(matches!(sw.state, JobState::Failed(_)), "{:?}", sw.state);
     }
 
     /// `statusCode` is the enumerated lifecycle and `activityResult` is the outcome;
