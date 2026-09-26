@@ -3,8 +3,12 @@ use rust_xlsxwriter::{Color, Format, Workbook};
 
 use crate::model::PatchRow;
 use crate::rows::{
-    ComplianceBucket, DeviceSummary, FailureGroup, OsCompliance, QueryScope, TableCell, TableColumn,
+    ComplianceBucket, DeviceSummary, FailureGroup, OsCompliance, QueryScope, TableCell,
+    TableColumn, clamp_cell,
 };
+
+/// Data rows one worksheet can hold: Excel's 1,048,576-row limit less the header.
+const MAX_SHEET_DATA_ROWS: usize = 1_048_575;
 
 /// The Patches detail-sheet columns. Only the workbook renders this table, so it
 /// lives here rather than on `PatchRow` — but it is declared the same way as the
@@ -95,7 +99,8 @@ fn header_format() -> Format {
 /// Compliance summary sheet, a Compliance by OS sheet, a Needs Reboot sheet for
 /// devices flagged for reboot, a Patch Failures sheet rolling up FAILED installs,
 /// and an About sheet carrying the provenance in [`WorkbookMeta`]. Data sheets with
-/// no rows are omitted; Patches and About are always written.
+/// no rows are omitted; Patches and About are always written. Detail rows past one
+/// sheet's capacity continue on `Patches (2)`, `Patches (3)`, …
 pub fn write_workbook(
     path: &str,
     rows: &[PatchRow],
@@ -105,21 +110,62 @@ pub fn write_workbook(
     failures: &[FailureGroup],
     meta: &WorkbookMeta<'_>,
 ) -> Result<()> {
+    write_workbook_split(
+        path,
+        rows,
+        compliance,
+        compliance_by_os,
+        reboot_devices,
+        failures,
+        meta,
+        MAX_SHEET_DATA_ROWS,
+    )
+}
+
+/// [`write_workbook`] with the per-sheet detail-row limit injected, so the split
+/// is testable without writing a million rows.
+#[allow(clippy::too_many_arguments)]
+fn write_workbook_split(
+    path: &str,
+    rows: &[PatchRow],
+    compliance: &[ComplianceBucket],
+    compliance_by_os: &[OsCompliance],
+    reboot_devices: &[DeviceSummary],
+    failures: &[FailureGroup],
+    meta: &WorkbookMeta<'_>,
+    rows_per_sheet: usize,
+) -> Result<()> {
     let mut workbook = Workbook::new();
     let header = header_format();
 
     // The detail sheet is always written (even empty) so the workbook always opens
     // on the table the operator asked for; it is also the only sheet with an
     // autofilter, being the only one meant to be sliced by hand.
+    //
+    // Past Excel's row limit the rows continue on "Patches (2)", "Patches (3)", …
+    // rather than failing the export: a whole-fleet third-party feed can run to
+    // seven figures, and the rows past the limit are as real as the ones before it.
+    let mut chunks = rows.chunks(rows_per_sheet.max(1));
     write_sheet(
         &mut workbook,
         &header,
         "Patches",
         &DETAIL_COLUMNS,
         &DETAIL_WIDTHS,
-        rows,
+        chunks.next().unwrap_or_default(),
         true,
     )?;
+    for (i, chunk) in chunks.enumerate() {
+        write_sheet(
+            &mut workbook,
+            &header,
+            &format!("Patches ({})", i + 2),
+            &DETAIL_COLUMNS,
+            &DETAIL_WIDTHS,
+            chunk,
+            true,
+        )?;
+    }
     if !compliance.is_empty() {
         write_sheet(
             &mut workbook,
@@ -240,7 +286,9 @@ fn write_about_sheet(
         for (label, value) in facets {
             row += 1;
             sheet.write_string(row, 0, *label)?;
-            sheet.write_string(row, 1, value)?;
+            // Operator-chosen names and free text (a long org list, a pasted
+            // search) — clamped like every other free-text cell.
+            sheet.write_string(row, 1, clamp_cell(value.clone()))?;
         }
     }
 
@@ -291,7 +339,9 @@ fn write_sheet<T>(
         for (col, (_, value)) in columns.iter().enumerate() {
             let col = col as u16;
             match value(item) {
-                TableCell::Text(s) => sheet.write_string(row, col, &s)?,
+                // By value: the accessor already allocated this String, and a
+                // reference only made the writer clone it again.
+                TableCell::Text(s) => sheet.write_string(row, col, clamp_cell(s))?,
                 TableCell::Count(n) => sheet.write_number(row, col, n as f64)?,
                 TableCell::Number(n) => sheet.write_number(row, col, n)?,
             };
@@ -643,6 +693,113 @@ mod tests {
             "srv01, srv02, srv03",
             "every affected device name is comma-joined"
         );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A patch failing on a few thousand devices joined its names past Excel's
+    /// 32,767-character cell limit, and the one rejected cell failed the whole
+    /// export. The list now ends in "… and N more" inside the limit.
+    #[test]
+    fn a_fleet_wide_failure_list_fits_in_one_cell() {
+        use crate::rows::CELL_MAX_CHARS;
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = std::env::temp_dir().join("npt-export-huge-failure.xlsx");
+
+        let names: Vec<std::sync::Arc<str>> = (0..5_000)
+            .map(|i| format!("workstation-{i:05}.corp.example").into())
+            .collect();
+        let failures = vec![FailureGroup {
+            patch_type: "OS",
+            kb: Some("KB5040434".into()),
+            name: "Cumulative Update".into(),
+            severity: "Critical",
+            severity_rank: 7,
+            affected_devices: names.len(),
+            device_names: names,
+            latest_failure: None,
+            latest_failure_ts: None,
+        }];
+        // A free-text facet past the cap is clamped rather than failing too.
+        let scope = QueryScope {
+            facets: vec![("Organizations", "x".repeat(CELL_MAX_CHARS + 10))],
+            ..Default::default()
+        };
+        let meta = WorkbookMeta {
+            scope: &scope,
+            ..meta()
+        };
+        write_workbook(
+            &path.to_string_lossy(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &failures,
+            &meta,
+        )
+        .expect("the export no longer fails on a long cell");
+
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let range = wb.worksheet_range("Patch Failures").unwrap();
+        let cell = range.get_value((1, 6)).unwrap().to_string();
+        assert!(cell.chars().count() <= CELL_MAX_CHARS);
+        assert!(cell.starts_with("workstation-00000.corp.example, "));
+        let more = cell.rsplit("… and ").next().unwrap();
+        let dropped: usize = more.trim_end_matches(" more").parse().unwrap();
+        let shown = cell.matches("workstation-").count();
+        assert_eq!(
+            shown + dropped,
+            5_000,
+            "the count accounts for every device"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Past Excel's row limit the detail rows continue on numbered sheets instead
+    /// of failing the export; nothing is dropped and About still goes last.
+    #[test]
+    fn detail_rows_past_one_sheet_continue_on_numbered_sheets() {
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = std::env::temp_dir().join("npt-export-split.xlsx");
+        let rows: Vec<PatchRow> = (0..5)
+            .map(|i| PatchRow {
+                device_id: i + 1,
+                device_name: format!("srv{i}").into(),
+                ..sample_row()
+            })
+            .collect();
+        write_workbook_split(
+            &path.to_string_lossy(),
+            &rows,
+            &[],
+            &[],
+            &[],
+            &[],
+            &meta(),
+            2,
+        )
+        .unwrap();
+
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        assert_eq!(
+            wb.sheet_names(),
+            ["Patches", "Patches (2)", "Patches (3)", "About"]
+        );
+        let mut seen = Vec::new();
+        for sheet in ["Patches", "Patches (2)", "Patches (3)"] {
+            let range = wb.worksheet_range(sheet).unwrap();
+            assert_eq!(
+                range.get_value((0, 0)).unwrap().to_string(),
+                "Organization",
+                "{sheet} repeats the header"
+            );
+            for r in 1..range.height() as u32 {
+                seen.push(range.get_value((r, 3)).unwrap().to_string());
+            }
+        }
+        assert_eq!(seen, ["srv0", "srv1", "srv2", "srv3", "srv4"]);
 
         let _ = std::fs::remove_file(&path);
     }
