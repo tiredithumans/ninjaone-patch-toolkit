@@ -98,8 +98,13 @@ held only "dispatching" for a request NinjaOne rejected.
 
 `plan_action` hashes **everything that reaches NinjaOne or that the guardrails read** — kind ‖
 sorted device ids ‖ script ref ‖ **resolved** script ‖ per-device parameters ‖ **resolved**
-run_as ‖ reboot choice ‖ reboot mode ‖ include_offline ‖ override_window ‖ dry_run — into a
-5-minute token; `run_action` re-plans from scratch and re-checks the hash.
+run_as ‖ reboot choice ‖ reboot mode ‖ reboot reason ‖ include_offline ‖ override_window ‖
+dry_run — into a 5-minute token; `run_action` re-plans from scratch and re-checks the hash.
+
+- The reboot reason is sent to NinjaOne and lands in its activity feed as the server-side record
+  of why the machine went down, so it is bound too (length-prefixed, as dispatched: `None` is an
+  empty string). It used to be excluded alongside the display-only `script_name`, so the reason
+  could be edited after review under the same approval.
 
 - The run-as identity is resolved in `build_plan` (`resolve_run_as`: a blank request means the
   Settings default) and `run_action` dispatches that value. It used to fall back to Settings

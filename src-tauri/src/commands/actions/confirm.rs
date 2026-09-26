@@ -13,8 +13,8 @@ use crate::api::actions::ScriptRef;
 /// everything the guardrails react to**.
 ///
 /// A confirmation token is only honored alongside a matching hash, so editing the
-/// device list (or the parameters, the reboot mode, the run-as identity, or either
-/// guardrail toggle) after the dialog opened invalidates the approval instead of
+/// device list (or the parameters, the reboot mode and reason, the run-as identity,
+/// or either guardrail toggle) after the dialog opened invalidates the approval instead of
 /// silently widening it.
 ///
 /// The request is destructured exhaustively so that adding a field to
@@ -54,7 +54,7 @@ pub(super) fn request_hash(
         run_as: _,
         reboot,
         reboot_mode,
-        reason: _,
+        reason,
         include_offline,
         override_window,
         dry_run,
@@ -109,6 +109,13 @@ pub(super) fn request_hash(
     );
     field(format!("{reboot:?}").as_bytes());
     field(format!("{reboot_mode:?}").as_bytes());
+    // The reboot reason is sent to NinjaOne and lands in its activity feed as the
+    // server-side record of why the machine went down, so the approval covers the
+    // text the operator reviewed. It was excluded as if it were display-only. Hashed
+    // as dispatched (`None` sends an empty string) and length-prefixed, because it is
+    // free text typed by hand and may contain the separator byte.
+    let reason = reason.as_deref().unwrap_or_default();
+    field(format!("{}:{reason}", reason.len()).as_bytes());
     field(&[u8::from(*include_offline)]);
     field(&[u8::from(*override_window)]);
     field(&[u8::from(*dry_run)]);

@@ -253,6 +253,25 @@ fn request_hash_binds_every_guardrail_and_dispatch_input() {
     assert_ne!(h, hash(&base, "dryRun=false"), "parameters must bind");
 }
 
+/// The reboot reason is sent to NinjaOne and recorded in its activity feed, so an
+/// approval for one reason must not dispatch with another. It used to be excluded
+/// from the hash as if it were display-only.
+#[test]
+fn request_hash_binds_the_reboot_reason() {
+    let mut a = request(ActionKind::Reboot, vec![1]);
+    a.reason = Some("Monthly patch window".into());
+    let mut b = a.clone();
+    b.reason = Some("Something else entirely".into());
+    assert_ne!(hash(&a, ""), hash(&b, ""), "the reason must bind");
+
+    // Hashed as dispatched: an absent reason is sent as an empty one.
+    let mut none = a.clone();
+    none.reason = None;
+    let mut empty = a.clone();
+    empty.reason = Some(String::new());
+    assert_eq!(hash(&none, ""), hash(&empty, ""));
+}
+
 /// Field values are separated, so two different requests cannot concatenate
 /// into the same hash input.
 #[test]
