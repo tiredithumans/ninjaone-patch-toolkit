@@ -1,5 +1,6 @@
+use super::jobs::constant_time_eq;
 use super::*;
-use crate::actions::{ActionKind, JobState};
+use crate::actions::{ActionKind, JobState, MAX_JOBS};
 use crate::rows::PatchFamilies;
 use crate::rows::{QueryResult, page_rows};
 

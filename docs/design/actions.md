@@ -157,8 +157,8 @@ for how the invalidation survives an in-flight fetch.
 
 ## Job state is tenant-stamped; the poller is single-claim
 
-Job state lives in `AppState.jobs`, mirroring `last_result` — a tenant switch reads as a miss. The
-poller is single-claim (`try_claim_job_poller`) and emits `action:progress` (no capability change
+Job state lives in `AppState.jobs` (methods in `state/jobs.rs`), mirroring `last_result` — a
+tenant switch reads as a miss. The poller is single-claim (`try_claim_job_poller`) and emits `action:progress` (no capability change
 needed; `core:event:default` already covers it). It retires via `release_job_poller_if_idle()`,
 which re-checks for pending jobs **and** clears the claim flag under the jobs lock. Dispatch
 appends its jobs before calling `try_claim_job_poller`, so a batch landing during shutdown is

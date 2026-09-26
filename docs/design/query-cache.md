@@ -1,12 +1,13 @@
 # Query result cache and whole-fleet prefetch
 
 Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
-Code: `src-tauri/src/state.rs` (`AppState`), `src-tauri/src/commands/patches.rs`
-(`query_patches`, `run_query`, `assemble_result`), `src-tauri/src/rows/`.
+Code: `src-tauri/src/state.rs` (`AppState`), `src-tauri/src/state/cache.rs` (`TenantCache`),
+`src-tauri/src/commands/patches.rs` (`query_patches`, `run_query`, `assemble_result`),
+`src-tauri/src/rows/`.
 
 ## One cache protocol, one type
 
-`TenantCache<T>` (`state.rs`) owns the whole five-step protocol every TTL'd slot needs:
+`TenantCache<T>` (`state/cache.rs`) owns the whole five-step protocol every TTL'd slot needs:
 
 1. probe the slot — tenant match **and** within the TTL — and return a hit;
 2. take the single-flight gate, so the loser of a race waits instead of paging a
