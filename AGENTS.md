@@ -186,8 +186,10 @@ Auth:
 
 Write path (device actions) — violating these silently widens the blast radius:
 
-- **Every write POST passes `ReplaySafety::ActOnce`**; a timed-out dispatch becomes
-  `JobState::Unknown` and is polled, never replayed. → `docs/design/actions.md#replaysafetyactonce-on-every-post`
+- **Every write POST passes `ReplaySafety::ActOnce`**; any ambiguous outcome (timeout, in-flight
+  transport error, 5xx, unreadable 2xx) fails with `api::OutcomeUnknown` and becomes
+  `JobState::Unknown` via `is_outcome_unknown` (a downcast, never message text) — polled, never
+  replayed. → `docs/design/actions.md#replaysafetyactonce-on-every-post`
 - **"Apply all" (native endpoint) and "Apply selected" (library script) are different `ActionKind`s
   under different `ACTION_GROUPS` headings.** Don't collapse them. Remediation script ids resolve
   from Settings, never the request; an unset id or an empty target list is a `plan()` blocker. → `docs/design/actions.md#there-is-no-per-kb-apply-endpoint-so-there-are-two-apply-paths-and-the-ui-names-both`
@@ -195,10 +197,10 @@ Write path (device actions) — violating these silently widens the blast radius
   (`util::targets_by_device` → `ActionRequest.device_targets` → `per_device_parameters`). Ticking a
   row must not tick the device's other rows. No batch-wide `targets` field. → `docs/design/actions.md#selection-is-per-patch-row-dispatch-is-per-device-with-per-device-targets`
 - **`build_parameters` encodes by kind:** `kbAllowList=` for OS, `productAllowListB64=` for
-  software (NinjaOne splits on spaces). → `docs/design/actions.md#the-parameter-encoding-is-chosen-by-kind`
+  software (NinjaOne splits on spaces). OS targets must pass `kb_number` or `plan()` blocks. → `docs/design/actions.md#the-parameter-encoding-is-chosen-by-kind`
 - **Confirm tokens are payload-bound and single-use.** `request_hash` destructures `ActionRequest`
-  exhaustively, hashes the *resolved* script and length-prefixed per-device parameters; `run_action`
-  re-plans and re-checks. → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
+  exhaustively, hashes the *resolved* script and run-as and length-prefixed per-device parameters; ids are not
+  de-duplicated (a repeated id is a `plan()` blocker); `run_action` re-plans and re-checks. → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
 - **Guardrails go in `actions::plan` (`blockers`/`warnings`), not in a dialog.** The `dry_run`
   check is also asserted at the dispatch site. → `docs/design/actions.md#guardrails-live-in-actionsplan`
 - **One dispatch surface (`ActionBar`); `Run as` / reboot / `Dry run` are rendered once** and
@@ -210,7 +212,7 @@ Write path (device actions) — violating these silently widens the blast radius
   `release_job_poller_if_idle`). Dispatch appends jobs before claiming. → `docs/design/actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim`
 - **A job resolves from `/activities` only:** `statusCode` is lifecycle, `activityResult` is the
   verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is applied
-  client-side; `is_action_activity` lists what the native endpoints emit. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
+  client-side; `is_action_activity(kind, type)` accepts only the types that kind emits. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 
 NinjaOne API client:
 
