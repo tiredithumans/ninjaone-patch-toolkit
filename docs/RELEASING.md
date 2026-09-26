@@ -55,6 +55,15 @@ Pick a strong password. The command prints the public key; that string goes into
   backup). **Losing the key permanently breaks auto-update for every installed copy** —
   users would have to notice on their own and manually download the next release.
 
+## Key history
+
+Each installed copy trusts only the key its own binary was built with, so a replaced key is a
+version boundary every user has to cross by hand once.
+
+| Key ID | Trusted by | Retired |
+|---|---|---|
+| `D757146EBA9BCDFD` | 0.14.2 and earlier | 0.14.4. The password no longer matched and the original could not be recovered, so the key was replaced. |
+
 ## Succession (the one unrecoverable failure)
 
 Everything else in this repo can be rebuilt from the source tree. The signing key cannot.
