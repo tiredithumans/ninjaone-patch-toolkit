@@ -286,7 +286,7 @@ Frontend:
 - **Conventional Commits required:** `<type>[(scope)][!]: <description>` (enforced by the
   `conventional-commit-validator.sh` PreToolUse hook).
   - Types: `feat fix docs chore refactor test build ci perf style revert deps`
-  - Scopes: `desktop`, `web`, `api`, `auth`, `export`, `filter`, `settings`, `ci`, `docs`.
+  - Scopes: `desktop`, `web`, `api`, `auth`, `actions`, `export`, `filter`, `settings`, `release`, `ci`, `docs`.
 - User-facing changes go under `## [Unreleased]` in `CHANGELOG.md`; the release skill rolls it.
 
 ## Verification playbook
