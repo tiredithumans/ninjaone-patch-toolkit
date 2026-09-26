@@ -1,7 +1,7 @@
 //! What the operator (and, through them, the maintainer) can see about what this
 //! app did.
 //!
-//! Two read-only surfaces, both over files the app already writes:
+//! Three read-only surfaces, all over files the app already writes:
 //!
 //! * [`open_diagnostics_folder`] reveals the directory holding the rolling logs, so
 //!   a bug report can carry evidence. Before this, `init_tracing` wrote to stdout
@@ -12,10 +12,12 @@
 //!   dispatch; nothing could read it back, so restarting the app after rebooting 25
 //!   servers left no in-app trace of it. The in-memory job list is per-session and
 //!   has a "Clear history" button; this is the durable half.
+//! * [`read_run_history`] renders `run-history.jsonl`, the one-rollup-per-query
+//!   trend `history` appends, so "is the backlog shrinking" has an answer.
 //!
-//! Neither command touches the network or `AppState`, and neither mutates anything,
-//! so neither is gated on `require_actions_enabled` — reading your own audit trail
-//! must not require the write feature to be switched on.
+//! None of the commands touches the network or `AppState`, and none mutates
+//! anything, so none is gated on `require_actions_enabled` — reading your own audit
+//! trail must not require the write feature to be switched on.
 
 use serde::Serialize;
 use tracing::warn;
