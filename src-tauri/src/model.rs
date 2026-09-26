@@ -187,7 +187,7 @@ impl Severity {
             .map_or(Self::Unknown, |(_, severity)| *severity)
     }
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Critical => "Critical",
             Self::Important => "Important",

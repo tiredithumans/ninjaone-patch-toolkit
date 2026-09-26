@@ -77,6 +77,23 @@ fn total_severity_is_the_sum_of_its_bands() {
         ],
         "band order mirrors Severity::rank(), most urgent first"
     );
+
+    // Each band is labelled by the variant it counts, and the variants run strictly
+    // most-to-least urgent — so a band cannot be relabelled, or reordered away from
+    // the severity sort, without this failing.
+    use crate::model::Severity;
+    let variants = [
+        Severity::Critical,
+        Severity::Important,
+        Severity::Security,
+        Severity::Moderate,
+        Severity::Recommended,
+        Severity::Low,
+        Severity::Optional,
+        Severity::Unknown,
+    ];
+    assert_eq!(labels, variants.map(Severity::label));
+    assert!(variants.windows(2).all(|w| w[0].rank() > w[1].rank()));
 }
 
 /// `AddAssign` is the other field-wise site; it must agree with `BANDS` too.

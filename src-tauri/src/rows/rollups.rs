@@ -86,15 +86,18 @@ impl SeverityCounts {
     /// how many bands exist. The report used to match bands by *string label* with a
     /// `_ => counts.unknown` catch-all, which meant a renamed band silently reported
     /// Unknown's count and then double-counted it into the total.
+    ///
+    /// The labels come from [`Severity::label`] rather than being restated here, so
+    /// the chart legend cannot drift from the label the table and exports print.
     pub const BANDS: [SeverityBand; 8] = [
-        ("Critical", |c| c.critical),
-        ("Important", |c| c.important),
-        ("Security", |c| c.security),
-        ("Moderate", |c| c.moderate),
-        ("Recommended", |c| c.recommended),
-        ("Low", |c| c.low),
-        ("Optional", |c| c.optional),
-        ("Unknown", |c| c.unknown),
+        (Severity::Critical.label(), |c| c.critical),
+        (Severity::Important.label(), |c| c.important),
+        (Severity::Security.label(), |c| c.security),
+        (Severity::Moderate.label(), |c| c.moderate),
+        (Severity::Recommended.label(), |c| c.recommended),
+        (Severity::Low.label(), |c| c.low),
+        (Severity::Optional.label(), |c| c.optional),
+        (Severity::Unknown.label(), |c| c.unknown),
     ];
 
     /// Total across every band. Derived from [`BANDS`](Self::BANDS) so it can never
