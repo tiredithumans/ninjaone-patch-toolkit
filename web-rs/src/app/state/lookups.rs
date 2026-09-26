@@ -67,26 +67,38 @@ impl AppState {
     /// Reloads the location list for the current organization selection, then prunes
     /// any selected location that is no longer offered.
     pub(in crate::app) fn reload_locations(self) {
+        self.load_locations(None);
+    }
+
+    /// Loads the location list for the current organization selection. Once the
+    /// list exists it selects `restore`, if given, and then prunes any selected
+    /// location the list does not offer — the ids can only be pruned against a list
+    /// that has arrived, which is why a preset's saved ids ride in here rather than
+    /// being set up front.
+    pub(super) fn load_locations(self, restore: Option<Vec<i64>>) {
         let orgs = self.filters.org_ids.get_untracked();
+        let apply = move |locs: Vec<Location>| {
+            self.lookups.locations.set(locs);
+            if let Some(ids) = restore {
+                self.filters.loc_ids.set(ids);
+            }
+            self.prune_selected_locations();
+        };
         // Demo mode resolves locations from the sample, not the backend.
         if self.session.demo.get_untracked() {
-            self.lookups.locations.set(demo::sample_locations(&orgs));
-            self.prune_selected_locations();
+            apply(demo::sample_locations(&orgs));
             return;
         }
         spawn_local(async move {
             match api::list_locations(orgs).await {
-                Ok(locs) => {
-                    self.lookups.locations.set(locs);
-                    self.prune_selected_locations();
-                }
+                Ok(locs) => apply(locs),
                 Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
             }
         });
     }
 
     /// Drops selected location ids that the current list no longer offers.
-    pub(super) fn prune_selected_locations(self) {
+    fn prune_selected_locations(self) {
         let available: Vec<i64> = self
             .lookups
             .locations

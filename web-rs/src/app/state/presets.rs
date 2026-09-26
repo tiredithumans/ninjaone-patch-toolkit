@@ -71,25 +71,8 @@ impl AppState {
         // location selection — the list has to exist before the ids can be pruned
         // against it.
         self.filters.org_ids.set(f.organization_ids);
-        let want_locs = f.location_ids;
         self.filters.loc_ids.set(Vec::new());
         self.lookups.locations.set(Vec::new());
-        let orgs = self.filters.org_ids.get_untracked();
-        if self.session.demo.get_untracked() {
-            self.lookups.locations.set(demo::sample_locations(&orgs));
-            self.filters.loc_ids.set(want_locs);
-            self.prune_selected_locations();
-            return;
-        }
-        spawn_local(async move {
-            match api::list_locations(orgs).await {
-                Ok(locs) => {
-                    self.lookups.locations.set(locs);
-                    self.filters.loc_ids.set(want_locs);
-                    self.prune_selected_locations();
-                }
-                Err(e) => self.notify(Toast::err(format!("Couldn't load locations: {e}"))),
-            }
-        });
+        self.load_locations(Some(f.location_ids));
     }
 }
