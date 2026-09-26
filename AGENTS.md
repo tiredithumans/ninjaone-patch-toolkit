@@ -63,7 +63,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/history.rs               # append-only run-history.jsonl (one rollup line per query) + RunRecord
 ├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / by OS / Needs-Reboot / Failures / About)
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
-├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets)
+├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
 ├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
@@ -71,7 +71,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── build.rs                     # tauri_build::build()
 ├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint)
 ├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
-└── capabilities/default.json    # scoped capability definitions
+└── capabilities/default.json    # webview capabilities: `core:default` only (the save dialog runs in Rust)
 
 web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 crate
 ├── src/main.rs                  # entry: panic hook + mount App
@@ -168,18 +168,24 @@ Backend — commands, cache, concurrency:
   writes, the audit append, the save dialog, keyring I/O. Judge new code against the rule, not
   against that list. → `docs/design/concurrency.md`
 - **`AppState` locks are brief and never held across `.await`.** Take `settings_snapshot()` first;
-  hold the result mutex for a handle (`current_result_handle`), not for the work. → `docs/design/concurrency.md`
+  hold the result mutex for a handle (`current_result_handle`), not for the work. Settings writers
+  go through `settings_write` + `replace_settings` (I/O on a blocking thread, published after the
+  disk write); only an instance/client-id change clears caches on save. → `docs/design/concurrency.md`
 
 Auth:
 
 - **Secrets live in the keyring only — never `settings.json`, never a `tracing` event.** The access
-  token is in-memory only. → `docs/design/auth.md#secrets-discipline--keyring-only-never-settingsjson-never-logs`
+  token is in-memory only; `restore_session` silently refreshes from the keyring at launch and on
+  `sign_in` (never on `reauthorize`). → `docs/design/auth.md#secrets-discipline--keyring-only-never-settingsjson-never-logs`
+- **Sign-out sticks.** `logout` and a completed interactive sign-in bump the session generation;
+  `store_tokens` checks tenant + session under `persist_lock`; a dead grant deletes only the entry
+  of the tenant it started under. → `docs/design/auth.md#sign-out-sticks-the-session-generation`
 - **PKCE with a loopback redirect on `callback_port`; Native (no secret) and Web (secret) clients
   are both supported.** The callback listener loops over connections. → `docs/design/auth.md`
 - **Scope is conditional on `settings.actions.enabled` and the refresh grant never re-sends it.**
   `management_grant()` detects a read-only grant; `None` means unknowable, not denied.
   `reauthorize` drops the keyring refresh token first. → `docs/design/auth.md#scope-is-conditional-and-the-refresh-grant-never-re-sends-it`
-- **`store_tokens` assigns in-memory first and downgrades a keyring failure to a warning.**
+- **`store_tokens` assigns in-memory first (session-gated) and downgrades a keyring failure to a warning.**
   `invalidate_access_token(&stale)` no-ops unless the token is still current. → `docs/design/auth.md#in-memory-before-keyring-and-only-the-token-that-got-the-401-is-invalidated`
 - **The refresh is single-flight under `refresh_lock`, and only `invalid_grant` clears the
   credential** (`refresh_grant_is_dead`). Not "any 4xx": 429 is retry-later. → `docs/design/auth.md#the-refresh-is-single-flight-and-only-invalid_grant-clears-the-credential`

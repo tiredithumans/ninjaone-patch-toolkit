@@ -53,8 +53,11 @@ pub(crate) fn Header() -> impl IntoView {
                                         return;
                                     }
                                     state.session.signing_in.set(true);
-                                    state
-                                        .notify(Toast::ok("Complete the sign-in in your browser…"));
+                                    // Neutral wording: the backend reuses a saved sign-in
+                                    // silently when it can, and only then opens a browser.
+                                    state.notify(Toast::ok(
+                                        "Signing in… if a browser opens, complete the sign-in there",
+                                    ));
                                     spawn_local(async move {
                                         match api::sign_in().await {
                                             Ok(()) => {
