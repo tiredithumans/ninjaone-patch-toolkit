@@ -41,8 +41,10 @@ symptoms — check it first, it may already name the cause.
   arg keys derive from the wrapper's own name and parameters, so a mismatch is a typo in one place.
 - `src/types.rs` — the hand-mirrored IPC types; a missing field deserializes as an error toast
   "decode <cmd>". `rows::tests::serialized_shapes_carry_every_frontend_required_key` pins the keys.
-- `src/app/state.rs` (signals + run/selection/session logic) and the view modules under
-  `src/app/`: `tables.rs`, `filters.rs`, `controls.rs`, `actions.rs`, `settings.rs`, `charts.rs`,
+- `src/app/state.rs` (signals) with its `impl AppState` split by concern under `src/app/state/`
+  (`query.rs` runs/refresh/drill-downs, `view.rs` paging/sort/groups, `selection.rs`,
+  `actions.rs` dispatch/jobs, `lookups.rs`, `presets.rs`), and the view modules under `src/app/`:
+  `tables.rs` + `tables/` (one file per results tab), `filters.rs`, `controls.rs`, `actions.rs`, `settings.rs`, `charts.rs`,
   `header.rs`, `update.rs`, `modal.rs`, `toaster.rs`. Pure helpers live in `src/app/util/` and are
   the only frontend code with tests.
 

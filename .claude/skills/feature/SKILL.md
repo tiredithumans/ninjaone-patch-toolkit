@@ -80,8 +80,8 @@ parameters. Mirror `MyArgs` / `MyResult` in `web-rs/src/types.rs` (plain `String
 
 ## 5. UI (optional)
 
-- Call `api::my_command(...)` from a signal-driven handler in `web-rs/src/app/state.rs` or the
-  component module; render in `web-rs/src/app/<module>.rs`. CSS is global `web-rs/styles.css`.
+- Call `api::my_command(...)` from a signal-driven handler in the matching `web-rs/src/app/state/<concern>.rs`
+  or the component module; render in `web-rs/src/app/<module>.rs`. CSS is global `web-rs/styles.css`.
 - A new dialog calls `modal::focus_trap()` inside the closure that creates it.
 
 ## 6. Verify

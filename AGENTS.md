@@ -78,8 +78,12 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ├── src/app.rs                   # module decls, shared consts (SEVERITY_OPTIONS), App root + startup wiring
 ├── src/app/
 │   ├── state.rs                 # AppState wrapper + Copy sub-structs by concern; no test module — logic goes to util
+│   ├── state/                   # impl AppState, one file per concern (no test modules)
+│   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
-│   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · tables.rs · toaster.rs · update.rs
+│   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
+│   ├── tables/                  # one file per results tab: patches · compliance · failures · reboot · trend
+│   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · toaster.rs · update.rs
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
 │       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · tests.rs
