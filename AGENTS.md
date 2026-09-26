@@ -3,7 +3,8 @@
 A **native Rust desktop app for patching-operations teams**. It authenticates to the NinjaOne
 Public API with **OAuth 2.0 + PKCE**, filters the fleet, lists per-server patches, computes
 compliance / reboot / SLA rollups, and exports to Excel. Tauri 2 backend + Leptos 0.8 (CSR/WASM)
-frontend, **edition 2024**, MSRV **1.98** (`rust-toolchain.toml`).
+frontend, **edition 2024**, MSRV **1.98** (`rust-toolchain.toml` pins `1.98.1`, the toolchain
+CI installs).
 
 Unlike a workspace, the two crates are **independent**: `src-tauri/` (backend, native target) and
 `web-rs/` (frontend, `wasm32-unknown-unknown`) each have their own `Cargo.toml` + `Cargo.lock`.
@@ -18,7 +19,7 @@ enforces it. The **rationale** behind each rule lives in [`docs/design/`](./docs
 |---|---|
 | **Task runner** | `just` — recipes in `/justfile`; Tauri's `before{Dev,Build}Command` call Trunk directly. |
 | **Setup / Dev** | `just setup` once per clone (installs `.githooks`), then `just dev` (`cargo tauri dev`; auto-starts `trunk serve` on `:8080`). |
-| **Verify** | `just verify` — every gate CI runs; the justfile is the list. |
+| **Verify** | `just verify` — the Rust gates CI runs (fmt, clippy, tests, both crates); the justfile is the list. CI adds the Trunk build and the gates in `docs/design/ci.md`. |
 | **Crates** | `src-tauri` (backend) + `web-rs` (frontend WASM). No cargo workspace. |
 | **IPC** | Global `window.__TAURI__.core.invoke` (`withGlobalTauri`), wrapped in `web-rs/src/api.rs`. |
 | **NinjaOne spec** | `docs/api/ninjaone-surface.md` is the committed digest of the surface we consume; the weekly `ninjaone-contract` CI job fails when the vendor's spec moves. Verify shapes/params/enums there or in <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> — never infer them. A fixture must emit the vendor's keys, not the ones the code hopes for: `DeviceSoftwarePatch` is `title`/`impact`/`productIdentifier` and **no** `kbNumber` — build it with `model::software_patch_json`. |
@@ -34,6 +35,7 @@ Skills live in `.claude/skills/` and Claude Code loads their descriptions automa
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
 ├── src/main.rs                  # binary entry → lib::run()
+├── src/paths.rs                 # app_dir(): the one on-disk location for settings, logs, audit + history files
 ├── src/state.rs                 # AppState: auth, api client, settings, tenant-stamped result/fleet caches, job store, confirm-token slot
 ├── src/state/tests.rs
 ├── src/auth.rs                  # OAuth2 PKCE (S256, loopback), keyring, single-flight refresh, conditional scope + management grant
@@ -63,14 +65,16 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets)
 ├── src/error.rs                 # UiError { message } — the IPC error shape
-├── src/commands/                # #[tauri::command] handlers (actions, auth, lookups, patches, export, settings, update)
+├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
+├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
 ├── src/commands/patches/tests.rs
+├── build.rs                     # tauri_build::build()
 ├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint)
 ├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
 └── capabilities/default.json    # scoped capability definitions
 
 web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 crate
-├── src/main.rs                  # entry, theme, root mount
+├── src/main.rs                  # entry: panic hook + mount App
 ├── src/app.rs                   # module decls, shared consts (SEVERITY_OPTIONS), App root + startup wiring
 ├── src/app/
 │   ├── state.rs                 # AppState wrapper + Copy sub-structs by concern; no test module — logic goes to util
@@ -82,12 +86,16 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
+├── index.html                   # Trunk entry (wasm + CSS links)
+├── tests/backend-grouping.json  # backend-generated fixture the demo's grouping is asserted against
 ├── styles.css                   # plain global CSS (BEM-ish names); --sev-* band tokens on :root
 └── Trunk.toml                   # WASM build/serve (127.0.0.1:8080); never set public_url here
 
 docs/design/                     # rationale behind the rules below, one note per domain
+docs/api/ninjaone-surface.md     # generated digest of the NinjaOne API surface we consume (ninjaone-contract job)
 docs/RELEASING.md · docs/TROUBLESHOOTING.md
-scripts/                         # screenshot capture tooling (Playwright; not shipped) + changelog-notes.sh
+scripts/                         # screenshot tooling (Playwright; not shipped), changelog-notes.sh, check-license-lists.sh, ninjaone-spec-digest.py
+about.toml · about.hbs · about-web.hbs  # cargo-about config + templates → THIRD-PARTY-LICENSES.md (`just licenses`)
 .githooks/                       # commit-msg (conventional commits) + pre-push (just verify); installed by `just setup`
 .claude/hooks/                   # the same commit rule plus command parity, AGENTS.md/README staleness, secrets scan; test.sh self-tests them (run in CI)
 .github/workflows/               # ci.yml · codeql.yml · pages.yml · release.yml · screenshot.yml
@@ -283,14 +291,16 @@ Frontend:
 
 ## Verification playbook
 
-`just verify` runs every local gate in CI's order; run it before declaring a change done. The
-individual recipes (`fmt-check`, `clippy`, `test`, `web-clippy`, `web-test`, …) are callable on
-their own — see `just --list`. For behavior a unit test can't prove, run `just dev` and exercise
-the view.
+`just verify` runs the Rust gates of CI's backend and frontend jobs in their order; run it before
+declaring a change done. The individual recipes (`fmt-check`, `clippy`, `test`, `web-clippy`,
+`web-test`, …) are callable on their own — see `just --list`. For behavior a unit test can't
+prove, run `just dev` and exercise the view. Hook or shell-script changes: `.claude/hooks/test.sh`
++ `shellcheck`. A dependency bump: `just licenses` and commit `THIRD-PARTY-LICENSES.md`.
 
-CI-only gates (coverage, audit/deny, CodeQL, manifest versions, screenshot tooling, the release
-verify job) → `docs/design/ci.md`. `cargo-audit` is a required check on `main`, so a green local
-`verify` can still fail CI on a new advisory.
+Gates `verify` does not run (Trunk `web-build`, coverage, audit/deny, licenses, the NinjaOne
+contract, shellcheck + hook tests, actionlint, conventional commits, CodeQL, manifest versions,
+screenshot tooling, the release verify job) → `docs/design/ci.md`. `cargo-audit` is a required
+check on `main`, so a green local `verify` can still fail CI on a new advisory.
 
 ## Keeping this file up to date
 
