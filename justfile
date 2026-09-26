@@ -126,6 +126,7 @@ web-deny:
 # Git Bash or WSL) — PowerShell's redirection would rewrite the encoding and line
 # endings and make the CI staleness check fail.
 [unix]
+[doc("Regenerate THIRD-PARTY-LICENSES.md for both crates (needs cargo-about).")]
 licenses:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -161,6 +162,7 @@ icon:
 # transitive tree than the one dependabot reviews.
 # [unix]: `VAR=1 cmd` and `cd … && …` are sh syntax, not PowerShell (windows-shell).
 [unix]
+[doc("Unit-test the screenshot tooling (needs Node, not Chromium).")]
 screenshot-test:
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix scripts ci --no-audit --no-fund
     npm --prefix scripts test
@@ -169,6 +171,7 @@ screenshot-test:
 # built web demo in headless Chromium. Needs Node; first run installs Playwright +
 # its Chromium (scripts/node_modules is gitignored). CI runs the same via screenshot.yml.
 [unix]
+[doc("Regenerate the README demo screenshot (needs Node; installs Chromium).")]
 screenshot:
     just web-build
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix scripts ci --no-audit --no-fund
