@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::paging::REPORTING_PAGE_SIZE;
-use super::{NinjaApiClient, ProgressFn};
+use super::{NinjaApiClient, ProgressFn, df_query};
 use crate::model::Patch;
 
 impl NinjaApiClient {
@@ -89,13 +89,6 @@ fn patch_query(df: Option<&str>, status: Option<&str>) -> Vec<(&'static str, Str
         query.push(("status", s.to_string()));
     }
     query
-}
-
-fn df_query(df: Option<&str>) -> Vec<(&'static str, String)> {
-    match df {
-        Some(f) if !f.is_empty() => vec![("df", f.to_string())],
-        _ => Vec::new(),
-    }
 }
 
 fn install_query(

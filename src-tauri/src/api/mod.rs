@@ -356,5 +356,15 @@ fn backoff(attempt: u8) -> Duration {
     Duration::from_secs(2u64.pow(attempt as u32))
 }
 
+/// The `df` (device filter) query parameter, or none at all. An empty filter is
+/// omitted rather than sent blank: a `df=` with no value is not "no filter" to the
+/// API. Shared by the device inventory and every patch feed so they cannot drift.
+fn df_query(df: Option<&str>) -> Vec<(&'static str, String)> {
+    match df {
+        Some(f) if !f.is_empty() => vec![("df", f.to_string())],
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests;
