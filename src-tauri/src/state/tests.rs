@@ -445,8 +445,9 @@ async fn concurrent_lookups_on_a_cold_cache_fetch_once() {
             state.lookups().await.expect("concurrent lookups")
         }));
     }
+    let mut sets = Vec::new();
     for t in tasks {
-        t.await.expect("join");
+        sets.push(t.await.expect("join"));
     }
 
     assert_eq!(
@@ -454,6 +455,9 @@ async fn concurrent_lookups_on_a_cold_cache_fetch_once() {
         1,
         "three concurrent callers on a cold cache must page the lookups once"
     );
+    // Every caller borrows the one cached set rather than receiving its own copy
+    // of all three lists.
+    assert!(sets.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1])));
 }
 
 /// Same race, on the lookups slot. `clear_lookups_cache` cleared it bare while

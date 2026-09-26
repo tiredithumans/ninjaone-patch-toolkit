@@ -12,8 +12,8 @@ use crate::state::AppState;
 /// every time.
 #[tauri::command]
 pub async fn list_orgs(state: State<'_, AppState>) -> Result<Vec<Organization>, UiError> {
-    let (orgs, _, _) = state.lookups().await.map_err(UiError::from)?;
-    Ok(orgs.as_ref().clone())
+    let lookups = state.lookups().await.map_err(UiError::from)?;
+    Ok(lookups.orgs.clone())
 }
 
 /// Locations belonging to any of `org_ids`; an empty list means every organization.
@@ -27,8 +27,9 @@ pub async fn list_locations(
     state: State<'_, AppState>,
     org_ids: Vec<i64>,
 ) -> Result<Vec<Location>, UiError> {
-    let (_, locations, _) = state.lookups().await.map_err(UiError::from)?;
-    Ok(locations
+    let lookups = state.lookups().await.map_err(UiError::from)?;
+    Ok(lookups
+        .locations
         .iter()
         .filter(|l| org_ids.is_empty() || l.organization_id.is_some_and(|id| org_ids.contains(&id)))
         .cloned()
@@ -37,8 +38,8 @@ pub async fn list_locations(
 
 #[tauri::command]
 pub async fn list_roles(state: State<'_, AppState>) -> Result<Vec<Role>, UiError> {
-    let (_, _, roles) = state.lookups().await.map_err(UiError::from)?;
-    Ok(roles.as_ref().clone())
+    let lookups = state.lookups().await.map_err(UiError::from)?;
+    Ok(lookups.roles.clone())
 }
 
 #[derive(Debug, Serialize)]

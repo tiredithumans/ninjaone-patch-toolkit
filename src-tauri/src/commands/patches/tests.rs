@@ -1,5 +1,6 @@
 use super::*;
 use crate::auth::AuthState;
+use crate::model::Organization;
 use serde_json::json;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -249,14 +250,14 @@ fn fixed_now() -> DateTime<Utc> {
 /// Lookups resolved up front — the org/location/role *fetch* is covered by the
 /// `api::mod` tests; here they only need to label rows so the join is assertable.
 fn lookups() -> Lookups {
-    (
-        Arc::new(vec![Organization {
+    Arc::new(LookupSet {
+        orgs: vec![Organization {
             id: 1,
             name: "Alpha".into(),
-        }]),
-        Arc::new(vec![]),
-        Arc::new(vec![]),
-    )
+        }],
+        locations: vec![],
+        roles: vec![],
+    })
 }
 
 fn client(server: &MockServer) -> NinjaApiClient {
@@ -894,8 +895,8 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
         cur(10, "KB1", "MANUAL", "CRITICAL"), // org 1 (Alpha) — in scope
         cur(20, "KB2", "MANUAL", "CRITICAL"), // org 2 (Beta) — out of scope
     ]);
-    let lookups = (
-        Arc::new(vec![
+    let lookups = Arc::new(LookupSet {
+        orgs: vec![
             Organization {
                 id: 1,
                 name: "Alpha".into(),
@@ -904,10 +905,10 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
                 id: 2,
                 name: "Beta".into(),
             },
-        ]),
-        Arc::new(vec![]),
-        Arc::new(vec![]),
-    );
+        ],
+        locations: vec![],
+        roles: vec![],
+    });
 
     let mut a = args(PatchType::Os, vec![PatchStatus::Pending]);
     a.filter.organization_ids = vec![1];

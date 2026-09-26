@@ -147,10 +147,13 @@ pub struct Memo<T> {
 /// One `TenantCache` entry rather than three, because they are fetched together and
 /// are only ever meaningful together — a row labelled with this tenant's orgs and
 /// the previous tenant's locations would be worse than no labels at all.
-struct LookupSet {
-    orgs: Vec<Organization>,
-    locations: Vec<Location>,
-    roles: Vec<Role>,
+///
+/// Handed out whole, behind the cache's own `Arc`, so a caller borrows the list it
+/// wants instead of receiving a copy of all three.
+pub struct LookupSet {
+    pub orgs: Vec<Organization>,
+    pub locations: Vec<Location>,
+    pub roles: Vec<Role>,
 }
 
 /// The two current-patch families live in separate `TenantCache` slots rather than
@@ -331,36 +334,22 @@ impl AppState {
         }
     }
 
-    /// Orgs/locations/roles used to label patch rows, served from a short-TTL
-    /// cache. Fetches the three concurrently on a miss. The lock is never held
-    /// across the `.await`.
-    pub async fn lookups(
-        &self,
-    ) -> Result<(Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>)> {
-        let set = self.lookup_set().await?;
-        // The three lists are cached as one entry but handed out separately, because
-        // `list_orgs`/`list_locations`/`list_roles` each want only their own. Cloning
-        // out of the shared `Arc<LookupSet>` costs one Vec copy per call; these are
-        // the small near-static lookups, not the whole-fleet feeds, and the
-        // alternative is leaking `LookupSet` into five call sites.
-        Ok((
-            Arc::new(set.orgs.clone()),
-            Arc::new(set.locations.clone()),
-            Arc::new(set.roles.clone()),
-        ))
-    }
-
     /// Organization id → name, read straight out of the cached lookups.
     ///
-    /// For the action planner, which needs nothing else: going through
-    /// [`Self::lookups`] cloned all three lists on every plan and every confirm just
-    /// to read the org names.
+    /// For the action planner, which needs nothing else.
     pub async fn org_names(&self) -> Result<HashMap<i64, String>> {
-        let set = self.lookup_set().await?;
+        let set = self.lookups().await?;
         Ok(set.orgs.iter().map(|o| (o.id, o.name.clone())).collect())
     }
 
-    async fn lookup_set(&self) -> Result<Arc<LookupSet>> {
+    /// Orgs/locations/roles used to label patch rows, served from a short-TTL
+    /// cache. Fetches the three concurrently on a miss. The lock is never held
+    /// across the `.await`.
+    ///
+    /// Returns the cached `Arc` itself. This used to copy all three lists into three
+    /// fresh `Arc<Vec<_>>`s on every call, so `list_orgs` paid for the locations and
+    /// roles it discarded and then cloned the orgs a second time to return them.
+    pub async fn lookups(&self) -> Result<Arc<LookupSet>> {
         let key = self.tenant_key();
         let (set, _) = self
             .lookups_cache
