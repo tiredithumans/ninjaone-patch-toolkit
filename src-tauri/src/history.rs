@@ -183,7 +183,12 @@ fn append(path: &Path, entry: &RunRecord) {
     }
     match opts.open(path) {
         Ok(mut file) => {
-            if let Err(err) = writeln!(file, "{line}") {
+            // One write for record + newline: `writeln!` on an unbuffered File is two
+            // syscalls, so a crash between them left a line with no terminator and
+            // the next append fused onto it.
+            let mut record = line.into_bytes();
+            record.push(b'\n');
+            if let Err(err) = file.write_all(&record) {
                 warn!(?err, path = %path.display(), "could not append run history");
                 return;
             }
