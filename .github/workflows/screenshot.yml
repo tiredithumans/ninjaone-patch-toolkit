@@ -33,24 +33,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Runs every piece of third-party code in this workflow — `npm ci` install
+  # scripts, a full wasm build (build scripts, proc-macros), Playwright's browser
+  # download — so it gets a read-only token and no secrets at all. It hands the
+  # image to `publish` as an artifact.
   capture:
     name: Capture demo
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Needs to push a branch and open a PR with the new image.
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     steps:
       # `ref: main` on purpose: a `release: published` run would otherwise check out
-      # the tag, and the PR branch would carry whatever that commit was rather than
-      # branching cleanly from main.
-      #
-      # No credential is persisted into .git/config: the steps below run `npm ci`
-      # (package install scripts) and a full wasm build (build scripts, proc-macros),
-      # all arbitrary third-party code that could otherwise read a token able to push
-      # to this repository. The token is handed only to the final push step — and
-      # which token it is decides whether CI runs on the PR (see the note at the top).
+      # the tag, and the image would be rendered from whatever that commit was.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
@@ -75,6 +70,37 @@ jobs:
           (cd scripts && npx playwright install --with-deps chromium)
       - name: Capture screenshot
         run: node scripts/screenshot.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: screenshot
+          path: docs/images/screenshot.png
+          if-no-files-found: error
+          retention-days: 1
+
+  # Holds the write token, and runs nothing but git and gh on a fresh checkout of
+  # main plus the downloaded image. Keeping it in its own job is the point: a
+  # compromised dependency in `capture` never shares a runner with this token, so
+  # it cannot read it or plant anything in .git/ for the push to execute.
+  publish:
+    name: Open screenshot PR
+    needs: capture
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # No credential is persisted into .git/config; the token is handed only to the
+      # push step below — and which token it is decides whether CI runs on the PR
+      # (see the note at the top).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: screenshot
+          path: docs/images
 
       - name: Push the refreshed screenshot and open or update its PR
         env:
@@ -93,9 +119,8 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # This step holds the token; a hook planted in .git/hooks by an earlier
-          # step's install script would otherwise run with it (and pre-push is
-          # handed the authenticated remote URL).
+          # Defense in depth: nothing in this job runs third-party code, but the
+          # token must never meet a hook (pre-push is handed the authenticated URL).
           git config core.hooksPath /dev/null
           git checkout -B "$BRANCH"
           git add docs/images/screenshot.png

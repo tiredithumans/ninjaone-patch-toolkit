@@ -116,10 +116,13 @@ compiles or installs holds only the permissions it must:
 
 - Workflow defaults are `contents: read`; the jobs that publish raise their own (`release.yml`'s
   `create-release`/`build`, `pages.yml`'s `deploy` — the only job with `pages: write` and
-  `id-token: write` — and `screenshot.yml`'s capture job).
+  `id-token: write` — and `screenshot.yml`'s `publish` job).
 - Checkouts in those workflows use `persist-credentials: false`, so no token sits in
-  `.git/config` while dependencies build. `screenshot.yml` hands its push token to the final
-  push step only, with git hooks disabled there.
+  `.git/config` while dependencies build.
+- `screenshot.yml` is two jobs so the write token never shares a runner with third-party code:
+  `capture` (read-only, no secrets) builds the demo, runs Playwright and uploads the image as an
+  artifact; `publish` checks out main, downloads the image and runs only git and `gh`, with the
+  token handed to the push step alone and git hooks disabled there.
 - The bundle `build` job in `release.yml` signs with `TAURI_SIGNING_PRIVATE_KEY` in the same
   step that compiles (tauri-action does both), so it restores **no** rust-cache (a cache is
   state other runs wrote) and builds only from the committed lockfiles (`trunk build --locked`
