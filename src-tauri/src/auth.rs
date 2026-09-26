@@ -4,7 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -34,6 +34,28 @@ const LEGACY_KEYRING_USER_REFRESH: &str = "refresh_token";
 /// Prefixes for the tenant-scoped entries — see [`tenant_entry`].
 const KEYRING_SECRET_PREFIX: &str = "client_secret";
 const KEYRING_REFRESH_PREFIX: &str = "refresh_token";
+
+/// Bounds applied to a token response's `expires_in` before it becomes a deadline.
+///
+/// The value is server-controlled and was used unchecked. A tiny one (or `0`, or a
+/// negative) made every token stale on arrival, so every API call in a fan-out
+/// queued behind the refresh lock for a grant of its own — a refresh storm against
+/// the token endpoint. A huge one overflowed `chrono::Duration::seconds`, which
+/// panics. A day is far past any lifetime NinjaOne issues; a minute is the least
+/// that still lets a query's requests share one token.
+const MIN_TOKEN_LIFETIME_SECS: i64 = 60;
+const MAX_TOKEN_LIFETIME_SECS: i64 = 24 * 60 * 60;
+/// How long before expiry a token is refreshed, so a request never leaves with a
+/// token that expires in flight. Capped at half the lifetime: a fixed five minutes
+/// is longer than a short-lived token lives at all.
+const MAX_REFRESH_SKEW_SECS: i64 = 300;
+
+/// When a token issued `now` with `expires_in` seconds of life should be refreshed.
+fn refresh_deadline(now: DateTime<Utc>, expires_in: i64) -> DateTime<Utc> {
+    let lifetime = expires_in.clamp(MIN_TOKEN_LIFETIME_SECS, MAX_TOKEN_LIFETIME_SECS);
+    let skew = (lifetime / 2).min(MAX_REFRESH_SKEW_SECS);
+    now + Duration::seconds(lifetime - skew)
+}
 
 /// The scope to request at sign-in. Split out so the choice is testable without
 /// standing up an authorize flow.
@@ -99,11 +121,46 @@ struct TenantStamp {
     client_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+impl TenantStamp {
+    /// This tenant's keyring entry for `prefix`. Derived from the stamp rather than
+    /// from whatever is configured *now*, so a grant that outlived a tenant switch
+    /// still files (or deletes) its credential under the tenant that issued it.
+    fn entry(&self, prefix: &str) -> String {
+        tenant_entry(prefix, &self.base_url, self.client_id.as_deref())
+    }
+}
+
+/// A [`TenantStamp`] plus the session generation the grant started in.
+///
+/// The tenant alone could not tell a sign-out apart from "nothing happened": a
+/// refresh already in flight when the operator signed out carried the same tenant,
+/// so it stored its tokens — in memory *and* in the keyring — straight after
+/// `logout` had deleted them, silently undoing the sign-out. `logout` bumps the
+/// generation, and so does a completed interactive sign-in, so a grant begun before
+/// either can neither store nor delete anything after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GrantStamp {
+    tenant: TenantStamp,
+    session: u64,
+}
+
+/// Everything a refresh needs, read in one lock acquisition so the host, client id,
+/// secret and refresh token cannot come from two different tenants.
+struct RefreshGrant {
+    stamp: GrantStamp,
+    client_id: String,
+    client_secret: Option<String>,
+    /// The in-memory refresh token, when this session already has one.
+    refresh_token: Option<String>,
+}
+
+#[derive(Clone)]
 pub struct TokenSet {
     pub access_token: String,
     pub refresh_token: Option<String>,
-    pub expires_at: DateTime<Utc>,
+    /// When to refresh: the server-stated expiry less a skew — see
+    /// [`refresh_deadline`].
+    pub refresh_at: DateTime<Utc>,
     /// Scope the authorization server actually granted, from the token response's
     /// `scope` field (RFC 6749 §5.1) or, failing that, the access token's own
     /// claim. `None` means "unknowable from this token" — which is not the same as
@@ -111,14 +168,30 @@ pub struct TokenSet {
     pub granted_scope: Option<String>,
 }
 
-impl TokenSet {
-    /// True when the access token is expired or within a 5 min skew.
-    pub fn is_stale(&self) -> bool {
-        Utc::now() + Duration::seconds(300) >= self.expires_at
+/// Hand-written so a `{:?}` anywhere — a `tracing` field, a test failure, a future
+/// `dbg!` — can never print a bearer or refresh token.
+impl std::fmt::Debug for TokenSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenSet")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("refresh_at", &self.refresh_at)
+            .field("granted_scope", &self.granted_scope)
+            .finish()
     }
 }
 
-#[derive(Debug, Deserialize)]
+impl TokenSet {
+    /// True once the token is past its refresh deadline.
+    pub fn is_stale(&self) -> bool {
+        Utc::now() >= self.refresh_at
+    }
+}
+
+#[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
     #[serde(default)]
@@ -129,6 +202,21 @@ struct TokenResponse {
     /// without an interactive round trip.
     #[serde(default)]
     scope: Option<String>,
+}
+
+/// Redacting, for the same reason as [`TokenSet`]'s.
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 /// Whether a failed refresh response means the *grant itself* is dead, i.e. the
@@ -170,6 +258,12 @@ pub struct AuthState {
     /// this app running?" — which blames the wrong thing, since the port is in fact
     /// held by *this* process's own in-flight flow.
     login_gate: Arc<tokio::sync::Mutex<()>>,
+    /// Pairs each in-memory change to the credential with its keyring write, so
+    /// [`Self::store_tokens_blocking`] and [`Self::logout`] cannot interleave: a store
+    /// that passed its session check before a sign-out must not write the keyring
+    /// after the sign-out deleted it. Taken only on blocking threads, and never
+    /// while holding `inner`.
+    persist_lock: Arc<Mutex<()>>,
 }
 
 struct Inner {
@@ -183,6 +277,24 @@ struct Inner {
     /// Whether the next interactive sign-in should ask for `management`. Mirrors
     /// `settings.actions.enabled`; it does not describe the *current* grant.
     request_management: bool,
+    /// Session generation — see [`GrantStamp`].
+    session: u64,
+}
+
+impl Inner {
+    fn tenant(&self) -> TenantStamp {
+        TenantStamp {
+            base_url: self.base_url.clone(),
+            client_id: self.client_id.clone(),
+        }
+    }
+
+    fn grant_stamp(&self) -> GrantStamp {
+        GrantStamp {
+            tenant: self.tenant(),
+            session: self.session,
+        }
+    }
 }
 
 impl AuthState {
@@ -208,44 +320,34 @@ impl AuthState {
                 client_secret,
                 tokens: None,
                 request_management,
+                session: 0,
             })),
             http,
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
+            persist_lock: Arc::new(Mutex::new(())),
         }
     }
 
     /// The tenant currently configured, for stamping a grant that is about to start.
     fn tenant_stamp(&self) -> TenantStamp {
-        let (base_url, client_id) = self
-            .inner
+        self.inner
             .read()
-            .map(|g| (g.base_url.clone(), g.client_id.clone()))
-            .unwrap_or_default();
-        TenantStamp {
-            base_url,
-            client_id,
-        }
+            .map(|g| g.tenant())
+            .unwrap_or_else(|p| p.into_inner().tenant())
     }
 
-    /// Keyring entry holding the refresh token for the currently configured tenant.
-    fn refresh_entry(&self) -> String {
-        let (base_url, client_id) = self
-            .inner
+    /// The tenant and session a grant is about to start under.
+    fn grant_stamp(&self) -> GrantStamp {
+        self.inner
             .read()
-            .map(|g| (g.base_url.clone(), g.client_id.clone()))
-            .unwrap_or_default();
-        tenant_entry(KEYRING_REFRESH_PREFIX, &base_url, client_id.as_deref())
+            .map(|g| g.grant_stamp())
+            .unwrap_or_else(|p| p.into_inner().grant_stamp())
     }
 
     /// Keyring entry holding the client secret for the currently configured tenant.
     fn secret_entry(&self) -> String {
-        let (base_url, client_id) = self
-            .inner
-            .read()
-            .map(|g| (g.base_url.clone(), g.client_id.clone()))
-            .unwrap_or_default();
-        tenant_entry(KEYRING_SECRET_PREFIX, &base_url, client_id.as_deref())
+        self.tenant_stamp().entry(KEYRING_SECRET_PREFIX)
     }
 
     pub fn base_url(&self) -> String {
@@ -264,10 +366,6 @@ impl AuthState {
             .read()
             .map(|g| g.client_secret.is_some())
             .unwrap_or(false)
-    }
-
-    fn client_secret(&self) -> Option<String> {
-        self.inner.read().ok()?.client_secret.clone()
     }
 
     /// Applies non-secret connection settings (instance URL, client ID, callback
@@ -301,19 +399,16 @@ impl AuthState {
         // D-Bus round trip while every concurrent `access_token()` caller was queued
         // behind the same lock, on a tokio worker. A slow or absent Secret Service
         // turned one settings save into a stall across every in-flight request.
-        let Ok(current) = self
-            .inner
-            .read()
-            .map(|g| (g.base_url.clone(), g.client_id.clone()))
-        else {
+        let Ok(current) = self.inner.read().map(|g| g.tenant()) else {
             return false;
         };
-        let tenant_changed = current.0 != base_url || current.1 != client_id;
+        let tenant_changed = current.base_url != base_url || current.client_id != client_id;
 
         // The secret is per-tenant, so re-read it for the tenant now in effect
         // instead of carrying the previous one's over. Done before the write lock is
         // taken; nothing else can be mid-`apply_settings` (the caller holds the
-        // settings mutex), so re-reading here cannot race a competing switch.
+        // settings write gate), so re-reading here cannot race a competing switch.
+        // This is a synchronous keyring read: callers run it on a blocking thread.
         let fresh_secret = tenant_changed.then(|| {
             load_tenant_keyring(
                 KEYRING_SECRET_PREFIX,
@@ -365,6 +460,8 @@ impl AuthState {
         Some(scope_grants_management(&scope))
     }
 
+    /// Stores (or, with `None`, deletes) this tenant's client secret. **Blocking**
+    /// keyring I/O — call it from a blocking thread.
     pub fn set_client_secret(&self, secret: Option<String>) -> Result<()> {
         let entry = self.secret_entry();
         match &secret {
@@ -383,6 +480,29 @@ impl AuthState {
             .read()
             .map(|g| g.tokens.as_ref().is_some_and(|t| !t.is_stale()))
             .unwrap_or(false)
+    }
+
+    /// Whether this process has a usable session, reusing a saved sign-in if it
+    /// has to.
+    ///
+    /// The access token is in-memory only, so on every launch `is_authenticated()`
+    /// read false — even with a perfectly good refresh token in the keyring. The
+    /// status the UI starts from said "signed out", the lookups were never loaded,
+    /// and Sign in ran the full browser flow for a grant the app already held. This
+    /// tries the saved credential silently first. Any failure — none saved, a dead
+    /// grant, a keyring fault, the network — reads as "not signed in" rather than an
+    /// error: it is a status probe, and the interactive flow remains the remedy.
+    pub async fn restore_session(&self) -> bool {
+        if self.is_authenticated() {
+            return true;
+        }
+        match self.access_token().await {
+            Ok(_) => true,
+            Err(e) => {
+                debug!(error = %e, "no saved sign-in could be reused");
+                false
+            }
+        }
     }
 
     /// Returns a valid access token, refreshing if needed. Does NOT start an
@@ -410,33 +530,59 @@ impl AuthState {
             return Ok(token);
         }
 
-        let stored_refresh = self
-            .inner
-            .read()
-            .map_err(|_| anyhow!("auth state poisoned"))?
-            .tokens
-            .as_ref()
-            .and_then(|t| t.refresh_token.clone());
-        if let Some(refresh) = stored_refresh {
-            return self.refresh(&refresh).await;
-        }
+        let mut grant = self.refresh_grant()?;
+        let refresh_token = match grant.refresh_token.take() {
+            Some(token) => token,
+            None => self.load_saved_refresh(&grant.stamp.tenant).await?,
+        };
+        self.refresh(grant, &refresh_token).await
+    }
 
-        // A keyring *fault* is not a signed-out install, and conflating them sent the
-        // operator to re-run a sign-in that could not have helped. `Ok(None)` is the
-        // genuinely-absent case; an error (locked keychain, no Secret Service running)
-        // says so, because the stored credential may well still be intact.
-        let (base_url, client_id) = self
+    /// One consistent read of everything a refresh needs. Sampling the host, the
+    /// client id and the secret in separate lock acquisitions let a tenant switch
+    /// land between them and pair one tenant's refresh token with another's client.
+    fn refresh_grant(&self) -> Result<RefreshGrant> {
+        let inner = self
             .inner
             .read()
-            .map(|g| (g.base_url.clone(), g.client_id.clone()))
-            .unwrap_or_default();
-        match load_tenant_keyring(
-            KEYRING_REFRESH_PREFIX,
-            LEGACY_KEYRING_USER_REFRESH,
-            &base_url,
-            client_id.as_deref(),
-        ) {
-            Ok(Some(refresh)) => self.refresh(&refresh).await,
+            .map_err(|_| anyhow!("auth state poisoned"))?;
+        // No client id means no sign-in can exist yet. Bailing before the keyring
+        // also keeps a pre-tenant-scoping credential from being adopted by the
+        // placeholder "no client" tenant of a half-configured install.
+        let client_id = inner
+            .client_id
+            .clone()
+            .ok_or_else(|| anyhow!("not authenticated: no client ID configured"))?;
+        Ok(RefreshGrant {
+            stamp: inner.grant_stamp(),
+            client_id,
+            client_secret: inner.client_secret.clone(),
+            refresh_token: inner.tokens.as_ref().and_then(|t| t.refresh_token.clone()),
+        })
+    }
+
+    /// Reads `tenant`'s saved refresh token from the keyring on a blocking thread —
+    /// this runs under `refresh_lock`, when every other `access_token()` caller is
+    /// queued behind it.
+    ///
+    /// A keyring *fault* is not a signed-out install, and conflating them sent the
+    /// operator to re-run a sign-in that could not have helped. `Ok(None)` is the
+    /// genuinely-absent case; an error (locked keychain, no Secret Service running)
+    /// says so, because the stored credential may well still be intact.
+    async fn load_saved_refresh(&self, tenant: &TenantStamp) -> Result<String> {
+        let tenant = tenant.clone();
+        let loaded = tauri::async_runtime::spawn_blocking(move || {
+            load_tenant_keyring(
+                KEYRING_REFRESH_PREFIX,
+                LEGACY_KEYRING_USER_REFRESH,
+                &tenant.base_url,
+                tenant.client_id.as_deref(),
+            )
+        })
+        .await
+        .context("keyring read task failed")?;
+        match loaded {
+            Ok(Some(refresh)) => Ok(refresh),
             Ok(None) => bail!("not authenticated"),
             Err(e) => Err(e)
                 .context("could not read the saved sign-in from the OS keyring; it may be locked"),
@@ -456,27 +602,25 @@ impl AuthState {
             .map(|t| t.access_token.clone()))
     }
 
-    async fn refresh(&self, refresh_token: &str) -> Result<String> {
-        let client_id = self
-            .client_id()
-            .ok_or_else(|| anyhow!("no client ID configured"))?;
-        let base_url = self.base_url();
-
-        // Sampled before the round trip; see `TenantStamp`.
-        let started = self.tenant_stamp();
-
+    async fn refresh(&self, grant: RefreshGrant, refresh_token: &str) -> Result<String> {
+        let RefreshGrant {
+            stamp,
+            client_id,
+            client_secret,
+            ..
+        } = grant;
         let mut body = vec![
             ("grant_type", "refresh_token".to_string()),
             ("refresh_token", refresh_token.to_string()),
             ("client_id", client_id),
         ];
-        if let Some(secret) = self.client_secret() {
+        if let Some(secret) = client_secret {
             body.push(("client_secret", secret));
         }
 
         let resp = self
             .http
-            .post(format!("{base_url}/ws/oauth/token"))
+            .post(format!("{}/ws/oauth/token", stamp.tenant.base_url))
             .form(&body)
             .send()
             .await
@@ -490,8 +634,10 @@ impl AuthState {
             // dead. A transient failure (429, 5xx, proxy error page) leaves it in
             // place so the next attempt can succeed without an interactive login.
             if refresh_grant_is_dead(status, &raw) {
-                let _ = delete_keyring(&self.refresh_entry());
-                self.clear_tokens_locked();
+                let this = self.clone();
+                tauri::async_runtime::spawn_blocking(move || this.discard_dead_grant(&stamp))
+                    .await
+                    .context("keyring delete task failed")?;
             } else {
                 debug!(%status, "refresh failed transiently; keeping stored credential");
             }
@@ -499,8 +645,35 @@ impl AuthState {
         }
 
         let parsed: TokenResponse = resp.json().await.context("refresh token body")?;
-        let token_set = self.store_tokens(parsed, started).await?;
+        let token_set = self.store_tokens(parsed, stamp, false).await?;
         Ok(token_set.access_token)
+    }
+
+    /// Clears a credential the server has declared dead — the one `stamp` names.
+    ///
+    /// It used to delete whichever tenant was configured when the response came
+    /// back, so a refresh that outlived a tenant switch deleted the *new* tenant's
+    /// sign-in over the old one's dead grant. It also ignored sign-outs: a refresh
+    /// racing a sign-out and a fresh sign-in could delete the credential that
+    /// sign-in had just saved. So: nothing at all once the session has moved on,
+    /// the started tenant's keyring entry otherwise, and the in-memory tokens only
+    /// if they still belong to that tenant.
+    fn discard_dead_grant(&self, stamp: &GrantStamp) {
+        let _persist = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.grant_stamp();
+        if current.session != stamp.session {
+            debug!("a dead refresh grant outlived its session; leaving the current one alone");
+            return;
+        }
+        if current.tenant == stamp.tenant {
+            self.clear_tokens_locked();
+        }
+        if let Err(e) = delete_keyring(&stamp.tenant.entry(KEYRING_REFRESH_PREFIX)) {
+            warn!(error = %e, "could not delete a refresh token the server rejected");
+        }
     }
 
     /// [`Self::store_tokens_blocking`], moved off the async runtime.
@@ -513,76 +686,106 @@ impl AuthState {
     /// turned one refresh into a stall across every concurrent fetch in the query.
     /// The lock is still held across this await, which is correct — the point is to
     /// stop holding a *worker* too.
-    async fn store_tokens(&self, parsed: TokenResponse, started: TenantStamp) -> Result<TokenSet> {
+    async fn store_tokens(
+        &self,
+        parsed: TokenResponse,
+        started: GrantStamp,
+        new_session: bool,
+    ) -> Result<TokenSet> {
         let this = self.clone();
-        tauri::async_runtime::spawn_blocking(move || this.store_tokens_blocking(parsed, started))
-            .await
-            .context("token persistence task failed")?
+        tauri::async_runtime::spawn_blocking(move || {
+            this.store_tokens_blocking(parsed, started, new_session)
+        })
+        .await
+        .context("token persistence task failed")?
     }
 
+    /// Stores a grant that started at `started`. `new_session` marks an
+    /// interactive sign-in, which starts a new session generation so that any
+    /// refresh still in flight from before it can no longer store or delete
+    /// anything.
     fn store_tokens_blocking(
         &self,
         parsed: TokenResponse,
-        started: TenantStamp,
+        started: GrantStamp,
+        new_session: bool,
     ) -> Result<TokenSet> {
-        // Tenant drift, checked the way `store_last_result_if_current` checks it:
-        // against the tenant the grant *started* under, not the one that happens to
-        // be current now. These tokens were issued by `started`'s authorization
-        // server; filing them under whatever is configured at this instant is the one
-        // way this can be actively wrong rather than merely stale.
-        let current = self.tenant_stamp();
-        if current != started {
-            warn!(
-                "the configured instance changed while signing in; discarding tokens issued by the previous one"
-            );
-            bail!("the instance changed while signing in; sign in again");
-        }
-        let expires_at = Utc::now() + Duration::seconds(parsed.expires_in);
-        // Prefer what the server said it granted; fall back to the token's own
-        // claim when the response omits `scope`.
-        let granted_scope = parsed
-            .scope
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| scope_claim_from_jwt(&parsed.access_token));
-        // RFC 6749 §6 lets the server omit `refresh_token` when it does not rotate
-        // the grant, in which case the existing one stays valid. Taking the response
-        // at face value dropped it, leaving the session dependent on the keyring copy
-        // — and that copy is explicitly allowed not to exist, since a keyring write
-        // failure is downgraded to a warning below. The two together turned a
-        // non-rotating server plus a locked keychain into "not authenticated"
-        // mid-session, which is exactly the forced re-login this function exists to
-        // prevent.
-        let previous_refresh = self
-            .inner
-            .read()
-            .ok()
-            .and_then(|g| g.tokens.as_ref().and_then(|t| t.refresh_token.clone()));
-        let token_set = TokenSet {
-            access_token: parsed.access_token,
-            refresh_token: parsed.refresh_token.clone().or(previous_refresh),
-            expires_at,
-            granted_scope,
+        let _persist = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let token_set = {
+            let mut inner = self
+                .inner
+                .write()
+                .map_err(|_| anyhow!("auth state poisoned"))?;
+            let current = inner.grant_stamp();
+            // Tenant drift, checked the way `store_last_result_if_current` checks it:
+            // against the tenant the grant *started* under, not the one that happens
+            // to be current now. These tokens were issued by `started`'s
+            // authorization server; filing them under whatever is configured at this
+            // instant is the one way this can be actively wrong rather than merely
+            // stale.
+            if current.tenant != started.tenant {
+                warn!(
+                    "the configured instance changed while signing in; discarding tokens issued by the previous one"
+                );
+                bail!("the instance changed while signing in; sign in again");
+            }
+            // The operator signed out (or signed in afresh) while this grant was in
+            // flight. Storing it would silently undo that sign-out.
+            if current.session != started.session {
+                warn!("the session ended while a grant was in flight; discarding its tokens");
+                bail!("you were signed out while this sign-in was in progress; sign in again");
+            }
+            // Prefer what the server said it granted; fall back to the token's own
+            // claim when the response omits `scope`.
+            let granted_scope = parsed
+                .scope
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| scope_claim_from_jwt(&parsed.access_token));
+            // RFC 6749 §6 lets the server omit `refresh_token` when it does not rotate
+            // the grant, in which case the existing one stays valid. Taking the
+            // response at face value dropped it, leaving the session dependent on the
+            // keyring copy — and that copy is explicitly allowed not to exist, since a
+            // keyring write failure is downgraded to a warning below. The two together
+            // turned a non-rotating server plus a locked keychain into "not
+            // authenticated" mid-session, which is exactly the forced re-login this
+            // function exists to prevent.
+            let previous_refresh = inner.tokens.as_ref().and_then(|t| t.refresh_token.clone());
+            let token_set = TokenSet {
+                access_token: parsed.access_token.clone(),
+                refresh_token: parsed.refresh_token.clone().or(previous_refresh),
+                refresh_at: refresh_deadline(Utc::now(), parsed.expires_in),
+                granted_scope,
+            };
+            // In-memory first, persistence second — the order is load-bearing.
+            //
+            // The server has already rotated the grant by the time we get here: the
+            // old refresh token is spent whether or not we manage to write the new
+            // one. So a keyring failure must not propagate out of `refresh()` and
+            // discard a token set that is perfectly valid. It used to: a locked
+            // keychain or a Secret Service outage returned `Err`, the fresh access
+            // *and* refresh tokens were dropped, and the next attempt replayed the
+            // consumed refresh token into the `invalid_grant` arm above — which
+            // deletes the credential. A transient OS fault became a forced
+            // interactive sign-in.
+            //
+            // Degrading to "no persistence this session" is the honest failure: the
+            // access token is in-memory only by design anyway, so the session
+            // continues and only survival across a restart is lost.
+            inner.tokens = Some(token_set.clone());
+            if new_session {
+                inner.session += 1;
+            }
+            token_set
         };
-        // In-memory first, persistence second — the order is load-bearing.
-        //
-        // The server has already rotated the grant by the time we get here: the old
-        // refresh token is spent whether or not we manage to write the new one. So a
-        // keyring failure must not propagate out of `refresh()` and discard a token
-        // set that is perfectly valid. It used to: a locked keychain or a Secret
-        // Service outage returned `Err`, the fresh access *and* refresh tokens were
-        // dropped, and the next attempt replayed the consumed refresh token into the
-        // `invalid_grant` arm above — which deletes the credential. A transient OS
-        // fault became a forced interactive sign-in.
-        //
-        // Degrading to "no persistence this session" is the honest failure: the
-        // access token is in-memory only by design anyway, so the session continues
-        // and only survival across a restart is lost.
-        self.inner
-            .write()
-            .map_err(|_| anyhow!("auth state poisoned"))?
-            .tokens = Some(token_set.clone());
+        // Outside `inner` (a keyring round trip must not stall every reader of the
+        // auth state) but inside `persist_lock`, so a sign-out cannot slip between
+        // the session check above and this write.
         if let Some(ref rt) = parsed.refresh_token
-            && let Err(e) = save_keyring(&self.refresh_entry(), rt)
+            && let Err(e) = save_keyring(&started.tenant.entry(KEYRING_REFRESH_PREFIX), rt)
         {
             warn!(
                 error = %e,
@@ -614,11 +817,20 @@ impl AuthState {
             && let Some(tokens) = inner.tokens.as_mut()
             && tokens.access_token == stale
         {
-            tokens.expires_at = Utc::now() - Duration::seconds(1);
+            tokens.refresh_at = Utc::now() - Duration::seconds(1);
         }
     }
 
-    /// Signs out: drops the in-memory tokens and deletes the stored refresh token.
+    /// Signs out: ends the session, drops the in-memory tokens and deletes the
+    /// stored refresh token.
+    ///
+    /// **Blocking** (keyring I/O) — async callers use [`Self::logout_async`].
+    ///
+    /// Bumping the session generation is what makes the sign-out stick: a refresh
+    /// or interactive grant already in flight carries the old generation, so
+    /// `store_tokens_blocking` refuses it instead of writing the tokens straight
+    /// back. `persist_lock` orders this against a store that has already passed
+    /// that check.
     ///
     /// A keyring delete that *fails* is reported, not swallowed. The in-memory clear
     /// still happens first so the session ends either way, but returning `Ok(())`
@@ -632,9 +844,20 @@ impl AuthState {
     /// signing out twice, or signing out of an install that never persisted a token,
     /// stays quiet.
     pub fn logout(&self) -> Result<()> {
-        // In-memory first, so the session is over regardless of what the keyring does.
-        self.clear_tokens_locked();
-        let current = delete_keyring(&self.refresh_entry());
+        let _persist = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // In-memory first, so the session is over regardless of what the keyring
+        // does. A poisoned lock still holds the real state, and signing out is the
+        // one operation that must not give up on it.
+        let tenant = {
+            let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+            inner.session += 1;
+            inner.tokens = None;
+            inner.tenant()
+        };
+        let current = delete_keyring(&tenant.entry(KEYRING_REFRESH_PREFIX));
         // Signing out of an install that still holds a pre-tenant-scoping entry must
         // clear that too, or the next `access_token()` migrates it straight back in.
         let legacy = delete_keyring(LEGACY_KEYRING_USER_REFRESH);
@@ -644,6 +867,13 @@ impl AuthState {
         )
     }
 
+    /// [`Self::logout`] on a blocking thread, for the async command handlers.
+    pub async fn logout_async(&self) -> Result<()> {
+        let this = self.clone();
+        tauri::async_runtime::spawn_blocking(move || this.logout())
+            .await
+            .context("sign-out task failed")?
+    }
     /// Interactive PKCE login: opens the browser and waits up to 3 minutes for the
     /// callback, then exchanges the code for tokens.
     pub async fn login_pkce(&self) -> Result<()> {
@@ -661,7 +891,11 @@ impl AuthState {
                  then try again"
             )
         })?;
-        let (client_id, base_url, port, request_management) = {
+        // One read, so the stamp, the client and its secret all describe the same
+        // tenant. Sampled before the browser opens: an interactive flow waits up to
+        // three minutes, ample room for the operator to change instance in Settings
+        // (or sign out) while it is pending. See `GrantStamp`.
+        let (client_id, client_secret, port, request_management, started) = {
             let inner = self
                 .inner
                 .read()
@@ -671,20 +905,14 @@ impl AuthState {
                     .client_id
                     .clone()
                     .ok_or_else(|| anyhow!("client ID not configured"))?,
-                inner.base_url.clone(),
+                inner.client_secret.clone(),
                 inner.callback_port,
                 inner.request_management,
+                inner.grant_stamp(),
             )
         };
-        // Sampled before the browser opens: an interactive flow waits up to three
-        // minutes, ample room for the operator to change instance in Settings while
-        // it is pending. See `TenantStamp`.
-        let started = TenantStamp {
-            base_url: base_url.clone(),
-            client_id: Some(client_id.clone()),
-        };
+        let base_url = started.tenant.base_url.clone();
         let scope = scope_for(request_management);
-        let client_secret = self.client_secret();
 
         let pkce = PkceChallenge::new();
         let state = random_url_token(32);
@@ -731,9 +959,16 @@ impl AuthState {
         let listener = TcpListener::bind(("127.0.0.1", port))
             .await
             .with_context(|| {
+                // Not "another instance of this app": the default port, 11434, is
+                // also Ollama's, and a second copy of this app is the less likely
+                // holder. The port stays as it is — it is registered as the redirect
+                // in customers' NinjaOne apps — so name the way out instead.
                 format!(
-                    "could not bind OAuth callback listener on 127.0.0.1:{port}. \
-                     Is another instance of this app running?"
+                    "could not listen for the sign-in callback on 127.0.0.1:{port} — another \
+                     program is using that port (Ollama, for one, uses 11434 by default), or \
+                     another copy of this app is running. Close it, or change the callback \
+                     port in Settings and add the matching redirect URI \
+                     (http://127.0.0.1:<port>) to your NinjaOne API app."
                 )
             })?;
 
@@ -806,7 +1041,7 @@ impl AuthState {
         }
 
         let parsed: TokenResponse = resp.json().await.context("token exchange body")?;
-        self.store_tokens(parsed, started).await?;
+        self.store_tokens(parsed, started, true).await?;
         Ok(())
     }
 }
@@ -824,17 +1059,19 @@ impl AuthState {
             tokens: Some(TokenSet {
                 access_token: access_token.to_string(),
                 refresh_token: None,
-                expires_at: Utc::now() + Duration::seconds(3600),
+                refresh_at: Utc::now() + Duration::seconds(3600),
                 // Tests that drive the action endpoints need a write-capable grant.
                 granted_scope: Some(SCOPE_WITH_ACTIONS.to_string()),
             }),
             request_management: false,
+            session: 0,
         };
         Self {
             inner: Arc::new(RwLock::new(inner)),
             http,
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
+            persist_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -855,16 +1092,18 @@ impl AuthState {
             tokens: Some(TokenSet {
                 access_token: access_token.to_string(),
                 refresh_token: Some(refresh_token.to_string()),
-                expires_at: Utc::now() + Duration::seconds(3600),
+                refresh_at: Utc::now() + Duration::seconds(3600),
                 granted_scope: Some(SCOPE_WITH_ACTIONS.to_string()),
             }),
             request_management: false,
+            session: 0,
         };
         Self {
             inner: Arc::new(RwLock::new(inner)),
             http,
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
+            persist_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -1056,18 +1295,17 @@ async fn handle_callback_conn(
         return Ok(None);
     }
 
+    // `is_redirect` guarantees `code` or `error`, so these two arms are exhaustive.
     let (status, body) = if error.is_some() {
         (
             400,
             "<html><body><h1>Authentication failed</h1><p>You can close this tab and return to the app.</p></body></html>",
         )
-    } else if code.is_some() {
+    } else {
         (
             200,
             "<html><body style=\"background:#0f1117;color:#e2e4e9;font-family:sans-serif;text-align:center;padding:80px\"><h1>Login successful</h1><p>You can close this tab.</p></body></html>",
         )
-    } else {
-        (400, "<html><body><h1>Missing code</h1></body></html>")
     };
 
     let reason = if status == 200 { "OK" } else { "Bad Request" };
@@ -1083,6 +1321,17 @@ async fn handle_callback_conn(
         state: state.unwrap_or_default(),
         error,
     }))
+}
+
+/// The scheme, host and path of `url`, with the query string and fragment removed.
+///
+/// Used for logging URLs whose query carries secrets. Deliberately textual rather
+/// than a `Url` parse: this must never fail or allocate its way into an error path,
+/// and truncating at the first `?` or `#` is exactly the guarantee needed — anything
+/// after either is dropped.
+fn url_without_query(url: &str) -> &str {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    &url[..end]
 }
 
 // --- Keyring wrappers ---------------------------------------------------------
@@ -1102,17 +1351,6 @@ async fn handle_callback_conn(
 /// keychain label. Truncating to 8 bytes is ample: this only has to distinguish the
 /// handful of tenants one operator uses, and a collision would merely reuse an entry
 /// the same way the old global name did.
-/// The scheme, host and path of `url`, with the query string and fragment removed.
-///
-/// Used for logging URLs whose query carries secrets. Deliberately textual rather
-/// than a `Url` parse: this must never fail or allocate its way into an error path,
-/// and truncating at the first `?` or `#` is exactly the guarantee needed — anything
-/// after either is dropped.
-fn url_without_query(url: &str) -> &str {
-    let end = url.find(['?', '#']).unwrap_or(url.len());
-    &url[..end]
-}
-
 fn tenant_entry(prefix: &str, base_url: &str, client_id: Option<&str>) -> String {
     use std::fmt::Write as _;
 

@@ -25,16 +25,27 @@ pub struct AuthStatus {
     pub scope_known: bool,
 }
 
-/// Launches the interactive PKCE browser flow and waits for the callback.
+/// Signs in: reuses the saved sign-in when it still works, otherwise launches the
+/// interactive PKCE browser flow and waits for the callback.
 ///
 /// Clears the session first. Signing in is not necessarily a *new* session
 /// continuing an old one — on a shared workstation it is routinely a different
 /// operator on the same instance, which every tenant stamp in the app reads as
 /// identical. Anything left in the caches at this point belongs to whoever was here
 /// before.
+///
+/// The silent attempt comes first because a saved refresh token for this tenant is
+/// a sign-in the operator already completed; sending them back through the browser
+/// for it was the "sign in on every launch" bug. It does not widen who can get in:
+/// a saved token exists only until someone signs out, which deletes it, and
+/// `auth_status` already reports such a session as signed in. `reauthorize` is the
+/// path that must not reuse it, and does not.
 #[tauri::command]
 pub async fn sign_in(state: State<'_, AppState>) -> Result<(), UiError> {
     clear_session_state(&state);
+    if state.auth.restore_session().await {
+        return Ok(());
+    }
     state.auth.login_pkce().await.map_err(UiError::from)
 }
 
@@ -49,14 +60,14 @@ pub async fn reauthorize(state: State<'_, AppState>) -> Result<(), UiError> {
     // Same reason as `sign_in`: re-consent runs the full browser flow, so the
     // operator who comes back may not be the one who left.
     clear_session_state(&state);
-    state.auth.logout().map_err(UiError::from)?;
+    state.auth.logout_async().await.map_err(UiError::from)?;
     state.auth.login_pkce().await.map_err(UiError::from)
 }
 
 #[tauri::command]
 pub async fn sign_out(state: State<'_, AppState>) -> Result<(), UiError> {
     clear_session_state(&state);
-    state.auth.logout().map_err(UiError::from)
+    state.auth.logout_async().await.map_err(UiError::from)
 }
 
 /// Drops every piece of tenant-scoped state a sign-out must not leave behind.
@@ -81,18 +92,29 @@ fn clear_session_state(state: &AppState) {
     state.clear_jobs();
 }
 
+/// The session as the UI should render it.
+///
+/// Async because it may refresh: the access token lives in memory only, so right
+/// after launch there is none even when the keyring holds a working sign-in, and
+/// reporting that as "signed out" left the app looking logged out until the operator
+/// went through the browser again. [`AuthState::restore_session`] tries the saved
+/// credential; any failure is simply "not signed in". The grant is read *after* it,
+/// so `write_enabled` describes the token just obtained.
+///
+/// [`AuthState::restore_session`]: crate::auth::AuthState::restore_session
 #[tauri::command]
-pub fn auth_status(state: State<'_, AppState>) -> AuthStatus {
+pub async fn auth_status(state: State<'_, AppState>) -> Result<AuthStatus, UiError> {
+    let authenticated = state.auth.restore_session().await;
     let grant = state.auth.management_grant();
-    AuthStatus {
-        authenticated: state.auth.is_authenticated(),
+    Ok(AuthStatus {
+        authenticated,
         client_id: state.auth.client_id(),
         has_client_secret: state.auth.has_client_secret(),
         instance_base_url: state.auth.base_url(),
         actions_enabled: state.settings_snapshot().actions.enabled,
         write_enabled: grant.unwrap_or(false),
         scope_known: grant.is_some(),
-    }
+    })
 }
 
 #[cfg(test)]
