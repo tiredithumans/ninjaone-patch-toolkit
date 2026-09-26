@@ -274,7 +274,15 @@ impl AppState {
         );
         let api = NinjaApiClient::new(http, auth.clone());
 
-        Ok(Self {
+        Ok(Self::from_parts(auth, api, settings))
+    }
+
+    /// Every field's starting value, in one place. `new()` and the test-only
+    /// `seeded()` differ only in where the client and settings come from; they used
+    /// to spell out the whole field list twice, so a new field could be initialized
+    /// one way in production and another (or not at all) in the tests.
+    fn from_parts(auth: AuthState, api: NinjaApiClient, settings: Settings) -> Self {
+        Self {
             auth,
             api,
             settings: Mutex::new(settings),
@@ -290,7 +298,7 @@ impl AppState {
             result_epoch: AtomicU64::new(0),
             job_poller_running: Arc::new(AtomicBool::new(false)),
             pending_confirm: Mutex::new(None),
-        })
+        }
     }
 
     /// Snapshot of settings for use across `.await` points without holding the lock.
@@ -785,23 +793,7 @@ impl AppState {
             instance_base_url: base_url,
             ..Settings::default()
         };
-        Self {
-            auth,
-            api,
-            settings: Mutex::new(settings),
-            settings_write: tokio::sync::Mutex::const_new(()),
-            last_result: Mutex::new(None),
-            lookups_cache: TenantCache::default(),
-            fleet_devices_cache: TenantCache::default(),
-            fleet_current_os: TenantCache::default(),
-            fleet_current_sw: TenantCache::default(),
-            jobs: Mutex::new(None),
-            job_seq: AtomicU64::new(1),
-            query_generation: AtomicU64::new(0),
-            result_epoch: AtomicU64::new(0),
-            job_poller_running: Arc::new(AtomicBool::new(false)),
-            pending_confirm: Mutex::new(None),
-        }
+        Self::from_parts(auth, api, settings)
     }
 }
 
