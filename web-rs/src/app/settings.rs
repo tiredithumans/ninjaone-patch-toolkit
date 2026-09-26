@@ -16,17 +16,11 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
         if saving.get_untracked() {
             return;
         }
-        let args = SaveSettingsArgs {
-            instance_base_url: state.settings.f_instance.get_untracked(),
-            client_id: non_empty(state.settings.f_client_id.get_untracked()),
-            callback_port: state.settings.f_port.get_untracked(),
-            install_window_days: state.settings.f_install_days.get_untracked(),
-            sla_days: state.settings.f_sla.get_untracked(),
-            client_secret: non_empty(state.settings.f_client_secret.get_untracked()),
-            clear_secret: false,
-            auto_check_updates: state.settings.f_auto_update.get_untracked(),
-            actions: state.settings.f_actions.get_untracked(),
-        };
+        let args = save_args(
+            state,
+            non_empty(state.settings.f_client_secret.get_untracked()),
+            false,
+        );
         saving.set(true);
         spawn_local(async move {
             match api::save_settings(args).await {
@@ -44,18 +38,7 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
 
     let clear_secret = move |_| {
         spawn_local(async move {
-            let args = SaveSettingsArgs {
-                instance_base_url: state.settings.f_instance.get_untracked(),
-                client_id: non_empty(state.settings.f_client_id.get_untracked()),
-                callback_port: state.settings.f_port.get_untracked(),
-                install_window_days: state.settings.f_install_days.get_untracked(),
-                sla_days: state.settings.f_sla.get_untracked(),
-                client_secret: None,
-                clear_secret: true,
-                auto_check_updates: state.settings.f_auto_update.get_untracked(),
-                actions: state.settings.f_actions.get_untracked(),
-            };
-            match api::save_settings(args).await {
+            match api::save_settings(save_args(state, None, true)).await {
                 Ok(v) => {
                     state.apply_settings_view(v);
                     state.notify(Toast::ok("Cleared stored secret"));
@@ -278,6 +261,27 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                 {concat!("NinjaOne Patch Toolkit v", env!("CARGO_PKG_VERSION"))}
             </p>
         </section>
+    }
+}
+
+/// The save payload from the form's current fields. Save and "Clear stored secret"
+/// both send every field and differ only in what they say about the secret, so that
+/// is all they pass and the rest is read from the form in exactly one place.
+fn save_args(
+    state: AppState,
+    client_secret: Option<String>,
+    clear_secret: bool,
+) -> SaveSettingsArgs {
+    SaveSettingsArgs {
+        instance_base_url: state.settings.f_instance.get_untracked(),
+        client_id: non_empty(state.settings.f_client_id.get_untracked()),
+        callback_port: state.settings.f_port.get_untracked(),
+        install_window_days: state.settings.f_install_days.get_untracked(),
+        sla_days: state.settings.f_sla.get_untracked(),
+        client_secret,
+        clear_secret,
+        auto_check_updates: state.settings.f_auto_update.get_untracked(),
+        actions: state.settings.f_actions.get_untracked(),
     }
 }
 
