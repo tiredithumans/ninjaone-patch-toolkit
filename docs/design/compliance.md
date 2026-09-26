@@ -82,9 +82,18 @@ number in them describes a different population.
 - Patch families are stated **once**, as the block's `Patch type` entry — the Type facet and the
   rollups' family scope are the same value, and two adjacent rows saying it read as two things.
 - The install lookback is named only when the status selection actually reached the history
-  endpoints (`plan.want_installs`), and an unnarrowed query emits an explicit whole-fleet
-  sentence: on a printed artifact, missing lines are indistinguishable from a renderer that
-  dropped them. `QueryPlan` keeps `statuses` verbatim for this — the two derived `HashSet`s are
+  endpoints (`plan.want_installs`), and a query with no **device-tier** facet emits an explicit
+  whole-fleet sentence: on a printed artifact, missing lines are indistinguishable from a renderer
+  that dropped them. The sentence sits in `facets` (every sheet), so only a device facet
+  (`FilterParams::has_identity_scope`) may remove it — a severity- or search-only query once
+  dropped it, leaving a CRITICAL-only export's Compliance sheet with no statement of its
+  population. Blank (whitespace-only) needles are no facet at all, as in `prepare()`.
+- `QueryScope.device_scoped` and `QueryScope.fingerprint` feed the run history
+  (`history::RunRecord::scoped` / `scope_key`). `scoped` once counted `facets` entries, so every
+  unfiltered run (whole-fleet line + patch type) read as scoped; and a bool cannot tell org A's
+  runs from org B's. The fingerprint is a canonical JSON spelling of every facet (ids sorted,
+  needles trimmed and lowercased, relative windows as `30d` because the absolute bound moves each
+  run); records from before it read back with an empty `scope_key`. `QueryPlan` keeps `statuses` verbatim for this — the two derived `HashSet`s are
   unordered and spelled in NinjaOne's wire vocabulary, so `MANUAL` ⇄ "Pending" would be a second
   place to get the mapping wrong (`PatchStatus::label`).
 
@@ -149,6 +158,17 @@ Before this the two had diverged: the report dropped `Patch Type` from the failu
 hardcoded the reboot table's headers as "Role"/"Pending patches" against the workbook's "Device
 Role"/"Pending Patches".
 
+## The workbook respects Excel's hard limits instead of failing on them
+
+A cell holds at most 32,767 characters and a sheet 1,048,576 rows, and `rust_xlsxwriter` rejects
+either overflow with an error that fails the **whole** export. The failures table's `Devices`
+cell joined every affected device name, so a patch failing on ~2,000 machines made the workbook
+unexportable. That cell is now `rows::join_capped` — as many names as fit, then "… and N more" —
+and every other text cell goes through `rows::clamp_cell` as a backstop. Detail rows past one
+sheet continue on `Patches (2)`, `Patches (3)`, … with the header and autofilter repeated, rather
+than being dropped or failing. The report renders the same capped cell so the two artifacts agree;
+the in-app table reads `device_names` whole.
+
 ## There is no patch release date in the NinjaOne API
 
 Grep the spec: `releaseDate` appears **zero** times. `DeviceOSPatch` / `DeviceSoftwarePatch`
@@ -165,7 +185,7 @@ This was once a field named `release_timestamp` aliasing a `releaseDate` that ne
 SLA rollup compared *now* against an always-recent timestamp and reported ~0 breaches on any
 fleet — and the wiremock fixtures fed `releaseDate`, so CI proved only that the aliasing worked.
 **Fixtures must emit `timestamp`.** Undated pending patches get their own `Unknown` age bucket
-rather than inflating `180+ days`; they still count as aged in the SLA rollup (`unwrap_or(true)`
+rather than inflating `181+ days`; they still count as aged in the SLA rollup (`unwrap_or(true)`
 — can't prove recent).
 
 ## `PatchRow` shares its repeated strings; it does not own them

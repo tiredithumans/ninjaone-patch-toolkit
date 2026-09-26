@@ -321,8 +321,11 @@ impl PreparedFilter<'_> {
         // Two more per-row `String`s removed: the needles are already lowered by
         // `prepare`, so the haystacks never needed a lowercased copy of their own.
         let kb = kb.unwrap_or_default();
+        // A query of just "KB" strips to an empty bare needle, and an empty needle
+        // matches everything — so the bare comparison is skipped rather than letting
+        // "KB" select every row in the fleet.
         contains_ascii_ci(kb, &needle.q_lower)
-            || contains_ascii_ci(strip_kb_prefix(kb), &needle.q_bare)
+            || (!needle.q_bare.is_empty() && contains_ascii_ci(strip_kb_prefix(kb), &needle.q_bare))
             || contains_ascii_ci(name.unwrap_or_default(), &needle.q_lower)
     }
 
@@ -643,6 +646,21 @@ mod tests {
         assert!(p.search_allowed(Some("5040434"), None));
         assert!(p.search_allowed(Some("KB5040434"), None));
         assert!(!p.search_allowed(Some("5036893"), None));
+    }
+
+    #[test]
+    fn a_bare_kb_search_does_not_match_every_row() {
+        let f = FilterParams {
+            search: Some(" kb ".into()),
+            ..Default::default()
+        };
+        let p = f.prepare();
+        // Stripping the prefix leaves an empty needle; it must not match "5040434".
+        assert!(!p.search_allowed(Some("5040434"), Some("Cumulative Update")));
+        assert!(!p.search_allowed(None, None));
+        // The literal "KB" still matches where it actually appears.
+        assert!(p.search_allowed(Some("KB5040434"), None));
+        assert!(p.search_allowed(None, Some("Update for kb article")));
     }
 
     #[test]

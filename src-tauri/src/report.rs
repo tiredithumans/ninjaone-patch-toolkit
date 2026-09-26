@@ -496,6 +496,7 @@ mod tests {
                 ("Status", "Pending, Failed".to_string()),
                 ("Search", "<script>".to_string()),
             ],
+            ..Default::default()
         };
         let html = render_report(&result);
         assert!(html.contains("<dt>Organizations</dt><dd>Contoso &amp; Co</dd>"));
@@ -771,7 +772,7 @@ mod tests {
                     count: 2,
                 },
                 AgeBucket {
-                    label: "180+ days".into(),
+                    label: "181+ days".into(),
                     count: 1,
                 },
             ],

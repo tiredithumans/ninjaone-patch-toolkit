@@ -14,6 +14,15 @@ use crate::model::{Device, Location, Organization, Patch, PatchRow, Role, Severi
 /// reporting no OS, or a patch whose organization is not in the lookups.
 pub(super) const UNKNOWN_LABEL: &str = "(unknown)";
 
+/// `PatchRow::device_id` for a patch record that carried no `deviceId` at all.
+///
+/// NinjaOne ids start at 1, so 0 names no device. It is a sentinel, not an id:
+/// grouping gives such rows no `device_id` (so they cannot become an action
+/// target) and the per-device counts skip it rather than tallying every id-less
+/// record as one shared device. `actions::plan` would skip it anyway — it is never in
+/// the inventory — but nothing should offer it as a target in the first place.
+pub const ORPHAN_DEVICE_ID: i64 = 0;
+
 /// Id→name maps used to label patch rows without repeated lookups.
 pub struct LookupMaps {
     pub orgs: HashMap<i64, String>,
@@ -246,7 +255,10 @@ pub fn build_rows(
             // exhaustive by construction — collected here and reported once per
             // distinct value rather than per row, so a fleet does not write millions
             // of identical warnings.
-            if let Some(raw) = patch.severity.as_deref()
+            // Checked only when the parse already fell through to Unknown, so the
+            // common case pays for one parse per patch, not two.
+            if severity == Severity::Unknown
+                && let Some(raw) = patch.severity.as_deref()
                 && Severity::is_unmapped(raw)
             {
                 unmapped_severities.insert(raw.to_string());
@@ -268,7 +280,7 @@ pub fn build_rows(
                 .or_insert_with(|| DeviceLabels::resolve(device, maps, &mut pool));
 
             rows.push(PatchRow {
-                device_id: patch.device_id.unwrap_or_default(),
+                device_id: patch.device_id.unwrap_or(ORPHAN_DEVICE_ID),
                 device_name: Arc::clone(&device_labels.device_name),
                 organization: Arc::clone(&device_labels.organization),
                 location: device_labels.location.clone(),

@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::PatchRow;
 
+use super::ORPHAN_DEVICE_ID;
+
 /// Sort key for the paged detail rows (`get_patch_rows`). Deserialized from the
 /// frontend's camelCase IPC args; mirrored in `web-rs/src/types.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -100,14 +102,16 @@ pub struct PatchGroup {
     /// third-party patches carry no KB).
     pub sublabel: Option<Arc<str>>,
     pub rows: usize,
-    /// Distinct devices in the group: always 1 for a device group, and the
-    /// affected-device count for a patch group.
+    /// Distinct devices in the group: 1 for a device group, and the
+    /// affected-device count for a patch group. Records with no device id
+    /// ([`ORPHAN_DEVICE_ID`]) are not counted, so their bucket reads 0.
     pub devices: usize,
     /// Highest severity among the members, so a collapsed group still shows how
     /// urgent its worst patch is.
     pub severity: &'static str,
     pub severity_rank: u8,
-    /// Device groups only — the id actions dispatch against, and its state.
+    /// Device groups only — the id actions dispatch against, and its state. `None`
+    /// for patch groups and for the bucket of records that carried no device id.
     pub device_id: Option<i64>,
     pub offline: bool,
     pub needs_reboot: bool,
@@ -157,7 +161,9 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                         devices: HashSet::new(),
                         severity: r.severity,
                         severity_rank: r.severity_rank,
-                        device_id: Some(r.device_id),
+                        // An id-less orphan bucket names no device, so it offers
+                        // nothing to dispatch against.
+                        device_id: (r.device_id != ORPHAN_DEVICE_ID).then_some(r.device_id),
                         offline: r.offline,
                         needs_reboot: r.needs_reboot,
                     },
@@ -176,7 +182,11 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 }),
         };
         acc.rows += 1;
-        acc.devices.insert(r.device_id);
+        // Id-less records are not one shared device; counting the sentinel would add
+        // a phantom machine to every patch group they appear in.
+        if r.device_id != ORPHAN_DEVICE_ID {
+            acc.devices.insert(r.device_id);
+        }
         // Records for the same group can disagree; surface the worst.
         if r.severity_rank > acc.severity_rank {
             acc.severity_rank = r.severity_rank;
