@@ -1,17 +1,22 @@
 # Third-party licenses
 
 The NinjaOne Patch Toolkit is distributed under [MIT](LICENSE-MIT) OR
-[Apache-2.0](LICENSE-APACHE). The binary statically links the crates below, whose
-licenses require their copyright notices be reproduced in a distribution.
+[Apache-2.0](LICENSE-APACHE). The app bundle ships two separately built crates —
+the native desktop binary (`src-tauri`) and the WebAssembly frontend it embeds
+(`web-rs`) — and statically links the crates below into them. Their licenses
+require the copyright notices be reproduced in a distribution. A crate both halves
+use is listed under each.
 
 Regenerate with `just licenses`. Do not edit by hand.
+
+## Desktop app (src-tauri)
 
 {{#each overview}}
 - {{name}} ({{count}} {{#if (eq count 1)}}crate{{else}}crates{{/if}})
 {{/each}}
 
 {{#each licenses}}
-## {{name}}
+### {{name}}
 
 Used by:
 {{#each used_by}}

@@ -71,8 +71,9 @@ test:
 
 # Backend test coverage (requires `cargo install cargo-llvm-cov`). Runs the
 # instrumented suite once, prints a per-file summary, then writes an lcov report
-# to src-tauri/target/lcov.info. The wasm frontend has no test suite, so coverage
-# is backend-only (the `web-clippy` gate compiles that crate).
+# to src-tauri/target/lcov.info. Backend-only: the frontend's `web-test` suite
+# covers only the pure `util` helpers on the host target, so a wasm-crate number
+# would measure little beyond them.
 coverage:
     cargo llvm-cov --manifest-path src-tauri/Cargo.toml --no-report
     cargo llvm-cov --manifest-path src-tauri/Cargo.toml report --summary-only
@@ -88,9 +89,12 @@ web-check:
 web-test:
     cargo test --manifest-path web-rs/Cargo.toml
 
-# Run every CI gate in sequence. `web-check` is not in the chain: clippy runs the
-# same type-check on the same target before its lints, so listing both paid for a
-# full wasm check twice per run. The recipe stays for quick iteration.
+# Run the Rust gates CI's backend and frontend jobs run, in the same order. CI
+# additionally builds the frontend through Trunk (`web-build`) and runs the gates in
+# docs/design/ci.md (audit, deny, licenses, hooks, actionlint, …). `web-check` is not
+# in the chain: clippy runs the same type-check on the same target before its lints,
+# so listing both paid for a full wasm check twice per run. The recipe stays for
+# quick iteration.
 verify: fmt-check clippy test web-clippy web-test
 
 # --- Dependency policy -------------------------------------------------------
@@ -110,14 +114,27 @@ deny:
 web-deny:
     cargo deny --manifest-path web-rs/Cargo.toml --config deny.toml check licenses bans sources
 
-# Regenerate THIRD-PARTY-LICENSES.md from the dependency tree (requires
-# `cargo install cargo-about`). Both crates ship inside one bundle, so both trees
-# are listed. deny.toml gates which licenses are *allowed* in; this is the outbound
-# half — most of those licenses require reproducing their copyright notices in a
-# distribution, and a statically linked binary distributes them all.
+# Regenerate THIRD-PARTY-LICENSES.md from the dependency trees (requires
+# `cargo install cargo-about`). deny.toml gates which licenses are *allowed* in; this
+# is the outbound half — most of those licenses require reproducing their copyright
+# notices in a distribution, and a statically linked binary distributes them all.
+# Both crates ship inside one bundle (the wasm frontend is embedded in the binary),
+# but they share no workspace or lockfile, so cargo-about runs once per crate and the
+# two renders are concatenated: about.hbs carries the preamble and the backend,
+# about-web.hbs the frontend. `--locked` so the notice describes the committed
+# lockfiles, not a fresh resolution. Unix shell (CI runs it on Linux; on Windows use
+# Git Bash or WSL) — PowerShell's redirection would rewrite the encoding and line
+# endings and make the CI staleness check fail.
+[unix]
 licenses:
-    cargo about generate --manifest-path src-tauri/Cargo.toml -o THIRD-PARTY-LICENSES.md about.hbs
-    @echo "wrote THIRD-PARTY-LICENSES.md"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    cargo about generate --locked -c about.toml --manifest-path src-tauri/Cargo.toml -o "$tmp/backend.md" about.hbs
+    cargo about generate --locked -c about.toml --manifest-path web-rs/Cargo.toml -o "$tmp/web.md" about-web.hbs
+    cat "$tmp/backend.md" "$tmp/web.md" > THIRD-PARTY-LICENSES.md
+    echo "wrote THIRD-PARTY-LICENSES.md"
 
 # --- Release / packaging -----------------------------------------------------
 
@@ -142,13 +159,16 @@ icon:
 # `npm ci` not `npm install`: it installs exactly the committed lockfile and fails if
 # package.json and the lock disagree, so CI cannot silently resolve a different
 # transitive tree than the one dependabot reviews.
+# [unix]: `VAR=1 cmd` and `cd … && …` are sh syntax, not PowerShell (windows-shell).
+[unix]
 screenshot-test:
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix scripts ci --no-audit --no-fund
     npm --prefix scripts test
 
 # Regenerate the README demo screenshot (docs/images/screenshot.png) by driving the
 # built web demo in headless Chromium. Needs Node; first run installs Playwright +
-# its Chromium under scripts/ (both gitignored). CI runs the same via screenshot.yml.
+# its Chromium (scripts/node_modules is gitignored). CI runs the same via screenshot.yml.
+[unix]
 screenshot:
     just web-build
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix scripts ci --no-audit --no-fund
