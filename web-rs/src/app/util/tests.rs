@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use super::super::state::{DeviceSelection, SelectedPatch};
+use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
@@ -52,28 +52,33 @@ fn only_a_forced_reboot_demands_a_typed_confirmation() {
 #[test]
 fn confirm_is_refused_until_the_device_count_is_typed_exactly() {
     // No typed count required: a click is enough.
-    assert!(can_confirm_action(false, false, false, "", "12"));
+    assert!(can_confirm_action(false, false, false, false, "", "12"));
 
     // Typed count required.
-    assert!(can_confirm_action(false, false, true, "12", "12"));
+    assert!(can_confirm_action(false, false, false, true, "12", "12"));
     assert!(
-        can_confirm_action(false, false, true, "  12  ", "12"),
+        can_confirm_action(false, false, false, true, "  12  ", "12"),
         "surrounding whitespace is forgiven"
     );
-    assert!(!can_confirm_action(false, false, true, "", "12"));
-    assert!(!can_confirm_action(false, false, true, "1", "12"));
-    assert!(!can_confirm_action(false, false, true, "13", "12"));
+    assert!(!can_confirm_action(false, false, false, true, "", "12"));
+    assert!(!can_confirm_action(false, false, false, true, "1", "12"));
+    assert!(!can_confirm_action(false, false, false, true, "13", "12"));
     assert!(
-        !can_confirm_action(false, false, true, "1 2", "12"),
+        !can_confirm_action(false, false, false, true, "1 2", "12"),
         "interior whitespace is not stripped"
     );
 
     // A blocked plan or an in-flight dispatch overrides everything, so a
     // correct count cannot double-fire an action.
-    assert!(!can_confirm_action(true, false, true, "12", "12"));
-    assert!(!can_confirm_action(false, true, true, "12", "12"));
-    assert!(!can_confirm_action(true, false, false, "", "12"));
-    assert!(!can_confirm_action(false, true, false, "", "12"));
+    assert!(!can_confirm_action(true, false, false, true, "12", "12"));
+    assert!(!can_confirm_action(false, true, false, true, "12", "12"));
+    assert!(!can_confirm_action(true, false, false, false, "", "12"));
+    assert!(!can_confirm_action(false, true, false, false, "", "12"));
+
+    // A failed dispatch spent the single-use token: Run must stay off until a
+    // fresh plan replaces it, however correct the typed count is.
+    assert!(!can_confirm_action(false, false, true, false, "", "12"));
+    assert!(!can_confirm_action(false, false, true, true, "12", "12"));
 }
 
 #[test]
@@ -278,19 +283,72 @@ fn sel_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, ty: &str)
 fn run_decision_orders_its_guards() {
     use RunDecision::*;
 
-    // Busy wins over everything, including demo.
-    assert_eq!(run_decision(true, false, true, true, false), AlreadyRunning);
-    assert_eq!(run_decision(false, true, true, true, false), AlreadyRunning);
+    // An in-flight run wins over everything, including demo. A silent tick skips...
+    assert_eq!(
+        run_decision(true, false, true, true, true, false),
+        AlreadyRunning
+    );
+    assert_eq!(
+        run_decision(false, true, true, true, true, false),
+        AlreadyRunning
+    );
+    // ...but a manual Run or drill-down is queued, never silently dropped. The Run
+    // button stays enabled during an auto-refresh, so dropping it made a click do
+    // nothing while the table went on showing the previous scope.
+    assert_eq!(run_decision(false, true, false, false, true, false), Queue);
+    assert_eq!(run_decision(true, false, false, false, true, false), Queue);
 
     // Demo beats the auth and status guards — it needs neither.
-    assert_eq!(run_decision(false, false, true, false, true), Demo);
+    assert_eq!(run_decision(false, false, false, true, false, true), Demo);
 
-    assert_eq!(run_decision(false, false, false, false, false), NotSignedIn);
     assert_eq!(
-        run_decision(false, false, false, true, true),
+        run_decision(false, false, false, false, false, false),
+        NotSignedIn
+    );
+    assert_eq!(
+        run_decision(false, false, false, false, true, true),
         NoStatusSelected
     );
-    assert_eq!(run_decision(false, false, false, true, false), Run);
+    assert_eq!(run_decision(false, false, true, false, true, false), Run);
+}
+
+/// Several clicks during one in-flight run collapse into one re-run, and a queued
+/// refresh keeps its `force` no matter what is queued after it.
+#[test]
+fn queued_runs_collapse_and_keep_force() {
+    assert_eq!(queue_run(None, false), Some(false));
+    assert_eq!(queue_run(None, true), Some(true));
+    assert_eq!(queue_run(Some(true), false), Some(true), "force is sticky");
+    assert_eq!(queue_run(Some(false), true), Some(true));
+}
+
+/// The slot drains only once nothing is in flight — the run still going is what
+/// fires it — and draining empties it so it fires once.
+#[test]
+fn queued_run_fires_once_after_the_run_in_flight_settles() {
+    let mut slot = Some(true);
+    assert_eq!(take_queued_run(&mut slot, true, false), None);
+    assert_eq!(take_queued_run(&mut slot, false, true), None);
+    assert_eq!(slot, Some(true), "still queued while a run is in flight");
+    assert_eq!(take_queued_run(&mut slot, false, false), Some(true));
+    assert_eq!(slot, None);
+    assert_eq!(take_queued_run(&mut slot, false, false), None, "fires once");
+}
+
+#[test]
+fn progress_stages_land_on_their_own_counters() {
+    let mut p = Progress::default();
+    apply_progress_stage(&mut p, "devices", 10);
+    apply_progress_stage(&mut p, "osPatches", 20);
+    apply_progress_stage(&mut p, "swPatches", 30);
+    apply_progress_stage(&mut p, "osInstalls", 40);
+    apply_progress_stage(&mut p, "swInstalls", 50);
+    assert_eq!(p.records(), 150);
+    assert!(!p.joining);
+    apply_progress_stage(&mut p, "somethingNew", 999);
+    assert_eq!(p.records(), 150, "an unknown stage is ignored");
+    apply_progress_stage(&mut p, "joining", 0);
+    assert!(p.joining);
 }
 
 /// Only equality is ever asked of the stamp, so wrapping is safe — and a plain
@@ -1718,4 +1776,288 @@ fn the_mirrored_action_predicates_match_the_backend_table() {
         "a new ActionKind must be added to this table — it is the only thing \
          asserting the frontend mirror still matches the backend"
     );
+}
+fn job_with(id: u64, state: JobState) -> JobReport {
+    JobReport {
+        id,
+        state,
+        ..job(ActionKind::OsPatchScan, false)
+    }
+}
+
+/// The poller's event and the dispatch response both carry the batch's rows and
+/// race each other; appending the response listed every job twice.
+#[test]
+fn merge_jobs_upserts_by_id_and_never_duplicates() {
+    let mut jobs = vec![job_with(1, JobState::Queued), job_with(2, JobState::Queued)];
+    // The event already advanced job 2 and delivered job 3...
+    merge_jobs(
+        &mut jobs,
+        vec![
+            job_with(2, JobState::Running),
+            job_with(3, JobState::Queued),
+        ],
+    );
+    // ...then the dispatch response arrives with the same batch.
+    merge_jobs(
+        &mut jobs,
+        vec![
+            job_with(2, JobState::Running),
+            job_with(3, JobState::Queued),
+        ],
+    );
+    let ids: Vec<u64> = jobs.iter().map(|j| j.id).collect();
+    assert_eq!(ids, vec![1, 2, 3], "each id once, first-seen order kept");
+    assert_eq!(jobs[1].state, JobState::Running, "replaced in place");
+
+    merge_jobs(&mut jobs, vec![job_with(1, JobState::Completed)]);
+    assert_eq!(jobs[0].state, JobState::Completed);
+    assert_eq!(jobs.len(), 3);
+}
+
+/// `Unknown` is an ambiguous dispatch still being polled, so it holds the update
+/// back like a running job does.
+#[test]
+fn jobs_in_flight_counts_every_non_terminal_state() {
+    let jobs = vec![
+        job_with(1, JobState::Queued),
+        job_with(2, JobState::Running),
+        job_with(3, JobState::Unknown("timed out".into())),
+        job_with(4, JobState::Completed),
+        job_with(5, JobState::Failed("exit 1".into())),
+        job_with(6, JobState::TimedOut),
+        job_with(7, JobState::Skipped("offline".into())),
+    ];
+    assert_eq!(jobs_in_flight(&jobs), 3);
+    assert_eq!(jobs_in_flight(&[]), 0);
+}
+
+#[test]
+fn update_waits_for_dispatch_and_for_jobs_in_flight() {
+    assert!(update_blocked_reason(true, 0).is_some());
+    let reason = update_blocked_reason(false, 2).expect("jobs running");
+    assert!(reason.contains('2'), "names how many: {reason}");
+    assert_eq!(update_blocked_reason(false, 0), None);
+}
+
+/// An auto-refresh keeps the selection, minus the rows it no longer lists.
+#[test]
+fn prune_keeps_only_ticked_rows_the_fresh_result_still_lists() {
+    let kb1 = sel_row(10, "srv-a", Some("KB1"), "Patch 1", "OS");
+    let kb2 = sel_row(10, "srv-a", Some("KB2"), "Patch 2", "OS");
+    let other = sel_row(20, "srv-b", Some("KB1"), "Patch 1", "OS");
+    let mut sel = BTreeMap::new();
+    apply_row_selection(&mut sel, &kb1, true);
+    apply_row_selection(&mut sel, &kb2, true);
+    apply_row_selection(&mut sel, &other, true);
+
+    // KB2 was installed; KB1 is still pending and the device went offline.
+    let mut still = kb1.clone();
+    still.offline = true;
+    let removed = prune_device_selection(&mut sel, 10, &[still]);
+    assert_eq!(removed, 1);
+    let device = &sel[&10];
+    assert_eq!(device.patches.len(), 1);
+    assert!(device.patches.contains_key(&patch_key(&kb1)));
+    assert!(device.offline, "the offline flag follows the fresh rows");
+    assert!(sel.contains_key(&20), "other devices are untouched");
+
+    // A device with nothing left leaves the selection entirely.
+    assert_eq!(prune_device_selection(&mut sel, 20, &[]), 1);
+    assert!(!sel.contains_key(&20));
+
+    // Rows for another device never keep this one's ticks alive.
+    assert_eq!(prune_device_selection(&mut sel, 10, &[other]), 1);
+    assert!(sel.is_empty());
+
+    // An unselected device is a no-op.
+    assert_eq!(prune_device_selection(&mut sel, 99, &[kb1]), 0);
+}
+
+#[test]
+fn group_selection_note_says_how_many_and_whether_capped() {
+    assert_eq!(
+        group_selection_note("KB1", 3, false),
+        "Selected 3 patch row(s) in KB1."
+    );
+    let capped = group_selection_note("Chrome", 500, true);
+    assert!(
+        capped.contains("first 500") && capped.contains("more"),
+        "{capped}"
+    );
+}
+
+/// The one-decimal percentage never claims a clean fleet it doesn't have.
+#[test]
+fn format_pct_tenths_never_rounds_up_to_100() {
+    assert_eq!(format_pct_tenths(99.96), "99.9%");
+    assert_eq!(format_pct_tenths(99.94), "99.9%");
+    assert_eq!(format_pct_tenths(99.86), "99.9%");
+    assert_eq!(format_pct_tenths(100.0), "100.0%");
+    assert_eq!(format_pct_tenths(87.26), "87.3%");
+    assert_eq!(format_pct_tenths(0.0), "0.0%");
+}
+
+#[test]
+fn trend_delta_is_signed_exactly_once() {
+    assert_eq!(trend_delta_label(12.0, false), "+12");
+    assert_eq!(trend_delta_label(-12.0, false), "-12");
+    assert_eq!(trend_delta_label(1204.4, false), "+1,204");
+    assert_eq!(trend_delta_label(0.3, false), "0", "rounds to no change");
+    assert_eq!(trend_delta_label(0.44, true), "+0.4%");
+    assert_eq!(trend_delta_label(-1.26, true), "-1.3%");
+    assert_eq!(
+        trend_delta_label(-0.04, true),
+        "0.0%",
+        "never a signed zero"
+    );
+}
+
+#[test]
+fn trend_verdict_follows_the_metric_direction_not_its_title() {
+    use TrendVerdict::*;
+    // Compliance: up is good.
+    assert_eq!(trend_verdict(2.0, true, true), Better);
+    assert_eq!(trend_verdict(-2.0, true, true), Worse);
+    // Backlog counts: up is bad.
+    assert_eq!(trend_verdict(5.0, false, false), Worse);
+    assert_eq!(trend_verdict(-5.0, false, false), Better);
+    // A change that prints as zero is not coloured as a movement.
+    assert_eq!(trend_verdict(0.04, true, true), Flat);
+    assert_eq!(trend_verdict(0.4, false, false), Flat);
+    assert_eq!(Flat.css_class(), "trend-delta");
+}
+
+#[test]
+fn failing_devices_are_counted_once_across_overlapping_groups() {
+    let group = |names: &[&str]| crate::types::FailureGroup {
+        patch_type: "OS".into(),
+        kb: None,
+        name: "p".into(),
+        severity: "Critical".into(),
+        affected_devices: names.len(),
+        device_names: names.iter().map(|n| n.to_string()).collect(),
+        latest_failure: None,
+    };
+    let failures = [group(&["a", "b"]), group(&["b", "c"]), group(&[])];
+    assert_eq!(failing_device_count(&failures), 3);
+    assert_eq!(failing_device_count(&[]), 0);
+}
+
+#[test]
+fn chart_label_names_every_value() {
+    assert_eq!(
+        chart_label(
+            "Compliance by OS",
+            &[
+                ("Windows".into(), "95%".into()),
+                ("macOS".into(), "80%".into())
+            ]
+        ),
+        "Compliance by OS: Windows 95%, macOS 80%"
+    );
+    assert_eq!(chart_label("Age", &[]), "Age: no data");
+}
+
+/// Arrow keys walk the tabs in on-screen order and wrap; Home/End jump.
+#[test]
+fn tab_keys_follow_the_aria_tabs_pattern() {
+    assert!(tab_after_key(Tab::Patches, "ArrowRight") == Some(Tab::Failures));
+    assert!(tab_after_key(Tab::Jobs, "ArrowRight") == Some(Tab::Patches));
+    assert!(tab_after_key(Tab::Patches, "ArrowLeft") == Some(Tab::Jobs));
+    assert!(tab_after_key(Tab::Reboot, "Home") == Some(Tab::Patches));
+    assert!(tab_after_key(Tab::Reboot, "End") == Some(Tab::Jobs));
+    assert!(tab_after_key(Tab::Reboot, "Enter").is_none());
+    // Every tab is visited exactly once around the ring.
+    let mut t = Tab::Patches;
+    for expected in TAB_ORDER {
+        assert!(t == expected);
+        t = tab_after_key(t, "ArrowRight").unwrap();
+    }
+    assert!(t == Tab::Patches);
+}
+
+#[test]
+fn install_window_applies_to_both_history_statuses() {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert!(needs_install_window(&s(&["INSTALLED"])));
+    assert!(
+        needs_install_window(&s(&["FAILED"])),
+        "the failure dashboard"
+    );
+    assert!(needs_install_window(&s(&["PENDING", "FAILED"])));
+    assert!(!needs_install_window(&s(&["PENDING", "APPROVED"])));
+    assert!(!needs_install_window(&[]));
+}
+
+/// A preset's saved bounds restore the First-seen control they came from.
+#[test]
+fn detected_window_fields_invert_the_saved_bounds() {
+    let e = date_to_epoch;
+    assert_eq!(
+        detected_window_fields(Some(7), e("2026-01-01"), None),
+        ("7".into(), String::new(), String::new()),
+        "a relative window wins"
+    );
+    assert_eq!(
+        detected_window_fields(None, e("2026-01-01"), e("2026-02-01")),
+        ("custom".into(), "2026-01-01".into(), "2026-02-01".into())
+    );
+    assert_eq!(
+        detected_window_fields(None, None, e("2026-02-01")),
+        ("custom".into(), String::new(), "2026-02-01".into())
+    );
+    assert_eq!(
+        detected_window_fields(None, None, None),
+        (String::new(), String::new(), String::new())
+    );
+}
+
+/// A custom instance selects Custom, and choosing Custom never blanks the URL.
+#[test]
+fn region_select_shows_custom_for_a_non_preset_url() {
+    assert_eq!(
+        preset_region("https://eu.ninjarmm.com"),
+        Some("https://eu.ninjarmm.com")
+    );
+    assert_eq!(
+        preset_region(" https://EU.ninjarmm.com/ "),
+        Some("https://eu.ninjarmm.com"),
+        "trailing slash and case are forgiven"
+    );
+    assert_eq!(preset_region("https://ninja.example.com"), None);
+
+    assert_eq!(
+        region_select_value("https://us2.ninjarmm.com", false),
+        "https://us2.ninjarmm.com"
+    );
+    assert_eq!(
+        region_select_value("https://ninja.example.com", false),
+        REGION_CUSTOM,
+        "used to fall back to North America (app)"
+    );
+    assert_eq!(
+        region_select_value("https://us2.ninjarmm.com", true),
+        REGION_CUSTOM,
+        "picking Custom holds while the preset URL is edited"
+    );
+    assert!(
+        preset_region(REGION_CUSTOM).is_none(),
+        "the Custom value is not a URL"
+    );
+}
+
+/// One severity table: the demo's group sort and the demo's row sort agree, and
+/// raw NinjaOne values rank like their labels.
+#[test]
+fn severity_rank_accepts_labels_raw_values_and_aliases() {
+    assert_eq!(severity_rank("Critical"), 7);
+    assert_eq!(severity_rank("CRITICAL"), 7);
+    assert_eq!(severity_rank("HIGH"), severity_rank("Important"));
+    assert_eq!(severity_rank("MEDIUM"), severity_rank("Moderate"));
+    assert_eq!(severity_rank("NONE"), severity_rank("Optional"));
+    assert_eq!(severity_rank("whatever"), 0);
+    for label in ["Critical", "Security", "Recommended", "Unknown"] {
+        assert_eq!(sev_ordinal(label), 7 - severity_rank(label));
+    }
 }

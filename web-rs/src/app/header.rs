@@ -60,10 +60,11 @@ pub(crate) fn Header() -> impl IntoView {
                                             Ok(()) => {
                                                 // The backend dropped the previous
                                                 // session's result and jobs; drop
-                                                // the rendering of them too.
+                                                // the rendering of them too. The
+                                                // lookups, scripts and jobs load
+                                                // off the auth status (see `App`).
                                                 state.clear_session();
                                                 state.session.refresh_auth();
-                                                state.load_lookups();
                                                 state.notify(Toast::ok("Signed in"));
                                             }
                                             Err(e) => state.notify(Toast::err(e)),

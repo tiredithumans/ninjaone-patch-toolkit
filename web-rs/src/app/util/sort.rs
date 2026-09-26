@@ -100,25 +100,34 @@ pub(crate) fn severity_raw(label: &str) -> Option<&'static str> {
         .map(|(raw, _)| *raw)
 }
 
-/// Severity ordinal (0 = most urgent) — the exact inverse of the backend's
-/// `Severity::rank()` (`src-tauri/src/model.rs`), which runs Critical 7 → Unknown 0.
+/// Severity rank mirroring the backend's `Severity::rank()` (`src-tauri/src/model.rs`):
+/// Critical 7 → Unknown 0. Accepts the display label or NinjaOne's raw value in any
+/// case, including the MSRC-style aliases the backend maps (`HIGH`, `MEDIUM`, `NONE`).
 ///
-/// `Security` and `Recommended` were missing, so both fell through to the catch-all
-/// and tied with `Unknown` *below* `Optional` — the opposite of the documented order,
-/// on the two bands NinjaOne uses most for third-party patches. This only drives the
-/// browser demo (the desktop app sorts backend-side via `RowSort`), which is also the
-/// README screenshot source.
-pub(super) fn sev_ordinal(sev: &str) -> u8 {
-    match sev {
-        "Critical" => 0,
-        "Important" => 1,
-        "Security" => 2,
-        "Moderate" => 3,
-        "Recommended" => 4,
-        "Low" => 5,
-        "Optional" => 6,
-        _ => 7,
+/// The one copy on the frontend. The demo's group sort kept its own table beside
+/// [`sev_ordinal`]'s, so the two orderings could drift apart with nothing failing.
+pub(crate) fn severity_rank(sev: &str) -> u8 {
+    match sev.to_ascii_uppercase().as_str() {
+        "CRITICAL" => 7,
+        "IMPORTANT" | "HIGH" => 6,
+        "SECURITY" => 5,
+        "MODERATE" | "MEDIUM" => 4,
+        "RECOMMENDED" => 3,
+        "LOW" => 2,
+        "OPTIONAL" | "NONE" => 1,
+        _ => 0,
     }
+}
+
+/// Severity ordinal (0 = most urgent) — the exact inverse of [`severity_rank`].
+///
+/// `Security` and `Recommended` were once missing, so both fell through to the
+/// catch-all and tied with `Unknown` *below* `Optional` — the opposite of the
+/// documented order, on the two bands NinjaOne uses most for third-party patches.
+/// This only drives the browser demo (the desktop app sorts backend-side via
+/// `RowSort`), which is also the README screenshot source.
+pub(super) fn sev_ordinal(sev: &str) -> u8 {
+    7 - severity_rank(sev)
 }
 
 /// Case-insensitive (ASCII) ordering without a per-comparison allocation.

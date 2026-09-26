@@ -1,20 +1,25 @@
 use super::*;
 
+/// The First-seen choices as (stored value, label). `custom` reveals the two date
+/// inputs; the numeric values are days, read by `util::filter_params`.
+const DETECTED_WINDOWS: [(&str, &str); 6] = [
+    ("", "Any time"),
+    ("1", "Last 24 hours"),
+    ("7", "Last 7 days"),
+    ("30", "Last 30 days"),
+    ("90", "Last 90 days"),
+    ("custom", "Custom range…"),
+];
+
 #[component]
 pub(crate) fn Filters() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // Both install-history statuses are bounded by the lookback window, not just
-    // INSTALLED: the backend sets `installed_after` whenever any `is_install_history()`
-    // status is requested. Gating this control on INSTALLED alone hid the window from
-    // the one view most likely to be truncated by it — a FAILED-only failure dashboard
-    // — so the operator could neither see nor widen the bound narrowing their results.
+    // Shown for either install-history status — see `util::needs_install_window`.
     let install_history_selected = move || {
         state
             .filters
             .statuses
-            .get()
-            .iter()
-            .any(|s| s == "INSTALLED" || s == "FAILED")
+            .with(|s| util::needs_install_window(s))
     };
     // Fleet-health tabs (Compliance / Needs Reboot) ignore the patch filters, so hide
     // those controls there rather than imply they'd change the device-scope numbers.
@@ -60,6 +65,9 @@ pub(crate) fn Filters() -> impl IntoView {
                     // one facet routes through the state method that reloads them
                     // (and drops any selected location that just went away).
                     on_toggle=Callback::new(move |id: i64| state.toggle_org(id))
+                    // Clear goes through the same reload, or the location list kept
+                    // offering (and the selection kept) only the cleared orgs' sites.
+                    on_clear=Callback::new(move |()| state.clear_orgs())
                     disabled=Signal::derive(move || state.lookups.loading_lookups())
                 />
                 <ScopePicker
@@ -78,6 +86,7 @@ pub(crate) fn Filters() -> impl IntoView {
                     on_toggle=Callback::new(move |id: i64| {
                         state.filters.toggle_id(state.filters.loc_ids, id)
                     })
+                    on_clear=Callback::new(move |()| state.filters.loc_ids.set(Vec::new()))
                     disabled=Signal::derive(move || {
                         state.lookups.loading_lookups() || state.lookups.locations.get().is_empty()
                     })
@@ -90,6 +99,7 @@ pub(crate) fn Filters() -> impl IntoView {
                     on_toggle=Callback::new(move |id: i64| {
                         state.filters.toggle_id(state.filters.role_ids, id)
                     })
+                    on_clear=Callback::new(move |()| state.filters.role_ids.set(Vec::new()))
                     disabled=Signal::derive(move || state.lookups.loading_lookups())
                 />
             </div>
@@ -121,8 +131,9 @@ pub(crate) fn Filters() -> impl IntoView {
                     }}
                 </div>
                 <div class="control-group">
-                    <span class="chips-label">"OS name contains:"</span>
+                    <span class="chips-label" id="filter-os-name-label">"OS name contains:"</span>
                     <input
+                        aria-labelledby="filter-os-name-label"
                         placeholder="e.g. Server 2022"
                         prop:value=move || state.filters.os_name.get()
                         on:input=move |ev| state.filters.os_name.set(event_target_value(&ev))
@@ -157,9 +168,12 @@ pub(crate) fn Filters() -> impl IntoView {
                             let val = t.clone();
                             let active = move || state.filters.patch_type.get() == val;
                             let set = t.clone();
+                            let pressed = active.clone();
                             view! {
                                 <button
+                                    type="button"
                                     class=move || if active() { "seg seg-on" } else { "seg" }
+                                    aria-pressed=move || pressed().to_string()
                                     on:click=move |_| state.filters.patch_type.set(set.clone())
                                 >
                                     {t}
@@ -230,25 +244,36 @@ pub(crate) fn Filters() -> impl IntoView {
                         .collect_view()}
                 </div>
                 <div class="control-group">
-                    <span class="chips-label">"Search (KB or name):"</span>
+                    <span class="chips-label" id="filter-search-label">"Search (KB or name):"</span>
                     <input
+                        type="search"
+                        aria-labelledby="filter-search-label"
                         placeholder="e.g. KB5040434"
                         prop:value=move || state.filters.search.get()
                         on:input=move |ev| state.filters.search.set(event_target_value(&ev))
                     />
                 </div>
                 <div class="control-group">
-                    <span class="chips-label">"First seen:"</span>
+                    <span class="chips-label" id="filter-first-seen-label">"First seen:"</span>
+                    // Selection rides on each option, not `prop:value` on the select:
+                    // this sits inside a `<Show>`, and a remount set the value before
+                    // the options existed, so the control showed "Any time" over a
+                    // stored window that was still filtering the query.
                     <select
-                        prop:value=move || state.filters.detected_window.get()
+                        aria-labelledby="filter-first-seen-label"
                         on:change=move |ev| state.filters.detected_window.set(event_target_value(&ev))
                     >
-                        <option value="">"Any time"</option>
-                        <option value="1">"Last 24 hours"</option>
-                        <option value="7">"Last 7 days"</option>
-                        <option value="30">"Last 30 days"</option>
-                        <option value="90">"Last 90 days"</option>
-                        <option value="custom">"Custom range…"</option>
+                        {DETECTED_WINDOWS
+                            .into_iter()
+                            .map(|(value, label)| {
+                                let selected = move || state.filters.detected_window.get() == value;
+                                view! {
+                                    <option value=value prop:selected=selected>
+                                        {label}
+                                    </option>
+                                }
+                            })
+                            .collect_view()}
                     </select>
                     <Show when=move || state.filters.detected_window.get() == "custom">
                         <label class="inline">
@@ -278,9 +303,12 @@ pub(crate) fn Filters() -> impl IntoView {
                 // shares the same aligned column (and row gap) as the rows above.
                 <Show when=install_history_selected>
                     <div class="control-group">
-                        <span class="chips-label">"Install history window (days):"</span>
+                        <span class="chips-label" id="filter-install-days-label">
+                            "Install history window (days):"
+                        </span>
                         <input
                             type="number"
+                            aria-labelledby="filter-install-days-label"
                             class="narrow"
                             min="1"
                             max="3650"
@@ -321,6 +349,9 @@ fn ScopePicker<T>(
     options: Signal<Vec<T>>,
     selected: RwSignal<Vec<i64>>,
     on_toggle: Callback<i64>,
+    /// Empties the selection. A callback rather than a direct write so a facet
+    /// with side effects (the org scope reloads the locations) keeps them.
+    on_clear: Callback<()>,
     disabled: Signal<bool>,
 ) -> impl IntoView
 where
@@ -336,12 +367,20 @@ where
         util::selection_label(&names, all_label)
     };
     let count = move || selected.get().len();
+    // The button's accessible name is the facet label *and* its current value, so a
+    // screen reader says "Organizations, All organizations" rather than only the
+    // value with no idea which picker it belongs to.
+    let slug = label.to_ascii_lowercase().replace(' ', "-");
+    let label_id = format!("scope-{slug}-label");
+    let button_id = format!("scope-{slug}-button");
 
     view! {
         <div class="scope-picker">
-            <span class="scope-picker__label">{label}</span>
+            <span class="scope-picker__label" id=label_id.clone()>{label}</span>
             <button
                 type="button"
+                id=button_id.clone()
+                aria-labelledby=format!("{label_id} {button_id}")
                 class="scope-picker__summary"
                 prop:disabled=move || disabled.get()
                 aria-expanded=move || open.get().to_string()
@@ -364,7 +403,7 @@ where
                             type="button"
                             class="btn btn-ghost"
                             prop:disabled=move || count() == 0
-                            on:click=move |_| selected.set(Vec::new())
+                            on:click=move |_| on_clear.run(())
                         >
                             "Clear"
                         </button>
