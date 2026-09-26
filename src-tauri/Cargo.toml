@@ -10,7 +10,11 @@ publish = false
 [lib]
 name = "ninjaone_patch_toolkit_lib"
 path = "src/lib.rs"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop-only: `rlib` is all `main.rs` links against. Tauri's template adds
+# `staticlib` + `cdylib` for iOS/Android builds, which this app does not ship —
+# and they made every debug build/test also link a ~1.1 GB static library and a
+# ~300 MB shared library of the whole dependency tree.
+crate-type = ["rlib"]
 
 [[bin]]
 name = "ninjaone-patch-toolkit"
