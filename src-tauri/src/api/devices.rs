@@ -1,6 +1,7 @@
 use anyhow::Result;
 
-use super::{DEFAULT_PAGE_SIZE, NinjaApiClient, ProgressFn};
+use super::paging::DEFAULT_PAGE_SIZE;
+use super::{NinjaApiClient, ProgressFn, df_query};
 use crate::model::Device;
 
 impl NinjaApiClient {
@@ -11,11 +12,12 @@ impl NinjaApiClient {
         df: Option<&str>,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Device>> {
-        let query: Vec<(&str, String)> = match df {
-            Some(f) if !f.is_empty() => vec![("df", f.to_string())],
-            _ => Vec::new(),
-        };
-        self.get_paginated_reporting("/devices-detailed", &query, DEFAULT_PAGE_SIZE, on_progress)
-            .await
+        self.get_paginated_reporting(
+            "/devices-detailed",
+            &df_query(df),
+            DEFAULT_PAGE_SIZE,
+            on_progress,
+        )
+        .await
     }
 }

@@ -2,7 +2,8 @@
 
 Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
 Code: `src-tauri/src/actions.rs` (domain + `plan()`), `src-tauri/src/api/actions.rs` (the
-POSTs), `src-tauri/src/commands/actions.rs` (plan/confirm/dispatch/poll),
+POSTs), `src-tauri/src/commands/actions/` (`mod.rs` the commands, `plan.rs`, `confirm.rs`,
+`dispatch.rs`, `poller.rs`),
 `src-tauri/src/api/activities.rs`, `web-rs/src/app/actions.rs` (UI).
 
 The feature is opt-in (`settings.actions.enabled`, default false) and every command re-checks
@@ -46,7 +47,7 @@ patches carry no KB, so it was always empty.
 Because the string is space-split, a KB target is spliced in unquoted, so `plan()` blocks any
 target of a KB-encoded kind that is not digits after an optional, case-insensitive `KB` prefix
 (`actions::kb_number`): `"123 dryRun=false"` would otherwise add a key of its own. The check reads
-`commands::actions::composed_targets` — exactly the targets that will be composed, so a
+`commands::actions::plan::composed_targets` — exactly the targets that will be composed, so a
 hand-typed string (sent verbatim) and the native endpoints are not checked against targets they
 never send. `build_parameters` also drops a malformed KB, in case a caller skips the planner.
 Software targets are free-form product titles and need no such check: they travel base64-encoded.
@@ -60,7 +61,7 @@ device into `kbAllowList` and made the one path capable of per-patch targeting u
 subset.
 
 A dispatch sends each device **only the patches ticked on it** (`util::targets_by_device` →
-`ActionRequest.device_targets` → `commands::actions::per_device_parameters`, a
+`ActionRequest.device_targets` → `commands::actions::plan::per_device_parameters`, a
 `BTreeMap<i64, String>` carried on `DispatchContext`). This covers **every** path that sends an
 allow list — both remediation kinds *and* the script picker's "Target only the selected KBs".
 There is no batch-wide `targets` field: it handed every device the union of the selection, which
@@ -85,7 +86,7 @@ asymmetry of the two feeds.
 `request_raw`'s timeout arm would otherwise replay the body and re-run the action; 429/401 still
 replay (the gateway rejected before the device queue). Every ambiguous outcome — a timeout or a
 connection lost after send, a 5xx, an unreadable 2xx body — fails with the `api::OutcomeUnknown`
-type, and `commands::actions::record_dispatch` turns it into `JobState::Unknown`: polled, never
+type, and `commands::actions::dispatch::record_dispatch` turns it into `JobState::Unknown`: polled, never
 auto-retried. Only a 4xx, a connect failure or a local refusal is `Failed`. See
 [api-client.md](./api-client.md#an-ambiguous-write-fails-with-the-outcomeunknown-type-never-a-phrase).
 
@@ -97,8 +98,13 @@ held only "dispatching" for a request NinjaOne rejected.
 
 `plan_action` hashes **everything that reaches NinjaOne or that the guardrails read** — kind ‖
 sorted device ids ‖ script ref ‖ **resolved** script ‖ per-device parameters ‖ **resolved**
-run_as ‖ reboot choice ‖ reboot mode ‖ include_offline ‖ override_window ‖ dry_run — into a
-5-minute token; `run_action` re-plans from scratch and re-checks the hash.
+run_as ‖ reboot choice ‖ reboot mode ‖ reboot reason ‖ include_offline ‖ override_window ‖
+dry_run — into a 5-minute token; `run_action` re-plans from scratch and re-checks the hash.
+
+- The reboot reason is sent to NinjaOne and lands in its activity feed as the server-side record
+  of why the machine went down, so it is bound too (length-prefixed, as dispatched: `None` is an
+  empty string). It used to be excluded alongside the display-only `script_name`, so the reason
+  could be edited after review under the same approval.
 
 - The run-as identity is resolved in `build_plan` (`resolve_run_as`: a blank request means the
   Settings default) and `run_action` dispatches that value. It used to fall back to Settings
@@ -156,8 +162,8 @@ for how the invalidation survives an in-flight fetch.
 
 ## Job state is tenant-stamped; the poller is single-claim
 
-Job state lives in `AppState.jobs`, mirroring `last_result` — a tenant switch reads as a miss. The
-poller is single-claim (`try_claim_job_poller`) and emits `action:progress` (no capability change
+Job state lives in `AppState.jobs` (methods in `state/jobs.rs`), mirroring `last_result` — a
+tenant switch reads as a miss. The poller is single-claim (`try_claim_job_poller`) and emits `action:progress` (no capability change
 needed; `core:event:default` already covers it). It retires via `release_job_poller_if_idle()`,
 which re-checks for pending jobs **and** clears the claim flag under the jobs lock. Dispatch
 appends its jobs before calling `try_claim_job_poller`, so a batch landing during shutdown is

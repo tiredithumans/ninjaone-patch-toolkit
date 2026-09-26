@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::error::UiError;
 use crate::filter::FilterParams;
-use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus, PatchType, Role};
+use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
     GroupBy, GroupPage, LookupMaps, PatchFamilies, PatchSource, QueryResult, QuerySummary, RowSort,
     build_age_buckets, build_compliance, build_compliance_by_os, build_device_summaries,
@@ -17,11 +17,11 @@ use crate::rows::{
     group_member_page, page_rows, pending_counts, slice_groups, sort_order,
 };
 use crate::settings::MAX_WINDOW_DAYS;
-use crate::state::{AppState, CurrentPatches, Memo, StoreOutcome};
+use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
 
-/// The org/location/role lookups a query joins against, each shared behind `Arc`
-/// so a cache hit hands out a cheap refcount bump instead of a deep clone.
-type Lookups = (Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>);
+/// The org/location/role lookups a query joins against, shared behind the cache's
+/// `Arc` so a cache hit hands out a cheap refcount bump instead of a deep clone.
+type Lookups = Arc<LookupSet>;
 
 /// Size of the first page of detail rows returned inline by `query_patches`. Must
 /// match the frontend's `PATCHES_PAGE_SIZE` so the seeded page fills the table's
@@ -332,9 +332,7 @@ impl QueryPlan {
 struct FetchedSources {
     devices: Arc<Vec<Device>>,
     current: CurrentPatches,
-    orgs: Arc<Vec<Organization>>,
-    locations: Arc<Vec<Location>>,
-    roles: Arc<Vec<Role>>,
+    lookups: Lookups,
     os_installs: Vec<Patch>,
     sw_installs: Vec<Patch>,
 }
@@ -425,7 +423,7 @@ where
     // finish and cache.
     let devices = devices?;
     let current = current?;
-    let (orgs, locations, roles) = lookup_sets?;
+    let lookups = lookup_sets?;
     let os_installs = os_installs?;
     let sw_installs = sw_installs?;
 
@@ -434,9 +432,7 @@ where
     let src = FetchedSources {
         devices,
         current,
-        orgs,
-        locations,
-        roles,
+        lookups,
         os_installs,
         sw_installs,
     };
@@ -459,7 +455,11 @@ fn assemble_result(
     sla_days: i64,
     now: DateTime<Utc>,
 ) -> QueryResult {
-    let maps = LookupMaps::build(&src.orgs, &src.locations, &src.roles);
+    let maps = LookupMaps::build(
+        &src.lookups.orgs,
+        &src.lookups.locations,
+        &src.lookups.roles,
+    );
 
     // Scope the whole-fleet caches to the selected identity facets (org/location/
     // role/class) client-side — this is what makes a re-filter a no-refetch

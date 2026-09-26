@@ -223,6 +223,21 @@ pub fn record_all(entries: &[AuditEntry]) {
     write_records(&path, entries);
 }
 
+/// One record as the exact bytes appended: the JSON and its newline in one buffer,
+/// so it reaches the file in a single `write_all`.
+///
+/// This was `writeln!(file, "{line}")` on the unbuffered `File`, which issues the
+/// JSON and the newline as two separate writes. Dispatch audits from a task per
+/// device and the poller closes records concurrently, so two appenders could land
+/// between each other's halves — two records fused on one line followed by an empty
+/// one — and a crash between the halves left a record with no terminator for the
+/// next append to run into. Either way a JSONL reader loses both records.
+fn encode_line(entry: &AuditEntry) -> serde_json::Result<Vec<u8>> {
+    let mut line = serde_json::to_vec(entry)?;
+    line.push(b'\n');
+    Ok(line)
+}
+
 /// The half of [`record_all`] that does not depend on the OS config directory, so it
 /// can be tested against a temp path. `record_all` itself was untestable — it
 /// resolved its own destination — which left the directory creation, the 0600 mode
@@ -259,14 +274,14 @@ fn write_records(path: &std::path::Path, entries: &[AuditEntry]) {
         }
     };
     for entry in entries {
-        let line = match serde_json::to_string(entry) {
+        let line = match encode_line(entry) {
             Ok(l) => l,
             Err(err) => {
                 warn!(?err, "could not serialize an audit record");
                 continue;
             }
         };
-        if let Err(err) = writeln!(file, "{line}") {
+        if let Err(err) = file.write_all(&line) {
             warn!(?err, path = %path.display(), "could not append to the action audit log");
             return;
         }
@@ -417,6 +432,49 @@ mod tests {
             0o600,
             "the audit log must not be group/world readable"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each record is one newline-terminated buffer with no interior newline, and
+    /// concurrent appenders — dispatch audits per device, from parallel tasks —
+    /// never split or fuse one. Every line must read back as a whole record.
+    #[test]
+    fn concurrent_appends_never_split_or_fuse_a_record() {
+        let one = encode_line(&sample_entry(1)).expect("serializes");
+        assert_eq!(one.last(), Some(&b'\n'));
+        assert_eq!(one.iter().filter(|b| **b == b'\n').count(), 1);
+
+        let dir = std::env::temp_dir().join(format!("njp-audit-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(AUDIT_FILE);
+
+        const WRITERS: u64 = 8;
+        const PER_WRITER: u64 = 50;
+        std::thread::scope(|s| {
+            for w in 0..WRITERS {
+                let path = &path;
+                s.spawn(move || {
+                    for i in 0..PER_WRITER {
+                        let mut entry = sample_entry(w * PER_WRITER + i);
+                        // Large enough that a split write would have room to interleave.
+                        entry.detail = "x".repeat(2048);
+                        write_records(path, &[entry]);
+                    }
+                });
+            }
+        });
+
+        let body = std::fs::read_to_string(&path).expect("the log exists");
+        let mut ids: Vec<u64> = body
+            .lines()
+            .map(|line| {
+                let v: serde_json::Value =
+                    serde_json::from_str(line).expect("every line is exactly one record");
+                v["jobId"].as_u64().expect("job id")
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..WRITERS * PER_WRITER).collect::<Vec<_>>());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
