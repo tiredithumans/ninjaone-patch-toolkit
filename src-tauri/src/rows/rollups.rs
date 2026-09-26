@@ -13,6 +13,7 @@ use serde::Serialize;
 use crate::model::{Device, Patch, PatchRow, Severity};
 
 use super::compliance::rollup_device;
+use super::join::ORPHAN_DEVICE_ID;
 use super::*;
 
 /// A fleet-wide rollup of FAILED install records grouped by patch, so the operator
@@ -28,8 +29,8 @@ pub struct FailureGroup {
     pub severity_rank: u8,
     /// Distinct devices the patch failed on (the headline count).
     pub affected_devices: usize,
-    /// Every affected device name, so the table and Excel/HTML export carry the
-    /// complete list (not a truncated sample).
+    /// Every affected device name. The in-app table shows the complete list; the
+    /// Excel/HTML "Devices" cell ends in "… and N more" past Excel's cell limit.
     pub device_names: Vec<Arc<str>>,
     pub latest_failure: Option<String>,
     pub latest_failure_ts: Option<i64>,
@@ -48,14 +49,11 @@ impl FailureGroup {
             TableCell::opt_text(f.latest_failure.as_deref())
         }),
         ("Devices", |f| {
-            // `Vec<Arc<str>>` has no `join`; the rendering is unchanged.
-            TableCell::Text(
-                f.device_names
-                    .iter()
-                    .map(|n| n.as_ref())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
+            // Capped at Excel's per-cell limit: a patch failing on a couple of
+            // thousand machines joined past it, and the one rejected cell failed the
+            // whole export. The report renders the same cell, so both artifacts
+            // agree; the in-app table reads `device_names` whole.
+            TableCell::Text(join_capped(&f.device_names, CELL_MAX_CHARS))
         }),
     ];
 }
@@ -140,7 +138,7 @@ pub struct OrgSeverity {
     pub counts: SeverityCounts,
 }
 
-/// One bucket of the pending-patch age histogram (by release age).
+/// One bucket of the pending-patch age histogram (by age since first seen).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgeBucket {
@@ -169,9 +167,12 @@ pub(super) fn is_pending(status: Option<&str>) -> bool {
 
 /// Groups the FAILED detail rows by patch (`patch_type` + `kb` + `name`), counting
 /// the distinct devices each failed on, the most recent failure, and the full list
-/// of affected device names. Sorted by affected-device count then severity, desc.
+/// of affected device names. Sorted by affected-device count then severity, desc,
+/// with ties in first-appearance order so identical runs list identically.
 pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
     struct Acc {
+        /// First-seen order in the canonical row sequence — the tie-break below.
+        seq: usize,
         patch_type: &'static str,
         kb: Option<Arc<str>>,
         name: Arc<str>,
@@ -190,9 +191,11 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
         if &*r.status != "FAILED" {
             continue;
         }
+        let seq = groups.len();
         let acc = groups
             .entry((r.patch_type, r.kb.clone(), r.name.clone()))
             .or_insert_with(|| Acc {
+                seq,
                 patch_type: r.patch_type,
                 kb: r.kb.clone(),
                 name: r.name.clone(),
@@ -204,8 +207,10 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
                 latest_date: None,
             });
         // Count distinct devices by id, but only add a name the first time we see
-        // that device, so the name list has no duplicates.
-        if acc.devices.insert(r.device_id) {
+        // that device, so the name list has no duplicates. A record with no device
+        // id is not a device: tallying the sentinel would count every id-less
+        // failure as one shared machine.
+        if r.device_id != ORPHAN_DEVICE_ID && acc.devices.insert(r.device_id) {
             acc.device_names.push(r.device_name.clone());
         }
         // Surface the highest severity seen for the group (records can disagree).
@@ -220,8 +225,14 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
             acc.latest_date = r.installed_date.clone();
         }
     }
-    let mut out: Vec<FailureGroup> = groups
-        .into_values()
+    // `HashMap` iteration order is randomized per process, so without a total order
+    // two identical runs listed tied patches differently — in the table, the
+    // workbook and the report. Ties fall back to the order each patch first appears
+    // in the canonical row sequence, which is itself deterministic.
+    let mut accumulated: Vec<Acc> = groups.into_values().collect();
+    accumulated.sort_unstable_by_key(|a| a.seq);
+    let mut out: Vec<FailureGroup> = accumulated
+        .into_iter()
         .map(|a| FailureGroup {
             patch_type: a.patch_type,
             kb: a.kb,
@@ -234,11 +245,13 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
             latest_failure_ts: a.latest_ts,
         })
         .collect();
-    out.sort_by_cached_key(|g| (Reverse(g.affected_devices), Reverse(g.severity_rank)));
+    // Stable, so the insertion order above survives as the tie-break.
+    out.sort_by_key(|g| (Reverse(g.affected_devices), Reverse(g.severity_rank)));
     out
 }
 
-/// Buckets pending (MANUAL/APPROVED) current patches by org and MSRC severity for
+/// Buckets pending current patches ([`is_pending`] — everything not `REJECTED` or
+/// `INSTALLED`) by org and MSRC severity for
 /// the dashboard's severity breakdown. Sorted by organization name.
 pub fn build_severity_by_org(
     current_patches: &[&Patch],
@@ -289,7 +302,7 @@ pub fn build_severity_by_org(
 /// Fixed labels for the pending-patch age histogram, oldest bucket last, with the
 /// undated bucket after it.
 ///
-/// "Unknown" is its own bucket rather than being folded into `180+ days`. Undated
+/// "Unknown" is its own bucket rather than being folded into `181+ days`. Undated
 /// pending patches are lumped with genuinely ancient ones only if you assume the
 /// worst, and the resulting bar is both the tallest and the most alarming — while
 /// actually meaning "we have no timestamp", which is a data-quality signal, not a
@@ -300,7 +313,9 @@ const AGE_BUCKET_LABELS: [&str; 6] = [
     "31-60 days",
     "61-90 days",
     "91-180 days",
-    "180+ days",
+    // 181, not 180: a patch exactly 180 days old is in the bucket above, and a label
+    // pair reading "91-180" / "180+" claimed it for both.
+    "181+ days",
     "Unknown",
 ];
 

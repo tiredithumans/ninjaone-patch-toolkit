@@ -345,6 +345,7 @@ mod tests {
                     ("Status", "Pending, Failed".to_string()),
                     ("Severity", "CRITICAL".to_string()),
                 ],
+                ..Default::default()
             }),
             scope_note: NOTE,
         }
