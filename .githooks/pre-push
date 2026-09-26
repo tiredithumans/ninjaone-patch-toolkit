@@ -2,8 +2,14 @@
 # Runs the same gates CI runs, before anything leaves the machine.
 #
 # `just verify` is the list — the recipe, not a hand-typed copy of it, so local
-# and CI cannot drift. Skipped when nothing under the two crates changed against
-# the upstream branch, since a docs-only push should not pay a full Rust build.
+# and CI cannot drift. Skipped when nothing that verify reads changed in the
+# commits being pushed, since a docs-only push should not pay a full Rust build.
+#
+# What "being pushed" means comes from git itself: the hook's stdin carries one
+# `<local ref> <local sha> <remote ref> <remote sha>` line per ref. Each is
+# compared against what the remote already has (its sha), or — for a new branch —
+# against where it forked from origin/main. When no base can be found the push is
+# verified rather than guessed at: an unknown change set is not a docs-only one.
 #
 # Set SKIP_VERIFY=1 to push anyway (a WIP branch, or a machine without the wasm
 # target installed). CI is still the authority.
@@ -13,10 +19,34 @@ set -uo pipefail
 [ "${SKIP_VERIFY:-0}" = "1" ] && exit 0
 command -v just >/dev/null 2>&1 || exit 0
 
-base=$(git merge-base HEAD "@{upstream}" 2>/dev/null || git rev-parse HEAD~1 2>/dev/null || echo "")
-if [ -n "$base" ] && git diff --quiet "$base" HEAD -- src-tauri web-rs 2>/dev/null; then
-  exit 0
-fi
+# Everything `just verify` compiles, lints, formats or is configured by.
+paths=(src-tauri web-rs justfile rust-toolchain.toml deny.toml .cargo)
+
+needs_verify=0
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  # A deletion pushes no content.
+  [ "${local_sha//0/}" = "" ] && continue
+
+  base=""
+  if [ "${remote_sha//0/}" != "" ] && git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
+    base=$remote_sha
+  else
+    for candidate in origin/main origin/HEAD "@{upstream}"; do
+      if base=$(git merge-base "$local_sha" "$candidate" 2>/dev/null); then
+        break
+      fi
+      base=""
+    done
+  fi
+
+  if [ -z "$base" ] || ! git diff --quiet "$base" "$local_sha" -- "${paths[@]}" 2>/dev/null; then
+    needs_verify=1
+    break
+  fi
+done
+
+# No ref lines means nothing is being updated, so there is nothing to verify.
+[ "$needs_verify" -eq 0 ] && exit 0
 
 echo "[pre-push] just verify (SKIP_VERIFY=1 to bypass)"
 if ! just verify; then
