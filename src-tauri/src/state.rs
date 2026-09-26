@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -485,6 +486,30 @@ impl AppState {
     pub async fn lookups(
         &self,
     ) -> Result<(Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>)> {
+        let set = self.lookup_set().await?;
+        // The three lists are cached as one entry but handed out separately, because
+        // `list_orgs`/`list_locations`/`list_roles` each want only their own. Cloning
+        // out of the shared `Arc<LookupSet>` costs one Vec copy per call; these are
+        // the small near-static lookups, not the whole-fleet feeds, and the
+        // alternative is leaking `LookupSet` into five call sites.
+        Ok((
+            Arc::new(set.orgs.clone()),
+            Arc::new(set.locations.clone()),
+            Arc::new(set.roles.clone()),
+        ))
+    }
+
+    /// Organization id → name, read straight out of the cached lookups.
+    ///
+    /// For the action planner, which needs nothing else: going through
+    /// [`Self::lookups`] cloned all three lists on every plan and every confirm just
+    /// to read the org names.
+    pub async fn org_names(&self) -> Result<HashMap<i64, String>> {
+        let set = self.lookup_set().await?;
+        Ok(set.orgs.iter().map(|o| (o.id, o.name.clone())).collect())
+    }
+
+    async fn lookup_set(&self) -> Result<Arc<LookupSet>> {
         let key = self.tenant_key();
         let (set, _) = self
             .lookups_cache
@@ -513,16 +538,7 @@ impl AppState {
                 })
             })
             .await?;
-        // The three lists are cached as one entry but handed out separately, because
-        // `list_orgs`/`list_locations`/`list_roles` each want only their own. Cloning
-        // out of the shared `Arc<LookupSet>` costs one Vec copy per call; these are
-        // the small near-static lookups, not the whole-fleet feeds, and the
-        // alternative is leaking `LookupSet` into five call sites.
-        Ok((
-            Arc::new(set.orgs.clone()),
-            Arc::new(set.locations.clone()),
-            Arc::new(set.roles.clone()),
-        ))
+        Ok(set)
     }
 
     /// Whole-fleet device inventory (no `df`), served from a long-TTL cache so

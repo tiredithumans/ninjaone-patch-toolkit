@@ -16,7 +16,7 @@ use chrono::Utc;
 use serde::Serialize;
 use tracing::warn;
 
-use super::{ActionKind, JobState};
+use super::{ActionKind, JobReport, JobState};
 
 /// The log's filename now lives in `paths::audit_path`, which single-sources the
 /// whole location; this copy only names temp files in the tests below.
@@ -56,6 +56,32 @@ impl AuditEntry {
     pub fn outcome_of(state: &JobState) -> String {
         state.label()
     }
+
+    /// The record that closes out the one written at dispatch, once `job` has an
+    /// outcome — from the poller when the activity feed settles it, or from the
+    /// dispatch itself when NinjaOne rejected the request outright. `parameters` and
+    /// the confirm-token prefix are already on the opening record.
+    pub fn closing(job: &JobReport, instance: String, client_id: Option<String>) -> Self {
+        Self {
+            timestamp: now_stamp(),
+            instance,
+            client_id,
+            batch_id: job.batch_id,
+            job_id: job.id,
+            kind: job.kind,
+            device_id: job.device_id,
+            device_name: job.device_name.clone(),
+            organization: job.organization.clone(),
+            detail: job.detail.clone(),
+            parameters: None,
+            dry_run: job.dry_run,
+            confirm_token_prefix: None,
+            outcome: Self::outcome_of(&job.state),
+            activity_id: job.activity_id,
+            series_uid: job.series_uid.clone(),
+            exit_code: job.exit_code,
+        }
+    }
 }
 
 /// Replaces the value of any `key=value` token whose key looks like a credential.
@@ -79,28 +105,86 @@ pub fn redact_parameters(parameters: &str) -> String {
     // it used to pass straight through, since neither token contains an `=` and so
     // neither could ever match. The module doc claims a script's service password
     // does not reach disk in cleartext, and for that shape it did.
+    //
+    // `:` separates a flag from its value as well as `=` does — `-Password:hunter2`
+    // is PowerShell's inline form. It used to be read as one bare flag, so the
+    // credential went to disk verbatim and the *following* token was redacted in its
+    // place. And a quoted value spans tokens once split on whitespace, so a redaction
+    // that stopped at the first one left the rest of the passphrase in the log.
     let mut out: Vec<String> = Vec::new();
-    let mut redact_next = false;
+    let mut owed = Owed::Nothing;
     for token in parameters.split_whitespace() {
-        if redact_next {
-            redact_next = false;
-            // Only a *value* is swallowed. `-Password -Verbose` means the flag was
-            // given no value, and blanking the following flag would both lose
-            // evidence and misrepresent what ran.
-            if !is_flag(token) {
-                out.push("<redacted>".into());
+        match owed {
+            Owed::ClosingQuote(q) => {
+                if token.ends_with(q) {
+                    owed = Owed::Nothing;
+                }
                 continue;
             }
+            Owed::Value => {
+                owed = Owed::Nothing;
+                // Only a *value* is swallowed. `-Password -Verbose` means the flag
+                // was given no value, and blanking the following flag would both
+                // lose evidence and misrepresent what ran.
+                if !is_flag(token) {
+                    out.push("<redacted>".into());
+                    owed = quote_owed(token);
+                    continue;
+                }
+            }
+            Owed::Nothing => {}
         }
-        match token.split_once('=') {
-            Some((key, _)) if is_sensitive(key) => out.push(format!("{key}=<redacted>")),
-            _ => {
-                redact_next = is_flag(token) && is_sensitive(token);
+        match split_key_value(token) {
+            // `-Password: hunter2` / `password= hunter2`: the value is the next token.
+            Some((key, sep, "")) if is_sensitive(key) => {
+                out.push(format!("{key}{sep}"));
+                owed = Owed::Value;
+            }
+            Some((key, sep, value)) if is_sensitive(key) => {
+                out.push(format!("{key}{sep}<redacted>"));
+                owed = quote_owed(value);
+            }
+            // Only a bare flag names the next token as its value. A flag that already
+            // carried one (`-Mode:password-reset`) must not redact whatever follows
+            // it just because its *value* looks sensitive.
+            Some(_) => out.push(token.to_string()),
+            None => {
+                if is_flag(token) && is_sensitive(token) {
+                    owed = Owed::Value;
+                }
                 out.push(token.to_string());
             }
         }
     }
     out.join(" ")
+}
+
+/// What [`redact_parameters`] still owes after the token it just wrote.
+#[derive(Clone, Copy)]
+enum Owed {
+    Nothing,
+    /// A sensitive flag with no inline value: the next token is its value.
+    Value,
+    /// A redacted value opened a quote; swallow tokens through the closing one. An
+    /// unterminated quote swallows the rest of the line, which is the safe way to be
+    /// wrong here.
+    ClosingQuote(char),
+}
+
+/// Splits `key=value` / `key:value` at whichever separator comes first, so a path in
+/// a value (`logPath=C:/temp`) still splits at the `=`.
+fn split_key_value(token: &str) -> Option<(&str, char, &str)> {
+    let at = token.find(['=', ':'])?;
+    let sep = token[at..].chars().next()?;
+    Some((&token[..at], sep, &token[at + sep.len_utf8()..]))
+}
+
+/// Whether a redacted `value` opened a quote it did not close in the same token.
+fn quote_owed(value: &str) -> Owed {
+    match value.chars().next() {
+        Some(q @ ('"' | '\'')) if value.len() == 1 || !value.ends_with(q) => Owed::ClosingQuote(q),
+        _ => Owed::Nothing,
+    }
 }
 
 /// Whether `token` is a flag rather than a value: `-Password`, `--api-key`, or the
@@ -385,5 +469,115 @@ mod tests {
     fn ordinary_flag_values_pass_through() {
         let params = "-Path C:/temp -Retries 3 -Force";
         assert_eq!(redact_parameters(params), params);
+        // `:` is a separator now, so a non-sensitive inline value must survive it.
+        let inline = "-Path:C:/temp logPath=C:/logs/run.txt https://example.com";
+        assert_eq!(redact_parameters(inline), inline);
+    }
+
+    /// `-Password:hunter2` is PowerShell's inline form. It read as one bare flag, so
+    /// the credential was written verbatim and the *next* token redacted instead.
+    #[test]
+    fn a_colon_separated_credential_is_redacted_in_place() {
+        assert_eq!(
+            redact_parameters("-Password:hunter2 -Verbose"),
+            "-Password:<redacted> -Verbose"
+        );
+        assert_eq!(
+            redact_parameters("-Password:hunter2 C:/temp"),
+            "-Password:<redacted> C:/temp",
+            "the token after an inline value is not the credential"
+        );
+        // An empty inline value means the credential is the next token.
+        assert_eq!(
+            redact_parameters("-Password: hunter2 -Force"),
+            "-Password: <redacted> -Force"
+        );
+        assert_eq!(
+            redact_parameters("servicePassword= hunter2"),
+            "servicePassword= <redacted>"
+        );
+    }
+
+    /// A flag that already carried its value must not redact what follows just
+    /// because the value mentions something sensitive.
+    #[test]
+    fn a_flag_with_an_inline_value_does_not_redact_the_next_token() {
+        assert_eq!(
+            redact_parameters("-Mode:password-reset -Force"),
+            "-Mode:password-reset -Force"
+        );
+    }
+
+    /// Split on whitespace, a quoted passphrase is several tokens; stopping at the
+    /// first left the rest of it on disk.
+    #[test]
+    fn a_quoted_multi_word_value_is_redacted_through_its_closing_quote() {
+        for (input, expected) in [
+            (
+                r#"-Password "correct horse battery" -Force"#,
+                "-Password <redacted> -Force",
+            ),
+            (
+                r#"-Password:"correct horse battery" -Force"#,
+                "-Password:<redacted> -Force",
+            ),
+            (
+                "servicePassword='correct horse' dryRun=true",
+                "servicePassword=<redacted> dryRun=true",
+            ),
+            // A quoted single word closes in its own token.
+            (
+                r#"-Password "hunter2" -Force"#,
+                "-Password <redacted> -Force",
+            ),
+            // A lone quote opens the value; its partner closes it.
+            (
+                r#"-Password " hunter 2 " -Force"#,
+                "-Password <redacted> -Force",
+            ),
+        ] {
+            let redacted = redact_parameters(input);
+            assert_eq!(redacted, expected, "{input}");
+            assert!(
+                !redacted.contains("horse") && !redacted.contains("hunter"),
+                "{redacted}"
+            );
+        }
+        // An unterminated quote swallows the rest rather than leak it.
+        assert_eq!(
+            redact_parameters(r#"-Password "correct horse -Force"#),
+            "-Password <redacted>"
+        );
+    }
+
+    /// A send-time rejection is closed out at dispatch, since the poller never sees
+    /// it. The record carries the outcome but not the parameters, which the opening
+    /// record already holds.
+    #[test]
+    fn a_closing_record_carries_the_outcome_and_correlators() {
+        let job = JobReport {
+            id: 9,
+            batch_id: 3,
+            device_id: 7,
+            device_name: "srv-1".into(),
+            organization: "Contoso".into(),
+            kind: ActionKind::Reboot,
+            detail: "Reboot (NORMAL)".into(),
+            dry_run: false,
+            state: JobState::Failed("400 not applicable".into()),
+            dispatched_at: String::new(),
+            dispatched_ts: 0,
+            finished_at: None,
+            duration_seconds: None,
+            activity_id: Some(11),
+            series_uid: None,
+            exit_code: Some(1),
+        };
+        let entry = AuditEntry::closing(&job, "https://x".into(), None);
+        assert_eq!(entry.outcome, "Failed: 400 not applicable");
+        assert_eq!((entry.batch_id, entry.job_id), (3, 9));
+        assert_eq!(entry.activity_id, Some(11));
+        assert_eq!(entry.exit_code, Some(1));
+        assert!(entry.parameters.is_none() && entry.confirm_token_prefix.is_none());
     }
 }

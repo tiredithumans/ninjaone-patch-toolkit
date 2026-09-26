@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
+use std::fmt;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -35,17 +36,55 @@ const DEFAULT_PAGE_SIZE: u32 = 500;
 /// the rest of the fleet.
 const REPORTING_PAGE_SIZE: u32 = 5000;
 const MAX_RETRIES: u8 = 3;
+/// The longest `Retry-After` this client sits out. The header is server-controlled,
+/// and an uncapped value parked the request — and, on a dispatch, the operator's
+/// whole batch — for as long as the server cared to ask, with nothing on screen.
+const MAX_RETRY_AFTER_SECS: u64 = 60;
 
-/// Whether a request may be replayed after a *transport* failure whose outcome is
-/// unknown (a client-side timeout: the body was sent, but no response came back).
+/// The failure of a [`ReplaySafety::ActOnce`] request that may nonetheless have
+/// reached NinjaOne: a timeout or a connection lost after the request was sent, a
+/// 5xx (the gateway may have failed *after* the job reached the device queue), or a
+/// 2xx whose body could not be read.
+///
+/// The dispatch site turns this into `JobState::Unknown` — polled, never replayed —
+/// rather than a terminal `Failed`. It is a type rather than a phrase in the message
+/// because the classification used to be `msg.contains("may already")`, which only
+/// the timeout arm produced, so a 5xx on an apply read as a definite failure while
+/// the device could be installing patches. Test with [`is_outcome_unknown`], which
+/// sees through any `.context()` layered on top.
+#[derive(Debug)]
+pub struct OutcomeUnknown(pub String);
+
+impl fmt::Display for OutcomeUnknown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} — the action may already be queued in NinjaOne. It was NOT retried; check \
+             the device's activity feed before trying again",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for OutcomeUnknown {}
+
+/// Whether `err` (or anything it wraps) is an [`OutcomeUnknown`].
+pub fn is_outcome_unknown(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<OutcomeUnknown>().is_some()
+}
+
+/// Whether a request may be replayed after a failure whose outcome is ambiguous.
 ///
 /// Reads are naturally idempotent. A POST that *acts* — reboot, script run, patch
 /// apply — is not, and NinjaOne v2 offers no idempotency-key header, so a replayed
 /// dispatch runs the script a second time on the device.
 ///
-/// This only governs the timeout arm. Server *rejections* (429, 401) are replayed
-/// regardless of the policy: the gateway refused the request before it ever reached
-/// the device queue, so re-sending cannot double-execute anything.
+/// It governs the arms that cannot tell "rejected" from "accepted": a transport
+/// failure after send, a 5xx, an unreadable 2xx body. An `ActOnce` request fails
+/// those with [`OutcomeUnknown`] instead of replaying. Server *rejections* (429,
+/// 401) are replayed regardless of the policy: the gateway refused the request
+/// before it ever reached the device queue, so re-sending cannot double-execute
+/// anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplaySafety {
     Idempotent,
@@ -72,6 +111,10 @@ impl NinjaApiClient {
     /// and retrying per `replay` (see [`ReplaySafety`]), and decodes the success
     /// body into a [`Value`].
     ///
+    /// For an `ActOnce` request a body that cannot be read is an [`OutcomeUnknown`]:
+    /// the server already answered 2xx, so the action was accepted even though we
+    /// cannot say what it reported.
+    ///
     /// The paginated fetchers deliberately do **not** go through here — see
     /// [`Self::request_page`]. Everything else (the single-shot GETs and the acting
     /// POSTs) returns small bodies where a `Value` costs nothing.
@@ -86,7 +129,12 @@ impl NinjaApiClient {
         let resp = self
             .send_with_retry(method, path, query, body, replay)
             .await?;
-        decode_response(resp).await
+        match decode_response(resp).await {
+            Err(err) if replay == ReplaySafety::ActOnce => Err(err.context(OutcomeUnknown(
+                "NinjaOne accepted the request but its response could not be read".into(),
+            ))),
+            other => other,
+        }
     }
 
     /// Issues a request and decodes the success body as one page of rows,
@@ -115,8 +163,9 @@ impl NinjaApiClient {
     ///
     /// Split from [`Self::request_raw`] so the typed page decoder can reuse the
     /// retry policy verbatim instead of growing a second copy of it — the arms here
-    /// (`ActOnce` on timeout, `Idempotent`-only on 5xx/connect, 429/401 for both) are
-    /// what keep an acting POST from being replayed into a second reboot.
+    /// (`ActOnce` → [`OutcomeUnknown`] on an in-flight failure or a 5xx,
+    /// `Idempotent`-only retries on 5xx/connect, 429/401 for both) are what keep an
+    /// acting POST from being replayed into a second reboot.
     async fn send_with_retry(
         &self,
         method: Method,
@@ -155,16 +204,21 @@ impl NinjaApiClient {
                     tokio::time::sleep(backoff(attempt)).await;
                     continue;
                 }
-                // The body was already on the wire when the clock ran out, so the
-                // action may have been queued even though we never saw the response.
-                // Replaying would risk a second reboot / script run.
-                Err(e) if e.is_timeout() && replay == ReplaySafety::ActOnce => {
-                    warn!(%method, %url, "acting request timed out; not retried");
-                    return Err(e).context(
-                        "the request timed out after the body was sent — the action may already \
-                         be queued in NinjaOne. It was NOT retried; check the device's activity \
-                         feed before trying again",
-                    );
+                // The body may already have been on the wire when the clock ran out or
+                // the connection dropped, so the action may have been queued even
+                // though we never saw the response. Replaying would risk a second
+                // reboot / script run, and calling it Failed would invite the operator
+                // to do the same by hand. Only a connect failure (no connection was
+                // established) or a request that could not be built is known not to
+                // have left; those fall through to the plain error below.
+                Err(e) if replay == ReplaySafety::ActOnce && !e.is_connect() && !e.is_builder() => {
+                    warn!(%method, %url, ?e, "acting request failed in flight; not retried");
+                    let why = if e.is_timeout() {
+                        "the request timed out after it was sent"
+                    } else {
+                        "the connection failed while the request was in flight"
+                    };
+                    return Err(anyhow::Error::new(e).context(OutcomeUnknown(why.into())));
                 }
                 // A connect failure means the request never reached the server, so
                 // replaying it can't double-execute — but only reads take this arm,
@@ -212,6 +266,14 @@ impl NinjaApiClient {
             if !status.is_success() {
                 let text = truncate_body(&resp.text().await.unwrap_or_default());
                 warn!(%method, %url, %status, body = %text, "http error");
+                // See `retry_for`: a 5xx on an acting POST is not a rejection but an
+                // unknown outcome, so it is polled rather than reported failed. A 4xx
+                // is NinjaOne refusing the request and stays a plain error.
+                if status.is_server_error() && replay == ReplaySafety::ActOnce {
+                    return Err(anyhow::Error::new(OutcomeUnknown(format!(
+                        "NinjaOne answered {status} to {method} {url}: {text}"
+                    ))));
+                }
                 bail!("{method} {url} failed ({status}): {text}");
             }
             return Ok(resp);
@@ -574,8 +636,11 @@ fn retry_for(
     }
     match status {
         // The server tells us how long to wait; second-guessing it is how a client
-        // turns a soft rate limit into a hard one.
-        StatusCode::TOO_MANY_REQUESTS => Retry::Wait(Duration::from_secs(retry_after.unwrap_or(5))),
+        // turns a soft rate limit into a hard one. It is still capped: the value is
+        // server-controlled, and one absurd header must not hang a dispatch.
+        StatusCode::TOO_MANY_REQUESTS => Retry::Wait(Duration::from_secs(
+            retry_after.unwrap_or(5).min(MAX_RETRY_AFTER_SECS),
+        )),
         StatusCode::UNAUTHORIZED => Retry::Reauth,
         s if s.is_server_error() && replay == ReplaySafety::Idempotent => {
             Retry::Wait(backoff(attempt + 1))
@@ -1422,6 +1487,96 @@ mod tests {
             err.to_string().contains("may already"),
             "the operator must be told the action may have landed, got: {err}"
         );
+        assert!(
+            is_outcome_unknown(&err),
+            "a timed-out acting POST is an unknown outcome, not a rejection: {err}"
+        );
+    }
+
+    /// The typed marker, not the message, is what the dispatch site classifies on —
+    /// so it has to survive whatever context a caller layers on top, and a message
+    /// that merely mentions the phrase must not count.
+    #[test]
+    fn the_outcome_unknown_marker_survives_added_context() {
+        let wrapped = anyhow::Error::new(std::io::Error::other("reset"))
+            .context(OutcomeUnknown("the connection failed".into()))
+            .context("dispatching reboot to srv-1");
+        assert!(is_outcome_unknown(&wrapped), "{wrapped:#}");
+
+        let rejected = anyhow::anyhow!("the action may already be queued (said the 400 body)");
+        assert!(!is_outcome_unknown(&rejected));
+    }
+
+    /// The connection is accepted, the request read, and the socket closed with no
+    /// response: the POST reached the server, so it may have been queued. It used to
+    /// fall to the generic `http send` arm and be reported as a definite failure.
+    #[tokio::test]
+    async fn post_connection_lost_in_flight_is_unknown_and_not_replayed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncReadExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let accepted = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = accepted.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                drop(sock);
+            }
+        });
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), format!("http://{addr}"), "test-token");
+        let err = NinjaApiClient::new(http, auth)
+            .device_reboot(1, crate::model::RebootMode::Normal, "patching")
+            .await
+            .expect_err("a dropped connection must surface");
+        assert!(is_outcome_unknown(&err), "{err:#}");
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "never replayed");
+    }
+
+    /// A connect failure never reached the server, so it is a plain failure.
+    #[tokio::test]
+    async fn post_connect_failure_is_not_an_unknown_outcome() {
+        // Bind then drop, so the port is (almost certainly) refusing connections.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("bind");
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), format!("http://{addr}"), "test-token");
+        let err = NinjaApiClient::new(http, auth)
+            .device_patch_scan(1, crate::model::PatchType::Os)
+            .await
+            .expect_err("nothing is listening");
+        assert!(!is_outcome_unknown(&err), "{err:#}");
+    }
+
+    #[test]
+    fn retry_after_is_capped() {
+        assert_eq!(
+            retry_for(
+                StatusCode::TOO_MANY_REQUESTS,
+                ReplaySafety::Idempotent,
+                0,
+                Some(MAX_RETRY_AFTER_SECS)
+            ),
+            Retry::Wait(Duration::from_secs(MAX_RETRY_AFTER_SECS))
+        );
+        assert_eq!(
+            retry_for(
+                StatusCode::TOO_MANY_REQUESTS,
+                ReplaySafety::ActOnce,
+                0,
+                Some(86_400)
+            ),
+            Retry::Wait(Duration::from_secs(MAX_RETRY_AFTER_SECS)),
+            "a server-controlled header must not park a dispatch for a day"
+        );
     }
 
     #[tokio::test]
@@ -1511,10 +1666,66 @@ mod tests {
 
         let http = reqwest::Client::new();
         let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
-        NinjaApiClient::new(http, auth)
+        let err = NinjaApiClient::new(http, auth)
             .device_patch_apply(3, crate::model::PatchType::Os)
             .await
             .expect_err("a 5xx on an acting POST must not be replayed");
+        assert!(
+            is_outcome_unknown(&err),
+            "a 5xx on an acting POST may have queued the job, so it is unknown: {err}"
+        );
+    }
+
+    /// A 4xx is NinjaOne refusing the request, so nothing was queued and the job is
+    /// a definite failure — it must not be dressed up as an unknown outcome.
+    #[tokio::test]
+    async fn post_4xx_is_a_rejection_not_an_unknown_outcome() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/device/3/patch/os/apply"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("not applicable"))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        let err = NinjaApiClient::new(http, auth)
+            .device_patch_apply(3, crate::model::PatchType::Os)
+            .await
+            .expect_err("a 400 must surface");
+        assert!(!is_outcome_unknown(&err), "{err}");
+    }
+
+    /// The server said 2xx — the action was accepted — but the body is not what its
+    /// content type promised. That is not a rejection either.
+    #[tokio::test]
+    async fn an_unreadable_2xx_body_on_an_acting_post_is_an_unknown_outcome() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/device/3/script/run"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("{not json", "application/json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+        let err = NinjaApiClient::new(http, auth)
+            .run_script(
+                3,
+                &crate::api::actions::ScriptRef::Script { id: 1 },
+                "",
+                "system",
+            )
+            .await
+            .expect_err("an undecodable body must surface");
+        assert!(is_outcome_unknown(&err), "{err:#}");
     }
 
     #[tokio::test]
