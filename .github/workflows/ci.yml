@@ -8,8 +8,12 @@ on:
   schedule:
     # Weekly RustSec database refresh so we catch advisories filed after merge,
     # and the weekly NinjaOne API-contract check (`ninjaone-contract`) — the vendor
-    # ships on its own cadence, so a spec change has to be noticed on ours.
+    # ships on its own cadence, so a spec change has to be noticed on ours. Those
+    # two are the point of the cron: the build/test jobs re-verify nothing that
+    # changed since the last push, so `changes` skips them on a schedule.
     - cron: "0 6 * * 1"
+  # Manual re-run of everything, including the live contract check.
+  workflow_dispatch:
 
 # A new push to the same branch/PR supersedes the in-flight run — without this
 # every PR update queues a duplicate full 3-OS matrix.
@@ -23,38 +27,72 @@ permissions:
   contents: read
 
 jobs:
-  # Detects whether a PR touches anything outside the docs allowlist. Pure-docs PRs
-  # (markdown / docs/ / LICENSE only) skip the Rust + WASM jobs below; their required
+  # Decides which of the gated jobs below this event needs.
+  #
+  # `code`: whether anything outside the docs allowlist changed. Pure-docs PRs
+  # (markdown / docs/ / LICENSE-* only) skip the Rust + WASM jobs; their required
   # checks still post — as skipped → success — because this workflow always triggers
   # (a `paths-ignore` on the trigger would leave required checks stuck pending and
-  # block the merge). Non-PR events (push to main, weekly cron) always run everything.
+  # block the merge). A push to main and a manual dispatch always build; the weekly
+  # cron never does (it exists for `audit` and `ninjaone-contract`).
+  #
+  # `contract`: whether to fetch the vendor's live spec. That job depends on a URL
+  # this repo does not control, so on a PR or push it runs only when the files it
+  # compares (the digest, the script, the API client) changed; the weekly cron and a
+  # manual dispatch always run it.
   changes:
     name: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      contract: ${{ steps.filter.outputs.contract }}
     steps:
-      - name: Detect non-docs changes
+      - name: Detect what changed
         id: filter
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          files=$(gh api --paginate \
-            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-            --jq '.[].filename')
+          set -euo pipefail
+          case "$EVENT" in
+            schedule)
+              printf 'code=false\ncontract=true\n' >> "$GITHUB_OUTPUT"; exit 0 ;;
+            workflow_dispatch)
+              printf 'code=true\ncontract=true\n' >> "$GITHUB_OUTPUT"; exit 0 ;;
+            pull_request)
+              files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')
+              ;;
+            *)
+              # A push. An all-zero `before` is a new ref with nothing to diff
+              # against, and the compare API caps its file list — either way,
+              # an unknown change set runs everything.
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              if [ -z "${BEFORE//0/}" ] || ! files=$(gh api "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[].filename'); then
+                echo "contract=true" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              ;;
+          esac
           # Run the Rust/WASM jobs unless every changed file is docs.
-          if printf '%s\n' "$files" | grep -qvE '(^docs/|\.md$|^LICENSE$)'; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = pull_request ]; then
+            if printf '%s\n' "$files" | grep -qvE '(^docs/|\.md$|^LICENSE(-[A-Z]+)?$)'; then
+              echo "code=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "code=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          if printf '%s\n' "$files" | grep -qE '^(docs/api/|src-tauri/src/api/|scripts/ninjaone-spec-digest\.py$|\.github/workflows/ci\.yml$)'; then
+            echo "contract=true" >> "$GITHUB_OUTPUT"
           else
-            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "contract=false" >> "$GITHUB_OUTPUT"
           fi
 
   rust:
@@ -62,6 +100,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +133,9 @@ jobs:
         run: |
           mkdir -p web-rs/dist
           printf '<!doctype html><title>stub</title>' > web-rs/dist/index.html
+      # Formatting is target-independent — one leg is enough.
       - name: fmt (both crates)
+        if: matrix.os == 'ubuntu-latest'
         run: just fmt-check
       - name: clippy
         run: just clippy
@@ -111,6 +152,7 @@ jobs:
     needs: [changes, rust]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Gate
         shell: bash
@@ -119,7 +161,7 @@ jobs:
           code='${{ needs.changes.outputs.code }}'
           result='${{ needs.rust.result }}'
           if [ "$changes" = "success" ] && [ "$code" != "true" ]; then
-            echo "docs-only change — backend matrix skipped"
+            echo "no code change for this event — backend matrix skipped"
             exit 0
           fi
           if [ "$result" != "success" ]; then
@@ -133,6 +175,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
@@ -167,6 +210,7 @@ jobs:
     # PR (it re-compiles + re-runs the backend tests the `rust` job already covered).
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # cargo-llvm-cov needs the llvm-tools-preview component for instrumentation.
@@ -215,6 +259,7 @@ jobs:
   versions:
     name: Manifest versions agree
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The two crates deliberately share no workspace (native vs wasm32 targets),
@@ -223,11 +268,8 @@ jobs:
       # `if: startsWith(github.ref, 'refs/tags/')`, i.e. after the tag and its
       # irreversible release run have been pushed, which is the expensive place to
       # find out. Checking mutual agreement here needs no tag and catches the
-      # mistake in review instead.
-      #
-      # Worth a job of its own: src-tauri/Cargo.toml co-changes with
-      # web-rs/Cargo.toml in 23 of the last 300 commits and with tauri.conf.json in
-      # 22, so this is a path the repo takes constantly.
+      # mistake in review instead — and every release and many dependency bumps
+      # touch these manifests, so it is a path the repo takes constantly.
       - name: Check the three manifests carry the same version
         run: |
           conf=$(jq -r '.version' src-tauri/tauri.conf.json)
@@ -243,6 +285,7 @@ jobs:
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Workflow-file syntax gate. Pinned by version + checksum (no install-action
@@ -258,6 +301,7 @@ jobs:
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The Claude hook scripts gate commits/docs locally; lint them in CI too so a
@@ -274,8 +318,10 @@ jobs:
   commits:
     name: Conventional commits
     runs-on: ubuntu-latest
-    # PR commits only: `main` carries squash-merge subjects that already passed
-    # here, and merge commits from before this gate existed must not fail it.
+    timeout-minutes: 10
+    # PR commits only: PRs land on `main` as merge commits, so every non-merge
+    # commit there already passed this check on its PR — and commits from before
+    # this gate existed must not fail it.
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -306,6 +352,7 @@ jobs:
   licenses:
     name: Third-party licenses
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # deny.toml gates which licenses may come IN; this is the outbound half —
@@ -329,7 +376,10 @@ jobs:
 
   ninjaone-contract:
     name: NinjaOne API contract
+    needs: changes
+    if: needs.changes.outputs.contract == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Every backend test mocks NinjaOne against hand-written fixtures, so the suite
@@ -372,6 +422,7 @@ jobs:
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # RustSec advisory scan via the same `just` recipe run locally. The recipe
@@ -386,6 +437,7 @@ jobs:
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # License + supply-chain (sources) + bans policy from deny.toml, over both
