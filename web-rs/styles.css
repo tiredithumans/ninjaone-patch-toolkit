@@ -180,12 +180,31 @@ select {
   color: var(--text);
   padding: 8px 10px;
   font-size: 13px;
+}
+
+/* Text fields show focus through their border, which is why the default ring is
+   dropped for them only. The blanket `outline: none` this replaces also hid focus
+   on every checkbox — the row selectors, the facet chips, the group headers — so a
+   keyboard user could not see which one Space would tick. */
+input:not([type="checkbox"]):not([type="radio"]):focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
   outline: none;
 }
 
-input:focus,
-select:focus {
-  border-color: var(--accent);
+/* One visible ring for everything reached by keyboard. `:focus-visible` keeps it
+   off for mouse clicks, so the ring is never noise. */
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+select:focus-visible,
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible,
+[role="tab"]:focus-visible,
+[role="tabpanel"]:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
 }
 
 input.narrow {
@@ -444,6 +463,13 @@ select:disabled {
   letter-spacing: 0.04em;
   color: var(--muted);
   margin-right: 2px;
+}
+
+.tab-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 
 .tab-divider {
@@ -1302,6 +1328,25 @@ tbody tr:hover {
 
 .modal-blockers {
   color: var(--danger);
+}
+
+/* A dispatch that failed from the open dialog: said where the operator is looking,
+   in the same danger palette as the blockers. */
+.modal-error {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  color: #fca5a5;
+  font-size: 13px;
+}
+
+.modal-error p {
+  margin: 0 0 6px;
+}
+
+.update-wait {
+  color: var(--warn);
 }
 
 .modal-warnings {
