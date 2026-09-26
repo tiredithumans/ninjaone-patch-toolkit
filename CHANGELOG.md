@@ -11,7 +11,16 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
-## [0.14.3] - 2026-09-26
+## [0.14.4] - 2026-09-26
+
+### Install this version manually
+
+**The update-signing key was replaced, so this version will not arrive through the in-app
+updater.** Copies on 0.14.2 or earlier only trust the old key, so they will not see this release.
+Download and install 0.14.4 from the GitHub release page once. After that, updates arrive
+through the app as before.
+
+v0.14.3 was tagged but never released: its bundles could not be signed. Its notes ship here.
 
 ### Fixed
 
