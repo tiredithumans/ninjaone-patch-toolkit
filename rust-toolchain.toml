@@ -1,4 +1,9 @@
+# The full patch version, not "1.98": rustup treats "1.98" and "1.98.1" as two
+# different toolchains, so CI's `dtolnay/rust-toolchain@… # 1.98.1` step (and the
+# extra components it installs, e.g. llvm-tools-preview for coverage) would land on
+# a toolchain this file then overrides. Bump it together with every workflow's
+# dtolnay pin.
 [toolchain]
-channel = "1.98"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
 targets = ["wasm32-unknown-unknown"]
