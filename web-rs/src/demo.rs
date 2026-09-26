@@ -472,14 +472,14 @@ fn sample_severity_by_org() -> Vec<OrgSeverity> {
 /// Pending-patch age histogram over the rows on screen, bucketed by how long ago
 /// each was first seen. Mirrors the backend's `build_age_buckets`, including its
 /// `Unknown` bucket for undated patches — which exists so they cannot silently
-/// inflate `180+ days`.
+/// inflate `181+ days`.
 fn scoped_age_buckets(rows: &[PatchRow]) -> Vec<AgeBucket> {
     const LABELS: [&str; 6] = [
         "0-30 days",
         "31-60 days",
         "61-90 days",
         "91-180 days",
-        "180+ days",
+        "181+ days",
         "Unknown",
     ];
     let mut counts = [0usize; LABELS.len()];

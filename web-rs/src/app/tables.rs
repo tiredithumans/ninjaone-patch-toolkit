@@ -636,6 +636,7 @@ fn RowCheckbox(row: Arc<PatchRow>) -> impl IntoView {
             <input
                 type="checkbox"
                 aria-label=label
+                prop:disabled=row.device_id == util::ORPHAN_DEVICE_ID
                 prop:checked=move || state.is_row_selected(&checked_row)
                 on:change=move |ev| state.toggle_row_selection(&row, event_target_checked(&ev))
             />

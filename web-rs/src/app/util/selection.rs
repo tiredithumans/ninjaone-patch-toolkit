@@ -17,11 +17,20 @@ use super::*;
 /// **only** that row — an earlier shape swept every KB on the device into the
 /// selection, which made the one path capable of per-patch targeting unable to
 /// receive a subset.
+/// Mirrors `rows::join::ORPHAN_DEVICE_ID`: the device id of a patch row whose
+/// record named no device.
+pub(crate) const ORPHAN_DEVICE_ID: i64 = 0;
+
 pub(crate) fn apply_row_selection(
     sel: &mut BTreeMap<i64, DeviceSelection>,
     row: &PatchRow,
     checked: bool,
 ) {
+    // A row with no device id is joined under a sentinel id the backend never
+    // dispatches to; letting it into the selection would offer a phantom target.
+    if checked && row.device_id == ORPHAN_DEVICE_ID {
+        return;
+    }
     let key = patch_key(row);
     if checked {
         sel.entry(row.device_id)

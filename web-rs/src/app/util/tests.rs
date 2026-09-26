@@ -383,6 +383,15 @@ fn ticking_one_row_does_not_tick_the_devices_other_rows() {
     assert!(!device.patches.contains_key(&patch_key(&b)));
 }
 
+/// A patch row with no device id is never a dispatch target.
+#[test]
+fn an_orphan_row_cannot_enter_the_selection() {
+    let mut sel = BTreeMap::new();
+    let orphan = sel_row(ORPHAN_DEVICE_ID, "", Some("KB1"), "Cumulative Update", "OS");
+    apply_row_selection(&mut sel, &orphan, true);
+    assert!(sel.is_empty());
+}
+
 /// A device enters with its first ticked row and leaves with its last, so a
 /// device with nothing ticked is never dispatched against.
 #[test]
@@ -918,6 +927,12 @@ fn a_trend_line_only_carries_runs_that_measured_the_same_thing() {
         instance: "https://eu.ninjarmm.com".into(),
         ..base.clone()
     };
+    // Same flags, different facets (another org): not the same series.
+    let other_scope = RunRecord {
+        scope_key: "org=2".into(),
+        rows_total: 55,
+        ..base.clone()
+    };
     let newest = RunRecord {
         rows_total: 90,
         ..base.clone()
@@ -927,6 +942,7 @@ fn a_trend_line_only_carries_runs_that_measured_the_same_thing() {
     let history = vec![
         os_only,
         other_tenant,
+        other_scope,
         base.clone(),
         filtered,
         newest.clone(),
