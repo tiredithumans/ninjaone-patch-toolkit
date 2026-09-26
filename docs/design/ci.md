@@ -76,7 +76,9 @@ script or `ci.yml` changed — a vendor outage cannot block unrelated work.
 
 ## CodeQL (GitHub-side)
 
-Rust security queries, build-mode `none` (`.github/workflows/codeql.yml`).
+Rust security queries, build-mode `none` (`.github/workflows/codeql.yml`), plus a light job for the
+`actions` pack (the workflow files) and `javascript-typescript` (`scripts/*.mjs`), neither of which
+needs a build.
 
 ## Manifest versions (GitHub-side)
 
