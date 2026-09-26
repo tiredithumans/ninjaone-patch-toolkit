@@ -128,8 +128,10 @@ compiles or installs holds only the permissions it must:
 - The bundle `build` job in `release.yml` signs with `TAURI_SIGNING_PRIVATE_KEY` in the same
   step that compiles (tauri-action does both), so it restores **no** rust-cache (a cache is
   state other runs wrote) and builds only from the committed lockfiles (`trunk build --locked`
-  in `beforeBuildCommand`, a `cargo fetch --locked` preflight). Moving the key into a
-  tag-scoped `release` environment is a repo setting — see [RELEASING.md](../RELEASING.md).
+  in `beforeBuildCommand`, a `cargo fetch --locked` preflight). The job declares
+  `environment: release`; the key's secrets belong to that environment, whose deployment rule
+  admits only `v*` tags. Moving the secrets there is a repo setting — see
+  [RELEASING.md](../RELEASING.md).
 - `rust-toolchain.toml` pins the same patch toolchain (`1.98.1`) the workflows install, so the
   components CI adds land on the toolchain the build actually uses.
 

@@ -208,6 +208,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Per OS leg; the legs run one at a time (max-parallel below).
     timeout-minutes: 90
+    # The signing key lives in this environment's secrets, so only a job that
+    # names it can read the key, and the environment's deployment rule admits only
+    # `v*` tags. Until the secrets are moved there (docs/RELEASING.md), the
+    # repository-level secrets still resolve here, so this line alone breaks nothing.
+    environment: release
     # Uploads bundles, signatures and latest.json entries to the draft release.
     permissions:
       contents: write
