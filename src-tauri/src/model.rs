@@ -139,10 +139,24 @@ pub enum Severity {
 }
 
 impl Severity {
-    /// Case-insensitive, because NinjaOne returns two vocabularies on the same
-    /// field: uppercase MSRC values (`CRITICAL`, `IMPORTANT`, `OPTIONAL`, `NONE`)
-    /// alongside lowercase engine values (`critical`, `security`, `optional`,
-    /// `recommended`, `unknown`).
+    /// Every spelling NinjaOne sends and the variant it maps to. Compared with
+    /// `eq_ignore_ascii_case` rather than by uppercasing the input: this runs for
+    /// every patch in every rollup over a six-figure feed, and the uppercased copy was
+    /// a `String` allocated only to be matched and dropped.
+    const SPELLINGS: [(&'static str, Self); 11] = [
+        ("CRITICAL", Self::Critical),
+        ("IMPORTANT", Self::Important),
+        ("HIGH", Self::Important),
+        ("SECURITY", Self::Security),
+        ("MODERATE", Self::Moderate),
+        ("MEDIUM", Self::Moderate),
+        ("RECOMMENDED", Self::Recommended),
+        ("LOW", Self::Low),
+        ("OPTIONAL", Self::Optional),
+        ("NONE", Self::Optional),
+        ("UNKNOWN", Self::Unknown),
+    ];
+
     /// Whether `raw` is a value this build has no mapping for.
     ///
     /// Distinct from "maps to [`Unknown`](Self::Unknown)": NinjaOne really does send
@@ -156,24 +170,24 @@ impl Severity {
     /// promises nothing about this vocabulary and the mapping cannot be exhaustive
     /// by construction. `build_rows` reports these once per distinct value.
     pub fn is_unmapped(raw: &str) -> bool {
-        !matches!(raw.to_ascii_uppercase().as_str(), "UNKNOWN" | "")
-            && Self::from_raw(raw) == Self::Unknown
+        !raw.is_empty()
+            && !Self::SPELLINGS
+                .iter()
+                .any(|(spelling, _)| spelling.eq_ignore_ascii_case(raw))
     }
 
+    /// Case-insensitive, because NinjaOne returns two vocabularies on the same
+    /// field: uppercase MSRC values (`CRITICAL`, `IMPORTANT`, `OPTIONAL`, `NONE`)
+    /// alongside lowercase engine values (`critical`, `security`, `optional`,
+    /// `recommended`, `unknown`). Anything else maps to [`Unknown`](Self::Unknown).
     pub fn from_raw(raw: &str) -> Self {
-        match raw.to_ascii_uppercase().as_str() {
-            "CRITICAL" => Self::Critical,
-            "IMPORTANT" | "HIGH" => Self::Important,
-            "SECURITY" => Self::Security,
-            "MODERATE" | "MEDIUM" => Self::Moderate,
-            "RECOMMENDED" => Self::Recommended,
-            "LOW" => Self::Low,
-            "OPTIONAL" | "NONE" => Self::Optional,
-            _ => Self::Unknown,
-        }
+        Self::SPELLINGS
+            .iter()
+            .find(|(spelling, _)| spelling.eq_ignore_ascii_case(raw))
+            .map_or(Self::Unknown, |(_, severity)| *severity)
     }
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Critical => "Critical",
             Self::Important => "Important",
@@ -287,7 +301,6 @@ impl Patch {
         self.installed_timestamp.and_then(unix_to_datetime)
     }
 
-    /// Human-friendly patch label combining KB, vendor, name and version.
     /// The operator-facing patch title — KB, vendor, name and version, joined — into
     /// a caller-owned buffer, which it clears first.
     ///
@@ -320,7 +333,7 @@ impl Patch {
     }
 }
 
-/// NinjaOne returns release/install times as Unix **seconds**, but some endpoints
+/// NinjaOne returns collection/install times as Unix **seconds**, but some endpoints
 /// have historically returned **milliseconds** for `*At` fields. A seconds value
 /// for any realistic date is below 1e11 (year 5138), so treat anything larger as
 /// milliseconds — otherwise an `from_timestamp(ms, 0)` yields a ~50,000-year date

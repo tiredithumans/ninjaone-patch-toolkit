@@ -132,8 +132,17 @@ async fn invoke<R: DeserializeOwned>(cmd: &str, args: JsValue) -> Result<R, Stri
     }
 }
 
-fn args_of(value: &impl Serialize) -> JsValue {
-    serde_wasm_bindgen::to_value(value).unwrap_or(JsValue::UNDEFINED)
+/// Serializes a command's arguments the way Tauri will read them: as JSON.
+///
+/// `json_compatible` because the default serializer turns a map into a JS `Map`,
+/// which Tauri's `JSON.stringify` flattens to `{}` — every `device_targets` entry of
+/// an `ActionRequest` arrived empty. A failure is surfaced rather than papered over
+/// with `undefined`, which the backend would report as a confusing "missing field"
+/// on a request that looked complete here.
+fn args_of(cmd: &str, value: &impl Serialize) -> Result<JsValue, String> {
+    value
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .map_err(|e| format!("encode {cmd}: {e}"))
 }
 
 fn no_args() -> JsValue {
@@ -170,7 +179,7 @@ macro_rules! ipc {
             #[derive(Serialize)]
             #[serde(rename_all = "camelCase")]
             struct Args { $($arg: $ty),+ }
-            invoke($cmd, args_of(&Args { $($arg),+ })).await
+            invoke($cmd, args_of($cmd, &Args { $($arg),+ })?).await
         }
     };
     // Command taking one or more arguments, named after the wrapper.

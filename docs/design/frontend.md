@@ -36,6 +36,11 @@ wrapper's parameter names and the command string equals the wrapper's name. A wr
 deliberately named differently spells the target out:
 `ipc!(export_patches as "export_patches_xlsx", () -> Option<String>)`.
 
+Args are serialized with `serde_wasm_bindgen::Serializer::json_compatible()`. The default
+serializer turns a `HashMap` into a JS `Map`, which Tauri's IPC flattens to `{}` — that is how
+`ActionRequest.device_targets` arrived empty. `args_of` returns a `Result`, so a serialization
+failure is reported rather than sent as `undefined`.
+
 ## camelCase ↔ snake_case across IPC
 
 Backend arg/result structs sent to/from the frontend carry `#[serde(rename_all = "camelCase")]`;
@@ -77,6 +82,12 @@ the opener in `on_cleanup` — which is why it must be created *per dialog insta
 `pending.map(...)` / `info.map(...)` closure), not once per component. `web-sys` is listed in
 `web-rs/Cargo.toml` only to enable the DOM features this needs.
 
+**An async response applies only if its request is still current.** Every page, group-header and
+group-member fetch is stamped (`QueryState.view_seq`, `members_gen`) and dropped on arrival if a
+newer request, a regroup, or a re-query has moved the stamp. Without it a slow sort overwrote a
+newer one, and a late member fetch ticked the previous result's rows into the new selection. A
+manual run that finds another in flight is queued (`util::queue_run`), never silently dropped.
+
 ## Demo mode + browser/Pages guard
 
 The same frontend serves two contexts. Inside Tauri it talks to the backend over IPC; in a plain
@@ -110,8 +121,10 @@ unit-tested, so `verify` still leans on `web-clippy` (which type-checks the wasm
 by any test.
 
 Put such logic in the `util` module (`web-rs/src/app/util/`) as a free function and test it
-there. The same rule covers `state.rs`, which is not a component file and has no test module —
-anything in it worth asserting moves to `util` rather than staying unreachable. What lives in
+there. The same rule covers `state.rs` and the `impl AppState` files under `state/` (one per
+concern: `query`, `view`, `selection`, `actions`, `lookups`, `presets`), which are not component
+files and have no test module — anything in them worth asserting moves to `util` rather than
+staying unreachable. What lives in
 `util` for this reason:
 
 - `filter_params` (the `FilterParams` mapping behind *every* query, lifted out of

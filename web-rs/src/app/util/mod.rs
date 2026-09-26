@@ -11,6 +11,7 @@
 mod changelog;
 mod filters;
 mod format;
+mod jobs;
 mod pager;
 mod query;
 mod selection;
@@ -19,6 +20,7 @@ mod sort;
 pub(crate) use changelog::*;
 pub(crate) use filters::*;
 pub(crate) use format::*;
+pub(crate) use jobs::*;
 pub(crate) use pager::*;
 pub(crate) use query::*;
 pub(crate) use selection::*;

@@ -2,7 +2,8 @@
 
 Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
 Code: `src-tauri/src/actions.rs` (domain + `plan()`), `src-tauri/src/api/actions.rs` (the
-POSTs), `src-tauri/src/commands/actions.rs` (plan/confirm/dispatch/poll),
+POSTs), `src-tauri/src/commands/actions/` (`mod.rs` the commands, `plan.rs`, `confirm.rs`,
+`dispatch.rs`, `poller.rs`),
 `src-tauri/src/api/activities.rs`, `web-rs/src/app/actions.rs` (UI).
 
 The feature is opt-in (`settings.actions.enabled`, default false) and every command re-checks
@@ -43,6 +44,14 @@ the hand-driven `ScriptPicker` path.
 to the `kbAllowList` arm, so a software remediation script was handed a KB list — and third-party
 patches carry no KB, so it was always empty.
 
+Because the string is space-split, a KB target is spliced in unquoted, so `plan()` blocks any
+target of a KB-encoded kind that is not digits after an optional, case-insensitive `KB` prefix
+(`actions::kb_number`): `"123 dryRun=false"` would otherwise add a key of its own. The check reads
+`commands::actions::plan::composed_targets` — exactly the targets that will be composed, so a
+hand-typed string (sent verbatim) and the native endpoints are not checked against targets they
+never send. `build_parameters` also drops a malformed KB, in case a caller skips the planner.
+Software targets are free-form product titles and need no such check: they travel base64-encoded.
+
 ## Selection is per patch row; dispatch is per device, with per-device targets
 
 `DeviceSelection.patches` maps each ticked row's `patch_key` → a `SelectedPatch { kb, name,
@@ -52,7 +61,7 @@ device into `kbAllowList` and made the one path capable of per-patch targeting u
 subset.
 
 A dispatch sends each device **only the patches ticked on it** (`util::targets_by_device` →
-`ActionRequest.device_targets` → `commands::actions::per_device_parameters`, a
+`ActionRequest.device_targets` → `commands::actions::plan::per_device_parameters`, a
 `BTreeMap<i64, String>` carried on `DispatchContext`). This covers **every** path that sends an
 allow list — both remediation kinds *and* the script picker's "Target only the selected KBs".
 There is no batch-wide `targets` field: it handed every device the union of the selection, which
@@ -75,17 +84,35 @@ asymmetry of the two feeds.
 ## `ReplaySafety::ActOnce` on every POST
 
 `request_raw`'s timeout arm would otherwise replay the body and re-run the action; 429/401 still
-replay (the gateway rejected before the device queue). A timed-out dispatch becomes
-`JobState::Unknown` — polled, never auto-retried. See
-[api-client.md](./api-client.md#the-5xx-and-connect-arms-are-idempotent-only) for why 5xx is also
-not replayed on a write.
+replay (the gateway rejected before the device queue). Every ambiguous outcome — a timeout or a
+connection lost after send, a 5xx, an unreadable 2xx body — fails with the `api::OutcomeUnknown`
+type, and `commands::actions::dispatch::record_dispatch` turns it into `JobState::Unknown`: polled, never
+auto-retried. Only a 4xx, a connect failure or a local refusal is `Failed`. See
+[api-client.md](./api-client.md#an-ambiguous-write-fails-with-the-outcomeunknown-type-never-a-phrase).
+
+A job that settles at dispatch (`Failed`) never reaches the poller, which writes the other closing
+audit records, so `dispatch_one` writes its `AuditEntry::closing` itself — otherwise the trail
+held only "dispatching" for a request NinjaOne rejected.
 
 ## Confirm tokens are payload-bound and single-use
 
 `plan_action` hashes **everything that reaches NinjaOne or that the guardrails read** — kind ‖
-sorted device ids ‖ script ref ‖ **resolved** script ‖ per-device parameters ‖ run_as ‖ reboot
-choice ‖ reboot mode ‖ include_offline ‖ override_window ‖ dry_run — into a 5-minute token;
-`run_action` re-plans from scratch and re-checks the hash.
+sorted device ids ‖ script ref ‖ **resolved** script ‖ per-device parameters ‖ **resolved**
+run_as ‖ reboot choice ‖ reboot mode ‖ reboot reason ‖ include_offline ‖ override_window ‖
+dry_run — into a 5-minute token; `run_action` re-plans from scratch and re-checks the hash.
+
+- The reboot reason is sent to NinjaOne and lands in its activity feed as the server-side record
+  of why the machine went down, so it is bound too (length-prefixed, as dispatched: `None` is an
+  empty string). It used to be excluded alongside the display-only `script_name`, so the reason
+  could be edited after review under the same approval.
+
+- The run-as identity is resolved in `build_plan` (`resolve_run_as`: a blank request means the
+  Settings default) and `run_action` dispatches that value. It used to fall back to Settings
+  *after* the token check, so the default could change between review and confirm and the
+  dispatch ran as a different identity under the same approval.
+- The device ids are sorted but **not de-duplicated**, and a repeated id is a `plan()` blocker. The
+  hash used to de-duplicate while `plan()` and the dispatch loop did not, so an approval for `[5]`
+  validated `[5, 5]` — the same script run twice on one machine.
 
 - The parameters are hashed as `canonical_parameters` — every device's own string, bound to its
   id — so re-ticking one row on one device invalidates the approval.
@@ -135,8 +162,8 @@ for how the invalidation survives an in-flight fetch.
 
 ## Job state is tenant-stamped; the poller is single-claim
 
-Job state lives in `AppState.jobs`, mirroring `last_result` — a tenant switch reads as a miss. The
-poller is single-claim (`try_claim_job_poller`) and emits `action:progress` (no capability change
+Job state lives in `AppState.jobs` (methods in `state/jobs.rs`), mirroring `last_result` — a
+tenant switch reads as a miss. The poller is single-claim (`try_claim_job_poller`) and emits `action:progress` (no capability change
 needed; `core:event:default` already covers it). It retires via `release_job_poller_if_idle()`,
 which re-checks for pending jobs **and** clears the claim flag under the jobs lock. Dispatch
 appends its jobs before calling `try_claim_job_poller`, so a batch landing during shutdown is
@@ -167,7 +194,19 @@ spec never states; don't guess.
 
 ### The activity-type filter must list what the native endpoints emit
 
-`is_action_activity` accepts `SCRIPTING` (the spec's value; `SCRIPT` is not in the enum but is
-kept anyway), `PATCH_MANAGEMENT`, `SOFTWARE_PATCH_MANAGEMENT`, `SYSTEM`, `SCHEDULED_TASK` and the
-`ACTION`/`ACTIONSET` pair. `scan`/`apply`/`reboot` return no correlator, so this heuristic is their
-only path to resolving.
+`scan`/`apply`/`reboot` return no correlator, so the third-tier heuristic is their only path to
+resolving, and `is_action_activity(kind, type)` accepts only what *that kind* emits: an OS
+scan/apply `PATCH_MANAGEMENT`, a software one `SOFTWARE_PATCH_MANAGEMENT`, a reboot `SYSTEM`, and
+every script-running kind `SCRIPTING` (the spec's value; `SCRIPT` is not in the enum but is kept
+anyway) or the `ACTION`/`ACTIONSET` pair for a built-in. It used to be one list for every kind,
+including `CONDITION_ACTION`/`CONDITION_ACTIONSET` and `SCHEDULED_TASK` — NinjaOne's own policy and
+scheduler runs — so a condition firing after a dispatch, an unrelated `SYSTEM` event, or a
+software apply could resolve a job with somebody else's verdict.
+
+## The audit log redacts credentials in every shape a script takes them
+
+`audit::redact_parameters` redacts the value of a sensitive `key=value`, a sensitive `-Flag value`
+pair, and PowerShell's inline `-Password:value` (`:` is a separator as well as `=`; it used to be
+read as one bare flag, so the credential was written verbatim and the *next* token redacted
+instead). A quoted value is redacted through its closing quote — split on whitespace,
+`-Password "a b"` is several tokens — and an unterminated quote swallows the rest of the line.

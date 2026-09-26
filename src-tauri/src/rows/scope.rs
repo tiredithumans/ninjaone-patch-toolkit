@@ -41,6 +41,18 @@ pub struct QueryScope {
     /// Compliance sheet with no such note read as "45 pending critical KB5040434
     /// installs". Never empty — the status selection always applies.
     pub patch_facets: Vec<(&'static str, String)>,
+    /// Whether a device-tier facet narrowed the population
+    /// ([`FilterParams::has_identity_scope`]). The run history's `scoped` flag, and
+    /// the switch between the whole-fleet line and the device facets above.
+    pub device_scoped: bool,
+    /// A canonical, order-independent spelling of every facet that shapes the
+    /// numbers — device scope, status selection and patch facets — so the run
+    /// history can tell two scoped runs apart. Org A and org B are both "scoped",
+    /// and a bool alone put them on one trend line. Relative windows are spelled
+    /// relatively (`30d`), because the absolute bound moves with every run while
+    /// the question being asked does not. The patch families are not in it; the
+    /// history carries those as fields of their own.
+    pub fingerprint: String,
 }
 
 /// Renders one id facet as a comma-separated name list.
@@ -77,7 +89,24 @@ pub fn build_query_scope(
     let organizations = id_facet(&filter.organization_ids, &maps.orgs);
     let locations = id_facet(&filter.location_ids, &maps.locations);
     let roles = id_facet(&filter.role_ids, &maps.roles);
-    let os_types = (!filter.node_classes.is_empty()).then(|| filter.node_classes.join(", "));
+    // Trimmed, and a blank value is no facet at all — the same reading
+    // `has_identity_scope` and `prepare` give it. A whitespace-only needle matched
+    // everything but still cost the export its whole-fleet line.
+    let non_blank = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+    };
+    let classes: Vec<&str> = filter
+        .node_classes
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .collect();
+    let os_types = (!classes.is_empty()).then(|| classes.join(", "));
+    let os_name = non_blank(&filter.os_name_contains);
+    let search = non_blank(&filter.search);
     let severities = (!filter.severities.is_empty()).then(|| filter.severities.join(", "));
     // Absolute bounds, because a report is read long after the day it was run:
     // "the last 30 days" silently re-anchors to whenever the reader happens to
@@ -103,24 +132,22 @@ pub fn build_query_scope(
 
     // Stated rather than left to inference: on a printed artifact the absence of
     // narrowing lines is indistinguishable from a renderer that dropped them.
-    let narrowed = [
-        &organizations,
-        &locations,
-        &roles,
-        &os_types,
-        &severities,
-        &detected_after,
-        &detected_before,
-        &filter.os_name_contains,
-        &filter.search,
-    ]
-    .iter()
-    .any(|f| f.is_some());
-    if !narrowed {
-        facets.push((
-            "Scope",
-            "Whole fleet \u{2014} no device or patch filters applied".to_string(),
-        ));
+    //
+    // Decided by the device tier alone. The line sits in `facets` — the tier that
+    // reaches every sheet — so a severity or search facet, which narrows only the
+    // detail rows, must not remove it: the compliance sheet of a CRITICAL-only
+    // export still covers the whole fleet, and used to lose the sentence saying so.
+    let device_scoped = filter.has_identity_scope();
+    if !device_scoped {
+        let patch_narrowed = [&severities, &detected_after, &detected_before, &search]
+            .iter()
+            .any(|f| f.is_some());
+        let line = if patch_narrowed {
+            "Whole fleet \u{2014} no device filters applied"
+        } else {
+            "Whole fleet \u{2014} no device or patch filters applied"
+        };
+        facets.push(("Scope", line.to_string()));
     }
 
     for (label, value) in [
@@ -128,7 +155,7 @@ pub fn build_query_scope(
         ("Locations", locations),
         ("Device roles", roles),
         ("OS type", os_types),
-        ("OS name contains", filter.os_name_contains.clone()),
+        ("OS name contains", os_name.clone()),
     ] {
         if let Some(value) = value {
             facets.push((label, value));
@@ -147,7 +174,7 @@ pub fn build_query_scope(
     )];
     for (label, value) in [
         ("Severity", severities),
-        ("Search", filter.search.clone()),
+        ("Search", search.clone()),
         ("First seen after", detected_after),
         ("First seen before", detected_before),
         (
@@ -163,5 +190,67 @@ pub fn build_query_scope(
     QueryScope {
         facets,
         patch_facets,
+        device_scoped,
+        fingerprint: fingerprint(filter, &classes, os_name, search, statuses),
     }
+}
+
+/// See [`QueryScope::fingerprint`]. Ids and classes are already canonical (sorted,
+/// deduped by [`filter::ids`](crate::filter)); text needles are lowercased because
+/// every matcher compares them case-insensitively.
+fn fingerprint(
+    filter: &FilterParams,
+    classes: &[&str],
+    os_name: Option<String>,
+    search: Option<String>,
+    statuses: &[PatchStatus],
+) -> String {
+    let join = |v: &mut Vec<String>| {
+        v.sort_unstable();
+        v.dedup();
+        v.join(",")
+    };
+    let ids = |ids: &[i64]| join(&mut ids.iter().map(i64::to_string).collect());
+    let lower = |v: Option<String>| v.map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+    let window = match (filter.detected_within_days, filter.detected_after) {
+        (Some(days), _) => format!("{days}d"),
+        (None, Some(after)) => after.to_string(),
+        (None, None) => String::new(),
+    };
+    let parts = [
+        ("org", ids(&filter.organization_ids)),
+        ("loc", ids(&filter.location_ids)),
+        ("role", ids(&filter.role_ids)),
+        (
+            "class",
+            join(&mut classes.iter().map(|c| c.to_ascii_uppercase()).collect()),
+        ),
+        ("os", lower(os_name)),
+        (
+            "status",
+            join(&mut statuses.iter().map(|s| s.label().to_string()).collect()),
+        ),
+        (
+            "sev",
+            join(
+                &mut filter
+                    .severities
+                    .iter()
+                    .map(|s| s.trim().to_ascii_uppercase())
+                    .collect(),
+            ),
+        ),
+        ("q", lower(search)),
+        ("after", window),
+        (
+            "before",
+            filter
+                .detected_before
+                .map(|b| b.to_string())
+                .unwrap_or_default(),
+        ),
+    ];
+    // JSON rather than a hand-joined string: the needles are free text, and an
+    // escaped encoding cannot let one facet's value forge another's boundary.
+    serde_json::to_string(&parts).unwrap_or_default()
 }

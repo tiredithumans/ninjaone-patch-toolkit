@@ -53,17 +53,21 @@ pub(crate) fn Header() -> impl IntoView {
                                         return;
                                     }
                                     state.session.signing_in.set(true);
-                                    state
-                                        .notify(Toast::ok("Complete the sign-in in your browser…"));
+                                    // Neutral wording: the backend reuses a saved sign-in
+                                    // silently when it can, and only then opens a browser.
+                                    state.notify(Toast::ok(
+                                        "Signing in… if a browser opens, complete the sign-in there",
+                                    ));
                                     spawn_local(async move {
                                         match api::sign_in().await {
                                             Ok(()) => {
                                                 // The backend dropped the previous
                                                 // session's result and jobs; drop
-                                                // the rendering of them too.
+                                                // the rendering of them too. The
+                                                // lookups, scripts and jobs load
+                                                // off the auth status (see `App`).
                                                 state.clear_session();
                                                 state.session.refresh_auth();
-                                                state.load_lookups();
                                                 state.notify(Toast::ok("Signed in"));
                                             }
                                             Err(e) => state.notify(Toast::err(e)),

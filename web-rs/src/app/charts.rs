@@ -11,7 +11,7 @@
 use leptos::prelude::*;
 
 use super::AppState;
-use super::util::{self, format_pct, group_thousands, severity_raw};
+use super::util::{self, format_pct, format_pct_tenths, group_thousands, severity_raw};
 use crate::types::{OrgSeverity, SeverityCounts};
 
 /// Severity bands in most-to-least-urgent order: display label, the CSS class that
@@ -169,15 +169,23 @@ pub(crate) fn ComplianceCharts() -> impl IntoView {
 
 /// Renders the horizontal compliance-bar SVG from `(label, pct)` pairs — shared by the
 /// per-organization and per-OS compliance charts.
-fn compliance_bars(items: Vec<(String, f64)>) -> AnyView {
+fn compliance_bars(title: &str, items: Vec<(String, f64)>) -> AnyView {
     if items.is_empty() {
         return view! { <p class="empty">"No compliance data."</p> }.into_any();
     }
     let h = items.len() as i32 * COMPLIANCE_ROW_H;
+    let aria = util::chart_label(
+        title,
+        &items
+            .iter()
+            .map(|(label, pct)| (label.clone(), format_pct(*pct)))
+            .collect::<Vec<_>>(),
+    );
     view! {
         <svg
             class="chart"
             role="img"
+            aria-label=aria
             width=COMPLIANCE_VW.to_string()
             height=h.to_string()
             viewBox=format!("0 0 {COMPLIANCE_VW:.0} {h}")
@@ -237,7 +245,7 @@ fn ComplianceBars() -> impl IntoView {
                     })
                     .unwrap_or_default()
             });
-            compliance_bars(items)
+            compliance_bars("Compliance by organization", items)
         }}
     }
 }
@@ -259,7 +267,7 @@ pub(crate) fn ComplianceByOsBars() -> impl IntoView {
                     })
                     .unwrap_or_default()
             });
-            compliance_bars(items)
+            compliance_bars("Compliance by OS", items)
         }}
     }
 }
@@ -280,11 +288,19 @@ fn SeverityBreakdown() -> impl IntoView {
             if segs.is_empty() {
                 return view! { <p class="empty">"No pending patches."</p> }.into_any();
             }
+            let aria = util::chart_label(
+                "Pending patches by severity",
+                &segs
+                    .iter()
+                    .map(|s| (s.label.to_string(), group_thousands(s.count)))
+                    .collect::<Vec<_>>(),
+            );
             view! {
                 <div>
                     <svg
                         class="chart"
                         role="img"
+                        aria-label=aria
                         width=SEV_TRACK.to_string()
                         height="24"
                         viewBox=format!("0 0 {SEV_TRACK:.0} 24")
@@ -380,10 +396,18 @@ fn AgeHistogram() -> impl IntoView {
             let width = AGE_GAP + bks.len() as i32 * (AGE_BAR_W + AGE_GAP);
             let height = AGE_FULL_H as i32 + top_pad + label_h;
             let baseline = top_pad as f64 + AGE_FULL_H;
+            let aria = util::chart_label(
+                "Pending patch age since first seen",
+                &bks
+                    .iter()
+                    .map(|b| (b.label.clone(), group_thousands(b.count)))
+                    .collect::<Vec<_>>(),
+            );
             view! {
                 <svg
                     class="chart"
                     role="img"
+                    aria-label=aria
                     width=width.to_string()
                     height=height.to_string()
                     viewBox=format!("0 0 {width} {height}")
@@ -520,10 +544,14 @@ mod tests {
 /// One sparkline plus its first/last values. Deliberately not axis-labelled: the
 /// question is the direction and the endpoints, and a dense axis on a four-up row of
 /// small charts reads as noise.
+///
+/// `percent` picks the formatting; `higher_is_better` is what colours the change —
+/// a property of the metric, never inferred from its title.
 #[component]
 pub(crate) fn TrendLine(
     title: &'static str,
-    unit: &'static str,
+    percent: bool,
+    higher_is_better: bool,
     values: Vec<f64>,
 ) -> impl IntoView {
     let points = util::sparkline_points(&values);
@@ -542,25 +570,14 @@ pub(crate) fn TrendLine(
     let last = values.last().copied().unwrap_or(0.0);
     let delta = last - first;
     let end = points.last().copied().unwrap_or((0.5, 0.5));
-    // "Better" is direction-dependent: more compliance is good, more of everything
-    // else here is bad.
-    let good = if title == "Compliance" {
-        delta > 0.0
-    } else {
-        delta < 0.0
-    };
-    let delta_class = if delta.abs() < f64::EPSILON {
-        "trend-delta"
-    } else if good {
-        "trend-delta trend-better"
-    } else {
-        "trend-delta trend-worse"
-    };
+    let delta_class = util::trend_verdict(delta, percent, higher_is_better).css_class();
+    let delta_label = util::trend_delta_label(delta, percent);
+    // The capped formatter: a compliance of 99.96 must not print as "100.0%".
     let fmt = move |v: f64| {
-        if unit == "%" {
-            format!("{v:.1}{unit}")
+        if percent {
+            format_pct_tenths(v)
         } else {
-            group_thousands(v.round() as usize)
+            group_thousands(v.max(0.0).round() as usize)
         }
     };
 
@@ -568,17 +585,7 @@ pub(crate) fn TrendLine(
         <div class="trend-card">
             <div class="trend-head">
                 <span class="trend-title">{title}</span>
-                <span class=delta_class>
-                    {format!(
-                        "{}{}",
-                        if delta > 0.0 { "+" } else { "" },
-                        if unit == "%" {
-                            format!("{delta:.1}{unit}")
-                        } else {
-                            format!("{:+.0}", delta)
-                        },
-                    )}
-                </span>
+                <span class=delta_class>{delta_label}</span>
             </div>
             <svg class="trend-spark" viewBox="0 0 300 60" role="img" aria-label=format!(
                 "{title}: {} then {}", fmt(first), fmt(last),

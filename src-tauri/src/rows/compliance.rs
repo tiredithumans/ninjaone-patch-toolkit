@@ -90,9 +90,10 @@ impl ComplianceAcc {
 /// Whether a current-patch record belongs to the backlog the compliance rollups
 /// track: not yet installed, and at least Important.
 ///
-/// NinjaOne uses MANUAL (pending approval) and APPROVED for current patches not yet
-/// installed — both count. The rank threshold deliberately excludes `Security` and
-/// `Recommended`, which are NinjaOne *classifications* rather than urgency grades.
+/// Pending is [`is_pending`]'s exclude list — every status except `REJECTED` and
+/// `INSTALLED` counts, not only NinjaOne's usual `MANUAL`/`APPROVED`. The rank
+/// threshold deliberately excludes `Security` and `Recommended`, which are NinjaOne
+/// *classifications* rather than urgency grades.
 fn counts_toward_backlog(p: &Patch) -> bool {
     is_pending(p.status.as_deref()) && p.severity_enum().rank() >= Severity::Important.rank()
 }
@@ -284,8 +285,8 @@ pub fn build_compliance_by_os(
     buckets
 }
 
-/// Counts current pending/approved patches per device for compliance and the
-/// reboot/summary views. Shares [`is_pending`] with every other pending rollup, so
+/// Counts current pending patches ([`is_pending`] — anything not `REJECTED` or
+/// `INSTALLED`) per device for compliance and the reboot/summary views. Shares [`is_pending`] with every other pending rollup, so
 /// the device's pending count, the severity breakdown and the age histogram cannot
 /// disagree about which records are pending.
 pub fn pending_counts(current_patches: &[&Patch]) -> HashMap<i64, usize> {
@@ -409,7 +410,7 @@ pub fn compliance_scope_note(
 /// The parenthetical naming the devices [`rollup_device`] left out, so the reader
 /// can reconcile the compliance table's `Devices` column with `devices_total`:
 /// `devices_total − offline − non-patchable` is the denominator. Empty when nothing
-/// was excluded. Mirrored in `web-rs/src/app/util.rs`.
+/// was excluded. Mirrored in `web-rs/src/app/util/format.rs`.
 fn excluded_clause(offline: usize, unpatchable: usize) -> String {
     let devices = |n: usize| if n == 1 { "device" } else { "devices" };
     match (offline, unpatchable) {

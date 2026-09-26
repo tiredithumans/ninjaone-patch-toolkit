@@ -77,6 +77,23 @@ fn total_severity_is_the_sum_of_its_bands() {
         ],
         "band order mirrors Severity::rank(), most urgent first"
     );
+
+    // Each band is labelled by the variant it counts, and the variants run strictly
+    // most-to-least urgent — so a band cannot be relabelled, or reordered away from
+    // the severity sort, without this failing.
+    use crate::model::Severity;
+    let variants = [
+        Severity::Critical,
+        Severity::Important,
+        Severity::Security,
+        Severity::Moderate,
+        Severity::Recommended,
+        Severity::Low,
+        Severity::Optional,
+        Severity::Unknown,
+    ];
+    assert_eq!(labels, variants.map(Severity::label));
+    assert!(variants.windows(2).all(|w| w[0].rank() > w[1].rank()));
 }
 
 /// `AddAssign` is the other field-wise site; it must agree with `BANDS` too.
@@ -122,7 +139,7 @@ fn device(id: i64, org: i64, os: &str) -> Device {
     }
 }
 
-fn patch(device_id: i64, status: &str, sev: &str, released_days_ago: Option<i64>) -> Patch {
+fn patch(device_id: i64, status: &str, sev: &str, first_seen_days_ago: Option<i64>) -> Patch {
     Patch {
         device_id: Some(device_id),
         kb_number: Some("KB5040434".into()),
@@ -132,7 +149,7 @@ fn patch(device_id: i64, status: &str, sev: &str, released_days_ago: Option<i64>
         severity: Some(sev.into()),
         status: Some(status.into()),
         patch_type: None,
-        collected_timestamp: released_days_ago
+        collected_timestamp: first_seen_days_ago
             .map(|d| (Utc::now() - Duration::days(d)).timestamp() as f64),
         installed_timestamp: None,
     }
@@ -228,8 +245,8 @@ fn first_seen_filter_narrows_rows() {
     let by_id = HashMap::from([(1, &d1)]);
     let maps = maps();
     let patches = vec![
-        patch(1, "PENDING", "CRITICAL", Some(2)), // released 2 days ago → kept
-        patch(1, "PENDING", "CRITICAL", Some(100)), // released 100 days ago → dropped
+        patch(1, "PENDING", "CRITICAL", Some(2)), // first seen 2 days ago → kept
+        patch(1, "PENDING", "CRITICAL", Some(100)), // first seen 100 days ago → dropped
     ];
     let cutoff = (Utc::now() - Duration::days(10)).timestamp();
     let filter = FilterParams {
@@ -596,7 +613,7 @@ fn compliance_by_os_groups_devices_and_patches_by_os() {
     assert_eq!(server.pending_critical, 1);
     assert_eq!(
         server.aged_critical, 1,
-        "released 45d ago, past the 30d SLA"
+        "first seen 45d ago, past the 30d SLA"
     );
 }
 
@@ -1584,6 +1601,110 @@ fn build_failures_groups_by_patch_and_counts_distinct_devices() {
     assert_eq!(groups[1].affected_devices, 1);
 }
 
+#[test]
+fn a_capped_list_says_how_many_it_left_out_and_stays_inside_the_cap() {
+    let names = ["alpha", "bravo", "charlie", "delta"];
+    assert_eq!(
+        join_capped(&names, 100),
+        "alpha, bravo, charlie, delta",
+        "a list that fits is joined whole"
+    );
+    for cap in [15, 20, 25, 27] {
+        let out = join_capped(&names, cap);
+        assert!(out.chars().count() <= cap, "{out:?} exceeds {cap}");
+        let rest: usize = out
+            .rsplit("… and ")
+            .next()
+            .unwrap()
+            .trim_end_matches(" more")
+            .parse()
+            .unwrap();
+        let shown = names.iter().filter(|n| out.contains(*n)).count();
+        assert_eq!(shown + rest, names.len(), "{out:?}");
+    }
+    assert_eq!(clamp_cell("short".into()), "short");
+    let long = clamp_cell("é".repeat(CELL_MAX_CHARS + 5));
+    assert_eq!(long.chars().count(), CELL_MAX_CHARS);
+    assert!(long.ends_with('…'));
+}
+
+/// Groups tied on (affected devices, severity) used to come out in `HashMap`
+/// order, which differs between processes — so two identical runs listed the same
+/// failures differently. Ties now keep first-appearance order.
+#[test]
+fn tied_failure_groups_keep_first_appearance_order() {
+    let kbs: Vec<String> = (0..16).map(|i| format!("KB{i:02}")).collect();
+    let rows: Vec<PatchRow> = kbs
+        .iter()
+        .enumerate()
+        .map(|(i, kb)| failed_row(i as i64 + 1, "srv", kb, None))
+        .collect();
+    let order = |g: &[FailureGroup]| -> Vec<String> {
+        g.iter()
+            .map(|f| f.kb.as_deref().unwrap_or_default().to_string())
+            .collect()
+    };
+    assert_eq!(order(&build_failures(&rows)), kbs);
+    let mut reversed = rows.clone();
+    reversed.reverse();
+    let mut want = kbs.clone();
+    want.reverse();
+    assert_eq!(order(&build_failures(&reversed)), want);
+}
+
+/// A record with no device id carries the sentinel id, which is not a device: two
+/// such failures are not "one affected device", and they add nothing to a patch
+/// group's device count or a device group's dispatch target.
+#[test]
+fn id_less_rows_are_not_counted_or_offered_as_a_device() {
+    let rows = vec![
+        failed_row(ORPHAN_DEVICE_ID, "(unknown)", "KB1", None),
+        failed_row(ORPHAN_DEVICE_ID, "(unknown)", "KB1", None),
+        failed_row(4, "srv4", "KB1", None),
+    ];
+    let failures = build_failures(&rows);
+    assert_eq!(failures[0].affected_devices, 1, "only srv4 is a device");
+    assert_eq!(failures[0].device_names.len(), 1);
+
+    let by_patch = build_groups(&rows, GroupBy::Patch);
+    assert_eq!(by_patch[0].devices, 1);
+
+    let by_device = build_groups(&rows, GroupBy::Device);
+    let orphan = by_device
+        .iter()
+        .find(|g| g.key == ORPHAN_DEVICE_ID.to_string())
+        .expect("the id-less bucket is still listed");
+    assert_eq!(orphan.device_id, None, "nothing to dispatch against");
+    assert_eq!(orphan.devices, 0);
+    assert_eq!(orphan.rows, 2);
+    let real = by_device.iter().find(|g| g.key == "4").unwrap();
+    assert_eq!(real.device_id, Some(4));
+    assert_eq!(real.devices, 1);
+}
+
+/// The build_rows side of the same sentinel: a record with no `deviceId` lands on
+/// [`ORPHAN_DEVICE_ID`], which no NinjaOne device can have.
+#[test]
+fn a_record_with_no_device_id_gets_the_orphan_sentinel() {
+    let mut p = patch(1, "MANUAL", "CRITICAL", Some(1));
+    p.device_id = None;
+    let patches = [p];
+    let refs = refs(&patches);
+    let rows = build_rows(
+        &HashMap::new(),
+        &maps(),
+        &[PatchSource {
+            patches: &refs,
+            type_label: "OS",
+            status_override: None,
+            status_filter: None,
+        }],
+        &FilterParams::default().prepare(),
+    );
+    assert_eq!(rows.len(), 1, "an unscoped query keeps orphans");
+    assert_eq!(rows[0].device_id, ORPHAN_DEVICE_ID);
+}
+
 fn scope_filter() -> FilterParams {
     FilterParams {
         organization_ids: Vec::new(),
@@ -1643,6 +1764,117 @@ fn an_unnarrowed_query_states_that_it_covers_the_whole_fleet() {
         facet(&scope, "Install history since"),
         None,
         "a Pending-only query never reached the history endpoints"
+    );
+}
+
+/// The whole-fleet line sits in the every-sheet tier, so only a device facet may
+/// remove it. A severity- or search-only query used to drop it, leaving the
+/// compliance sheet of a CRITICAL-only export with no statement of its population.
+/// And a blank needle is no facet at all.
+#[test]
+fn patch_facets_and_blank_needles_keep_the_whole_fleet_line() {
+    let mut filter = scope_filter();
+    filter.severities = vec!["CRITICAL".into()];
+    filter.search = Some("KB5040434".into());
+    filter.detected_after = Some(1_777_000_000);
+    let scope = build_query_scope(
+        &filter,
+        &maps(),
+        BOTH_FAMILIES,
+        &[PatchStatus::Pending],
+        None,
+    );
+    assert_eq!(
+        facet(&scope, "Scope"),
+        Some("Whole fleet \u{2014} no device filters applied")
+    );
+    assert!(!scope.device_scoped);
+    assert_eq!(facet(&scope, "Severity"), Some("CRITICAL"));
+
+    let mut blank = scope_filter();
+    blank.os_name_contains = Some("   ".into());
+    blank.search = Some(" \t".into());
+    blank.node_classes = vec![" ".into()];
+    let scope = build_query_scope(
+        &blank,
+        &maps(),
+        BOTH_FAMILIES,
+        &[PatchStatus::Pending],
+        None,
+    );
+    assert_eq!(
+        facet(&scope, "Scope"),
+        Some("Whole fleet \u{2014} no device or patch filters applied")
+    );
+    assert_eq!(facet(&scope, "OS name contains"), None);
+    assert_eq!(facet(&scope, "OS type"), None);
+    assert_eq!(facet(&scope, "Search"), None);
+    assert!(!scope.device_scoped);
+    assert_eq!(
+        scope.fingerprint,
+        build_query_scope(
+            &scope_filter(),
+            &maps(),
+            BOTH_FAMILIES,
+            &[PatchStatus::Pending],
+            None
+        )
+        .fingerprint,
+        "a blank needle measures the same thing as no needle"
+    );
+
+    let mut os = scope_filter();
+    os.os_name_contains = Some(" Server ".into());
+    let scope = build_query_scope(&os, &maps(), BOTH_FAMILIES, &[PatchStatus::Pending], None);
+    assert!(scope.device_scoped);
+    assert_eq!(facet(&scope, "Scope"), None);
+    assert_eq!(facet(&scope, "OS name contains"), Some("Server"));
+}
+
+/// Two different scopes must not fingerprint alike, and one scope must fingerprint
+/// alike however it was spelled — and on every run of a relative window.
+#[test]
+fn the_scope_fingerprint_separates_scopes_and_ignores_spelling() {
+    let fp = |f: &FilterParams, statuses: &[PatchStatus]| {
+        build_query_scope(f, &maps(), BOTH_FAMILIES, statuses, None).fingerprint
+    };
+    let pending = [PatchStatus::Pending];
+    let mut org_a = scope_filter();
+    org_a.organization_ids = vec![10];
+    let mut org_b = scope_filter();
+    org_b.organization_ids = vec![77];
+    assert_ne!(fp(&org_a, &pending), fp(&org_b, &pending));
+    assert_ne!(fp(&org_a, &pending), fp(&scope_filter(), &pending));
+
+    let mut sev = scope_filter();
+    sev.severities = vec!["CRITICAL".into()];
+    assert_ne!(
+        fp(&sev, &pending),
+        fp(&scope_filter(), &pending),
+        "a severity-only run counts different detail rows"
+    );
+    assert_ne!(
+        fp(&scope_filter(), &pending),
+        fp(&scope_filter(), &[PatchStatus::Failed])
+    );
+
+    let mut upper = scope_filter();
+    upper.os_name_contains = Some("SERVER".into());
+    upper.severities = vec!["CRITICAL".into(), "IMPORTANT".into()];
+    let mut lower = scope_filter();
+    lower.os_name_contains = Some(" server".into());
+    lower.severities = vec!["important".into(), "critical".into()];
+    assert_eq!(fp(&upper, &pending), fp(&lower, &pending));
+
+    let mut monday = scope_filter();
+    monday.detected_within_days = Some(30);
+    monday.detected_after = Some(1_777_000_000);
+    let mut tuesday = monday.clone();
+    tuesday.detected_after = Some(1_777_086_400);
+    assert_eq!(
+        fp(&monday, &pending),
+        fp(&tuesday, &pending),
+        "a relative window is the same question on every run"
     );
 }
 
@@ -1833,21 +2065,55 @@ fn build_age_buckets_separate_undated_patches_from_genuinely_old_ones() {
     undated.collected_timestamp = None;
     let current = vec![
         patch(1, "MANUAL", "CRITICAL", Some(5)),   // 0-30
-        patch(1, "MANUAL", "CRITICAL", Some(200)), // 180+
+        patch(1, "MANUAL", "CRITICAL", Some(200)), // 181+
         undated,
         patch(1, "INSTALLED", "CRITICAL", Some(5)), // not pending → ignored
     ];
     let buckets = build_age_buckets(&refs(&current), &by_id, Utc::now());
     assert_eq!(buckets.len(), 6, "five age bands plus the undated bucket");
     assert_eq!(buckets[0].count, 1, "0-30 bucket");
-    // The undated patch must NOT inflate 180+: folding it in made the tallest,
+    // The undated patch must NOT inflate 181+: folding it in made the tallest,
     // most alarming bar mean "we have no timestamp" rather than "this is old".
     assert_eq!(
         buckets[4].count, 1,
-        "180+ holds only the genuinely aged one"
+        "181+ holds only the genuinely aged one"
     );
     assert_eq!(&*buckets[5].label, "Unknown");
     assert_eq!(buckets[5].count, 1, "the undated patch lands in Unknown");
+}
+
+/// Each label claims exactly the days its arm matches: 180 days is "91-180", and
+/// the open-ended bucket starts at 181. The labels once read "91-180" / "180+",
+/// assigning day 180 to both.
+#[test]
+fn age_bucket_labels_match_their_boundaries() {
+    let d = device(1, 10, "Windows Server 2022");
+    let by_id = HashMap::from([(1, &d)]);
+    let now = Utc::now();
+    let aged = |days: i64| {
+        let mut p = patch(1, "MANUAL", "CRITICAL", None);
+        p.collected_timestamp = Some((now - Duration::days(days)).timestamp() as f64);
+        p
+    };
+    for (days, label) in [
+        (30, "0-30 days"),
+        (31, "31-60 days"),
+        (60, "31-60 days"),
+        (61, "61-90 days"),
+        (90, "61-90 days"),
+        (91, "91-180 days"),
+        (180, "91-180 days"),
+        (181, "181+ days"),
+    ] {
+        let current = [aged(days)];
+        let buckets = build_age_buckets(&refs(&current), &by_id, now);
+        let hit: Vec<&str> = buckets
+            .iter()
+            .filter(|b| b.count > 0)
+            .map(|b| b.label.as_str())
+            .collect();
+        assert_eq!(hit, [label], "a patch first seen {days} days ago");
+    }
 }
 
 #[test]

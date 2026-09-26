@@ -24,7 +24,7 @@ updates:
     ignore:
       # dtolnay/rust-toolchain encodes the *toolchain* in the ref: upstream ships
       # one rolling `v1` tag and publishes toolchain versions as branches, so our
-      # `@<sha> # 1.98.0` pin is a commit on the 1.98.0 branch with no semver tag
+      # `@<sha> # 1.98.1` pin is a commit on the 1.98.1 branch with no semver tag
       # containing it. Dependabot can't map that SHA back to a version and errors
       # the whole github-actions job (`unknown_error`), which reports the weekly
       # run as failed even though the other action bumps land fine. Bumping this
@@ -66,12 +66,12 @@ updates:
 
   # The headless-screenshot tooling (scripts/) — a dev/CI tool, never shipped with
   # the app, but screenshot.yml runs it on every published release to refresh the
-  # README image. It was missing from this file until now, so its two packages
-  # drifted unwatched: `selfsigned` fell four majors behind and had turned
-  # `generate` async, which would have broken the capture at runtime.
+  # README image. Before it was listed here its packages drifted unwatched:
+  # `selfsigned` fell four majors behind and had turned `generate` async, which
+  # would have broken the capture at runtime.
   #
-  # scripts/package-lock.json is gitignored, so there is no lockfile to update —
-  # the versions are exact pins in package.json and Dependabot rewrites those.
+  # The versions are exact pins in package.json, and scripts/package-lock.json is
+  # committed (`npm ci` installs exactly it); Dependabot rewrites both together.
   - package-ecosystem: npm
     directory: /scripts
     schedule:

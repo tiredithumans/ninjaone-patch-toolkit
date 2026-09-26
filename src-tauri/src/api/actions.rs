@@ -2,14 +2,16 @@
 //!
 //! Everything here POSTs, so every call goes out with [`ReplaySafety::ActOnce`]
 //! (via [`NinjaApiClient::post_action`] / [`NinjaApiClient::post_json`]) — a
-//! timed-out dispatch is never replayed, because NinjaOne offers no idempotency
-//! key and the device may already be running the job.
+//! dispatch whose outcome is ambiguous (timeout, connection lost in flight, 5xx,
+//! unreadable 2xx body) is never replayed and fails with
+//! [`OutcomeUnknown`](super::OutcomeUnknown), because NinjaOne offers no
+//! idempotency key and the device may already be running the job.
 
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use tracing::{debug, info};
 
-use super::NinjaApiClient;
+use super::{NinjaApiClient, OutcomeUnknown};
 use crate::error::truncate_body;
 use crate::model::{AutomationScript, DeviceScriptingOptions, PatchType, RebootMode};
 
@@ -112,11 +114,14 @@ impl NinjaApiClient {
                 Value::Object(body),
             )
             .await?;
+        // NinjaOne answered 2xx, so the script was accepted and may be running. An
+        // unseen body shape is therefore an unknown outcome, not a failure: reporting
+        // it Failed invited the operator to dispatch the script a second time.
         let parsed = parse_dispatch_response(&raw).ok_or_else(|| {
-            anyhow!(
-                "script/run reported success but returned an unrecognized body: {}",
+            anyhow::Error::new(OutcomeUnknown(format!(
+                "script/run was accepted but returned an unrecognized body: {}",
                 truncate_body(&raw.to_string())
-            )
+            )))
         })?;
         // The response shape is undocumented and tenant-specific; log the raw body
         // so an unseen shape from the field is one grep away from a new test case.
@@ -168,12 +173,13 @@ fn parse_dispatch_response(raw: &Value) -> Option<ScriptDispatch> {
             Some(ScriptDispatch {
                 id: num("id"),
                 activity_id: num("activityId").or_else(|| num("activity_id")),
-                series_uid: text("jobUid").or_else(|| text("seriesUid")).or_else(|| {
-                    // Only treat `uid` as a series uid when `id` didn't already
-                    // identify the dispatch, so an echoed script uid isn't mistaken
-                    // for a job correlator.
-                    text("uid")
-                }),
+                // `uid` is the last resort, after the two names that are certainly a
+                // job correlator. It is taken whether or not `id` is present: if it
+                // is only an echoed built-in-action uid, the series tier simply finds
+                // no activity carrying it and matching falls through to the next tier.
+                series_uid: text("jobUid")
+                    .or_else(|| text("seriesUid"))
+                    .or_else(|| text("uid")),
             })
         }
         Value::Number(n) => Some(ScriptDispatch {
@@ -363,6 +369,25 @@ mod tests {
             .await
             .expect("a bodiless 204 is still a successful dispatch");
         assert_eq!(out.any_id(), None);
+    }
+
+    /// A 2xx whose body is a shape no tenant has been seen to send: the script was
+    /// accepted, so this is an unknown outcome (polled), not a failure.
+    #[tokio::test]
+    async fn run_script_with_an_unrecognized_2xx_body_is_an_unknown_outcome() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/device/3/script/run"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([1, 2, 3])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = client(&server)
+            .run_script(3, &ScriptRef::Script { id: 1 }, "", "system")
+            .await
+            .expect_err("an unrecognized body carries no correlator to return");
+        assert!(super::super::is_outcome_unknown(&err), "{err:#}");
     }
 
     #[tokio::test]

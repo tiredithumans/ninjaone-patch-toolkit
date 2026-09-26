@@ -28,6 +28,10 @@ Then refresh both lockfiles so they record the crate's own new version. Any buil
 (`just verify` below is enough); there is no `cargo update --precise` step for a path crate.
 Confirm with `git diff --stat` that both `Cargo.lock` files changed.
 
+Regenerate the license notice: `just licenses` (needs `cargo-about`). The CI
+`Third-party licenses` job fails a PR whose `THIRD-PARTY-LICENSES.md` is stale, and the
+lockfile refresh above can change it.
+
 ## 2. Roll the changelog
 
 `release.yml` publishes the `CHANGELOG.md` section for the tagged version as the release body
@@ -45,15 +49,28 @@ Confirm with `git diff --stat` that both `Cargo.lock` files changed.
   release exists).
 - Optional: `just build` to confirm bundles build locally.
 
-## 4. Tag and push
+## 4. Land the bump, then tag the merged commit
+
+`main` is protected, so the bump lands through a PR like any other change, and the tag goes on
+the commit that CI verified on `main` — not on a local commit that may never merge as-is.
 
 ```bash
 git checkout main && git pull origin main
-git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json web-rs/Cargo.toml web-rs/Cargo.lock CHANGELOG.md
+git checkout -b release/v<X.Y.Z>
+git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json web-rs/Cargo.toml web-rs/Cargo.lock CHANGELOG.md THIRD-PARTY-LICENSES.md
 git commit -m "chore(release): v<X.Y.Z>"
+git push -u origin release/v<X.Y.Z>
+gh pr create --base main --title "chore(release): v<X.Y.Z>" --body "Version bump and changelog roll for v<X.Y.Z>."
+gh pr checks <num> --watch --required
+gh pr merge <num> --merge --delete-branch
+
+git checkout main && git pull origin main
 git tag -a v<X.Y.Z> -m "release v<X.Y.Z>"
-git push origin main --tags
+git push origin v<X.Y.Z>
 ```
+
+Push the one tag by name. `--tags` pushes every local tag, including stale or experimental
+ones, and each `v*` tag starts a release run.
 
 ## 5. Publish
 
@@ -68,8 +85,10 @@ release: bumping to v0.14.0 (minor)
 
 ✅ just verify + just screenshot-test passed
 ✅ bumped src-tauri/Cargo.toml, src-tauri/tauri.conf.json, web-rs/Cargo.toml → 0.14.0 (both lockfiles refreshed)
+✅ THIRD-PARTY-LICENSES.md regenerated
 ✅ CHANGELOG rolled: [Unreleased] → [0.14.0] - 2026-09-01
-✅ tagged v0.14.0 and pushed — release.yml building bundles
+✅ release PR #<num> merged after required checks
+✅ tagged v0.14.0 on main and pushed the tag — release.yml building bundles
 
 🔗 https://github.com/tiredithumans/ninjaone-patch-toolkit/releases (draft)
 ```
@@ -77,5 +96,8 @@ release: bumping to v0.14.0 (minor)
 ## Failure handling
 
 - Gate fails → stop, report the output.
-- Tag already exists → report; never force-move a tag.
-- Guard job fails → a manifest or the changelog heading is out of step; fix, re-tag.
+- Tag already exists (locally or on the remote) → report; never force-move or re-push a tag.
+- Guard or verify job fails → the tag is spent. Delete the draft release if one was created,
+  land the fix through a PR, and release it as the **next patch version** with a new tag. Never
+  move or delete-and-recreate a pushed `v*` tag: the updater and anyone who fetched it have
+  already seen it.

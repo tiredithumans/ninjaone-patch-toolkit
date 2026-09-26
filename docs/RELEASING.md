@@ -1,8 +1,9 @@
 # Releasing & update signing — maintainer runbook
 
 How releases are cut is covered by the release skill (bump the three manifests in lockstep,
-roll `[Unreleased]` in `CHANGELOG.md`, tag, push — `release.yml` builds and uploads the
-bundles). This document covers the part that is **not** in the workflow: the minisign key
+roll `[Unreleased]` in `CHANGELOG.md`, regenerate `THIRD-PARTY-LICENSES.md`, land that through
+a PR, then tag the merged commit on `main` and push the one tag — `release.yml` builds and
+uploads the bundles). This document covers the part that is **not** in the workflow: the minisign key
 that signs auto-updates, and what to do about it.
 
 ## How update signing works
@@ -34,6 +35,22 @@ Pick a strong password. The command prints the public key; that string goes into
 - **GitHub Actions secrets** (`TAURI_SIGNING_PRIVATE_KEY` = the private-key file's
   contents, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = its password) are the only place CI
   ever sees the key. Never commit it, never echo it in a workflow.
+- **Exposure during the build.** tauri-action builds and signs in one step, so every build
+  script and proc-macro in both dependency trees runs with the key in its environment. The
+  build job therefore restores no build cache and builds only from the committed lockfiles
+  (`trunk build --locked`, a `cargo fetch --locked` preflight).
+- **The key belongs in the `release` environment, not repository secrets.** The `build` job
+  already declares `environment: release`. GitHub never reveals a secret's value, so moving it
+  means re-entering it from your offline copy:
+  1. **Settings → Environments → `release`** (create it if a release run hasn't already).
+  2. **Deployment branches and tags → Selected branches and tags → Add rule → Tag → `v*`.**
+     Optionally add yourself under **Required reviewers**, so each signing run waits for approval.
+  3. **Environment secrets → Add**: `TAURI_SIGNING_PRIVATE_KEY` (the key file's contents) and
+     `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+  4. **Settings → Secrets and variables → Actions → Repository secrets:** delete both. Until you
+     do, every workflow on every branch can still read them.
+
+  After that, only a `v*` tag run of the `build` job can read the key.
 - Keep an **offline backup** of the private key + password (password manager or sealed
   backup). **Losing the key permanently breaks auto-update for every installed copy** —
   users would have to notice on their own and manually download the next release.

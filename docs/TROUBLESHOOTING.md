@@ -165,7 +165,9 @@ dialog open too long) invalidates the approval. Re-open the action and confirm a
 ## Build & run (contributors)
 
 - Needs Rust **1.98** with the `wasm32-unknown-unknown` target (pinned in
-  `rust-toolchain.toml`), `trunk`, the Tauri CLI, and a matching `wasm-bindgen-cli`.
+  `rust-toolchain.toml`), `just`, `trunk`, and the Tauri CLI. Trunk fetches the
+  `wasm-bindgen` CLI matching `web-rs/Cargo.lock` on its own, so no separate
+  `wasm-bindgen-cli` install is needed.
 - On Linux, install the webview deps (`libwebkit2gtk-4.1-dev`, …) — see the CI workflow
   for the exact list.
 - `just dev` builds the backend and auto-starts `trunk serve`; a backend-only compile

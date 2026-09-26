@@ -17,11 +17,20 @@ use super::*;
 /// **only** that row — an earlier shape swept every KB on the device into the
 /// selection, which made the one path capable of per-patch targeting unable to
 /// receive a subset.
+/// Mirrors `rows::join::ORPHAN_DEVICE_ID`: the device id of a patch row whose
+/// record named no device.
+pub(crate) const ORPHAN_DEVICE_ID: i64 = 0;
+
 pub(crate) fn apply_row_selection(
     sel: &mut BTreeMap<i64, DeviceSelection>,
     row: &PatchRow,
     checked: bool,
 ) {
+    // A row with no device id is joined under a sentinel id the backend never
+    // dispatches to; letting it into the selection would offer a phantom target.
+    if checked && row.device_id == ORPHAN_DEVICE_ID {
+        return;
+    }
     let key = patch_key(row);
     if checked {
         sel.entry(row.device_id)
@@ -48,6 +57,41 @@ pub(crate) fn apply_row_selection(
             sel.remove(&row.device_id);
         }
     }
+}
+
+/// Re-checks one selected device against its rows in a fresh result, keeping only
+/// the ticked patches that are still there. Returns how many ticked rows it dropped.
+///
+/// This is what lets an auto-refresh keep the operator's selection. Clearing it on
+/// every tick meant a 5-minute cadence wiped a hand-built 20-device selection while
+/// they were still building it; keeping it blindly would dispatch against patches
+/// the refresh just showed as installed. A ticked row survives only if the same
+/// patch (by [`patch_key`]) is still listed on the same device, and the device's
+/// offline flag is taken from the fresh rows so the summary's offline count stays
+/// true. A device with nothing left leaves the selection.
+pub(crate) fn prune_device_selection(
+    sel: &mut BTreeMap<i64, DeviceSelection>,
+    device_id: i64,
+    fresh_rows: &[PatchRow],
+) -> usize {
+    let Some(entry) = sel.get_mut(&device_id) else {
+        return 0;
+    };
+    let present: BTreeSet<String> = fresh_rows
+        .iter()
+        .filter(|r| r.device_id == device_id)
+        .map(patch_key)
+        .collect();
+    let before = entry.patches.len();
+    entry.patches.retain(|key, _| present.contains(key));
+    if let Some(row) = fresh_rows.iter().find(|r| r.device_id == device_id) {
+        entry.offline = row.offline;
+    }
+    let removed = before - entry.patches.len();
+    if entry.patches.is_empty() {
+        sel.remove(&device_id);
+    }
+    removed
 }
 
 /// Identity of a patch *within a device's selection*.
@@ -107,8 +151,6 @@ pub(crate) fn targets_by_device(
         .collect()
 }
 
-/// [`targets_by_device`] for a remediation kind, which picks the family. Empty for
-/// any other kind — the native endpoints take no target list at all.
 /// The run options the ActionBar renders once and every dispatch reads.
 ///
 /// Plain data, read out of the signals by the caller. `build_action_request` is then
@@ -196,6 +238,8 @@ pub(crate) fn build_action_request(
     req
 }
 
+/// [`targets_by_device`] for a remediation kind, which picks the family. Empty for
+/// any other kind — the native endpoints take no target list at all.
 pub(crate) fn remediation_targets(
     selected: &BTreeMap<i64, DeviceSelection>,
     kind: ActionKind,
@@ -385,12 +429,32 @@ pub(crate) fn needs_typed_confirmation(
 /// Whether the confirm button may fire. Extracted from the modal body so the rule
 /// that guards the destructive path is host-testable rather than only reachable by
 /// clicking through a browser.
+///
+/// `token_spent` is a failed dispatch from this dialog: the confirm token is
+/// single-use and already consumed, so only a fresh plan can re-enable it.
 pub(crate) fn can_confirm_action(
     blocked: bool,
     dispatching: bool,
+    token_spent: bool,
     needs_typed: bool,
     typed: &str,
     expected: &str,
 ) -> bool {
-    !blocked && !dispatching && (!needs_typed || typed.trim() == expected)
+    !blocked && !dispatching && !token_spent && (!needs_typed || typed.trim() == expected)
+}
+
+/// The toast after ticking a group whose members were never on screen: how many
+/// rows the click took, and whether the group had more than one click may take.
+pub(crate) fn group_selection_note(label: &str, rows: usize, capped: bool) -> String {
+    if capped {
+        format!(
+            "Selected the first {} patch rows in {label} — the group has more; narrow the filters to reach them.",
+            group_thousands(rows)
+        )
+    } else {
+        format!(
+            "Selected {} patch row(s) in {label}.",
+            group_thousands(rows)
+        )
+    }
 }

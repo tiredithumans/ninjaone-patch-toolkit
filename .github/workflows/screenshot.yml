@@ -17,35 +17,39 @@ name: Screenshot
 # the required CI checks actually run. With the default `GITHUB_TOKEN` they do not:
 # GitHub deliberately suppresses workflow triggers for events raised by that token to
 # prevent recursion, so the PR sits with zero checks and — because `main` requires
-# four — can never be merged without an admin override. The run still succeeds in
+# status checks — can never be merged without an admin override. The run still succeeds in
 # that case and prints how to kick the checks off by hand.
 on:
   workflow_dispatch:
   release:
     types: [published]
 
-# Needs to push a branch and open a PR with the new image.
+# Read-only by default; the one job that publishes raises it itself.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: screenshot
   cancel-in-progress: true
 
 jobs:
+  # Runs every piece of third-party code in this workflow — `npm ci` install
+  # scripts, a full wasm build (build scripts, proc-macros), Playwright's browser
+  # download — so it gets a read-only token and no secrets at all. It hands the
+  # image to `publish` as an artifact.
   capture:
     name: Capture demo
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
       # `ref: main` on purpose: a `release: published` run would otherwise check out
-      # the tag, and the PR branch would carry whatever that commit was rather than
-      # branching cleanly from main. `token` decides who pushes — see the note at the
-      # top about why that governs whether CI runs on the resulting PR.
+      # the tag, and the image would be rendered from whatever that commit was.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
-          token: ${{ secrets.SCREENSHOT_PAT || secrets.GITHUB_TOKEN }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
           targets: wasm32-unknown-unknown
@@ -66,6 +70,37 @@ jobs:
           (cd scripts && npx playwright install --with-deps chromium)
       - name: Capture screenshot
         run: node scripts/screenshot.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: screenshot
+          path: docs/images/screenshot.png
+          if-no-files-found: error
+          retention-days: 1
+
+  # Holds the write token, and runs nothing but git and gh on a fresh checkout of
+  # main plus the downloaded image. Keeping it in its own job is the point: a
+  # compromised dependency in `capture` never shares a runner with this token, so
+  # it cannot read it or plant anything in .git/ for the push to execute.
+  publish:
+    name: Open screenshot PR
+    needs: capture
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # No credential is persisted into .git/config; the token is handed only to the
+      # push step below — and which token it is decides whether CI runs on the PR
+      # (see the note at the top).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: screenshot
+          path: docs/images
 
       - name: Push the refreshed screenshot and open or update its PR
         env:
@@ -84,13 +119,18 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Defense in depth: nothing in this job runs third-party code, but the
+          # token must never meet a hook (pre-push is handed the authenticated URL).
+          git config core.hooksPath /dev/null
           git checkout -B "$BRANCH"
           git add docs/images/screenshot.png
           git commit -m "docs: refresh the README demo screenshot"
           # Force needed because the branch is reused: the previous run's commit is
           # not an ancestor once main has moved on. Safe — nothing but this workflow
           # ever writes to this branch, and the image is regenerated from scratch.
-          git push --force origin "$BRANCH"
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+            "HEAD:refs/heads/${BRANCH}"
 
           existing=$(gh pr list --head "$BRANCH" --base main --state open \
                        --json number --jq '.[0].number // empty')

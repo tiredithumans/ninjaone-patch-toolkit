@@ -17,4 +17,4 @@ contract line in AGENTS.md short.
 | [compliance.md](./compliance.md) | What a compliance number means: the rollup population, the scope note, both clocks, `QueryScope` provenance, status routing and pushdown, `is_pending`, percentage capping, interned row strings, the absent release date. |
 | [severity.md](./severity.md) | NinjaOne's two severity vocabularies and the full checklist for adding a value. |
 | [frontend.md](./frontend.md) | Tauri command shape, IPC arg shape, WASM gating, CSP, auto-update, Leptos reactivity and focus traps, demo mode, and the "no logic in a component body" testing rule. |
-| [ci.md](./ci.md) | The CI-only gates: coverage, audit/deny, CodeQL, manifest versions, screenshot tooling, the release verify job. |
+| [ci.md](./ci.md) | The CI-only gates and which events run them: coverage, audit/deny, third-party licenses, the NinjaOne contract, shellcheck/hook tests, actionlint, commit subjects, CodeQL, manifest versions, screenshot tooling, the release verify job, token/cache exposure in the publishing workflows. |

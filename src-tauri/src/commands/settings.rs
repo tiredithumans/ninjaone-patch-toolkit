@@ -3,7 +3,8 @@ use tauri::State;
 
 use crate::error::UiError;
 use crate::settings::{
-    ActionSettings, MAX_ACTION_CONCURRENCY, MAX_DEVICES_PER_ACTION_CEILING, MAX_WINDOW_DAYS, Preset,
+    ActionSettings, MAX_ACTION_CONCURRENCY, MAX_DEVICES_PER_ACTION_CEILING, MAX_WINDOW_DAYS,
+    Preset, Settings, is_loopback_host,
 };
 use crate::state::AppState;
 
@@ -51,7 +52,7 @@ pub fn get_settings(state: State<'_, AppState>) -> SettingsView {
     view(&state)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveSettingsArgs {
     pub instance_base_url: String,
@@ -72,6 +73,27 @@ pub struct SaveSettingsArgs {
     pub actions: ActionSettings,
 }
 
+/// Hand-written so the client secret can never reach a log line or a panic
+/// message through `{:?}`; only whether one was supplied is shown.
+impl std::fmt::Debug for SaveSettingsArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaveSettingsArgs")
+            .field("instance_base_url", &self.instance_base_url)
+            .field("client_id", &self.client_id)
+            .field("callback_port", &self.callback_port)
+            .field("install_window_days", &self.install_window_days)
+            .field("sla_days", &self.sla_days)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("clear_secret", &self.clear_secret)
+            .field("auto_check_updates", &self.auto_check_updates)
+            .field("actions", &self.actions)
+            .finish()
+    }
+}
+
 fn default_auto_check() -> bool {
     true
 }
@@ -82,8 +104,7 @@ fn default_auto_check() -> bool {
 fn require_https_instance(url: &str) -> Result<(), UiError> {
     let parsed = url::Url::parse(url)
         .map_err(|_| UiError::new(format!("instance URL is not a valid URL: {url}")))?;
-    let host = parsed.host_str().unwrap_or_default();
-    let is_loopback = matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1");
+    let is_loopback = is_loopback_host(parsed.host_str().unwrap_or_default());
     match parsed.scheme() {
         "https" => Ok(()),
         "http" if is_loopback => Ok(()),
@@ -161,8 +182,71 @@ fn validate_action_settings(a: &ActionSettings) -> Result<(), UiError> {
     Ok(())
 }
 
+/// What a save changed that the caller has to act on.
+#[derive(Debug, PartialEq, Eq)]
+struct SaveEffects {
+    /// Instance or client id moved: every tenant-keyed cache is now another
+    /// tenant's.
+    tenant_changed: bool,
+    /// The scope the next sign-in requests moved.
+    actions_changed: bool,
+}
+
+/// The settings `args` asks for, applied over `current`. Pure, so what counts as a
+/// tenant switch is testable without a Tauri `State`.
+fn merge_settings(
+    current: &Settings,
+    instance_base_url: String,
+    args: SaveSettingsArgs,
+) -> (Settings, SaveEffects) {
+    let client_id = args
+        .client_id
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
+    let mut next = current.clone();
+    // Both halves of the cache's tenant key, not just the instance: pointing the
+    // same instance at a different client id is as much a tenant switch as
+    // changing the host, and the caches key on the pair.
+    let effects = SaveEffects {
+        tenant_changed: current.instance_base_url != instance_base_url
+            || current.client_id != client_id,
+        actions_changed: current.actions.enabled != args.actions.enabled,
+    };
+    next.instance_base_url = instance_base_url;
+    next.client_id = client_id;
+    // Already range-checked by validate_settings_input.
+    next.callback_port = args.callback_port;
+    next.install_window_days = args.install_window_days;
+    next.sla_days = args.sla_days;
+    next.auto_check_updates = args.auto_check_updates;
+    next.actions = args.actions;
+    next.actions.run_as = next.actions.run_as.trim().to_string();
+    (next, effects)
+}
+
+/// Runs blocking settings I/O (the file write, keyring reads and writes) off the
+/// async runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, UiError> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| UiError::new(format!("saving settings failed: {e}")))?
+        .map_err(UiError::from)
+}
+
+/// Saves the Settings panel.
+///
+/// Async, with the file and keyring I/O on a blocking thread and no `settings`
+/// lock held across it. As a synchronous command it ran on the main thread — the
+/// one that pumps the window — and did a keyring round trip and a file write there
+/// while holding the settings mutex every query reads, so a slow Secret Service
+/// froze the UI and stalled in-flight work at once. Writers are serialized by
+/// `settings_write` instead, and the new value is published in memory only once it
+/// is on disk: a failed write no longer leaves memory and `settings.json`
+/// disagreeing.
 #[tauri::command]
-pub fn save_settings(
+pub async fn save_settings(
     state: State<'_, AppState>,
     args: SaveSettingsArgs,
 ) -> Result<SettingsView, UiError> {
@@ -174,116 +258,118 @@ pub fn save_settings(
     require_https_instance(&instance_base_url)?;
     validate_settings_input(&args)?;
 
-    let tenant_changed;
-    let actions_changed;
-    let snapshot = {
-        let mut guard = state
-            .settings
-            .lock()
-            .map_err(|_| UiError::new("settings state poisoned"))?;
-        let client_id = args
-            .client_id
-            .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty());
-        // Both halves of the cache's tenant key, not just the instance: pointing the
-        // same instance at a different client id is as much a tenant switch as
-        // changing the host, and the caches key on the pair.
-        tenant_changed =
-            guard.instance_base_url != instance_base_url || guard.client_id != client_id;
-        guard.instance_base_url = instance_base_url;
-        guard.client_id = client_id;
-        // Already range-checked by validate_settings_input above.
-        guard.callback_port = args.callback_port;
-        guard.install_window_days = args.install_window_days;
-        guard.sla_days = args.sla_days;
-        guard.auto_check_updates = args.auto_check_updates;
-        actions_changed = guard.actions.enabled != args.actions.enabled;
-        guard.actions = args.actions;
-        guard.actions.run_as = guard.actions.run_as.trim().to_string();
-        guard.save().map_err(UiError::from)?;
-        guard.clone()
+    let secret_change = match args.client_secret.as_deref().map(str::trim) {
+        Some(secret) if !secret.is_empty() => Some(Some(secret.to_string())),
+        _ if args.clear_secret => Some(None),
+        _ => None,
     };
+
+    let _writer = state.settings_write.lock().await;
+    let (next, effects) = merge_settings(&state.settings_snapshot(), instance_base_url, args);
+
+    let to_disk = next.clone();
+    blocking(move || to_disk.save()).await?;
+    state.replace_settings(next.clone());
 
     // Drops the previous tenant's grant when the tenant actually changed — see
     // `AuthState::apply_settings` for why leaving it in place destroyed the
-    // credential of the tenant being switched away from.
-    state.auth.apply_settings(
-        snapshot.instance_base_url.clone(),
-        snapshot.client_id.clone(),
-        snapshot.callback_port,
-        snapshot.actions.enabled,
-    );
-    // The instance may have changed — drop cached lookups so a different tenant
-    // doesn't inherit stale org/location/role names, and drop the cached query
-    // result so an export can't write the previous tenant's rows.
-    state.clear_lookups_cache();
-    if tenant_changed {
+    // credential of the tenant being switched away from. Its keyring read (the
+    // new tenant's secret) and the secret write below are both blocking. The
+    // secret is stored after the switch so it lands under the tenant now in effect.
+    let auth = state.auth.clone();
+    let applied = next.clone();
+    // Not `?`-ed until the caches are cleared: the new tenant is already on disk
+    // and in memory, so a failed secret write must not skip the clears below.
+    let auth_applied = blocking(move || {
+        auth.apply_settings(
+            applied.instance_base_url,
+            applied.client_id,
+            applied.callback_port,
+            applied.actions.enabled,
+        );
+        match secret_change {
+            Some(secret) => auth.set_client_secret(secret),
+            None => Ok(()),
+        }
+    })
+    .await;
+
+    // Only a tenant switch invalidates the caches. The lookups, the whole-fleet
+    // devices and the current patches are all per-tenant fleet data that no other
+    // setting feeds into — the install window, SLA and presets are applied when a
+    // query is assembled, and the port, the secret, the actions block and the
+    // update check never reach a fetch. Clearing on every save meant toggling the
+    // update check threw away a whole-fleet fetch that can take minutes to redo.
+    if effects.tenant_changed {
+        state.clear_lookups_cache();
         state.clear_last_result();
         state.clear_jobs();
     }
+    auth_applied?;
     // Toggling actions changes the OAuth scope the next sign-in requests, but the
     // *current* grant is unchanged — the frontend reads `write_enabled` from
     // auth_status and prompts for re-authorization when the two disagree.
-    if actions_changed {
+    if effects.actions_changed {
         tracing::info!(
-            enabled = snapshot.actions.enabled,
+            enabled = next.actions.enabled,
             "patch actions toggled; re-authorization required for the scope to take effect"
         );
     }
 
-    match args.client_secret.map(|s| s.trim().to_string()) {
-        Some(secret) if !secret.is_empty() => {
-            state
-                .auth
-                .set_client_secret(Some(secret))
-                .map_err(UiError::from)?;
-        }
-        _ if args.clear_secret => {
-            state.auth.set_client_secret(None).map_err(UiError::from)?;
-        }
-        _ => {}
-    }
-
     Ok(SettingsView {
-        tenant_changed,
+        tenant_changed: effects.tenant_changed,
         ..view(&state)
     })
 }
 
+/// Applies `edit` to the presets and persists the result, the same way
+/// `save_settings` persists: serialized by `settings_write`, written on a blocking
+/// thread, published in memory once on disk.
+async fn update_presets(
+    state: &AppState,
+    edit: impl FnOnce(&mut Vec<Preset>),
+) -> Result<Vec<Preset>, UiError> {
+    let _writer = state.settings_write.lock().await;
+    let mut next = state.settings_snapshot();
+    edit(&mut next.presets);
+    let to_disk = next.clone();
+    blocking(move || to_disk.save()).await?;
+    let presets = next.presets.clone();
+    state.replace_settings(next);
+    Ok(presets)
+}
+
 /// Upserts a preset by name.
 #[tauri::command]
-pub fn save_preset(state: State<'_, AppState>, preset: Preset) -> Result<Vec<Preset>, UiError> {
-    let mut guard = state
-        .settings
-        .lock()
-        .map_err(|_| UiError::new("settings state poisoned"))?;
-    if let Some(existing) = guard.presets.iter_mut().find(|p| p.name == preset.name) {
-        // Replace the whole record so re-saving a name also updates the patch-query
-        // selectors, not just `filter`.
-        *existing = preset;
-    } else {
-        guard.presets.push(preset);
-    }
-    guard.save().map_err(UiError::from)?;
-    Ok(guard.presets.clone())
+pub async fn save_preset(
+    state: State<'_, AppState>,
+    preset: Preset,
+) -> Result<Vec<Preset>, UiError> {
+    update_presets(&state, |presets| {
+        if let Some(existing) = presets.iter_mut().find(|p| p.name == preset.name) {
+            // Replace the whole record so re-saving a name also updates the
+            // patch-query selectors, not just `filter`.
+            *existing = preset;
+        } else {
+            presets.push(preset);
+        }
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn delete_preset(state: State<'_, AppState>, name: String) -> Result<Vec<Preset>, UiError> {
-    let mut guard = state
-        .settings
-        .lock()
-        .map_err(|_| UiError::new("settings state poisoned"))?;
-    guard.presets.retain(|p| p.name != name);
-    guard.save().map_err(UiError::from)?;
-    Ok(guard.presets.clone())
+pub async fn delete_preset(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<Vec<Preset>, UiError> {
+    update_presets(&state, |presets| presets.retain(|p| p.name != name)).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionSettings, MAX_WINDOW_DAYS, SaveSettingsArgs, require_https_instance,
-        validate_action_settings, validate_settings_input,
+        ActionSettings, MAX_WINDOW_DAYS, SaveEffects, SaveSettingsArgs, Settings, merge_settings,
+        require_https_instance, validate_action_settings, validate_settings_input,
     };
 
     #[test]
@@ -437,5 +523,73 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    /// Saving used to drop every whole-fleet cache no matter what changed, so
+    /// flipping the update check cost the next query a full refetch. Only the
+    /// instance or the client id may count as a tenant switch.
+    #[test]
+    fn only_the_instance_or_client_id_is_a_tenant_switch() {
+        let current = Settings {
+            client_id: Some("client-a".into()),
+            ..Settings::default()
+        };
+        let same_tenant = |edit: fn(&mut SaveSettingsArgs)| {
+            let mut a = SaveSettingsArgs {
+                client_id: Some("client-a".into()),
+                ..args(11434, 30, 30)
+            };
+            edit(&mut a);
+            merge_settings(&current, current.instance_base_url.clone(), a).1
+        };
+        let unchanged = SaveEffects {
+            tenant_changed: false,
+            actions_changed: false,
+        };
+
+        assert_eq!(same_tenant(|a| a.auto_check_updates = false), unchanged);
+        assert_eq!(same_tenant(|a| a.callback_port = 12000), unchanged);
+        assert_eq!(same_tenant(|a| a.sla_days = 7), unchanged);
+        assert_eq!(
+            same_tenant(|a| a.client_secret = Some("s".into())),
+            unchanged
+        );
+        // Whitespace around the client id is trimmed, not a new tenant.
+        assert_eq!(
+            same_tenant(|a| a.client_id = Some("  client-a ".into())),
+            unchanged
+        );
+        assert_eq!(
+            same_tenant(|a| a.actions.enabled = true),
+            SaveEffects {
+                tenant_changed: false,
+                actions_changed: true,
+            }
+        );
+
+        assert!(same_tenant(|a| a.client_id = Some("client-b".into())).tenant_changed);
+        assert!(same_tenant(|a| a.client_id = None).tenant_changed);
+        let moved = merge_settings(
+            &current,
+            "https://eu.ninjarmm.com".into(),
+            SaveSettingsArgs {
+                client_id: Some("client-a".into()),
+                ..args(11434, 30, 30)
+            },
+        );
+        assert!(moved.1.tenant_changed);
+        assert_eq!(moved.0.instance_base_url, "https://eu.ninjarmm.com");
+    }
+
+    /// The client secret must never be printable through `{:?}`.
+    #[test]
+    fn debug_output_redacts_the_client_secret() {
+        let a = SaveSettingsArgs {
+            client_secret: Some("hunter2-secret-value".into()),
+            ..args(11434, 30, 30)
+        };
+        let printed = format!("{a:?}");
+        assert!(!printed.contains("hunter2-secret-value"));
+        assert!(printed.contains("<redacted>"));
     }
 }

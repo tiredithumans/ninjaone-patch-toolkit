@@ -222,6 +222,66 @@ pub(crate) fn detected_label(window: &str, after: &str, before: &str) -> Option<
     }
 }
 
+/// Whether the install-history lookback applies to this status selection.
+///
+/// Both install-history statuses are bounded by it, not just INSTALLED: the backend
+/// sets `installed_after` whenever any `is_install_history()` status is requested.
+/// Tying it to INSTALLED alone hid the window — from the control and from the chip —
+/// on the one view most likely to be truncated by it, a FAILED-only failure
+/// dashboard. The Filters panel and the chip snapshot both ask this one question.
+pub(crate) fn needs_install_window(statuses: &[String]) -> bool {
+    statuses.iter().any(|s| s == "INSTALLED" || s == "FAILED")
+}
+
+/// The First-seen control's `(window, after, before)` fields for a saved filter's
+/// bounds — the inverse of the mapping `filter_params` applies on the way out.
+///
+/// A relative window wins over absolute bounds (it is what the control stores), any
+/// bound alone means a custom range, and neither means "Any time".
+pub(crate) fn detected_window_fields(
+    within_days: Option<i64>,
+    after: Option<i64>,
+    before: Option<i64>,
+) -> (String, String, String) {
+    match (within_days, after, before) {
+        (Some(d), _, _) => (d.to_string(), String::new(), String::new()),
+        (None, None, None) => (String::new(), String::new(), String::new()),
+        (None, after, before) => (
+            "custom".to_string(),
+            epoch_to_date(after),
+            epoch_to_date(before),
+        ),
+    }
+}
+
+/// The region preset an instance URL belongs to, if any. Compared without a
+/// trailing slash and case-insensitively, the way an operator is likely to paste it.
+pub(crate) fn preset_region(url: &str) -> Option<&'static str> {
+    let wanted = url.trim().trim_end_matches('/');
+    super::super::REGIONS
+        .iter()
+        .find(|(preset, _)| preset.eq_ignore_ascii_case(wanted))
+        .map(|(preset, _)| *preset)
+}
+
+/// Option value the Region select shows for `url`: its preset, or the Custom entry
+/// when the URL is not a preset — or when the operator picked Custom and has not yet
+/// typed a URL that happens to match one.
+///
+/// The select used to have no way to show Custom at all: a non-preset URL fell back
+/// to the first option ("North America (app)"), and choosing "Custom…" wrote its
+/// empty value into the URL field, blanking the instance the operator was about to edit.
+pub(crate) fn region_select_value(url: &str, custom_chosen: bool) -> &'static str {
+    match preset_region(url) {
+        Some(preset) if !custom_chosen => preset,
+        _ => REGION_CUSTOM,
+    }
+}
+
+/// The Region select's Custom entry. Not a URL, so it can never be written into the
+/// instance field.
+pub(crate) const REGION_CUSTOM: &str = "custom";
+
 /// Anything the scope multi-selects can list: an id and a display name.
 ///
 /// The three lookups (`Organization`/`Location`/`Role`) are separate types with the

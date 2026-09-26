@@ -1,7 +1,9 @@
 //! Display formatting: counts, labels, durations, the summary line, the
 //! compliance scope note, percentages, CSS-class pickers and the aged badge.
 
-use crate::types::{JobReport, PatchFamilies, RunRecord};
+use std::collections::BTreeSet;
+
+use crate::types::{FailureGroup, JobReport, PatchFamilies, RunRecord};
 
 use super::super::Tab;
 
@@ -21,6 +23,52 @@ pub(crate) fn group_thousands(n: usize) -> String {
 
 pub(crate) fn tab_class(active: Tab, this: Tab) -> &'static str {
     if active == this { "tab tab-on" } else { "tab" }
+}
+
+/// The results tabs in on-screen order — what the arrow keys walk.
+pub(crate) const TAB_ORDER: [Tab; 6] = [
+    Tab::Patches,
+    Tab::Failures,
+    Tab::Compliance,
+    Tab::Reboot,
+    Tab::Trend,
+    Tab::Jobs,
+];
+
+/// The tab a key press on the tab list moves to, per the WAI-ARIA tabs pattern:
+/// Left/Right step and wrap, Home/End jump to either end. `None` for any other key,
+/// so the caller leaves it (Tab, Enter, …) to the browser.
+pub(crate) fn tab_after_key(current: Tab, key: &str) -> Option<Tab> {
+    let i = TAB_ORDER.iter().position(|t| *t == current).unwrap_or(0);
+    let n = TAB_ORDER.len();
+    match key {
+        "ArrowRight" => Some(TAB_ORDER[(i + 1) % n]),
+        "ArrowLeft" => Some(TAB_ORDER[(i + n - 1) % n]),
+        "Home" => Some(TAB_ORDER[0]),
+        "End" => Some(TAB_ORDER[n - 1]),
+        _ => None,
+    }
+}
+
+/// Distinct devices across every failure group. The groups overlap (one device
+/// usually fails several patches), so the per-group counts cannot simply be added.
+pub(crate) fn failing_device_count(failures: &[FailureGroup]) -> usize {
+    failures
+        .iter()
+        .flat_map(|f| f.device_names.iter())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+/// The accessible name of a chart: its title, then every labelled value it draws.
+/// An `<svg role="img">` without one is announced as a bare "image", which is all a
+/// screen-reader user got for the three dashboard charts.
+pub(crate) fn chart_label(title: &str, items: &[(String, String)]) -> String {
+    if items.is_empty() {
+        return format!("{title}: no data");
+    }
+    let parts: Vec<String> = items.iter().map(|(k, v)| format!("{k} {v}")).collect();
+    format!("{title}: {}", parts.join(", "))
 }
 
 /// The count shown on a group header, which counts the *other* axis from the one
@@ -169,6 +217,79 @@ pub(crate) fn format_pct(pct: f64) -> String {
         pct.round().min(99.0)
     };
     format!("{shown:.0}%")
+}
+
+/// [`format_pct`] at one decimal, with the same rule: a value below 100 never
+/// prints as `100.0%`. Plain `{:.1}` turns 99.96 into "100.0%", which is exactly the
+/// clean-fleet claim the zero-decimal formatter exists to refuse; below 100 this
+/// caps at 99.9%. Mirrors the backend's one-decimal `pct_cell`.
+pub(crate) fn format_pct_tenths(pct: f64) -> String {
+    let shown = if pct >= 100.0 {
+        100.0
+    } else {
+        ((pct * 10.0).round() / 10.0).min(99.9)
+    };
+    format!("{shown:.1}%")
+}
+
+/// Whether a trend moved the good way, the bad way, or not at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrendVerdict {
+    Flat,
+    Better,
+    Worse,
+}
+
+impl TrendVerdict {
+    pub(crate) fn css_class(self) -> &'static str {
+        match self {
+            Self::Flat => "trend-delta",
+            Self::Better => "trend-delta trend-better",
+            Self::Worse => "trend-delta trend-worse",
+        }
+    }
+}
+
+/// Judges a trend's change. The direction that counts as "better" is a property of
+/// the metric, passed in — it used to be chosen by comparing the card's *title* to
+/// the string "Compliance", so renaming a card silently inverted its colouring.
+///
+/// Judged on the change as displayed (`percent` → tenths, otherwise whole units),
+/// so a delta that prints as zero is never coloured as a movement.
+pub(crate) fn trend_verdict(delta: f64, percent: bool, higher_is_better: bool) -> TrendVerdict {
+    let shown = if percent {
+        (delta * 10.0).round() / 10.0
+    } else {
+        delta.round()
+    };
+    if shown == 0.0 {
+        TrendVerdict::Flat
+    } else if (shown > 0.0) == higher_is_better {
+        TrendVerdict::Better
+    } else {
+        TrendVerdict::Worse
+    }
+}
+
+/// The signed change printed on a trend card: `+0.4%` / `-1.2%` for a percentage,
+/// `+1,204` / `-12` for a count, and an unsigned zero when nothing moved.
+///
+/// Signed exactly once. The card used to prefix a `+` by hand *and* format with
+/// `{:+}`, so every rising count read "++12".
+pub(crate) fn trend_delta_label(delta: f64, percent: bool) -> String {
+    if percent {
+        let tenths = (delta * 10.0).round() / 10.0;
+        if tenths == 0.0 {
+            return "0.0%".to_string();
+        }
+        return format!("{tenths:+.1}%");
+    }
+    let whole = delta.round();
+    if whole == 0.0 {
+        return "0".to_string();
+    }
+    let sign = if whole > 0.0 { '+' } else { '-' };
+    format!("{sign}{}", group_thousands(whole.abs() as usize))
 }
 
 pub(crate) fn sev_class(sev: &str) -> &'static str {

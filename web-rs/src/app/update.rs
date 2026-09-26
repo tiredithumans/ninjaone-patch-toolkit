@@ -66,7 +66,19 @@ pub(crate) fn UpdateSplash() -> impl IntoView {
                     },
                 )
             };
+            // The install relaunches the app, which would abandon a dispatch mid-batch
+            // and every job the poller is still resolving; see
+            // `util::update_blocked_reason`.
+            let wait_reason = move || {
+                util::update_blocked_reason(
+                    state.actions.dispatching.get(),
+                    state.actions.jobs.with(|j| util::jobs_in_flight(j)),
+                )
+            };
             let install = move |_| {
+                if wait_reason().is_some() {
+                    return;
+                }
                 state.updates.update_busy.set(true);
                 spawn_local(async move {
                     // On success the backend installs and relaunches the app, so
@@ -100,10 +112,18 @@ pub(crate) fn UpdateSplash() -> impl IntoView {
                             )}
                         </p>
                         {changelog}
+                        <Show when=move || wait_reason().is_some()>
+                            <p class="modal-sub update-wait" role="status">
+                                {move || wait_reason().unwrap_or_default()}
+                            </p>
+                        </Show>
                         <div class="row modal-actions">
                             <button
                                 class="btn btn-primary"
-                                prop:disabled=move || state.updates.update_busy.get()
+                                prop:disabled=move || {
+                                    state.updates.update_busy.get() || wait_reason().is_some()
+                                }
+                                title=move || wait_reason().unwrap_or_default()
                                 on:click=install
                             >
                                 {move || {

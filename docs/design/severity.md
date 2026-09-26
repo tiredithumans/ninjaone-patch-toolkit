@@ -42,13 +42,15 @@ so that test is the substitute. The three families still exist for a reason: the
 
 ## `rows::SeverityCounts::BANDS` is the canonical enumeration on the counts side
 
-It pairs each label with a typed accessor, and `total()`, the HTML report's chart, its legend and
-its denominator all derive from it — so they cannot disagree about how many bands exist.
+It pairs each label — taken from `Severity::label()` (a `const fn`), not restated — with a typed
+accessor, and `total()`, the HTML report's chart, its legend and its denominator all derive from
+it — so they cannot disagree about how many bands exist.
 `report.rs` contributes only `SEVERITY_COLORS`, whose length is tied to `BANDS.len()` by its array
 type (a band without a color is a compile error). The earlier `report.rs` helper matched bands by
 **string label** with a `_ => counts.unknown` catch-all, so a renamed band silently reported
 Unknown's count and double-counted it into the total. `total_severity_is_the_sum_of_its_bands`
-(`rows/`) fails if a field is added to the struct but not to `BANDS`.
+(`rows/`) fails if a field is added to the struct but not to `BANDS`, or if a band's label or
+order drifts from the `Severity` variant it counts.
 
 ## `rows::TableColumn<T>` is the shared table definition
 

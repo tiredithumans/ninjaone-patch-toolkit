@@ -1,5 +1,6 @@
+use super::jobs::constant_time_eq;
 use super::*;
-use crate::actions::{ActionKind, JobState};
+use crate::actions::{ActionKind, JobState, MAX_JOBS};
 use crate::rows::PatchFamilies;
 use crate::rows::{QueryResult, page_rows};
 
@@ -152,6 +153,51 @@ fn replacing_the_result_drops_the_memoized_sort_order() {
         ["xray", "yankee", "zulu"],
         "the new result must be sorted on its own rows"
     );
+}
+
+/// The memo is built with the lock released (on `spawn_blocking` in the paging
+/// commands), so a new query can replace the result mid-build. The late memo must
+/// then be dropped, not attached to rows it was not built over.
+#[test]
+fn a_memo_built_over_a_replaced_result_is_not_stored() {
+    let state = AppState::seeded("http://example.test".into());
+    state.store_last_result_if_current(
+        state.begin_query(),
+        result_with_devices(&["delta", "alpha"]),
+    );
+    let sort = device_sort(false).unwrap();
+    let Some(crate::state::Memo { result: old, memo }) = state.sort_memo(sort).unwrap() else {
+        panic!("a result is cached");
+    };
+    assert!(memo.is_none(), "nothing built yet");
+    let stale = Arc::new(crate::rows::sort_order(&old.rows, sort));
+
+    state.store_last_result_if_current(
+        state.begin_query(),
+        result_with_devices(&["zulu", "yankee", "xray"]),
+    );
+    state.store_sort_memo(&old, sort, stale);
+    let current = state.sort_memo(sort).unwrap().unwrap();
+    assert!(
+        current.memo.is_none(),
+        "the order built over the previous rows must not be attached to the new ones"
+    );
+
+    // Offered against the result that is actually cached, it is kept.
+    let fresh = Arc::new(crate::rows::sort_order(&current.result.rows, sort));
+    state.store_sort_memo(&current.result, sort, Arc::clone(&fresh));
+    let hit = state.sort_memo(sort).unwrap().unwrap();
+    assert!(hit.memo.is_some_and(|m| Arc::ptr_eq(&m, &fresh)));
+
+    // The grouping memo follows the same rule.
+    let group = state.group_memo(GroupBy::Device).unwrap().unwrap();
+    let groups = Arc::new(crate::rows::build_groups(
+        &group.result.rows,
+        GroupBy::Device,
+    ));
+    state.clear_last_result();
+    state.store_group_memo(&group.result, GroupBy::Device, groups);
+    assert!(state.group_memo(GroupBy::Device).unwrap().is_none());
 }
 
 /// A mock exposing both current-patch feeds, each counting its own hits.
@@ -399,8 +445,9 @@ async fn concurrent_lookups_on_a_cold_cache_fetch_once() {
             state.lookups().await.expect("concurrent lookups")
         }));
     }
+    let mut sets = Vec::new();
     for t in tasks {
-        t.await.expect("join");
+        sets.push(t.await.expect("join"));
     }
 
     assert_eq!(
@@ -408,6 +455,9 @@ async fn concurrent_lookups_on_a_cold_cache_fetch_once() {
         1,
         "three concurrent callers on a cold cache must page the lookups once"
     );
+    // Every caller borrows the one cached set rather than receiving its own copy
+    // of all three lists.
+    assert!(sets.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1])));
 }
 
 /// Same race, on the lookups slot. `clear_lookups_cache` cleared it bare while

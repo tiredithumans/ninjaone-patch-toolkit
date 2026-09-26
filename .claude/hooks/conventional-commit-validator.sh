@@ -13,10 +13,10 @@ payload=$(cat 2>/dev/null || true)
 
 # Cheap pre-filter: skip the heavy parse when the command can't possibly be a
 # `git commit`. This hook fires on every Bash call, so the common path must be
-# fast.
+# fast. Deliberately loose — `git -C dir commit` and `cd x && git -c k=v commit`
+# have no literal "git commit" in them.
 case "$payload" in
-  *'"git'*'commit'*) ;;
-  *'git commit'*) ;;
+  *git*commit*) ;;
   *) exit 0 ;;
 esac
 
@@ -38,6 +38,31 @@ cmd = (payload.get("tool_input") or {}).get("command", "") or ""
 if "git" not in cmd or "commit" not in cmd:
     sys.exit(0)
 
+# git's own options that come BEFORE the subcommand and take a separate value
+# (`git -C dir commit`, `git -c key=val commit`). Every other leading `-x` /
+# `--long[=v]` is a flag with no separate value.
+GLOBAL_OPTS_WITH_VALUE = {
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+    "--exec-path", "--super-prefix",
+}
+
+def commit_args(tokens):
+    """The argv after `commit` when `tokens` contains a `git … commit` call."""
+    for i, t in enumerate(tokens):
+        if t != "git" and not t.endswith("/git"):
+            continue
+        j = i + 1
+        while j < len(tokens) and tokens[j].startswith("-"):
+            opt = tokens[j]
+            j += 2 if opt in GLOBAL_OPTS_WITH_VALUE else 1
+        if j < len(tokens) and tokens[j] == "commit":
+            return tokens[j + 1:]
+    return None
+
+# Short `git commit` flags that take no value, so they can precede an attached
+# `m` in one cluster: `-am"msg"` arrives from shlex as `-ammsg`.
+NO_VALUE_SHORT = "asnevqpio"
+
 def find_subject(segment):
     if "git" not in segment or "commit" not in segment:
         return None
@@ -45,11 +70,8 @@ def find_subject(segment):
         tokens = shlex.split(segment, posix=True)
     except ValueError:
         return None
-    for i in range(len(tokens) - 1):
-        if tokens[i] == "git" and tokens[i + 1] == "commit":
-            args = tokens[i + 2:]
-            break
-    else:
+    args = commit_args(tokens)
+    if args is None:
         return None
     j = 0
     while j < len(args):
@@ -61,6 +83,10 @@ def find_subject(segment):
         # combined short flags ending in `m` (e.g. -am, -sm)
         if re.fullmatch(r"-[A-Za-z]*m", t) and j + 1 < len(args):
             return args[j + 1]
+        # the value attached to the flag (e.g. -m"subject", -am"subject")
+        attached = re.fullmatch(r"-[" + NO_VALUE_SHORT + r"]*m(.+)", t, re.DOTALL)
+        if attached:
+            return attached.group(1)
         j += 1
     return None
 
@@ -79,7 +105,7 @@ def first_nonempty_line(text):
 # matching heredocs fed to other commands chained after the commit (e.g. a
 # `gh pr create --body "$(cat <<'EOF' ...)"`).
 heredoc = re.search(
-    r"git\s+commit\s[^\n]*?(?:-[A-Za-z]*m|--message)[= \t]*[\"']?"
+    r"git(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+commit\s[^\n]*?(?:-[A-Za-z]*m|--message)[= \t]*[\"']?"
     r"\$\(\s*cat\s+<<-?\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?[ \t]*\n"
     r"(.*?)\n[ \t]*\1[ \t]*(?:\n|$)",
     cmd,

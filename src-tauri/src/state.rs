@@ -1,44 +1,28 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use tracing::warn;
 
-use crate::actions::{JobReport, MAX_JOBS};
+use crate::actions::JobReport;
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::auth::AuthState;
+#[cfg(test)]
 use crate::model::PatchRow;
 use crate::model::{Device, Location, Organization, Patch, Role};
-use crate::rows::{GroupBy, PatchGroup, QueryResult, RowSort, build_groups, sort_order};
+#[cfg(test)]
+use crate::rows::sort_order;
+use crate::rows::{GroupBy, PatchGroup, QueryResult, RowSort};
 use crate::settings::Settings;
 
-/// How long a confirmation token issued by `plan_action` stays usable. Short
-/// enough that a dialog left open over lunch fails closed rather than dispatching
-/// against a fleet whose state has moved on.
-const CONFIRM_TTL: Duration = Duration::from_secs(300);
+mod cache;
+mod jobs;
 
-/// A plan the operator has been shown and may confirm.
-///
-/// The hash binds the token to the exact action + device set + parameters that
-/// were planned, so an altered request fails the check even with a valid token.
-pub struct PendingConfirm {
-    pub token: String,
-    pub request_hash: String,
-    pub issued_at: Instant,
-    /// The tenant the plan was approved against.
-    ///
-    /// `request_hash` destructures `ActionRequest` exhaustively — a new field there
-    /// is a compile error — but `ActionRequest` carries no instance or client id, so
-    /// no amount of hashing could bind the approval to a tenant. `run_action` then
-    /// re-reads `instance_base_url` from settings *after* consuming the token, which
-    /// means a plan approved against instance A could dispatch against instance B
-    /// inside the 5-minute window. Every other cache in this file is tenant-stamped
-    /// for exactly this reason; the one slot that authorizes writes to real devices
-    /// was not. It has to live on the slot rather than in the hash for that reason.
-    tenant: TenantKey,
-}
+use cache::TenantCache;
+use jobs::PendingConfirm;
 
 /// How long cached org/location/role lookups stay fresh before a query refetches
 /// them. They change rarely, so this spares repeat queries and every auto-refresh
@@ -112,31 +96,6 @@ pub enum StoreOutcome {
     Poisoned,
 }
 
-/// RAII claim on the single job-poller slot, issued by
-/// [`AppState::try_claim_job_poller`].
-///
-/// Dropping it releases the slot, so **every** exit from the poller task frees the
-/// claim — a panic in `advance_job`/`audit::record`/`emit_progress`, a runtime
-/// shutdown dropping the task, or an early `return`. The flag used to be a bare
-/// `AtomicBool` cleared only inside `release_job_poller_if_idle`, reached from the
-/// single "no pending jobs" arm of the loop; any other exit leaked the claim
-/// permanently, after which every later `spawn_job_poller` returned immediately and
-/// **no dispatched job was polled again for the life of the process** — jobs simply
-/// sat at Queued while the operator watched.
-///
-/// [`AppState::release_job_poller_if_idle`] takes the claim by value so the release
-/// can happen under the jobs lock; it hands the claim back when work is still
-/// pending.
-pub struct JobPollerClaim {
-    flag: Arc<AtomicBool>,
-}
-
-impl Drop for JobPollerClaim {
-    fn drop(&mut self) {
-        self.flag.store(false, Ordering::Release);
-    }
-}
-
 /// Opaque claim on a query run, issued by [`AppState::begin_query`] and redeemed by
 /// [`AppState::store_last_result_if_current`]. Carries the generation that orders
 /// overlapping queries and the tenant the run started under, so neither can be
@@ -176,134 +135,11 @@ struct CachedResult {
     sorted: Option<(RowSort, Arc<Vec<u32>>)>,
 }
 
-/// One tenant-stamped, TTL'd, epoch-gated, single-flight cache slot.
-///
-/// The same five-step protocol was written out four times in this file — once for
-/// lookups, once for the device inventory, and twice for the current-patch families
-/// via `current_family`. Each copy had to get the same sequence right:
-///
-/// 1. probe the slot (tenant match **and** within the TTL) and return a hit;
-/// 2. take the single-flight gate, so the loser of a race waits instead of paging a
-///    six-figure feed a second time;
-/// 3. re-probe under the gate — this is what turns that wait into a cache hit;
-/// 4. sample the epoch *before* the fetch;
-/// 5. store only if the epoch is unchanged when the slot lock is retaken.
-///
-/// Step 5 is the subtle one and it is not optional: without it, a fetch already in
-/// flight when an invalidation lands writes its pre-invalidation rows straight back
-/// and restarts the TTL on exactly the data the caller wanted gone. The tenant stamp
-/// cannot cover that case, because a sign-out or a post-action invalidation is the
-/// *same* tenant.
-///
-/// Prose did not keep the four copies in step. `lookups_epoch`'s field comment used
-/// to read "Mirrors `devices_epoch`/`current_epoch`, which the lookups cache was
-/// missing" — step 5 was simply absent there until someone noticed, and the lookups
-/// slot also never grew step 2 at all. Both are now structural: a fifth cache cannot
-/// be added without the protocol, because the protocol is the type.
-pub(crate) struct TenantCache<T> {
-    slot: Mutex<Option<CacheEntry<T>>>,
-    /// Bumped by [`TenantCache::invalidate`] before it clears the slot, and re-read
-    /// under the slot lock at the store. Both interleavings of a racing write lose:
-    /// one that stores before the clear is wiped by it, one that stores after sees
-    /// the new epoch and declines.
-    epoch: AtomicU64,
-    /// Held across `.await`, so a `tokio` mutex rather than a `std` one.
-    fetch_lock: tokio::sync::Mutex<()>,
-}
-
-struct CacheEntry<T> {
-    /// Monotonic instant the entry was stored, for the TTL comparison. Separate from
-    /// `fetched_at` because a wall clock can move backwards.
-    at: Instant,
-    tenant: TenantKey,
-    /// Behind an `Arc` so a hit is a refcount bump rather than a deep copy of a
-    /// whole-fleet `Vec`.
-    value: Arc<T>,
-    /// Wall-clock fetch time, for the UI's "patch data as of …" label.
-    fetched_at: DateTime<Utc>,
-}
-
-impl<T> Default for TenantCache<T> {
-    fn default() -> Self {
-        Self {
-            slot: Mutex::new(None),
-            epoch: AtomicU64::new(0),
-            fetch_lock: tokio::sync::Mutex::new(()),
-        }
-    }
-}
-
-impl<T> TenantCache<T> {
-    /// A live entry for `tenant`, or `None` on a miss, a tenant change, or past
-    /// `ttl`. One definition, used by both the pre-lock probe and the post-gate
-    /// re-check so the two cannot disagree about what "fresh" means.
-    fn peek(&self, tenant: &TenantKey, ttl: Duration) -> Option<(Arc<T>, DateTime<Utc>)> {
-        let guard = self.slot.lock().ok()?;
-        let entry = guard.as_ref()?;
-        (entry.tenant == *tenant && entry.at.elapsed() < ttl)
-            .then(|| (entry.value.clone(), entry.fetched_at))
-    }
-
-    /// Serves `tenant`'s entry, fetching it if there isn't a fresh one.
-    ///
-    /// `ttl` is a parameter rather than a field because the current-patch families
-    /// use two: a normal re-filter accepts `CURRENT_PATCHES_TTL`, while a forced
-    /// refresh drops to `FORCE_MIN_INTERVAL` so a fast auto-refresh cadence cannot
-    /// become a refetch loop.
-    ///
-    /// The slot lock is never held across the fetch.
-    async fn get_or_fetch<F, Fut>(
-        &self,
-        tenant: &TenantKey,
-        ttl: Duration,
-        label: &'static str,
-        fetch: F,
-    ) -> Result<(Arc<T>, DateTime<Utc>)>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<T>>,
-    {
-        if let Some(hit) = self.peek(tenant, ttl) {
-            return Ok(hit);
-        }
-        let _fetching = self.fetch_lock.lock().await;
-        // Re-probe under the gate: the winner of the race has usually stored by now,
-        // which is what makes waiting cheaper than fetching.
-        if let Some(hit) = self.peek(tenant, ttl) {
-            return Ok(hit);
-        }
-        let epoch = self.epoch.load(Ordering::SeqCst);
-        let value = Arc::new(fetch().await?);
-        let fetched_at = Utc::now();
-        if let Ok(mut guard) = self.slot.lock() {
-            if self.epoch.load(Ordering::SeqCst) == epoch {
-                *guard = Some(CacheEntry {
-                    at: Instant::now(),
-                    tenant: tenant.clone(),
-                    value: value.clone(),
-                    fetched_at,
-                });
-            } else {
-                tracing::debug!("{label} invalidated mid-fetch; not caching");
-            }
-        }
-        Ok((value, fetched_at))
-    }
-
-    /// The current epoch, for tests asserting an invalidation happened.
-    #[cfg(test)]
-    pub(crate) fn epoch(&self) -> u64 {
-        self.epoch.load(Ordering::SeqCst)
-    }
-
-    /// Drops the entry and makes any fetch already in flight decline to store.
-    pub(crate) fn invalidate(&self) {
-        // Bump *before* clearing, so both interleavings of a racing write lose.
-        self.epoch.fetch_add(1, Ordering::SeqCst);
-        if let Ok(mut guard) = self.slot.lock() {
-            *guard = None;
-        }
-    }
+/// What [`AppState::sort_memo`] / [`AppState::group_memo`] hand back: a handle on
+/// the cached result, and the memo for the requested view when one is already built.
+pub struct Memo<T> {
+    pub result: Arc<QueryResult>,
+    pub memo: Option<Arc<T>>,
 }
 
 /// The three reference lists, cached as one value.
@@ -311,10 +147,13 @@ impl<T> TenantCache<T> {
 /// One `TenantCache` entry rather than three, because they are fetched together and
 /// are only ever meaningful together — a row labelled with this tenant's orgs and
 /// the previous tenant's locations would be worse than no labels at all.
-struct LookupSet {
-    orgs: Vec<Organization>,
-    locations: Vec<Location>,
-    roles: Vec<Role>,
+///
+/// Handed out whole, behind the cache's own `Arc`, so a caller borrows the list it
+/// wants instead of receiving a copy of all three.
+pub struct LookupSet {
+    pub orgs: Vec<Organization>,
+    pub locations: Vec<Location>,
+    pub roles: Vec<Role>,
 }
 
 /// The two current-patch families live in separate `TenantCache` slots rather than
@@ -354,6 +193,12 @@ pub struct AppState {
     pub api: NinjaApiClient,
     /// Locked only for brief read/clone/replace — never held across `.await`.
     pub settings: Mutex<Settings>,
+    /// Serializes the *writers* of `settings` across their disk write. A save is a
+    /// read-modify-write whose write is file (and keyring) I/O, so it cannot run
+    /// under `settings` — that would block every reader, on whatever thread, for the
+    /// duration. Held across `.await` (it is a `tokio` mutex, for exactly that),
+    /// so two saves cannot interleave and lose one's change. Readers never take it.
+    pub settings_write: tokio::sync::Mutex<()>,
     /// Last query result, stamped with the tenant it belongs to and cached so export
     /// and row paging read it without the frontend round-tripping all rows over IPC.
     /// Private on purpose: all access goes through `store_last_result` /
@@ -409,7 +254,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Result<Self> {
-        let settings = Settings::load().unwrap_or_default();
+        let settings = Settings::load_or_recover();
 
         let http = reqwest::Client::builder()
             .user_agent(concat!(
@@ -429,10 +274,19 @@ impl AppState {
         );
         let api = NinjaApiClient::new(http, auth.clone());
 
-        Ok(Self {
+        Ok(Self::from_parts(auth, api, settings))
+    }
+
+    /// Every field's starting value, in one place. `new()` and the test-only
+    /// `seeded()` differ only in where the client and settings come from; they used
+    /// to spell out the whole field list twice, so a new field could be initialized
+    /// one way in production and another (or not at all) in the tests.
+    fn from_parts(auth: AuthState, api: NinjaApiClient, settings: Settings) -> Self {
+        Self {
             auth,
             api,
             settings: Mutex::new(settings),
+            settings_write: tokio::sync::Mutex::const_new(()),
             last_result: Mutex::new(None),
             lookups_cache: TenantCache::default(),
             fleet_devices_cache: TenantCache::default(),
@@ -444,7 +298,7 @@ impl AppState {
             result_epoch: AtomicU64::new(0),
             job_poller_running: Arc::new(AtomicBool::new(false)),
             pending_confirm: Mutex::new(None),
-        })
+        }
     }
 
     /// Snapshot of settings for use across `.await` points without holding the lock.
@@ -456,6 +310,15 @@ impl AppState {
             warn!("settings mutex poisoned; recovering the last-known settings");
             p.into_inner().clone()
         })
+    }
+
+    /// Replaces the in-memory settings. Only a writer holding `settings_write`, and
+    /// only after the new value is safely on disk, calls this.
+    pub fn replace_settings(&self, next: Settings) {
+        *self
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
     }
 
     /// The tenant (instance + client id) that owns freshly cached data. Cheap — a
@@ -479,12 +342,22 @@ impl AppState {
         }
     }
 
+    /// Organization id → name, read straight out of the cached lookups.
+    ///
+    /// For the action planner, which needs nothing else.
+    pub async fn org_names(&self) -> Result<HashMap<i64, String>> {
+        let set = self.lookups().await?;
+        Ok(set.orgs.iter().map(|o| (o.id, o.name.clone())).collect())
+    }
+
     /// Orgs/locations/roles used to label patch rows, served from a short-TTL
     /// cache. Fetches the three concurrently on a miss. The lock is never held
     /// across the `.await`.
-    pub async fn lookups(
-        &self,
-    ) -> Result<(Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>)> {
+    ///
+    /// Returns the cached `Arc` itself. This used to copy all three lists into three
+    /// fresh `Arc<Vec<_>>`s on every call, so `list_orgs` paid for the locations and
+    /// roles it discarded and then cloned the orgs a second time to return them.
+    pub async fn lookups(&self) -> Result<Arc<LookupSet>> {
         let key = self.tenant_key();
         let (set, _) = self
             .lookups_cache
@@ -513,16 +386,7 @@ impl AppState {
                 })
             })
             .await?;
-        // The three lists are cached as one entry but handed out separately, because
-        // `list_orgs`/`list_locations`/`list_roles` each want only their own. Cloning
-        // out of the shared `Arc<LookupSet>` costs one Vec copy per call; these are
-        // the small near-static lookups, not the whole-fleet feeds, and the
-        // alternative is leaking `LookupSet` into five call sites.
-        Ok((
-            Arc::new(set.orgs.clone()),
-            Arc::new(set.locations.clone()),
-            Arc::new(set.roles.clone()),
-        ))
+        Ok(set)
     }
 
     /// Whole-fleet device inventory (no `df`), served from a long-TTL cache so
@@ -767,77 +631,103 @@ impl AppState {
         })
     }
 
-    /// Runs `f` against the cached rows and the index permutation for `sort`,
-    /// building that permutation at most once per sort.
+    /// Phase one of a memoized read: a handle on the current tenant's result plus
+    /// the sort order memoized for `sort`, if there is one. The lock is held for two
+    /// `Arc` bumps.
     ///
-    /// `None` passes `None` through rather than materializing an identity
-    /// permutation — the unsorted view is already in cache order, and a fleet that
-    /// never asked to be re-sorted should not pay four bytes a row to say so.
-    ///
-    /// Mirrors [`Self::with_grouped_result`], including reading as a miss on a tenant
-    /// switch.
+    /// The memo used to be *built* here, under the lock: the first sorted page of a
+    /// six-figure fleet ran the whole `O(n log n)` sweep holding the mutex every
+    /// paging command and the export take, on an async worker. Now a miss hands back
+    /// the handle; the caller builds the order off the runtime
+    /// (`spawn_blocking`) and offers it back through [`Self::store_sort_memo`].
+    pub fn sort_memo(&self, sort: RowSort) -> Result<Option<Memo<Vec<u32>>>, CachePoisoned> {
+        self.memo(|c| match &c.sorted {
+            Some((s, o)) if *s == sort => Some(Arc::clone(o)),
+            _ => None,
+        })
+    }
+
+    /// Phase two: keeps `order` as the memo for `sort` — **only** if `result` is
+    /// still the cached result. A query that finished (or a sign-out that landed)
+    /// while the order was being built has replaced or cleared the slot, and an
+    /// index permutation over the old rows would page the new ones in a meaningless
+    /// order. Checked by identity (`Arc::ptr_eq`), which is exact: the slot never
+    /// re-wraps a result it already holds.
+    pub fn store_sort_memo(&self, result: &Arc<QueryResult>, sort: RowSort, order: Arc<Vec<u32>>) {
+        self.store_memo(result, |c| c.sorted = Some((sort, order)));
+    }
+
+    /// [`Self::sort_memo`] for the grouping: the handle plus the groups memoized for
+    /// `group_by`, if any. Same reason and same two-phase shape.
+    pub fn group_memo(
+        &self,
+        group_by: GroupBy,
+    ) -> Result<Option<Memo<Vec<PatchGroup>>>, CachePoisoned> {
+        self.memo(|c| match &c.groups {
+            Some((g, v)) if *g == group_by => Some(Arc::clone(v)),
+            _ => None,
+        })
+    }
+
+    /// [`Self::store_sort_memo`] for the grouping, with the same identity check.
+    pub fn store_group_memo(
+        &self,
+        result: &Arc<QueryResult>,
+        group_by: GroupBy,
+        groups: Arc<Vec<PatchGroup>>,
+    ) {
+        self.store_memo(result, |c| c.groups = Some((group_by, groups)));
+    }
+
+    fn memo<T>(
+        &self,
+        read: impl FnOnce(&CachedResult) -> Option<Arc<T>>,
+    ) -> Result<Option<Memo<T>>, CachePoisoned> {
+        let key = self.tenant_key();
+        let guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
+        Ok(match guard.as_ref() {
+            Some(c) if c.tenant == key => Some(Memo {
+                result: Arc::clone(&c.result),
+                memo: read(c),
+            }),
+            _ => None,
+        })
+    }
+
+    fn store_memo(&self, result: &Arc<QueryResult>, write: impl FnOnce(&mut CachedResult)) {
+        let key = self.tenant_key();
+        if let Ok(mut guard) = self.last_result.lock()
+            && let Some(cached) = guard.as_mut()
+            && cached.tenant == key
+            && Arc::ptr_eq(&cached.result, result)
+        {
+            write(cached);
+        }
+    }
+
+    /// Both phases of [`Self::sort_memo`] composed synchronously, building the order
+    /// on the calling thread with the lock released. The paging command does the
+    /// same with the build on `spawn_blocking`; this is the form the memo tests use.
+    #[cfg(test)]
     pub fn with_sorted_result<T>(
         &self,
         sort: Option<RowSort>,
         f: impl FnOnce(&[PatchRow], Option<&[u32]>) -> T,
     ) -> Result<Option<T>, CachePoisoned> {
-        let key = self.tenant_key();
-        let mut guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
-        let Some(cached) = guard.as_mut() else {
-            return Ok(None);
-        };
-        if cached.tenant != key {
-            return Ok(None);
-        }
         let Some(sort) = sort else {
-            return Ok(Some(f(&cached.result.rows, None)));
+            return Ok(self
+                .current_result_handle()?
+                .map(|result| f(&result.rows, None)));
         };
-        // Built and bound in one step. This used to repopulate the memo and then
-        // re-read it with `.expect("just populated")` — a panic inside a held guard,
-        // which poisons the slot and takes export, the report and all three paging
-        // commands down with it. That exact pattern was deliberately removed from
-        // `append_jobs`; there is no reason to keep it here.
-        let order = match &cached.sorted {
-            Some((s, o)) if *s == sort => Arc::clone(o),
-            _ => {
-                let o = Arc::new(sort_order(&cached.result.rows, sort));
-                cached.sorted = Some((sort, Arc::clone(&o)));
-                o
-            }
-        };
-        Ok(Some(f(&cached.result.rows, Some(&order))))
-    }
-
-    /// Runs `f` against one page of group headers, building the grouping only when
-    /// the memo does not already hold this `group_by`.
-    ///
-    /// Same tenant check and same lock as [`Self::with_current_result`]; the memo is
-    /// stored inside the result, so replacing or clearing the result discards it
-    /// automatically. Switching between *By device* and *By patch* rebuilds once and
-    /// then pages freely, which is the access pattern the Patches tab actually has.
-    pub fn with_grouped_result<T>(
-        &self,
-        group_by: GroupBy,
-        f: impl FnOnce(&[PatchGroup]) -> T,
-    ) -> Result<Option<T>, CachePoisoned> {
-        let key = self.tenant_key();
-        let mut guard = self.last_result.lock().map_err(|_| CachePoisoned)?;
-        let Some(cached) = guard.as_mut() else {
+        let Some(Memo { result, memo }) = self.sort_memo(sort)? else {
             return Ok(None);
         };
-        if cached.tenant != key {
-            return Ok(None);
-        }
-        // Same non-panicking shape as `with_sorted_result`.
-        let groups = match &cached.groups {
-            Some((g, v)) if *g == group_by => Arc::clone(v),
-            _ => {
-                let v = Arc::new(build_groups(&cached.result.rows, group_by));
-                cached.groups = Some((group_by, Arc::clone(&v)));
-                v
-            }
-        };
-        Ok(Some(f(&groups)))
+        let order = memo.unwrap_or_else(|| {
+            let order = Arc::new(sort_order(&result.rows, sort));
+            self.store_sort_memo(&result, sort, Arc::clone(&order));
+            order
+        });
+        Ok(Some(f(&result.rows, Some(&order))))
     }
 
     /// Drops the cached query result after sign-out or an instance change. The tenant
@@ -887,190 +777,6 @@ impl AppState {
             self.fleet_current_os.epoch(),
         )
     }
-
-    /// Reserves `count` consecutive job ids, returning `(batch_id, first_job_id)`.
-    pub fn next_job_ids(&self, count: usize) -> (u64, u64) {
-        let batch = self.job_seq.fetch_add(1, Ordering::Relaxed);
-        let base = self.job_seq.fetch_add(count as u64, Ordering::Relaxed);
-        (batch, base)
-    }
-
-    /// Appends newly dispatched rows for the current tenant, trimming history to
-    /// [`MAX_JOBS`] by dropping the oldest **terminal** rows first — an in-flight
-    /// job must never be evicted out from under the poller.
-    pub fn append_jobs(&self, new_jobs: Vec<JobReport>) {
-        let key = self.tenant_key();
-        let Ok(mut guard) = self.jobs.lock() else {
-            warn!("job store poisoned; dispatched jobs will not appear in the Jobs tab");
-            return;
-        };
-        // `insert` hands back the `&mut` directly, so the re-lookup that needed an
-        // `expect` is gone. That expect was the only one in production code, and it
-        // sat inside a held guard — a panic there would have poisoned the job store
-        // for the rest of the process, which the arm above warns is unrecoverable.
-        let jobs = match guard.as_mut() {
-            Some((t, jobs)) if *t == key => jobs,
-            _ => &mut guard.insert((key, Vec::new())).1,
-        };
-        jobs.extend(new_jobs);
-
-        if jobs.len() > MAX_JOBS {
-            let excess = jobs.len() - MAX_JOBS;
-            let mut dropped = 0;
-            jobs.retain(|j| {
-                if dropped < excess && j.state.is_terminal() {
-                    dropped += 1;
-                    return false;
-                }
-                true
-            });
-        }
-    }
-
-    /// Applies polled updates, matching on `JobReport.id`. Rows the caller no
-    /// longer knows about are left untouched.
-    pub fn apply_job_updates(&self, updates: Vec<JobReport>) {
-        let key = self.tenant_key();
-        let Ok(mut guard) = self.jobs.lock() else {
-            return;
-        };
-        let Some((t, jobs)) = guard.as_mut() else {
-            return;
-        };
-        if *t != key {
-            return;
-        }
-        for update in updates {
-            if let Some(slot) = jobs.iter_mut().find(|j| j.id == update.id) {
-                *slot = update;
-            }
-        }
-    }
-
-    /// Clone-out of the jobs still awaiting a terminal state. Returns owned rows so
-    /// the lock is released before the poller's `.await`s.
-    pub fn pending_jobs(&self) -> Vec<JobReport> {
-        self.jobs_snapshot()
-            .into_iter()
-            .filter(|j| !j.state.is_terminal())
-            .collect()
-    }
-
-    /// All jobs for the current tenant, newest last. Empty after a tenant switch.
-    pub fn jobs_snapshot(&self) -> Vec<JobReport> {
-        let key = self.tenant_key();
-        self.jobs
-            .lock()
-            .ok()
-            .and_then(|g| match g.as_ref() {
-                Some((t, jobs)) if *t == key => Some(jobs.clone()),
-                _ => None,
-            })
-            .unwrap_or_default()
-    }
-
-    /// Drops dispatch history on sign-out or an instance change.
-    pub fn clear_jobs(&self) {
-        if let Ok(mut guard) = self.jobs.lock() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = self.pending_confirm.lock() {
-            *guard = None;
-        }
-    }
-
-    /// Claims the single poller slot. `None` means one is already running and the
-    /// caller should just let it pick up the new batch.
-    ///
-    /// The claim is an RAII guard: dropping it releases the slot. That is what makes
-    /// the flag safe to hold across a long-running task — see [`JobPollerClaim`].
-    pub fn try_claim_job_poller(&self) -> Option<JobPollerClaim> {
-        self.job_poller_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-            .then(|| JobPollerClaim {
-                flag: Arc::clone(&self.job_poller_running),
-            })
-    }
-
-    /// Releases the poller claim **only if** no unresolved job remains. Returns
-    /// `None` when the claim was released and the caller should stop polling, and
-    /// `Some(claim)` — the claim handed back — when work appeared and it must keep
-    /// going.
-    ///
-    /// Closes a lost-wakeup race. The poller used to break out of its loop on an
-    /// empty pending set and release the claim afterwards; a batch dispatched in
-    /// that gap recorded its jobs, then found `try_claim_job_poller` still taken
-    /// because the flag had not been cleared yet — so nothing polled it, and those
-    /// jobs sat unresolved until some later dispatch happened to start a new poller.
-    ///
-    /// The check and the release happen under the jobs lock, and dispatch records
-    /// its jobs before calling `try_claim_job_poller`. A concurrent dispatch is
-    /// therefore either visible here (we keep polling) or strictly after the release
-    /// (its own claim succeeds). There is no order in which it is neither.
-    pub fn release_job_poller_if_idle(&self, claim: JobPollerClaim) -> Option<JobPollerClaim> {
-        let Ok(guard) = self.jobs.lock() else {
-            // A poisoned job store cannot be polled meaningfully; release so a
-            // later dispatch can at least try.
-            drop(claim);
-            return None;
-        };
-        let key = self.tenant_key();
-        let has_pending = guard.as_ref().is_some_and(|(tenant, jobs)| {
-            *tenant == key && jobs.iter().any(|j| !j.state.is_terminal())
-        });
-        if has_pending {
-            return Some(claim);
-        }
-        // Dropped before `guard`, so the release still happens under the jobs lock —
-        // that ordering is the whole point of the check above.
-        drop(claim);
-        drop(guard);
-        None
-    }
-
-    /// Records the plan the operator is being asked to confirm, replacing any
-    /// earlier one — only one dialog is open at a time.
-    pub fn store_pending_confirm(&self, token: String, request_hash: String) {
-        let tenant = self.tenant_key();
-        if let Ok(mut guard) = self.pending_confirm.lock() {
-            *guard = Some(PendingConfirm {
-                token,
-                request_hash,
-                issued_at: Instant::now(),
-                tenant,
-            });
-        }
-    }
-
-    /// Consumes a confirmation token, returning whether it authorizes this exact
-    /// request. Single-use: the slot is cleared on any match attempt, so a
-    /// double-click can't dispatch twice.
-    ///
-    /// Both secrets are compared in constant time. The realistic threat here is low —
-    /// the slot holds one token at a time, it is single-use, it expires in five
-    /// minutes, and the only party that can present one is the frontend that was
-    /// handed it — but `==` on a `String` returns on the first differing byte, and
-    /// this is the gate standing between a stale or modified frontend and a fleet-wide
-    /// reboot. A comparison that leaks nothing costs nothing here.
-    pub fn consume_confirm_token(&self, token: &str, request_hash: &str) -> bool {
-        let Ok(mut guard) = self.pending_confirm.lock() else {
-            return false;
-        };
-        let Some(pending) = guard.take() else {
-            return false;
-        };
-        // Not short-circuiting: both comparisons run regardless of the first result.
-        let token_ok = constant_time_eq(pending.token.as_bytes(), token.as_bytes());
-        let hash_ok = constant_time_eq(pending.request_hash.as_bytes(), request_hash.as_bytes());
-        // The tenant is compared here rather than folded into `request_hash` because
-        // `ActionRequest` has no field to hash it from — see `PendingConfirm::tenant`.
-        // An approval is for one instance; the operator can change instance in
-        // Settings while the dialog is open.
-        token_ok & hash_ok
-            && pending.tenant == self.tenant_key()
-            && pending.issued_at.elapsed() < CONFIRM_TTL
-    }
 }
 
 #[cfg(test)]
@@ -1087,34 +793,8 @@ impl AppState {
             instance_base_url: base_url,
             ..Settings::default()
         };
-        Self {
-            auth,
-            api,
-            settings: Mutex::new(settings),
-            last_result: Mutex::new(None),
-            lookups_cache: TenantCache::default(),
-            fleet_devices_cache: TenantCache::default(),
-            fleet_current_os: TenantCache::default(),
-            fleet_current_sw: TenantCache::default(),
-            jobs: Mutex::new(None),
-            job_seq: AtomicU64::new(1),
-            query_generation: AtomicU64::new(0),
-            result_epoch: AtomicU64::new(0),
-            job_poller_running: Arc::new(AtomicBool::new(false)),
-            pending_confirm: Mutex::new(None),
-        }
+        Self::from_parts(auth, api, settings)
     }
-}
-
-/// Byte-equality that does not return early on the first difference.
-///
-/// The length check is deliberately *not* constant time — the length of a token is
-/// not the secret, and both sides here are fixed-width by construction.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[cfg(test)]

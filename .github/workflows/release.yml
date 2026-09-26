@@ -7,10 +7,10 @@ on:
 
 # Workflow-level default is the *narrowest* that works; the two jobs that actually
 # publish raise it themselves. `guard` and `verify` only read the repo — and `verify`
-# compiles 596 backend + 185 frontend dependencies, whose build scripts and
+# compiles hundreds of backend and frontend dependencies, whose build scripts and
 # proc-macros execute arbitrary code at compile time. Handing that a token which can
-# push to the repository is the one avoidable part. pages.yml in this repo already
-# models the same per-job pattern.
+# push to the repository is the one avoidable part. pages.yml and screenshot.yml use
+# the same per-job pattern.
 permissions:
   contents: read
 
@@ -28,8 +28,13 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this workflow pushes with git; the jobs that publish do it
+          # through the API. Don't leave a token in .git/config for build scripts.
+          persist-credentials: false
       # Fail fast (before the long builds) if a tag was pushed without bumping the
       # version. The bundle/updater take their version from tauri.conf.json; the
       # release name comes from the tag — a mismatch ships a confusingly-versioned
@@ -89,6 +94,7 @@ jobs:
   verify:
     name: Verify (gates the release)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Read-only on purpose: this job compiles the full dependency tree, and a
     # build script or proc-macro anywhere in it runs arbitrary code. It has no
     # reason to hold a token that can write to the repository.
@@ -96,6 +102,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this workflow pushes with git; the jobs that publish do it
+          # through the API. Don't leave a token in .git/config for build scripts.
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
@@ -153,6 +163,7 @@ jobs:
     name: Create draft release
     needs: [guard, verify]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Creates the draft release the build jobs upload into.
     permissions:
       contents: write
@@ -161,6 +172,10 @@ jobs:
       release_id: ${{ steps.create.outputs.result }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this workflow pushes with git; the jobs that publish do it
+          # through the API. Don't leave a token in .git/config for build scripts.
+          persist-credentials: false
 
       # Same CHANGELOG.md extraction the build jobs use — sets the release body
       # here (the build jobs reuse it for latest.json's `notes`). Kept in sync by
@@ -191,6 +206,13 @@ jobs:
     name: Build bundles (${{ matrix.os }})
     needs: create-release
     runs-on: ${{ matrix.os }}
+    # Per OS leg; the legs run one at a time (max-parallel below).
+    timeout-minutes: 90
+    # The signing key lives in this environment's secrets, so only a job that
+    # names it can read the key, and the environment's deployment rule admits only
+    # `v*` tags. Until the secrets are moved there (docs/RELEASING.md), the
+    # repository-level secrets still resolve here, so this line alone breaks nothing.
+    environment: release
     # Uploads bundles, signatures and latest.json entries to the draft release.
     permissions:
       contents: write
@@ -217,20 +239,35 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this workflow pushes with git; the jobs that publish do it
+          # through the API. Don't leave a token in .git/config for build scripts.
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: |
-            src-tauri
-            web-rs
+      # Deliberately NO rust-cache here. This job compiles the binaries that get
+      # signed and auto-updated onto every install, with the signing key in the
+      # environment. A restored target/ or ~/.cargo is state written by other
+      # workflow runs — any of which may have compiled untrusted code — and a
+      # poisoned artifact in it would be linked straight into a signed bundle. A
+      # release is rare enough that a cold build is the right price.
 
       - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
           tool: trunk
+
+      # The bundle must be built from exactly the committed lockfiles. The frontend
+      # half is `trunk build --locked` (tauri.conf.json's beforeBuildCommand); the
+      # backend's cargo build is driven by tauri-action, so assert here that
+      # src-tauri/Cargo.lock needs no change — cargo then has nothing to re-resolve.
+      - name: Lockfiles are current
+        shell: bash
+        run: |
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+          cargo fetch --locked --manifest-path web-rs/Cargo.toml --target wasm32-unknown-unknown
 
       - name: Install system deps (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -264,6 +301,10 @@ jobs:
         env:
           # Required for tauri-action to upload to the GitHub release.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Known exposure: tauri-action builds and signs in one step, so every
+          # build script and proc-macro in both trees runs with the key in its
+          # environment. That is why this job restores no cache and builds only
+          # from the committed lockfiles; see docs/design/ci.md.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:

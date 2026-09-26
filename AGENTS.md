@@ -3,7 +3,8 @@
 A **native Rust desktop app for patching-operations teams**. It authenticates to the NinjaOne
 Public API with **OAuth 2.0 + PKCE**, filters the fleet, lists per-server patches, computes
 compliance / reboot / SLA rollups, and exports to Excel. Tauri 2 backend + Leptos 0.8 (CSR/WASM)
-frontend, **edition 2024**, MSRV **1.98** (`rust-toolchain.toml`).
+frontend, **edition 2024**, MSRV **1.98** (`rust-toolchain.toml` pins `1.98.1`, the toolchain
+CI installs).
 
 Unlike a workspace, the two crates are **independent**: `src-tauri/` (backend, native target) and
 `web-rs/` (frontend, `wasm32-unknown-unknown`) each have their own `Cargo.toml` + `Cargo.lock`.
@@ -18,7 +19,7 @@ enforces it. The **rationale** behind each rule lives in [`docs/design/`](./docs
 |---|---|
 | **Task runner** | `just` — recipes in `/justfile`; Tauri's `before{Dev,Build}Command` call Trunk directly. |
 | **Setup / Dev** | `just setup` once per clone (installs `.githooks`), then `just dev` (`cargo tauri dev`; auto-starts `trunk serve` on `:8080`). |
-| **Verify** | `just verify` — every gate CI runs; the justfile is the list. |
+| **Verify** | `just verify` — the Rust gates CI runs (fmt, clippy, tests, both crates); the justfile is the list. CI adds the Trunk build and the gates in `docs/design/ci.md`. |
 | **Crates** | `src-tauri` (backend) + `web-rs` (frontend WASM). No cargo workspace. |
 | **IPC** | Global `window.__TAURI__.core.invoke` (`withGlobalTauri`), wrapped in `web-rs/src/api.rs`. |
 | **NinjaOne spec** | `docs/api/ninjaone-surface.md` is the committed digest of the surface we consume; the weekly `ninjaone-contract` CI job fails when the vendor's spec moves. Verify shapes/params/enums there or in <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> — never infer them. A fixture must emit the vendor's keys, not the ones the code hopes for: `DeviceSoftwarePatch` is `title`/`impact`/`productIdentifier` and **no** `kbNumber` — build it with `model::software_patch_json`. |
@@ -34,14 +35,19 @@ Skills live in `.claude/skills/` and Claude Code loads their descriptions automa
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
 ├── src/main.rs                  # binary entry → lib::run()
-├── src/state.rs                 # AppState: auth, api client, settings, tenant-stamped result/fleet caches, job store, confirm-token slot
+├── src/paths.rs                 # app_dir(): the one on-disk location for settings, logs, audit + history files
+├── src/state.rs                 # AppState: auth, api client, settings, result cache + memos, fleet/lookup accessors, invalidation
+├── src/state/cache.rs           # TenantCache<T>: tenant-stamped, TTL'd, epoch-gated, single-flight slot
+├── src/state/jobs.rs            # job store, single-claim poller slot, confirm-token slot
 ├── src/state/tests.rs
 ├── src/auth.rs                  # OAuth2 PKCE (S256, loopback), keyring, single-flight refresh, conditional scope + management grant
 ├── src/auth/tests.rs
 ├── src/actions.rs               # device-action domain: ActionKind/JobState/JobReport, pure plan() guardrails, build_parameters
 ├── src/actions/audit.rs         # append-only action-audit.jsonl (parameters redacted)
 ├── src/api/                     # NinjaOne Public API client
-│   ├── mod.rs                   # NinjaApiClient: /api/v2, bearer, retry policy, cursor paging, single-parse pages
+│   ├── mod.rs                   # NinjaApiClient: /api/v2, bearer, retry policy (retry_for), ReplaySafety/OutcomeUnknown, df_query
+│   ├── paging.rs                # get_paginated, parse_page/PagedRow, cursor forward-progress
+│   ├── tests.rs                 # retry / pagination / replay tests (wiremock)
 │   ├── devices.rs               # device inventory
 │   ├── patches.rs               # current patches + install-history endpoints
 │   ├── actions.rs               # WRITE path: patch scan/apply, reboot, script/run, automation-script library
@@ -56,38 +62,49 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
 │   ├── groups.rs                # grouping, sorting, paging over the cache
 │   ├── scope.rs                 # QueryScope export provenance
-│   ├── table.rs                 # TableCell / TableColumn / format_pct — the shared column definition
+│   ├── table.rs                 # TableCell / TableColumn / format_pct / clamp_cell / join_capped — the shared column definition
 │   └── tests.rs
 ├── src/history.rs               # append-only run-history.jsonl (one rollup line per query) + RunRecord
-├── src/export.rs                # rust_xlsxwriter workbook (Patches / Compliance / by OS / Needs-Reboot / Failures / About)
+├── src/export.rs                # rust_xlsxwriter workbook (Patches [+ Patches (n) past the row limit] / Compliance / by OS / Needs-Reboot / Failures / About)
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
-├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets)
+├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
-├── src/commands/                # #[tauri::command] handlers (actions, auth, lookups, patches, export, settings, update)
+├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
+├── src/commands/actions/        # mod.rs handlers · confirm.rs request_hash · plan.rs build_plan · dispatch.rs send_action · poller.rs poll_tick · tests.rs
+├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
 ├── src/commands/patches/tests.rs
+├── build.rs                     # tauri_build::build()
 ├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint)
 ├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
-└── capabilities/default.json    # scoped capability definitions
+└── capabilities/default.json    # webview capabilities: `core:default` only (the save dialog runs in Rust)
 
 web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 crate
-├── src/main.rs                  # entry, theme, root mount
+├── src/main.rs                  # entry: panic hook + mount App
 ├── src/app.rs                   # module decls, shared consts (SEVERITY_OPTIONS), App root + startup wiring
 ├── src/app/
 │   ├── state.rs                 # AppState wrapper + Copy sub-structs by concern; no test module — logic goes to util
+│   ├── state/                   # impl AppState, one file per concern (no test modules)
+│   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
-│   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · tables.rs · toaster.rs · update.rs
+│   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
+│   ├── tables/                  # one file per results tab: patches · compliance · failures · reboot · trend
+│   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · toaster.rs · update.rs
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
-│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · tests.rs
+│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · tests.rs
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
+├── index.html                   # Trunk entry (wasm + CSS links)
+├── tests/backend-grouping.json  # backend-generated fixture the demo's grouping is asserted against
 ├── styles.css                   # plain global CSS (BEM-ish names); --sev-* band tokens on :root
 └── Trunk.toml                   # WASM build/serve (127.0.0.1:8080); never set public_url here
 
 docs/design/                     # rationale behind the rules below, one note per domain
+docs/api/ninjaone-surface.md     # generated digest of the NinjaOne API surface we consume (ninjaone-contract job)
 docs/RELEASING.md · docs/TROUBLESHOOTING.md
-scripts/                         # screenshot capture tooling (Playwright; not shipped) + changelog-notes.sh
+scripts/                         # screenshot tooling (Playwright; not shipped), changelog-notes.sh, check-license-lists.sh, ninjaone-spec-digest.py
+about.toml · about.hbs · about-web.hbs  # cargo-about config + templates → THIRD-PARTY-LICENSES.md (`just licenses`)
 .githooks/                       # commit-msg (conventional commits) + pre-push (just verify); installed by `just setup`
 .claude/hooks/                   # the same commit rule plus command parity, AGENTS.md/README staleness, secrets scan; test.sh self-tests them (run in CI)
 .github/workflows/               # ci.yml · codeql.yml · pages.yml · release.yml · screenshot.yml
@@ -105,7 +122,7 @@ scripts/                         # screenshot capture tooling (Playwright; not s
   `get_paginated` / `request_raw`; never a second reqwest/cursor loop.
 - **New device action** — 4 steps: the POST in `api/actions.rs` via `post_action`/`post_json`
   (`ReplaySafety::ActOnce`); an `ActionKind` variant with correct `is_mutating()` /
-  `supports_dry_run()`; the dispatch arm in `commands::actions::send_action`; the button in
+  `supports_dry_run()`; the dispatch arm in `commands::actions::dispatch::send_action`; the button in
   `web-rs/src/app/actions.rs::ACTION_GROUPS` under the heading that names its *mechanism*. Mirror the
   variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **New filter facet** — a device facet extends `PreparedFilter::device_allowed` (+
@@ -133,14 +150,16 @@ Backend — commands, cache, concurrency:
   wire-format change; update both sides. → `docs/design/frontend.md#ipc-arg-shape--keys-match-rust-fn-parameter-names-camelcase`
 - **`AppState.last_result` is the single source of truth for paging, export and the HTML report.**
   Write via `store_last_result_if_current(token, result)`, read via `with_current_result` /
-  `current_result_handle`; never touch the slot directly. → `docs/design/query-cache.md`
+  `current_result_handle` (memos via `sort_memo` / `group_memo` + `store_*_memo`); never touch
+  the slot directly. → `docs/design/query-cache.md`
 - **Claim the `QueryToken` (`begin_query`) before any fetch and redeem it at the store.** A
   superseded or tenant-drifted result is dropped. `StoreOutcome::Superseded` still returns the
   summary; `TenantChanged`/`Poisoned` are errors (`commands::patches::summary_for`). → `docs/design/query-cache.md#the-write-is-generation--and-tenant-gated`
 - **Tenant switch, sign-out, sign-in and re-authorize all call `clear_session()`** on the frontend
   and `clear_session_state` on the backend. → `docs/design/query-cache.md#a-tenant-switch-a-sign-out-a-sign-in-and-a-re-authorization-all-clear-the-frontend`
 - **Paging/grouping/sorting commands return empty on a cache miss, never an error.** Sorted and
-  grouped views are memoized inside `CachedResult`; the cached rows are never reordered. Group
+  grouped views are memoized inside `CachedResult`, built on `spawn_blocking` and stored only if
+  `Arc::ptr_eq` still holds; the cached rows are never reordered. Group
   headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
 - **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`) ride on both `QueryResult` and
   `QuerySummary`.** Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
@@ -160,26 +179,34 @@ Backend — commands, cache, concurrency:
   writes, the audit append, the save dialog, keyring I/O. Judge new code against the rule, not
   against that list. → `docs/design/concurrency.md`
 - **`AppState` locks are brief and never held across `.await`.** Take `settings_snapshot()` first;
-  hold the result mutex for a handle (`current_result_handle`), not for the work. → `docs/design/concurrency.md`
+  hold the result mutex for a handle (`current_result_handle`), not for the work. Settings writers
+  go through `settings_write` + `replace_settings` (I/O on a blocking thread, published after the
+  disk write); only an instance/client-id change clears caches on save. → `docs/design/concurrency.md`
 
 Auth:
 
 - **Secrets live in the keyring only — never `settings.json`, never a `tracing` event.** The access
-  token is in-memory only. → `docs/design/auth.md#secrets-discipline--keyring-only-never-settingsjson-never-logs`
+  token is in-memory only; `restore_session` silently refreshes from the keyring at launch and on
+  `sign_in` (never on `reauthorize`). → `docs/design/auth.md#secrets-discipline--keyring-only-never-settingsjson-never-logs`
+- **Sign-out sticks.** `logout` and a completed interactive sign-in bump the session generation;
+  `store_tokens` checks tenant + session under `persist_lock`; a dead grant deletes only the entry
+  of the tenant it started under. → `docs/design/auth.md#sign-out-sticks-the-session-generation`
 - **PKCE with a loopback redirect on `callback_port`; Native (no secret) and Web (secret) clients
   are both supported.** The callback listener loops over connections. → `docs/design/auth.md`
 - **Scope is conditional on `settings.actions.enabled` and the refresh grant never re-sends it.**
   `management_grant()` detects a read-only grant; `None` means unknowable, not denied.
   `reauthorize` drops the keyring refresh token first. → `docs/design/auth.md#scope-is-conditional-and-the-refresh-grant-never-re-sends-it`
-- **`store_tokens` assigns in-memory first and downgrades a keyring failure to a warning.**
+- **`store_tokens` assigns in-memory first (session-gated) and downgrades a keyring failure to a warning.**
   `invalidate_access_token(&stale)` no-ops unless the token is still current. → `docs/design/auth.md#in-memory-before-keyring-and-only-the-token-that-got-the-401-is-invalidated`
 - **The refresh is single-flight under `refresh_lock`, and only `invalid_grant` clears the
   credential** (`refresh_grant_is_dead`). Not "any 4xx": 429 is retry-later. → `docs/design/auth.md#the-refresh-is-single-flight-and-only-invalid_grant-clears-the-credential`
 
 Write path (device actions) — violating these silently widens the blast radius:
 
-- **Every write POST passes `ReplaySafety::ActOnce`**; a timed-out dispatch becomes
-  `JobState::Unknown` and is polled, never replayed. → `docs/design/actions.md#replaysafetyactonce-on-every-post`
+- **Every write POST passes `ReplaySafety::ActOnce`**; any ambiguous outcome (timeout, in-flight
+  transport error, 5xx, unreadable 2xx) fails with `api::OutcomeUnknown` and becomes
+  `JobState::Unknown` via `is_outcome_unknown` (a downcast, never message text) — polled, never
+  replayed. → `docs/design/actions.md#replaysafetyactonce-on-every-post`
 - **"Apply all" (native endpoint) and "Apply selected" (library script) are different `ActionKind`s
   under different `ACTION_GROUPS` headings.** Don't collapse them. Remediation script ids resolve
   from Settings, never the request; an unset id or an empty target list is a `plan()` blocker. → `docs/design/actions.md#there-is-no-per-kb-apply-endpoint-so-there-are-two-apply-paths-and-the-ui-names-both`
@@ -187,10 +214,10 @@ Write path (device actions) — violating these silently widens the blast radius
   (`util::targets_by_device` → `ActionRequest.device_targets` → `per_device_parameters`). Ticking a
   row must not tick the device's other rows. No batch-wide `targets` field. → `docs/design/actions.md#selection-is-per-patch-row-dispatch-is-per-device-with-per-device-targets`
 - **`build_parameters` encodes by kind:** `kbAllowList=` for OS, `productAllowListB64=` for
-  software (NinjaOne splits on spaces). → `docs/design/actions.md#the-parameter-encoding-is-chosen-by-kind`
+  software (NinjaOne splits on spaces). OS targets must pass `kb_number` or `plan()` blocks. → `docs/design/actions.md#the-parameter-encoding-is-chosen-by-kind`
 - **Confirm tokens are payload-bound and single-use.** `request_hash` destructures `ActionRequest`
-  exhaustively, hashes the *resolved* script and length-prefixed per-device parameters; `run_action`
-  re-plans and re-checks. → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
+  exhaustively, hashes the *resolved* script and run-as and length-prefixed per-device parameters; ids are not
+  de-duplicated (a repeated id is a `plan()` blocker); `run_action` re-plans and re-checks. → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
 - **Guardrails go in `actions::plan` (`blockers`/`warnings`), not in a dialog.** The `dry_run`
   check is also asserted at the dispatch site. → `docs/design/actions.md#guardrails-live-in-actionsplan`
 - **One dispatch surface (`ActionBar`); `Run as` / reboot / `Dry run` are rendered once** and
@@ -202,7 +229,7 @@ Write path (device actions) — violating these silently widens the blast radius
   `release_job_poller_if_idle`). Dispatch appends jobs before claiming. → `docs/design/actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim`
 - **A job resolves from `/activities` only:** `statusCode` is lifecycle, `activityResult` is the
   verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is applied
-  client-side; `is_action_activity` lists what the native endpoints emit. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
+  client-side; `is_action_activity(kind, type)` accepts only the types that kind emits. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 
 NinjaOne API client:
 
@@ -278,19 +305,21 @@ Frontend:
 - **Conventional Commits required:** `<type>[(scope)][!]: <description>` (enforced by the
   `conventional-commit-validator.sh` PreToolUse hook).
   - Types: `feat fix docs chore refactor test build ci perf style revert deps`
-  - Scopes: `desktop`, `web`, `api`, `auth`, `export`, `filter`, `settings`, `ci`, `docs`.
+  - Scopes: `desktop`, `web`, `api`, `auth`, `actions`, `export`, `filter`, `settings`, `release`, `ci`, `docs`.
 - User-facing changes go under `## [Unreleased]` in `CHANGELOG.md`; the release skill rolls it.
 
 ## Verification playbook
 
-`just verify` runs every local gate in CI's order; run it before declaring a change done. The
-individual recipes (`fmt-check`, `clippy`, `test`, `web-clippy`, `web-test`, …) are callable on
-their own — see `just --list`. For behavior a unit test can't prove, run `just dev` and exercise
-the view.
+`just verify` runs the Rust gates of CI's backend and frontend jobs in their order; run it before
+declaring a change done. The individual recipes (`fmt-check`, `clippy`, `test`, `web-clippy`,
+`web-test`, …) are callable on their own — see `just --list`. For behavior a unit test can't
+prove, run `just dev` and exercise the view. Hook or shell-script changes: `.claude/hooks/test.sh`
++ `shellcheck`. A dependency bump: `just licenses` and commit `THIRD-PARTY-LICENSES.md`.
 
-CI-only gates (coverage, audit/deny, CodeQL, manifest versions, screenshot tooling, the release
-verify job) → `docs/design/ci.md`. `cargo-audit` is a required check on `main`, so a green local
-`verify` can still fail CI on a new advisory.
+Gates `verify` does not run (Trunk `web-build`, coverage, audit/deny, licenses, the NinjaOne
+contract, shellcheck + hook tests, actionlint, conventional commits, CodeQL, manifest versions,
+screenshot tooling, the release verify job) → `docs/design/ci.md`. `cargo-audit` is a required
+check on `main`, so a green local `verify` can still fail CI on a new advisory.
 
 ## Keeping this file up to date
 

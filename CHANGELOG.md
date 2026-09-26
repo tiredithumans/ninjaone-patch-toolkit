@@ -11,22 +11,95 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-09-26
+
+### Fixed
+
+**Patch actions**
+
+- **A dispatch with an uncertain outcome is shown as Unknown, not Failed.** A server error, a
+  connection lost mid-request, or an unreadable response meant the action may already be queued,
+  but the job read as Failed and looked safe to send again. It is now Unknown and is tracked to a
+  result, never re-sent automatically.
+- **Each dispatched action appears once on the Jobs tab**, not twice with one copy frozen.
+- **"Install only the selected patches" sends each device its own target list.** The per-device
+  list could arrive empty.
+- **The confirmation covers the default "Run as" account.** Changing it in Settings after review
+  now requires reviewing the action again.
+- **A device listed twice in one request is refused** instead of receiving the action twice.
+- **OS patch targets must be KB numbers.** Anything else blocks the dispatch instead of being
+  written into the script's parameters.
+- **A job is matched only to activity types its action produces**, so NinjaOne policy runs and
+  unrelated system events can no longer close it.
+- **The audit log records dispatches that failed immediately**, and hides passwords written as
+  `-Password:value` or in quotes.
+- **A failed dispatch keeps the confirmation open** with the error and a Re-plan button, instead of
+  a dialog whose single-use token could no longer succeed.
+- **"Update & restart" waits until in-flight jobs finish.**
+- Patch rows with no device id can no longer be selected as action targets.
+- **Changing the reboot reason after review now requires reviewing again.** The reason is sent to
+  NinjaOne but was not covered by the confirmation.
+- Action audit and run-history records are each written in one piece, so concurrent or
+  interrupted writes can no longer split or fuse a line.
+
+**Sign-in and settings**
+
+- **The app stays signed in across restarts.** The saved sign-in is reused instead of opening the
+  browser flow every launch.
+- **Signing out can no longer be undone** by a token refresh that was already in progress.
+- **A damaged `settings.json` is kept** as `settings.json.corrupt-<timestamp>` instead of being
+  silently replaced by defaults, and settings are now saved atomically.
+- **Saving Settings no longer freezes the window** while the OS keychain responds, and no longer
+  discards cached fleet data unless the instance or client ID changed.
+- Scripts and job history load after sign-in, re-authorization or enabling actions, not only at
+  launch.
+- A callback-port conflict now says another program may hold the port (Ollama uses 11434 by
+  default) and that the port can be changed in Settings.
+
+**Results, trend and exports**
+
+- **Excel export no longer fails on large fleets.** A failure's Devices cell ends with "… and N
+  more" within Excel's cell limit, and detail rows past Excel's row limit continue on
+  "Patches (2)", "Patches (3)", ….
+- **The Trend tab no longer mixes different scopes on one line.** Every whole-fleet run was recorded
+  as filtered, and runs for different organizations or filters shared a series.
+- **Run query and drill-downs are no longer ignored during an auto-refresh**; they run as soon as
+  it finishes.
+- **Auto-refresh keeps your selection**, dropping only rows that are no longer listed.
+- A slow page, sort or group response can no longer overwrite a newer one or tick rows from a
+  previous result.
+- Searching for just "KB" no longer matches every patch.
+- The oldest age bucket is labelled "181+ days"; a 180-day-old patch was covered by two labels.
+- Patch records with no device id are no longer counted or grouped as an actionable "device 0".
+- Tied entries in the Patch Failures list appear in the same order on every run.
+- Exports keep the "Whole fleet" line when only severity, search or date filters are active.
+- Trend deltas read "+12", not "++12", and compliance never displays as 100.0% unless it is 100%.
+- Clearing Organizations resets the Locations list.
+- The First seen, Script and Reboot mode dropdowns always show the value in effect.
+- A custom instance URL shows Region "Custom…", and choosing Custom no longer blanks the URL.
+- Export and Save ignore double clicks; a failed preset delete is reported.
+- Ticking a collapsed group expands it and reports how many rows were selected.
+- Device roles load on tenants with 500 or more roles.
+- The first sorted or grouped page of a large fleet no longer blocks paging and export while it
+  is built.
+- Web demo: the Flat view works again, and preset and job-history controls are hidden.
+
+**Accessibility**
+
+- Keyboard focus is visible on checkboxes and controls; the results tabs work with arrow keys;
+  inputs and charts are labelled; errors are announced as alerts and stay on screen longer.
+
+### Security
+
+- Removed unused dialog permissions from the webview.
+- Rate-limit waits are capped at 60 seconds.
+- The release build no longer restores a shared build cache or keeps git credentials while it
+  compiles and signs, and the update-signing key is readable only by release-tag builds.
+- `THIRD-PARTY-LICENSES.md` now lists the frontend's crates too; both halves ship in the app.
+
 ### Changed
 
-- **Dependencies refreshed in both crates.** No manifest requirement moved — every direct
-  dependency in both crates was already at its latest major — so this is a lockfile refresh: 52
-  transitive bumps in the backend (`reqwest` 0.13.4 -> 0.13.5, `rustls` 0.23.43 -> 0.23.45,
-  `rust_xlsxwriter` 0.99.0 -> 0.99.1, `open` 5.4.3 -> 5.4.4, `wasm-bindgen` 0.2.127 -> 0.2.128,
-  `jiff` 0.2.35 -> 0.2.37 among them) and 13 in the frontend. `plist` now resolves quick-xml 0.42
-  while `calamine` stays on 0.41; both audit clean, so the `cargo-audit` ignore list stays empty.
-- **CI action pins moved to their current releases.** `dtolnay/rust-toolchain` 1.98.0 -> 1.98.1 —
-  the latest 1.98.x stable, which `rust-toolchain.toml`'s `1.98` channel already resolves to, so
-  MSRV is unchanged; `taiki-e/install-action` v2.87.2 -> v2.87.13; `actions/deploy-pages` v5.0.0
-  -> v5.0.1; `github/codeql-action` v4.37.9 -> v4.38.0. The other seven pinned actions were
-  already current.
-- **Screenshot tooling: `playwright` 1.62.1 -> 1.63.0** (`selfsigned` 5.5.0 was already current).
-  Dev/CI only — not shipped with the app.
-- **`THIRD-PARTY-LICENSES.md` regenerated** for the refreshed tree.
+- Dependencies refreshed in both crates to their latest compatible releases, all audit-clean.
 
 ## [0.14.2] - 2026-09-08
 

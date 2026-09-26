@@ -59,7 +59,7 @@ pub(super) fn pct_cell(pct: f64) -> TableCell {
 /// point and never claims a clean fleet that isn't. Exactly 100.0 still prints
 /// `100%`.
 ///
-/// Mirrored in `web-rs/src/app/util.rs::format_pct` for the in-app tables and charts;
+/// Mirrored in `web-rs/src/app/util/format.rs::format_pct` for the in-app tables and charts;
 /// the two crates share no code, so the rule is written twice on purpose.
 pub fn format_pct(pct: f64) -> String {
     let shown = if pct >= 100.0 {
@@ -68,4 +68,61 @@ pub fn format_pct(pct: f64) -> String {
         pct.round().min(99.0)
     };
     format!("{shown:.0}%")
+}
+
+/// Excel's hard limit on the characters in one cell. `rust_xlsxwriter` rejects a
+/// longer string with an error, and one rejected cell fails the whole workbook — so
+/// an export of a large fleet failed outright on a single long value.
+pub const CELL_MAX_CHARS: usize = 32_767;
+
+/// Cuts `s` to at most [`CELL_MAX_CHARS`] characters, marking the cut with `…`.
+///
+/// The backstop for any free-text cell. A list that can say what it dropped should
+/// use [`join_capped`] instead.
+pub fn clamp_cell(s: String) -> String {
+    if s.len() <= CELL_MAX_CHARS || s.chars().count() <= CELL_MAX_CHARS {
+        return s;
+    }
+    let mut out: String = s.chars().take(CELL_MAX_CHARS - 1).collect();
+    out.push('…');
+    out
+}
+
+/// Joins `items` with `, ` in at most `max_chars` characters. When the whole list
+/// does not fit it keeps as many leading items as leave room for a closing
+/// "… and N more", so the reader knows the list is incomplete and by how much.
+pub fn join_capped<S: AsRef<str>>(items: &[S], max_chars: usize) -> String {
+    let full = items
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if full.chars().count() <= max_chars {
+        return full;
+    }
+    // Room for the longest suffix this list could need, so the kept items can
+    // never push it over the cap.
+    let budget = max_chars.saturating_sub(format!(", … and {} more", items.len()).len());
+    let mut out = String::new();
+    let mut len = 0;
+    let mut kept = 0;
+    for item in items {
+        let item = item.as_ref();
+        let add = item.chars().count() + if kept == 0 { 0 } else { 2 };
+        if len + add > budget {
+            break;
+        }
+        if kept > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(item);
+        len += add;
+        kept += 1;
+    }
+    let rest = items.len() - kept;
+    if kept > 0 {
+        out.push_str(", ");
+    }
+    out.push_str(&format!("… and {rest} more"));
+    out
 }

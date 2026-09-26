@@ -1,5 +1,10 @@
 use super::*;
 
+/// The pre-tenant-scoping refresh entry is one global name in the shared test
+/// keyring: `logout` deletes it and a keyring lookup with no scoped entry adopts it.
+/// Tests that touch it take this so they cannot see each other's value.
+static LEGACY_REFRESH_ENTRY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A dead grant is the *only* thing that may clear the stored refresh token.
 /// Everything else has to leave it alone: clearing on a transient failure is
 /// what turned a network blip into a forced interactive sign-in.
@@ -73,7 +78,7 @@ fn switching_tenant_drops_the_previous_grant() {
         Some("client-a".into()),
         false,
     );
-    auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.tenant_stamp())
+    auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.grant_stamp(), false)
         .expect("store");
     assert!(auth.is_authenticated());
 
@@ -101,7 +106,7 @@ fn a_non_tenant_settings_change_keeps_the_session() {
         Some("client-a".into()),
         false,
     );
-    auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.tenant_stamp())
+    auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.grant_stamp(), false)
         .expect("store");
 
     let changed = auth.apply_settings(
@@ -153,6 +158,7 @@ fn each_tenant_stores_its_refresh_token_separately() {
 /// adopted by the configured tenant on first read, then removed.
 #[test]
 fn a_legacy_global_credential_is_migrated_once() {
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
     save_keyring(LEGACY_KEYRING_USER_REFRESH, "legacy-refresh").expect("seed legacy");
 
     let got = load_tenant_keyring(
@@ -194,12 +200,13 @@ fn a_non_rotating_refresh_keeps_the_existing_token() {
     );
     auth.store_tokens_blocking(
         token_response(Some("original-refresh")),
-        auth.tenant_stamp(),
+        auth.grant_stamp(),
+        false,
     )
     .expect("first store");
 
     let set = auth
-        .store_tokens_blocking(token_response(None), auth.tenant_stamp())
+        .store_tokens_blocking(token_response(None), auth.grant_stamp(), false)
         .expect("second store, server declined to rotate");
 
     assert_eq!(
@@ -214,18 +221,66 @@ fn token_set_staleness() {
     let fresh = TokenSet {
         access_token: "a".into(),
         refresh_token: None,
-        expires_at: Utc::now() + Duration::seconds(3600),
+        refresh_at: Utc::now() + Duration::seconds(60),
         granted_scope: None,
     };
     assert!(!fresh.is_stale());
 
-    let expiring = TokenSet {
-        access_token: "a".into(),
-        refresh_token: None,
-        expires_at: Utc::now() + Duration::seconds(60),
+    let due = TokenSet {
+        refresh_at: Utc::now() - Duration::seconds(1),
+        ..fresh
+    };
+    assert!(due.is_stale());
+}
+
+/// `expires_in` is server-controlled. Used unchecked, `0` made every token stale
+/// on arrival (a refresh per API call) and a huge value overflowed
+/// `Duration::seconds`, which panics.
+#[test]
+fn a_hostile_expires_in_is_clamped() {
+    let now = Utc::now();
+    // An ordinary hour keeps the five-minute skew.
+    assert_eq!(refresh_deadline(now, 3600), now + Duration::seconds(3300));
+    // Tiny, zero and negative lifetimes still leave a usable window rather than
+    // being stale on arrival.
+    for tiny in [0, 1, -5, i64::MIN] {
+        let at = refresh_deadline(now, tiny);
+        assert!(
+            at >= now + Duration::seconds(30),
+            "expires_in={tiny} must not make the token stale on arrival"
+        );
+    }
+    // A short-lived token is refreshed halfway through, not after it has expired.
+    assert_eq!(refresh_deadline(now, 120), now + Duration::seconds(60));
+    // Absurd lifetimes are capped at a day and do not panic.
+    for huge in [i64::MAX, 10_000_000_000] {
+        assert_eq!(
+            refresh_deadline(now, huge),
+            now + Duration::seconds(MAX_TOKEN_LIFETIME_SECS - MAX_REFRESH_SKEW_SECS)
+        );
+    }
+}
+
+/// Neither token may be printable through `{:?}` — a tracing field or a test
+/// failure message would otherwise carry it.
+#[test]
+fn debug_output_redacts_tokens() {
+    let set = TokenSet {
+        access_token: "access-SECRET".into(),
+        refresh_token: Some("refresh-SECRET".into()),
+        refresh_at: Utc::now(),
         granted_scope: None,
     };
-    assert!(expiring.is_stale());
+    let response = TokenResponse {
+        access_token: "access-SECRET".into(),
+        refresh_token: Some("refresh-SECRET".into()),
+        expires_in: 3600,
+        scope: None,
+    };
+    for printed in [format!("{set:?}"), format!("{response:?}")] {
+        assert!(!printed.contains("SECRET"), "a token leaked through Debug");
+        assert!(printed.contains("<redacted>"));
+    }
 }
 
 fn auth_url_with(scope: &str) -> String {
@@ -319,7 +374,8 @@ fn granted_scope_prefers_the_token_response_over_the_claim() {
             expires_in: 3600,
             scope: Some("monitoring offline_access".into()),
         },
-        auth.tenant_stamp(),
+        auth.grant_stamp(),
+        false,
     )
     .expect("store");
     assert_eq!(auth.management_grant(), Some(false));
@@ -342,7 +398,8 @@ fn granted_scope_from_token_response_marks_write_enabled() {
             expires_in: 3600,
             scope: Some("monitoring management offline_access".into()),
         },
-        auth.tenant_stamp(),
+        auth.grant_stamp(),
+        false,
     )
     .expect("store");
     assert_eq!(auth.management_grant(), Some(true));
@@ -473,7 +530,8 @@ fn a_keyring_failure_keeps_the_session_it_just_obtained() {
             expires_in: 3600,
             scope: Some("monitoring management offline_access".into()),
         },
-        auth.tenant_stamp(),
+        auth.grant_stamp(),
+        false,
     )
     .expect("a keyring problem must not fail the store");
 
@@ -500,7 +558,8 @@ fn a_late_401_does_not_invalidate_a_token_that_replaced_it() {
             expires_in: 3600,
             scope: None,
         },
-        auth.tenant_stamp(),
+        auth.grant_stamp(),
+        false,
     )
     .expect("store");
     assert!(auth.is_authenticated());
@@ -658,7 +717,7 @@ fn tokens_are_discarded_when_the_instance_changes_mid_grant() {
         Some("client-a".into()),
         false,
     );
-    let started = auth.tenant_stamp();
+    let started = auth.grant_stamp();
 
     // The operator switches instance while the grant is in flight.
     auth.apply_settings(
@@ -669,7 +728,7 @@ fn tokens_are_discarded_when_the_instance_changes_mid_grant() {
     );
 
     let err = auth
-        .store_tokens_blocking(token_response(Some("refresh-a")), started)
+        .store_tokens_blocking(token_response(Some("refresh-a")), started, false)
         .expect_err("a grant issued by the previous instance must not be stored");
     assert!(
         err.to_string().contains("instance changed"),
@@ -691,8 +750,8 @@ fn tokens_are_stored_when_the_instance_is_unchanged() {
         Some("client-a".into()),
         false,
     );
-    let started = auth.tenant_stamp();
-    auth.store_tokens_blocking(token_response(Some("refresh-a")), started)
+    let started = auth.grant_stamp();
+    auth.store_tokens_blocking(token_response(Some("refresh-a")), started, false)
         .expect("an unchanged tenant stores normally");
     assert!(auth.is_authenticated());
 }
@@ -703,6 +762,7 @@ fn tokens_are_stored_when_the_instance_is_unchanged() {
 /// entry is not a failure, so a second sign-out stays quiet.
 #[test]
 fn logout_clears_the_session_and_is_idempotent() {
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
     let auth = AuthState::new(
         reqwest::Client::new(),
         "https://a.example.com".into(),
@@ -710,7 +770,7 @@ fn logout_clears_the_session_and_is_idempotent() {
         Some("client-a".into()),
         false,
     );
-    auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.tenant_stamp())
+    auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.grant_stamp(), false)
         .expect("store");
     assert!(auth.is_authenticated());
 
@@ -759,5 +819,246 @@ fn a_url_without_a_query_is_unchanged() {
     assert_eq!(
         url_without_query("https://example.com/path#frag"),
         "https://example.com/path"
+    );
+}
+// --- Session restore, sign-out races, dead grants ---------------------------
+
+/// An `AuthState` pointed at `base_url` with `client_id` and nothing in memory —
+/// what a fresh launch looks like.
+fn launched(base_url: &str, client_id: &str) -> AuthState {
+    AuthState::new(
+        reqwest::Client::new(),
+        base_url.to_string(),
+        11434,
+        Some(client_id.to_string()),
+        false,
+    )
+}
+
+fn saved_refresh_entry(base_url: &str, client_id: &str) -> String {
+    tenant_entry(KEYRING_REFRESH_PREFIX, base_url, Some(client_id))
+}
+
+async fn token_endpoint(
+    server: &wiremock::MockServer,
+    response: wiremock::ResponseTemplate,
+    expected_calls: u64,
+) {
+    use wiremock::Mock;
+    use wiremock::matchers::{method, path};
+    Mock::given(method("POST"))
+        .and(path("/ws/oauth/token"))
+        .respond_with(response)
+        .expect(expected_calls)
+        .mount(server)
+        .await;
+}
+
+fn granted(access: &str, refresh: &str) -> wiremock::ResponseTemplate {
+    wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "access_token": access,
+        "refresh_token": refresh,
+        "expires_in": 3600,
+        "scope": "monitoring offline_access",
+    }))
+}
+
+/// The "signed out on every launch" bug: the access token is in-memory only, so
+/// a restart read as unauthenticated even with a working refresh token saved.
+/// `auth_status` and `sign_in` both go through `restore_session`.
+#[tokio::test]
+async fn a_saved_sign_in_is_reused_after_a_restart() {
+    let server = wiremock::MockServer::start().await;
+    token_endpoint(&server, granted("restored-access", "rotated-refresh"), 1).await;
+    let base = server.uri();
+    save_keyring(
+        &saved_refresh_entry(&base, "client-restore"),
+        "saved-refresh",
+    )
+    .unwrap();
+
+    let auth = launched(&base, "client-restore");
+    assert!(!auth.is_authenticated(), "nothing is in memory at launch");
+
+    assert!(auth.restore_session().await);
+    assert!(auth.is_authenticated());
+    assert_eq!(auth.access_token().await.unwrap(), "restored-access");
+    assert_eq!(
+        load_keyring(&saved_refresh_entry(&base, "client-restore"))
+            .unwrap()
+            .as_deref(),
+        Some("rotated-refresh"),
+        "the rotated refresh token replaces the spent one"
+    );
+}
+
+/// With nothing saved there is nothing to try: no request, and a plain "not
+/// signed in" rather than an error.
+#[tokio::test]
+async fn restoring_with_nothing_saved_is_quietly_signed_out() {
+    let _legacy = LEGACY_REFRESH_ENTRY.lock().await;
+    let server = wiremock::MockServer::start().await;
+    token_endpoint(&server, granted("never", "never"), 0).await;
+
+    let auth = launched(&server.uri(), "client-nothing-saved");
+    assert!(!auth.restore_session().await);
+    assert!(!auth.is_authenticated());
+}
+
+/// A saved credential the server rejects as `invalid_grant` reads as signed out,
+/// and is deleted so the next launch does not retry it.
+#[tokio::test]
+async fn a_dead_saved_sign_in_reads_as_signed_out() {
+    let server = wiremock::MockServer::start().await;
+    token_endpoint(
+        &server,
+        wiremock::ResponseTemplate::new(400)
+            .set_body_json(serde_json::json!({ "error": "invalid_grant" })),
+        1,
+    )
+    .await;
+    let base = server.uri();
+    let entry = saved_refresh_entry(&base, "client-dead");
+    save_keyring(&entry, "revoked-refresh").unwrap();
+
+    let auth = launched(&base, "client-dead");
+    assert!(!auth.restore_session().await);
+    assert_eq!(load_keyring(&entry).unwrap(), None);
+}
+
+/// Sign-out used to be undoable: a refresh already in flight carried the same
+/// tenant, so when its response landed it stored the tokens in memory *and* wrote
+/// the refresh token back to the keyring `logout` had just cleared.
+#[tokio::test]
+async fn a_refresh_in_flight_cannot_undo_a_sign_out() {
+    let _legacy = LEGACY_REFRESH_ENTRY.lock().await;
+    let server = wiremock::MockServer::start().await;
+    token_endpoint(
+        &server,
+        granted("late-access", "late-refresh").set_delay(std::time::Duration::from_millis(300)),
+        1,
+    )
+    .await;
+    let base = server.uri();
+    let entry = saved_refresh_entry(&base, "client-signout");
+    save_keyring(&entry, "saved-refresh").unwrap();
+
+    let auth = launched(&base, "client-signout");
+    let in_flight = {
+        let auth = auth.clone();
+        tokio::spawn(async move { auth.access_token().await })
+    };
+    // Let the request reach the (delayed) token endpoint, then sign out.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    auth.logout_async().await.expect("sign out");
+
+    let result = in_flight.await.expect("join");
+    assert!(result.is_err(), "the stale grant must be refused");
+    assert!(!auth.is_authenticated(), "the sign-out must stick");
+    assert_eq!(
+        load_keyring(&entry).unwrap(),
+        None,
+        "the keyring must not get the refresh token back"
+    );
+}
+
+/// The same race without the network: a grant stamped before the sign-out is
+/// refused at the store.
+#[test]
+fn a_grant_started_before_sign_out_is_not_stored() {
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
+    let auth = launched("https://signout.example.com", "client-stamp");
+    let started = auth.grant_stamp();
+    auth.logout().expect("sign out");
+
+    let err = auth
+        .store_tokens_blocking(token_response(Some("late-refresh")), started, false)
+        .expect_err("a pre-sign-out grant must be refused");
+    assert!(err.to_string().contains("signed out"), "{err}");
+    assert!(!auth.is_authenticated());
+    assert_eq!(
+        load_keyring(&saved_refresh_entry(
+            "https://signout.example.com",
+            "client-stamp"
+        ))
+        .unwrap(),
+        None
+    );
+}
+
+/// A completed interactive sign-in starts a new session, so a refresh begun
+/// before it cannot overwrite (or, on `invalid_grant`, delete) its credential.
+#[test]
+fn an_interactive_sign_in_supersedes_an_older_refresh() {
+    let auth = launched("https://supersede.example.com", "client-supersede");
+    let refresh_started = auth.grant_stamp();
+
+    auth.store_tokens_blocking(
+        token_response(Some("interactive")),
+        auth.grant_stamp(),
+        true,
+    )
+    .expect("interactive sign-in");
+
+    assert!(
+        auth.store_tokens_blocking(
+            token_response(Some("stale")),
+            refresh_started.clone(),
+            false
+        )
+        .is_err()
+    );
+    auth.discard_dead_grant(&refresh_started);
+    assert!(auth.is_authenticated(), "the newer session survives");
+    assert_eq!(
+        load_keyring(&saved_refresh_entry(
+            "https://supersede.example.com",
+            "client-supersede"
+        ))
+        .unwrap()
+        .as_deref(),
+        Some("interactive")
+    );
+}
+
+/// A refresh that outlives a tenant switch and then fails with `invalid_grant`
+/// used to delete the credential of whichever tenant was configured *now* — the
+/// one the operator had just switched to — and leave the dead one in place.
+#[tokio::test]
+async fn a_dead_grant_deletes_the_tenant_it_started_under() {
+    let server = wiremock::MockServer::start().await;
+    token_endpoint(
+        &server,
+        wiremock::ResponseTemplate::new(400)
+            .set_body_json(serde_json::json!({ "error": "invalid_grant" }))
+            .set_delay(std::time::Duration::from_millis(300)),
+        1,
+    )
+    .await;
+    let base_a = server.uri();
+    let entry_a = saved_refresh_entry(&base_a, "client-switch-a");
+    let base_b = "https://switched-to.example.com";
+    let entry_b = saved_refresh_entry(base_b, "client-switch-b");
+    save_keyring(&entry_a, "dead-refresh").unwrap();
+    save_keyring(&entry_b, "live-refresh").unwrap();
+
+    let auth = launched(&base_a, "client-switch-a");
+    let in_flight = {
+        let auth = auth.clone();
+        tokio::spawn(async move { auth.access_token().await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    auth.apply_settings(base_b.into(), Some("client-switch-b".into()), 11434, false);
+
+    assert!(in_flight.await.expect("join").is_err());
+    assert_eq!(
+        load_keyring(&entry_a).unwrap(),
+        None,
+        "the dead grant's own entry is the one removed"
+    );
+    assert_eq!(
+        load_keyring(&entry_b).unwrap().as_deref(),
+        Some("live-refresh"),
+        "the tenant switched to keeps its sign-in"
     );
 }

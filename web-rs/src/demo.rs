@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::app::util::date_to_epoch;
+use crate::app::util::{date_to_epoch, severity_rank};
 use crate::types::QueryResult;
 use crate::types::{
     AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams, GroupBy, Location,
@@ -472,14 +472,14 @@ fn sample_severity_by_org() -> Vec<OrgSeverity> {
 /// Pending-patch age histogram over the rows on screen, bucketed by how long ago
 /// each was first seen. Mirrors the backend's `build_age_buckets`, including its
 /// `Unknown` bucket for undated patches — which exists so they cannot silently
-/// inflate `180+ days`.
+/// inflate `181+ days`.
 fn scoped_age_buckets(rows: &[PatchRow]) -> Vec<AgeBucket> {
     const LABELS: [&str; 6] = [
         "0-30 days",
         "31-60 days",
         "61-90 days",
         "91-180 days",
-        "180+ days",
+        "181+ days",
         "Unknown",
     ];
     let mut counts = [0usize; LABELS.len()];
@@ -764,20 +764,6 @@ pub fn group_members(rows: &[PatchRow], group_by: GroupBy, key: &str) -> Vec<Pat
         .filter(|r| group_key(r, group_by) == key)
         .cloned()
         .collect()
-}
-
-/// Severity rank mirroring `model::Severity::rank()`, for the demo's group sort.
-fn severity_rank(severity: &str) -> u8 {
-    match severity.to_ascii_uppercase().as_str() {
-        "CRITICAL" => 7,
-        "IMPORTANT" | "HIGH" => 6,
-        "SECURITY" => 5,
-        "MODERATE" | "MEDIUM" => 4,
-        "RECOMMENDED" => 3,
-        "LOW" => 2,
-        "OPTIONAL" | "NONE" => 1,
-        _ => 0,
-    }
 }
 
 #[cfg(test)]

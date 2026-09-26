@@ -27,3 +27,7 @@ accepted = [
 
 # ring vendors its own license layout that cargo-about cannot infer.
 workarounds = ["ring"]
+
+# The two crates in this repo are `publish = false`. Listing them would name our own
+# code as a third party and change the notice on every version bump.
+private = { ignore = true }

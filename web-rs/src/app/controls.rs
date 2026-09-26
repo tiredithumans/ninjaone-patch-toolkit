@@ -5,67 +5,32 @@ use super::*;
 #[component]
 pub(crate) fn RunControls() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // One save dialog at a time, shared by both exports: each opens a native Save
+    // dialog, and a double-click used to stack two of them over the same workbook.
+    let exporting = RwSignal::new(false);
 
     view! {
         <section class="panel">
             <div class="controls">
+                // Enabled during an auto-refresh on purpose: a click then queues
+                // behind it (see `util::run_decision`) and says so.
                 <button
                     class="btn btn-primary"
                     prop:disabled=move || state.run.busy.get()
                     on:click=move |_| state.run_query()
                 >
-                    {move || if state.run.busy.get() { "Running…" } else { "Run query" }}
-                </button>
-                <button
-                    class="btn"
-                    prop:disabled=move || {
-                        state.query.result.get().is_none() || state.session.web_mode.get() || state.session.demo.get()
-                    }
-                    title=move || {
-                        if state.session.web_mode.get() || state.session.demo.get() {
-                            "Excel export needs a live query in the desktop app"
+                    {move || {
+                        if state.run.busy.get() {
+                            "Running…"
+                        } else if state.run.queued.get().is_some() {
+                            "Queued…"
                         } else {
-                            ""
+                            "Run query"
                         }
-                    }
-                    on:click=move |_| {
-                        spawn_local(async move {
-                            match api::export_patches().await {
-                                Ok(Some(p)) => state.notify(Toast::ok(format!("Exported to {p}"))),
-                                Ok(None) => {}
-                                Err(e) => state.notify(Toast::err(e)),
-                            }
-                        });
-                    }
-                >
-                    "Export to Excel"
+                    }}
                 </button>
-                <button
-                    class="btn"
-                    prop:disabled=move || {
-                        state.query.result.get().is_none() || state.session.web_mode.get() || state.session.demo.get()
-                    }
-                    title=move || {
-                        if state.session.web_mode.get() || state.session.demo.get() {
-                            "The HTML report needs a live query in the desktop app"
-                        } else {
-                            ""
-                        }
-                    }
-                    on:click=move |_| {
-                        spawn_local(async move {
-                            match api::export_report().await {
-                                Ok(Some(p)) => {
-                                    state.notify(Toast::ok(format!("Report saved to {p}")))
-                                }
-                                Ok(None) => {}
-                                Err(e) => state.notify(Toast::err(e)),
-                            }
-                        });
-                    }
-                >
-                    "Export report"
-                </button>
+                <ExportButton kind=Export::Workbook exporting=exporting/>
+                <ExportButton kind=Export::Report exporting=exporting/>
                 <Show when=move || state.run.refreshing.get()>
                     <span class="chips-label">"↻ refreshing…"</span>
                 </Show>
@@ -113,7 +78,11 @@ pub(crate) fn RunControls() -> impl IntoView {
                         }}
                     </span>
                 </Show>
-                <PresetRow/>
+                // Presets persist through the backend's settings file, which the
+                // browser demo does not have: every save or delete could only fail.
+                <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
+                    <PresetRow/>
+                </Show>
             </div>
             <Show when=move || state.run.busy.get()>
                 <div class="query-progress">
@@ -171,11 +140,89 @@ pub(crate) fn RunControls() -> impl IntoView {
     }
 }
 
+/// The two exports of the cached result. Both write through a native Save dialog
+/// and need a live query in the desktop app; they differ only in the command and
+/// the wording.
+#[derive(Clone, Copy)]
+enum Export {
+    Workbook,
+    Report,
+}
+
+impl Export {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Workbook => "Export to Excel",
+            Self::Report => "Export report",
+        }
+    }
+
+    /// Tooltip in the browser demo, where there is no backend to export from.
+    fn web_title(self) -> &'static str {
+        match self {
+            Self::Workbook => "Excel export needs a live query in the desktop app",
+            Self::Report => "The HTML report needs a live query in the desktop app",
+        }
+    }
+
+    fn saved(self, path: &str) -> String {
+        match self {
+            Self::Workbook => format!("Exported to {path}"),
+            Self::Report => format!("Report saved to {path}"),
+        }
+    }
+
+    /// `Ok(None)` is the operator cancelling the Save dialog.
+    async fn save(self) -> Result<Option<String>, String> {
+        match self {
+            Self::Workbook => api::export_patches().await,
+            Self::Report => api::export_report().await,
+        }
+    }
+}
+
+/// One export button. `exporting` is owned by the caller and shared by every
+/// export, so a click on either is refused while any Save dialog is open.
+#[component]
+fn ExportButton(kind: Export, exporting: RwSignal<bool>) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let web_only = move || state.session.web_mode.get() || state.session.demo.get();
+    view! {
+        <button
+            class="btn"
+            prop:disabled=move || {
+                exporting.get() || state.query.result.with(|r| r.is_none()) || web_only()
+            }
+            title=move || if web_only() { kind.web_title() } else { "" }
+            on:click=move |_| {
+                if exporting.get_untracked() {
+                    return;
+                }
+                exporting.set(true);
+                spawn_local(async move {
+                    match kind.save().await {
+                        Ok(Some(p)) => state.notify(Toast::ok(kind.saved(&p))),
+                        Ok(None) => {}
+                        Err(e) => state.notify(Toast::err(e)),
+                    }
+                    exporting.set(false);
+                });
+            }
+        >
+            {kind.label()}
+        </button>
+    }
+}
+
 #[component]
 fn PresetRow() -> impl IntoView {
     let state = expect_context::<AppState>();
+    let saving = RwSignal::new(false);
 
     let save_preset = move |_| {
+        if saving.get_untracked() {
+            return;
+        }
         let name = state.settings.preset_name.get_untracked();
         if name.trim().is_empty() {
             state.notify(Toast::err("Name the preset first"));
@@ -188,6 +235,7 @@ fn PresetRow() -> impl IntoView {
             statuses: Some(state.filters.statuses.get_untracked()),
             install_days: Some(state.filters.install_days.get_untracked()),
         };
+        saving.set(true);
         spawn_local(async move {
             match api::save_preset(preset).await {
                 Ok(p) => {
@@ -197,6 +245,7 @@ fn PresetRow() -> impl IntoView {
                 }
                 Err(e) => state.notify(Toast::err(e)),
             }
+            saving.set(false);
         });
     };
 
@@ -240,8 +289,13 @@ fn PresetRow() -> impl IntoView {
                                         }
                                         let n = del_name.clone();
                                         spawn_local(async move {
-                                            if let Ok(p) = api::delete_preset(n).await {
-                                                state.settings.presets.set(p);
+                                            match api::delete_preset(n).await {
+                                                Ok(p) => state.settings.presets.set(p),
+                                                // It used to fail silently, leaving a
+                                                // chip that looked deleted-then-not.
+                                                Err(e) => state.notify(Toast::err(format!(
+                                                    "Couldn't delete the preset: {e}"
+                                                ))),
                                             }
                                         });
                                     }
@@ -257,11 +311,12 @@ fn PresetRow() -> impl IntoView {
             }}
             <input
                 class="preset-name"
+                aria-label="Preset name"
                 placeholder="Preset name"
                 prop:value=move || state.settings.preset_name.get()
                 on:input=move |ev| state.settings.preset_name.set(event_target_value(&ev))
             />
-            <button class="btn btn-ghost" on:click=save_preset>
+            <button class="btn btn-ghost" prop:disabled=move || saving.get() on:click=save_preset>
                 "Save preset"
             </button>
         </div>

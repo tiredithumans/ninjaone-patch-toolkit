@@ -119,31 +119,6 @@ pub(crate) fn ActionBar() -> impl IntoView {
                         }
                     })
                     .collect_view()}
-                <div class="action-group">
-                    <span class="action-group-label">"Restart"</span>
-                    <button
-                        class="btn btn-sm"
-                        aria-label=format!(
-                            "{}. {}",
-                            ActionKind::Reboot.label(),
-                            ActionKind::Reboot.blast_radius(),
-                        )
-                        title=move || {
-                            disabled_reason()
-                                .unwrap_or_else(|| {
-                                    format!(
-                                        "{}. {}",
-                                        ActionKind::Reboot.label(),
-                                        ActionKind::Reboot.blast_radius(),
-                                    )
-                                })
-                        }
-                        prop:disabled=move || disabled_reason().is_some()
-                        on:click=move |_| state.open_plan(ActionKind::Reboot)
-                    >
-                        "Reboot…"
-                    </button>
-                </div>
             </div>
 
             // Which patches "Install only the selected patches" would actually send,
@@ -240,16 +215,22 @@ pub(crate) fn ActionBar() -> impl IntoView {
                     <span class="action-options-label">"Applies to Reboot"</span>
                     <label>
                         "Mode"
-                        <select
-                            prop:value=move || state.actions.reboot_mode.get()
-                            on:change=move |ev| {
-                                state.actions.reboot_mode.set(event_target_value(&ev))
-                            }
-                        >
+                        // `prop:selected` per option rather than `prop:value`: this sits in
+                        // a `<Show>`, and on a remount the value was set before the
+                        // options existed — the control read "Normal" while a stored
+                        // "Forced" was what the next plan would send.
+                        <select on:change=move |ev| {
+                            state.actions.reboot_mode.set(event_target_value(&ev))
+                        }>
                             {REBOOT_MODES
-                                .iter()
+                                .into_iter()
                                 .map(|(value, label)| {
-                                    view! { <option value=*value>{*label}</option> }
+                                    let selected = move || state.actions.reboot_mode.get() == value;
+                                    view! {
+                                        <option value=value prop:selected=selected>
+                                            {label}
+                                        </option>
+                                    }
                                 })
                                 .collect_view()}
                         </select>
@@ -336,7 +317,12 @@ pub(crate) fn ReauthorizeLink() -> impl IntoView {
 /// endpoint, which has no per-patch variant, and "selected" is a library script that
 /// receives a target list. Presenting them as one "Apply" button meant the ticked
 /// rows looked like they narrowed an apply that in fact ignored them.
-const ACTION_GROUPS: [(&str, &[(ActionKind, &str)]); 3] = [
+///
+/// Every dispatch button comes from here, Reboot included, so each one gets the
+/// same tooltip, accessible name and disabled-reason stacking. Reboot's mode and
+/// reason are *not* per-button: they are the shared run options rendered once
+/// below, like Run as and Dry run.
+const ACTION_GROUPS: [(&str, &[(ActionKind, &str)]); 4] = [
     (
         "Scan",
         &[
@@ -362,6 +348,7 @@ const ACTION_GROUPS: [(&str, &[(ActionKind, &str)]); 3] = [
             (ActionKind::SoftwarePatchRemediate, "Selected Software"),
         ],
     ),
+    ("Restart", &[(ActionKind::Reboot, "Reboot…")]),
 ];
 
 /// Confirmation modal. Shows exactly what will happen — including the literal
@@ -408,6 +395,7 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                         util::can_confirm_action(
                             blocked,
                             state.actions.dispatching.get(),
+                            state.actions.dispatch_error.with(Option::is_some),
                             needs_typed,
                             typed,
                             &expected,
@@ -415,6 +403,7 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                     })
                 }
             });
+            let failed = move || state.actions.dispatch_error.with(Option::is_some);
 
             view! {
                 <div class="modal-overlay" role="presentation">
@@ -579,15 +568,45 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                             </label>
                         </Show>
 
+                        // A failed dispatch keeps the dialog open and says why here,
+                        // where the operator is looking. Its token is spent, so the
+                        // way forward is a fresh plan (or Cancel), not Run again.
+                        <Show when=failed>
+                            <div class="modal-error" role="alert">
+                                <p>
+                                    <strong>"Dispatch failed: "</strong>
+                                    {move || state.actions.dispatch_error.get().unwrap_or_default()}
+                                </p>
+                                <p class="modal-sub">
+                                    "Nothing more will be sent from this confirmation. Re-plan to check the targets again and get a fresh confirmation."
+                                </p>
+                            </div>
+                        </Show>
+
                         <div class="modal-actions">
                             <button
                                 class="btn"
                                 prop:disabled=move || state.actions.dispatching.get()
                                 on:click=move |_| state.cancel_plan()
                             >
-                                "Cancel"
+                                {move || if failed() { "Close" } else { "Cancel" }}
                             </button>
-                            <Show when=move || !blocked>
+                            <Show when=failed>
+                                <button
+                                    class="btn btn-primary"
+                                    prop:disabled=move || state.actions.dispatching.get()
+                                    on:click=move |_| state.replan()
+                                >
+                                    {move || {
+                                        if state.actions.dispatching.get() {
+                                            "Re-planning…"
+                                        } else {
+                                            "Re-plan"
+                                        }
+                                    }}
+                                </button>
+                            </Show>
+                            <Show when=move || !blocked && !failed()>
                                 <button
                                     class="btn btn-primary"
                                     prop:disabled=move || !can_confirm.get()
@@ -629,15 +648,34 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
 fn RunAsRoles() -> impl IntoView {
     let state = expect_context::<AppState>();
     let roles = RwSignal::new(Vec::<String>::new());
+    // Stamp of the newest lookup, so a slow reply for a device no longer sampled
+    // cannot land after (and overwrite) the reply for the one that is.
+    let request = StoredValue::new(0u64);
+
+    // The one input the lookup depends on. A memo, because the effect used to track
+    // the whole selection: every checkbox tick refetched the same device's roles,
+    // the replies raced, and a failing lookup toasted once per click.
+    let sampled = Memo::new(move |_| {
+        state
+            .actions
+            .selected
+            .with(|s| s.keys().next().copied())
+            .filter(|_| state.blocked_reason().is_none())
+    });
 
     Effect::new(move |_| {
-        let first = state.actions.selected.with(|s| s.keys().next().copied());
-        let Some(device_id) = first.filter(|_| state.can_act()) else {
+        let seq = util::next_query_seq(request.get_value());
+        request.set_value(seq);
+        let Some(device_id) = sampled.get() else {
             roles.set(Vec::new());
             return;
         };
         leptos::task::spawn_local(async move {
-            match api::list_run_as_options(device_id).await {
+            let outcome = api::list_run_as_options(device_id).await;
+            if util::is_superseded(request.get_value(), seq) {
+                return;
+            }
+            match outcome {
                 Ok(opts) => roles.set(opts.roles),
                 // Every other call in this file routes failures through a Toast.
                 // Swallowing this one left an empty "Run as" datalist that looked
@@ -687,15 +725,14 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
         <fieldset class="script-picker" prop:disabled=disabled>
             <label>
                 "Script"
-                <select
-                    prop:value=move || {
-                        state.actions.script_id.get().map(|i| i.to_string()).unwrap_or_default()
-                    }
-                    on:change=move |ev| {
-                        state.actions.script_id.set(event_target_value(&ev).parse().ok())
-                    }
-                >
-                    <option value="">
+                // Selection rides on each option (see the reboot Mode select): the
+                // picker lives in a collapsible `<details>` under a `<Show>`, and
+                // `prop:value` on a remount showed "Select a script…" over a stored
+                // script id that the next dispatch would still use.
+                <select on:change=move |ev| {
+                    state.actions.script_id.set(event_target_value(&ev).parse().ok())
+                }>
+                    <option value="" prop:selected=move || state.actions.script_id.get().is_none()>
                         {move || {
                             if state.actions.scripts_loading.get() {
                                 "Loading…"
@@ -711,7 +748,13 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
                             .get()
                             .into_iter()
                             .map(|s| {
-                                view! { <option value=s.id.to_string()>{s.name}</option> }
+                                let id = s.id;
+                                let selected = move || state.actions.script_id.get() == Some(id);
+                                view! {
+                                    <option value=id.to_string() prop:selected=selected>
+                                        {s.name}
+                                    </option>
+                                }
                             })
                             .collect_view()
                     }}
@@ -800,7 +843,9 @@ pub(crate) fn JobsTable() -> impl IntoView {
             </Show>
 
             // Dispatch lives in the action bar on the Patches tab, next to the
-            // selection it targets. This tab is history.
+            // selection it targets. This tab is history. Neither button has a job
+            // store to talk to in the browser demo, so they are not offered there.
+            <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
             <div class="jobs-toolbar">
                 <button class="btn btn-sm" on:click=move |_| state.refresh_jobs()>
                     "Refresh"
@@ -814,6 +859,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
                     "Clear history"
                 </button>
             </div>
+            </Show>
 
             <h3 class="jobs-heading">"This session"</h3>
 

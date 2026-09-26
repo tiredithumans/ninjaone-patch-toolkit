@@ -1,7 +1,8 @@
 # NinjaOne API client: retry and pagination
 
 Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
-Code: `src-tauri/src/api/mod.rs` (`NinjaApiClient`), `src-tauri/Cargo.toml` (reqwest features).
+Code: `src-tauri/src/api/mod.rs` (`NinjaApiClient`, retry), `src-tauri/src/api/paging.rs`
+(`get_paginated`, `parse_page`, `PagedRow`, `PageCursor`), `src-tauri/Cargo.toml` (reqwest features).
 Spec: rendered docs at <https://app.ninjarmm.com/apidocs/?links.active=core>; raw OpenAPI at
 <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> (grep it; the SPA can't be scraped).
 **Verify endpoint shapes, params, and field/status enums against the spec — never infer them
@@ -10,22 +11,29 @@ from endpoint names or memory.**
 ## Reuse the shared retry + pagination
 
 Every call goes through `NinjaApiClient`: `{base}/api/v2{path}`, bearer auth, retry on timeout /
-connect failure / **5xx** / 429 (honors `Retry-After`) / 401 (forces a token refresh).
-`get_paginated` handles **both** a bare JSON array **and** the `{ results, cursor }` envelope,
-where `cursor` may be a string or a `{ name, offset, … }` object; it stops when a page returns 0
-rows even if the server echoes a stale token. Don't hand-roll a second reqwest/cursor loop.
+connect failure / **5xx** / 429 (honors `Retry-After`, capped at `MAX_RETRY_AFTER_SECS` = 60 s —
+the header is server-controlled, and an uncapped value parked a dispatch for as long as it asked)
+/ 401 (forces a token refresh). `get_paginated` handles **both** a bare JSON array **and** the
+`{ results, cursor }` envelope, where `cursor` may be a string or a `{ name, offset, … }` object;
+it stops when a page returns 0 rows even if the server echoes a stale token. Don't hand-roll a
+second reqwest/cursor loop.
+
+Only an endpoint the spec gives paging parameters goes through `get_paginated`. `/roles` declares
+none (see `docs/api/ninjaone-surface.md`), so it is one `get_json`: paged with `after`, a tenant
+with a full page of roles got the same page back for the second request, which the forward-progress
+guard below rightly reports as a stall.
 
 ## Paginated bodies are deserialized straight into `T`; everything else goes through `Value`
 
 `send_with_retry` owns the request/retry loop and returns the raw `reqwest::Response`;
 `request_raw` decodes it as a `Value` (single-shot GETs, acting POSTs — all small bodies) and
-`request_page` decodes it as a `PageBody<T>` (`api::parse_page`). The paginated path exists
+`request_page` decodes it as a `PageBody<T>` (`api::paging::parse_page`). The paginated path exists
 because a whole-fleet third-party feed runs to six figures, and a `Value` intermediate allocates a
 `String` for every JSON key on every row and then walks the tree again to build the `Patch` — the
 rows are parsed twice. `parse_page` dispatches on the body's first non-whitespace byte and reads
 the `{ results, cursor }` wrapper via `serde_json`'s `RawValue` (hence the `raw_value` feature),
 so the shape checks stay explicit and the rows are parsed once. The `after`-paginated branch needs
-each row's id, which is no longer reachable generically — `api::PagedRow` supplies it, so a new
+each row's id, which is no longer reachable generically — `api::paging::PagedRow` supplies it, so a new
 paged type is a compile error rather than a silently non-advancing cursor.
 
 ## The retry policy is a pure function
@@ -78,8 +86,22 @@ A reporting pull is dozens of *sequential* cursor pages, so a gateway 502 on a l
 discard every page already accumulated — 5xx is the most common transient failure on that path,
 far more so than 429. But a 5xx on an acting POST is exactly the ambiguity
 `ReplaySafety::ActOnce` exists for (the gateway may have failed *after* the job reached the device
-queue), so writes still fail through to `JobState::Unknown` and are polled, never replayed.
-429/401 stay replayable for both.
+queue), so writes are never replayed. 429/401 stay replayable for both.
+
+## An ambiguous write fails with the `OutcomeUnknown` type, never a phrase
+
+Every `ActOnce` failure after which the action may still have reached NinjaOne fails with
+`api::OutcomeUnknown`: a timeout or a connection lost after send (anything but `is_connect()` /
+`is_builder()`), a 5xx, and a 2xx whose body cannot be decoded (or, for `script/run`, has a shape
+`parse_dispatch_response` does not recognize). The dispatch site checks `api::is_outcome_unknown`
+— a downcast that sees through added `.context()` — and records `JobState::Unknown`, which is
+polled and never replayed. A 4xx, a connect failure and a refusal before sending stay plain errors
+and become `Failed`.
+
+This used to be `msg.contains("may already")`, a phrase only the timeout arm produced, while this
+note already claimed a 5xx became `Unknown`. It didn't: a gateway 502 on an apply, a connection
+reset mid-POST, or an unreadable 200 was recorded as `Failed` while the device could be installing
+— and `Failed` reads as "safe to press Apply again".
 
 ## reqwest's default features are off, so every one it drops must be re-added explicitly
 

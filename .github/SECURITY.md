@@ -22,8 +22,16 @@ fixes. Update to the newest release before reporting.
 
 In scope: the desktop app and the two crates in this repository — the OAuth 2.0
 + PKCE authentication / token handling, the NinjaOne API client, OS-keyring
-storage of the refresh token and optional client secret, and the local data
-handling / Excel export.
+storage of the refresh token and optional client secret, the local data
+handling / Excel and HTML export, and in particular:
+
+- the **device-action write path** (opt-in *Patch actions*: patch scan / apply,
+  reboot, and running automation-library scripts against devices under the
+  `management` scope) — its guardrails, confirm tokens, and anything that could
+  make an action reach more devices, patches or scripts than the operator
+  confirmed; and
+- the **auto-updater** — manifest and artifact signature verification, the
+  update endpoint, and the release pipeline that signs updates.
 
 Out of scope: vulnerabilities in the NinjaOne platform or API itself (report
 those to NinjaOne); and issues that require an already-compromised workstation
@@ -35,7 +43,9 @@ The security model is described in the
 [Security section of the README](../README.md#security): access tokens are kept
 in memory only; the refresh token and the optional client secret live in the OS
 keyring (Keychain / Credential Manager / Secret Service); nothing sensitive is
-written to `settings.json`; and the app requests read-only (`monitoring`) scope.
+written to `settings.json`. By default the app requests read-only scope
+(`monitoring offline_access`); `management` is requested only after an operator
+switches on *Patch actions* in Settings and re-authorizes.
 
 ## Release integrity
 

@@ -621,6 +621,15 @@ pub enum JobState {
 }
 
 impl JobState {
+    /// Mirrors the backend's `JobState::is_terminal`. `Unknown` is deliberately not
+    /// terminal: a timed-out dispatch is polled until `/activities` resolves it.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed(_) | Self::TimedOut | Self::Skipped(_)
+        )
+    }
+
     pub fn label(&self) -> String {
         match self {
             Self::Queued => "Queued".into(),
@@ -843,13 +852,17 @@ pub struct RunRecord {
     pub os_patches: bool,
     pub software_patches: bool,
     pub scoped: bool,
+    /// Canonical spelling of every facet the run applied. Two runs with different
+    /// keys (org A vs org B, or a severity-only run) are not one series. Empty on
+    /// lines written before the key existed.
+    pub scope_key: String,
 }
 
 impl RunRecord {
     /// Compliance over the population the rollups cover. `None` for an empty scope
     /// rather than 0% — an empty scope is not a fleet at zero compliance, and
     /// charting it as one is the same class of lie as rounding 99.5% up to 100.
-    /// Mirrors `history::RunRecord::compliance_pct`.
+    /// The backend stores only the two counts; the percentage is derived here.
     pub fn compliance_pct(&self) -> Option<f64> {
         (self.devices_in_scope > 0)
             .then(|| self.devices_compliant as f64 * 100.0 / self.devices_in_scope as f64)
@@ -866,11 +879,11 @@ impl RunRecord {
     }
 
     /// Whether two records measured the same thing, and so belong on one trend line.
-    /// Mirrors `history::RunRecord::comparable_with`.
     pub fn comparable_with(&self, other: &Self) -> bool {
         self.instance == other.instance
             && self.os_patches == other.os_patches
             && self.software_patches == other.software_patches
             && self.scoped == other.scoped
+            && self.scope_key == other.scope_key
     }
 }

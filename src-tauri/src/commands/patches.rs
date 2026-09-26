@@ -9,19 +9,19 @@ use tauri::{AppHandle, Emitter, State};
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::error::UiError;
 use crate::filter::FilterParams;
-use crate::model::{Device, Location, Organization, Patch, PatchRow, PatchStatus, PatchType, Role};
+use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
     GroupBy, GroupPage, LookupMaps, PatchFamilies, PatchSource, QueryResult, QuerySummary, RowSort,
     build_age_buckets, build_compliance, build_compliance_by_os, build_device_summaries,
-    build_failures, build_query_scope, build_rows, build_severity_by_org, group_member_page,
-    page_rows, pending_counts, slice_groups,
+    build_failures, build_groups, build_query_scope, build_rows, build_severity_by_org,
+    group_member_page, page_rows, pending_counts, slice_groups, sort_order,
 };
 use crate::settings::MAX_WINDOW_DAYS;
-use crate::state::{AppState, CurrentPatches, StoreOutcome};
+use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
 
-/// The org/location/role lookups a query joins against, each shared behind `Arc`
-/// so a cache hit hands out a cheap refcount bump instead of a deep clone.
-type Lookups = (Arc<Vec<Organization>>, Arc<Vec<Location>>, Arc<Vec<Role>>);
+/// The org/location/role lookups a query joins against, shared behind the cache's
+/// `Arc` so a cache hit hands out a cheap refcount bump instead of a deep clone.
+type Lookups = Arc<LookupSet>;
 
 /// Size of the first page of detail rows returned inline by `query_patches`. Must
 /// match the frontend's `PATCHES_PAGE_SIZE` so the seeded page fills the table's
@@ -224,18 +224,6 @@ fn summary_for(
     }
 }
 
-/// The fetch→scope→join→rollup core of [`query_patches`], split out so it can be
-/// driven in tests against a mock NinjaOne server without a Tauri `AppHandle`/`State`.
-///
-/// `lookups`, `devices_fut`, and `current_fut` are taken as *futures* (not resolved
-/// values) so the cached-or-fetched org/location/role lookups, the whole-fleet device
-/// inventory, and the whole-fleet current patches all resolve concurrently with the
-/// per-query install-history fetch — a cache hit resolves its future instantly.
-/// `query_patches` passes the `AppState` cache accessors; a test passes ready values.
-/// The whole-fleet devices and current patches are then scoped to the requested
-/// identity facets **client-side** (so a re-filter needs no refetch). `progress` (the
-/// UI sink, keyed by stage) and `now` (the clock, for the release/install windows, SLA
-/// aging, and `generated_at`) are injected so the caller owns both.
 /// The routing decisions a query makes *before* it fetches anything: which feeds
 /// to hit, which statuses narrow which source, and the absolute time bounds.
 ///
@@ -344,9 +332,7 @@ impl QueryPlan {
 struct FetchedSources {
     devices: Arc<Vec<Device>>,
     current: CurrentPatches,
-    orgs: Arc<Vec<Organization>>,
-    locations: Arc<Vec<Location>>,
-    roles: Arc<Vec<Role>>,
+    lookups: Lookups,
     os_installs: Vec<Patch>,
     sw_installs: Vec<Patch>,
 }
@@ -359,6 +345,11 @@ struct FetchedSources {
 /// inventory, and the whole-fleet current patches all resolve concurrently with the
 /// per-query install-history fetch — a cache hit resolves its future instantly.
 /// `query_patches` passes the `AppState` cache accessors; a test passes ready values.
+/// The whole-fleet devices and current patches are then scoped to the requested
+/// identity facets **client-side** (so a re-filter needs no refetch). `progress` (the
+/// UI sink, keyed by stage) and `now` (the clock, for the first-seen and install
+/// windows, SLA aging since first seen, and `generated_at`) are injected so the
+/// caller owns both.
 #[allow(clippy::too_many_arguments)]
 async fn run_query<L, D, C>(
     api: &NinjaApiClient,
@@ -432,7 +423,7 @@ where
     // finish and cache.
     let devices = devices?;
     let current = current?;
-    let (orgs, locations, roles) = lookup_sets?;
+    let lookups = lookup_sets?;
     let os_installs = os_installs?;
     let sw_installs = sw_installs?;
 
@@ -441,9 +432,7 @@ where
     let src = FetchedSources {
         devices,
         current,
-        orgs,
-        locations,
-        roles,
+        lookups,
         os_installs,
         sw_installs,
     };
@@ -466,7 +455,11 @@ fn assemble_result(
     sla_days: i64,
     now: DateTime<Utc>,
 ) -> QueryResult {
-    let maps = LookupMaps::build(&src.orgs, &src.locations, &src.roles);
+    let maps = LookupMaps::build(
+        &src.lookups.orgs,
+        &src.lookups.locations,
+        &src.lookups.roles,
+    );
 
     // Scope the whole-fleet caches to the selected identity facets (org/location/
     // role/class) client-side — this is what makes a re-filter a no-refetch
@@ -680,16 +673,42 @@ pub async fn get_patch_rows(
     limit: usize,
     sort: Option<RowSort>,
 ) -> Result<Vec<PatchRow>, UiError> {
-    // `with_sorted_result` runs the page-slice under the lock and only against a
-    // result belonging to the current tenant (a tenant switch reads as empty). It
-    // also memoizes the sort order, so paging through a sorted view costs one sweep
-    // rather than one per page — the lock is held for a slice, not a full re-sort.
+    // Only a result belonging to the current tenant is read (a tenant switch reads
+    // as empty). The sort order is memoized, so paging through a sorted view costs
+    // one sweep rather than one per page.
     let limit = clamp_page(limit);
-    let rows = state
-        .with_sorted_result(sort, |rows, order| page_rows(rows, order, offset, limit))
-        .map_err(UiError::from)?
-        .unwrap_or_default();
-    Ok(rows)
+    let Some(sort) = sort else {
+        // Cache order: a handle, then a slice of at most `limit` rows with the lock
+        // already released.
+        return Ok(state
+            .current_result_handle()?
+            .map(|result| page_rows(&result.rows, None, offset, limit))
+            .unwrap_or_default());
+    };
+    let Some(Memo { result, memo }) = state.sort_memo(sort)? else {
+        return Ok(Vec::new());
+    };
+    let order = match memo {
+        Some(order) => order,
+        None => {
+            // The first request for a sort pays one full sweep over every cached
+            // row — CPU-bound, so off the runtime, and with the result mutex
+            // released (the memo read above held it for two `Arc` bumps). It used
+            // to run inside that mutex on an async worker, stalling every other
+            // paging command, the export and unrelated IPC for its duration.
+            let rows = Arc::clone(&result);
+            let order = Arc::new(
+                tokio::task::spawn_blocking(move || sort_order(&rows.rows, sort))
+                    .await
+                    .map_err(|e| UiError::new(format!("sorting the rows panicked: {e}")))?,
+            );
+            // Kept only if this is still the cached result; either way this page is
+            // served from the rows the order was built over.
+            state.store_sort_memo(&result, sort, Arc::clone(&order));
+            order
+        }
+    };
+    Ok(page_rows(&result.rows, Some(&order), offset, limit))
 }
 
 /// Serves one page of **group headers** over the same cached rows `get_patch_rows`
@@ -707,14 +726,28 @@ pub async fn get_patch_groups(
 ) -> Result<GroupPage, UiError> {
     // Empty on a miss, matching `get_patch_rows` / `get_patch_group_members` — see
     // the note on `get_patch_rows`.
-    // Through the memo rather than `group_page`, which rebuilt the whole grouping on
-    // every request. The slice is the same; only the rebuild is gone.
+    // Through the memo, so the whole grouping is built once per `group_by` rather
+    // than on every page request.
     let limit = clamp_page(limit);
-    let page = state
-        .with_grouped_result(group_by, |all| slice_groups(all, offset, limit))
-        .map_err(UiError::from)?
-        .unwrap_or_default();
-    Ok(page)
+    let Some(Memo { result, memo }) = state.group_memo(group_by)? else {
+        return Ok(GroupPage::default());
+    };
+    let groups = match memo {
+        Some(groups) => groups,
+        None => {
+            // Same two-phase shape as `get_patch_rows`: build off the runtime with
+            // the lock released, keep it only if the result is still current.
+            let rows = Arc::clone(&result);
+            let groups = Arc::new(
+                tokio::task::spawn_blocking(move || build_groups(&rows.rows, group_by))
+                    .await
+                    .map_err(|e| UiError::new(format!("grouping the rows panicked: {e}")))?,
+            );
+            state.store_group_memo(&result, group_by, Arc::clone(&groups));
+            groups
+        }
+    };
+    Ok(slice_groups(&groups, offset, limit))
 }
 
 /// Serves one page of a single group's member rows. `key` is the opaque
@@ -728,13 +761,17 @@ pub async fn get_patch_group_members(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<PatchRow>, UiError> {
-    let rows = state
-        .with_current_result(|r| {
-            group_member_page(&r.rows, group_by, &key, offset, clamp_page(limit))
-        })
-        .map_err(UiError::from)?
-        .unwrap_or_default();
-    Ok(rows)
+    let Some(result) = state.current_result_handle()? else {
+        return Ok(Vec::new());
+    };
+    // A member lookup scans every cached row for the key, so it runs off the runtime
+    // on a handle rather than under the result mutex.
+    let limit = clamp_page(limit);
+    tokio::task::spawn_blocking(move || {
+        group_member_page(&result.rows, group_by, &key, offset, limit)
+    })
+    .await
+    .map_err(|e| UiError::new(format!("reading the group's rows panicked: {e}")))
 }
 
 #[cfg(test)]
