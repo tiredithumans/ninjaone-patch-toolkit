@@ -1,8 +1,9 @@
 # Releasing & update signing — maintainer runbook
 
 How releases are cut is covered by the release skill (bump the three manifests in lockstep,
-roll `[Unreleased]` in `CHANGELOG.md`, tag, push — `release.yml` builds and uploads the
-bundles). This document covers the part that is **not** in the workflow: the minisign key
+roll `[Unreleased]` in `CHANGELOG.md`, regenerate `THIRD-PARTY-LICENSES.md`, land that through
+a PR, then tag the merged commit on `main` and push the one tag — `release.yml` builds and
+uploads the bundles). This document covers the part that is **not** in the workflow: the minisign key
 that signs auto-updates, and what to do about it.
 
 ## How update signing works
@@ -34,6 +35,13 @@ Pick a strong password. The command prints the public key; that string goes into
 - **GitHub Actions secrets** (`TAURI_SIGNING_PRIVATE_KEY` = the private-key file's
   contents, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = its password) are the only place CI
   ever sees the key. Never commit it, never echo it in a workflow.
+- **Exposure during the build.** tauri-action builds and signs in one step, so every build
+  script and proc-macro in both dependency trees runs with the key in its environment. The
+  build job therefore restores no build cache and builds only from the committed lockfiles
+  (`trunk build --locked`, a `cargo fetch --locked` preflight). Recommended repo setting:
+  move both secrets from repository scope to a `release` **environment** limited to `v*`
+  tags (and optionally with a required reviewer), then add `environment: release` to the
+  `build` job — a workflow run on any other ref can then never read the key.
 - Keep an **offline backup** of the private key + password (password manager or sealed
   backup). **Losing the key permanently breaks auto-update for every installed copy** —
   users would have to notice on their own and manually download the next release.
