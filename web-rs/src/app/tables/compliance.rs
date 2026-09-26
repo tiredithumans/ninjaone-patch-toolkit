@@ -119,8 +119,6 @@ impl From<&OsCompliance> for ComplianceRow {
     }
 }
 
-/// Shared table for the two compliance rollups (per-organization and per-OS):
-/// identical columns, differing only in the grouping column's header and values.
 /// What clicking a rollup row's label should narrow to, or `None` for a rollup whose
 /// grouping key isn't a filter facet.
 ///
@@ -133,6 +131,8 @@ enum RollupDrill {
     Organization,
 }
 
+/// Shared table for the two compliance rollups (per-organization and per-OS):
+/// identical columns, differing only in the grouping column's header and values.
 #[component]
 fn ComplianceRollupTable(
     first_col: &'static str,
