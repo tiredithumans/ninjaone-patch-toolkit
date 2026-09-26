@@ -12,11 +12,11 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
-# Least-privilege, plus the two scopes the Pages deploy needs.
+# Least-privilege by default. Only `deploy` holds the two scopes publishing needs:
+# `build` compiles the whole frontend dependency tree (build scripts and proc-macros
+# run arbitrary code), and must not be able to mint an OIDC token or write Pages.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # Never cancel an in-flight deploy; let the running publish finish.
 concurrency:
@@ -27,8 +27,15 @@ jobs:
   build:
     name: Build (Leptos/WASM)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # configure-pages only reads the site's Pages settings.
+    permissions:
+      contents: read
+      pages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
           targets: wasm32-unknown-unknown
@@ -51,6 +58,10 @@ jobs:
     name: Deploy
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -17,8 +17,8 @@ a gate fails.
   nothing unpushed → report "nothing to ship" and stop.
 - **Gates:** Rust source changed (`src-tauri/`, `web-rs/`) → `just verify`, stop on failure.
   `.claude/hooks/` or `.claude/settings.json` changed → `.claude/hooks/test.sh`. Changes limited
-  to docs, skills or `.github/` skip verify — say so in the PR test plan. Merging here does not
-  wait on remote checks, so the local gates are the only gates.
+  to docs, skills or `.github/` skip verify — say so in the PR test plan. The local gates are
+  the fast loop; the required CI checks on `main` are the gate the merge waits for (step 4).
 - User-facing change without a `CHANGELOG.md` `[Unreleased]` line → add one before committing.
 
 ## 1. Branch
@@ -29,7 +29,8 @@ a gate fails.
 ## 2. Commit
 
 - One concern per commit, Conventional Commits (`<type>[(scope)][!]: <description>`; scopes
-  `desktop`, `web`, `api`, `auth`, `export`, `filter`, `settings`, `ci`, `docs`). Pass multi-line
+  `desktop`, `web`, `api`, `auth`, `actions`, `export`, `filter`, `settings`, `ci`, `docs`,
+  `release`). Pass multi-line
   bodies with the `-m "$(cat <<'EOF' … EOF)"` heredoc form; the validator hook understands it,
   including double quotes inside the body.
 - Stage explicitly (`git add <paths>`), never a blind `git add -A`.
@@ -43,6 +44,8 @@ a gate fails.
 
 ## 4. Merge + cleanup
 
+- `gh pr checks <num> --watch --required` — wait for the required checks. Any failure → stop and
+  report it; do not merge around it.
 - `gh pr merge <num> --merge --delete-branch` — merge commits; the command also checks out
   `main`, fast-forwards it, and deletes the local branch.
 - `git fetch --prune`, confirm `git status` is clean on the updated `main`, report the PR URL and

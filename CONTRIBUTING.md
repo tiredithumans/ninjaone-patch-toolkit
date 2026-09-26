@@ -6,16 +6,6 @@ changes** so we can agree on the approach before you invest time.
 
 By participating you agree to abide by our [Code of Conduct](./CODE_OF_CONDUCT.md).
 
-## Setup
-
-```sh
-just setup    # installs the repo's git hooks (conventional-commit subjects, pre-push `just verify`)
-```
-
-`core.hooksPath` is per-clone local config and cannot be committed, so this is a one-time
-step per checkout. The `Conventional commits` CI job enforces the same rule for anyone who
-skips it.
-
 ## Getting set up
 
 Prerequisites and the run/build commands live in the [README](./README.md). The
@@ -23,8 +13,13 @@ short version:
 
 ```bash
 cargo install just      # one-time: the task runner (or brew/winget)
+just setup              # one-time per clone: git hooks (commit subjects, pre-push `just verify`)
 just dev                # daily dev loop (= cargo tauri dev; auto-starts trunk serve)
 ```
+
+`core.hooksPath` is per-clone local config and cannot be committed, which is why
+`just setup` is a step of its own. The `Conventional commits` CI job enforces the
+same rule for anyone who skips it.
 
 You also need Rust 1.98 with the `wasm32-unknown-unknown` target (pinned in
 `rust-toolchain.toml`), the Tauri CLI, and `trunk`. No secrets or env vars are
@@ -46,8 +41,13 @@ the area you are changing.
 Run the same gates CI runs, and make sure they pass:
 
 ```bash
-just verify            # every gate CI runs, in CI's order
+just verify            # the Rust gates CI runs, in CI's order
 ```
+
+CI also runs a few gates `verify` does not (dependency audit, license notice,
+workflow and shell lint, commit subjects); they are listed in
+[docs/design/ci.md](./docs/design/ci.md). If you bumped a dependency, run
+`just licenses` and commit `THIRD-PARTY-LICENSES.md`.
 
 - **Keep changes focused.** Solve one logical thing per PR; smaller diffs review
   faster and break less.
@@ -62,8 +62,8 @@ just verify            # every gate CI runs, in CI's order
 local hook validates them): `<type>[(scope)][!]: <description>`.
 
 - **types:** `feat fix docs chore refactor test build ci perf style revert deps`
-- **scopes seen in this repo:** `desktop`, `web`, `api`, `auth`, `export`,
-  `filter`, `settings`, `ci`, `docs`
+- **scopes seen in this repo:** `desktop`, `web`, `api`, `auth`, `actions`,
+  `export`, `filter`, `settings`, `ci`, `docs`, `release`
 
 ## Reporting security issues
 

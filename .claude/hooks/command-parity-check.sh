@@ -37,7 +37,7 @@ esac
 
 # Only fire for files in the command chain.
 case "$rel" in
-  src-tauri/src/commands/*.rs) ;;
+  src-tauri/src/commands/*.rs) ;;  # `*` spans `/`, so nested modules match too
   src-tauri/src/lib.rs) ;;
   web-rs/src/api.rs) ;;
   *) exit 0 ;;
@@ -48,8 +48,9 @@ lib_rs="$project/src-tauri/src/lib.rs"
 bindings_file="$project/web-rs/src/api.rs"
 [ -d "$commands_dir" ] && [ -f "$lib_rs" ] && [ -f "$bindings_file" ] || exit 0
 
-# 1. Declared: fn name within a few lines after a #[tauri::command] attribute.
-declared=$(grep -h -A4 '#\[tauri::command' "$commands_dir"/*.rs 2>/dev/null \
+# 1. Declared: fn name within a few lines after a #[tauri::command] attribute,
+# in any module under commands/ (a domain can grow into commands/<domain>/*.rs).
+declared=$(grep -rh -A4 --include='*.rs' '#\[tauri::command' "$commands_dir" 2>/dev/null \
   | grep -oE 'fn [a-z_0-9]+' | sed 's/^fn //' | sort -u)
 
 # 2. Registered: `commands::module::name` entries inside generate_handler![].

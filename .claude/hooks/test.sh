@@ -70,8 +70,8 @@ expect_silent "parity: unrelated file is silent"
 # A command with no wrapper must be named. Simulate by pointing the hook at a
 # scratch copy of the tree with one wrapper removed.
 tmp=$(mktemp -d)
-mkdir -p "$tmp/src-tauri/src/commands" "$tmp/web-rs/src"
-cp "$project"/src-tauri/src/commands/*.rs "$tmp/src-tauri/src/commands/"
+mkdir -p "$tmp/src-tauri/src" "$tmp/web-rs/src"
+cp -R "$project/src-tauri/src/commands" "$tmp/src-tauri/src/commands"
 cp "$project/src-tauri/src/lib.rs" "$tmp/src-tauri/src/lib.rs"
 grep -v 'list_node_classes' "$project/web-rs/src/api.rs" > "$tmp/web-rs/src/api.rs"
 CLAUDE_PROJECT_DIR="$tmp" run_hook command-parity-check.sh \
@@ -81,6 +81,28 @@ CLAUDE_PROJECT_DIR="$tmp" run_hook command-parity-check.sh \
 bt='\140'
 expect_contains "parity: missing wrapper is reported" \
   "$(printf "%blist_node_classes%b has no ipc! wrapper" "$bt" "$bt")"
+rm -rf "$tmp"
+
+# A command declared in a nested module (commands/<domain>/<file>.rs) counts as
+# declared, and an edit there triggers the check. The top-level-only glob missed
+# both: the fn read as "registered but never declared".
+tmp=$(mktemp -d)
+mkdir -p "$tmp/src-tauri/src" "$tmp/web-rs/src"
+cp -R "$project/src-tauri/src/commands" "$tmp/src-tauri/src/commands"
+mkdir -p "$tmp/src-tauri/src/commands/nested"
+printf '#[tauri::command]\npub fn nested_probe() {}\n' > "$tmp/src-tauri/src/commands/nested/probe.rs"
+sed 's/generate_handler!\[/generate_handler![\n            commands::nested::nested_probe,/' \
+  "$project/src-tauri/src/lib.rs" > "$tmp/src-tauri/src/lib.rs"
+cp "$project/web-rs/src/api.rs" "$tmp/web-rs/src/api.rs"
+CLAUDE_PROJECT_DIR="$tmp" run_hook command-parity-check.sh \
+  "$(printf '{"tool_input":{"file_path":"%s/src-tauri/src/commands/nested/probe.rs"}}' "$tmp")"
+expect_contains "parity: nested-module command is declared and fires" \
+  "$(printf "%bnested_probe%b has no ipc! wrapper" "$bt" "$bt")"
+if printf '%s' "$out" | grep -qF "no #[tauri::command] fn with that name"; then
+  printf 'FAIL parity: nested-module command read as undeclared:\n%s\n' "$out"; fail=$((fail + 1))
+else
+  pass=$((pass + 1))
+fi
 rm -rf "$tmp"
 
 # --- agents-md-staleness-check -----------------------------------------------
@@ -122,6 +144,26 @@ run_hook conventional-commit-validator.sh "$(bash_payload 'git commit -m "Fixed 
 expect_code "validator: bad subject is blocked" 2
 expect_contains "validator: bad subject names the rule" 'Conventional Commits'
 
+# git's global options before `commit`, and a subject attached to -m.
+for cmd in \
+  'git -C . commit -m "Bad subject"' \
+  'git -c user.name=x commit -m "Bad subject"' \
+  'git --no-pager -C src-tauri commit -am "Bad subject"' \
+  'git commit -m"Bad subject"' \
+  'git commit -am"Bad subject"' \
+  'cd web-rs && git -C .. commit --message="Bad subject"'; do
+  run_hook conventional-commit-validator.sh "$(bash_payload "$cmd")"
+  expect_code "validator: blocks: $cmd" 2
+done
+for cmd in \
+  'git -C . commit -m "fix(web): keep Tab inside the dialog"' \
+  'git -c commit.gpgsign=false commit -m"docs: note the flag"' \
+  'git log --grep commit -n 1' \
+  'git -C . status && echo commit'; do
+  run_hook conventional-commit-validator.sh "$(bash_payload "$cmd")"
+  expect_code "validator: passes: $cmd" 0
+done
+
 heredoc=$(cat <<'MSG'
 git commit -m "$(cat <<'EOF'
 docs: explain the "why" in design notes
@@ -133,6 +175,18 @@ MSG
 )
 run_hook conventional-commit-validator.sh "$(bash_payload "$heredoc")"
 expect_code "validator: heredoc form with quotes passes" 0
+
+heredoc_bad=$(cat <<'MSG'
+git -C . commit -m "$(cat <<'EOF'
+Fixed the "dialog"
+
+Body.
+EOF
+)"
+MSG
+)
+run_hook conventional-commit-validator.sh "$(bash_payload "$heredoc_bad")"
+expect_code "validator: heredoc after a global option is checked" 2
 
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
