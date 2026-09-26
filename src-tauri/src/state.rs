@@ -354,6 +354,12 @@ pub struct AppState {
     pub api: NinjaApiClient,
     /// Locked only for brief read/clone/replace — never held across `.await`.
     pub settings: Mutex<Settings>,
+    /// Serializes the *writers* of `settings` across their disk write. A save is a
+    /// read-modify-write whose write is file (and keyring) I/O, so it cannot run
+    /// under `settings` — that would block every reader, on whatever thread, for the
+    /// duration. Held across `.await` (it is a `tokio` mutex, for exactly that),
+    /// so two saves cannot interleave and lose one's change. Readers never take it.
+    pub settings_write: tokio::sync::Mutex<()>,
     /// Last query result, stamped with the tenant it belongs to and cached so export
     /// and row paging read it without the frontend round-tripping all rows over IPC.
     /// Private on purpose: all access goes through `store_last_result` /
@@ -409,7 +415,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Result<Self> {
-        let settings = Settings::load().unwrap_or_default();
+        let settings = Settings::load_or_recover();
 
         let http = reqwest::Client::builder()
             .user_agent(concat!(
@@ -433,6 +439,7 @@ impl AppState {
             auth,
             api,
             settings: Mutex::new(settings),
+            settings_write: tokio::sync::Mutex::const_new(()),
             last_result: Mutex::new(None),
             lookups_cache: TenantCache::default(),
             fleet_devices_cache: TenantCache::default(),
@@ -456,6 +463,15 @@ impl AppState {
             warn!("settings mutex poisoned; recovering the last-known settings");
             p.into_inner().clone()
         })
+    }
+
+    /// Replaces the in-memory settings. Only a writer holding `settings_write`, and
+    /// only after the new value is safely on disk, calls this.
+    pub fn replace_settings(&self, next: Settings) {
+        *self
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
     }
 
     /// The tenant (instance + client id) that owns freshly cached data. Cheap — a
@@ -1091,6 +1107,7 @@ impl AppState {
             auth,
             api,
             settings: Mutex::new(settings),
+            settings_write: tokio::sync::Mutex::const_new(()),
             last_result: Mutex::new(None),
             lookups_cache: TenantCache::default(),
             fleet_devices_cache: TenantCache::default(),

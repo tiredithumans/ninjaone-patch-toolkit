@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Write as _,
     path::{Path, PathBuf},
 };
 
@@ -20,6 +21,13 @@ pub const DEFAULT_SLA_DAYS: i64 = 30;
 /// millisecond representation. A hand-edited `settings.json` or a stale frontend
 /// could otherwise hand a command `i64::MAX` and take the process down.
 pub const MAX_WINDOW_DAYS: i64 = 3650;
+
+/// Whether `host` (as `url::Url::host_str` spells it) is the local machine — the
+/// one place a plaintext `http://` instance is allowed, for a mock server. Shared
+/// by the load-time upgrade and the save-time check so the two cannot disagree.
+pub fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1")
+}
 
 /// A named, reusable filter combination. The device/OS/search/severity facets live
 /// in `filter`; the patch-query selectors (type/status/install window) are stored
@@ -147,20 +155,75 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn load() -> Result<Self> {
-        Self::load_from(&settings_path()?)
+    /// Loads `settings.json`, falling back to the defaults — loudly — when it cannot.
+    ///
+    /// This used to be `load().unwrap_or_default()` with nothing logged, so a corrupt
+    /// file silently became the defaults and the next save of *any* setting wrote
+    /// them over the operator's real configuration, destroying the one copy that
+    /// could have been repaired. An unparseable file is now moved aside to
+    /// `settings.json.corrupt-<UTC timestamp>` first, so it survives for inspection
+    /// and the fresh defaults never overwrite it.
+    pub fn load_or_recover() -> Self {
+        match settings_path() {
+            Ok(path) => Self::load_or_quarantine(&path, chrono::Utc::now()),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not locate settings.json; using default settings");
+                Self::default()
+            }
+        }
     }
 
-    /// Reads settings from an explicit path — the seam `load` and the tests share.
+    fn load_or_quarantine(path: &Path, now: chrono::DateTime<chrono::Utc>) -> Self {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            // Unreadable is not corrupt: the file may be fine and merely locked or
+            // permission-denied, so it is left exactly where it is.
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "could not read settings.json; using default settings for this session"
+                );
+                return Self::default();
+            }
+        };
+        match Self::parse(&text) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                let aside = quarantine_path(path, now);
+                match fs::rename(path, &aside) {
+                    Ok(()) => tracing::warn!(
+                        error = %e,
+                        moved_to = %aside.display(),
+                        "settings.json could not be parsed; it was moved aside and default settings are in use"
+                    ),
+                    Err(re) => tracing::warn!(
+                        error = %e,
+                        rename_error = %re,
+                        "settings.json could not be parsed and could not be moved aside; default settings are in use"
+                    ),
+                }
+                Self::default()
+            }
+        }
+    }
+
+    /// Reads settings from an explicit path — the seam the tests use.
     /// A missing file yields the defaults (first run); a present-but-unparseable
     /// file is an error so a corrupted config surfaces loudly rather than silently
     /// resetting the operator's instance/client configuration.
+    #[cfg(test)]
     fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
         let text = fs::read_to_string(path).context("read settings")?;
-        let mut cfg: Settings = serde_json::from_str(&text).context("parse settings")?;
+        Self::parse(&text)
+    }
+
+    fn parse(text: &str) -> Result<Self> {
+        let mut cfg: Settings = serde_json::from_str(text).context("parse settings")?;
         cfg.enforce_https_instance();
         Ok(cfg)
     }
@@ -186,8 +249,7 @@ impl Settings {
         if parsed.scheme() != "http" {
             return;
         }
-        let host = parsed.host_str().unwrap_or_default();
-        if matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+        if is_loopback_host(parsed.host_str().unwrap_or_default()) {
             return;
         }
         let upgraded = self.instance_base_url.replacen("http://", "https://", 1);
@@ -199,18 +261,55 @@ impl Settings {
         self.instance_base_url = upgraded;
     }
 
+    /// Writes `settings.json`. **Blocking** file I/O — async callers run it on a
+    /// blocking thread.
     pub fn save(&self) -> Result<()> {
         self.save_to(&settings_path()?)
     }
 
+    /// Atomic: the new contents go to a temporary file beside the real one and are
+    /// renamed over it. A plain `fs::write` truncates first, so a crash, a full disk
+    /// or a power cut mid-write left a half-written file — which the next launch
+    /// could not parse.
     fn save_to(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).context("create settings dir")?;
-        }
+        let dir = path
+            .parent()
+            .context("settings path has no parent directory")?;
+        fs::create_dir_all(dir).context("create settings dir")?;
         let text = serde_json::to_string_pretty(self).context("serialize settings")?;
-        fs::write(path, text).context("write settings")?;
-        Ok(())
+        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        let written = write_owner_only(&tmp, text.as_bytes())
+            .and_then(|()| fs::rename(&tmp, path).context("replace settings"));
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        written
     }
+}
+
+/// Creates (or truncates) `path` readable by the owner only, like the audit log and
+/// run history, writes `bytes` and syncs them to disk before the caller renames it
+/// into place.
+fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path).context("create temporary settings file")?;
+    file.write_all(bytes).context("write settings")?;
+    file.sync_all().context("flush settings")?;
+    Ok(())
+}
+
+/// Where an unparseable `settings.json` is moved: beside it, stamped so a second
+/// corruption never overwrites the first one's evidence.
+fn quarantine_path(path: &Path, now: chrono::DateTime<chrono::Utc>) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".corrupt-{}", now.format("%Y%m%dT%H%M%SZ")));
+    path.with_file_name(name)
 }
 
 fn settings_path() -> Result<PathBuf> {
@@ -386,5 +485,85 @@ mod tests {
             cfg.enforce_https_instance();
             assert_eq!(cfg.instance_base_url, url, "{url} must be preserved");
         }
+    }
+
+    /// A corrupt file used to become the defaults silently, and the next save of
+    /// any setting overwrote the operator's real configuration with them. It is
+    /// now moved aside first, so the evidence survives and the save cannot touch it.
+    #[test]
+    fn a_corrupt_file_is_moved_aside_before_defaults_are_used() {
+        let dir = std::env::temp_dir().join(format!("npt-settings-corrupt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("settings.json");
+        fs::write(&path, "{ \"instanceBaseUrl\": ").expect("write");
+        let now = chrono::DateTime::from_timestamp(1_790_000_000, 0).expect("ts");
+
+        let loaded = Settings::load_or_quarantine(&path, now);
+
+        assert_eq!(loaded.instance_base_url, DEFAULT_BASE_URL);
+        assert!(
+            !path.exists(),
+            "the corrupt file must not stay where a save would overwrite it"
+        );
+        let aside = quarantine_path(&path, now);
+        assert_eq!(
+            aside.file_name().unwrap().to_string_lossy(),
+            "settings.json.corrupt-20260921T141320Z"
+        );
+        assert_eq!(
+            fs::read_to_string(&aside).expect("kept"),
+            "{ \"instanceBaseUrl\": "
+        );
+
+        // A later save writes a fresh file and leaves the evidence alone.
+        loaded.save_to(&path).expect("save");
+        assert!(aside.exists());
+        assert!(Settings::load_from(&path).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A missing file is a first run, not a corruption: nothing is moved.
+    #[test]
+    fn a_missing_file_is_not_quarantined() {
+        let path = temp_path("quarantine-missing");
+        let _ = fs::remove_file(&path);
+        let loaded = Settings::load_or_quarantine(&path, chrono::Utc::now());
+        assert_eq!(loaded.callback_port, DEFAULT_CALLBACK_PORT);
+    }
+
+    /// The save goes through a temporary file and a rename, leaves no temporary
+    /// behind, and the result is owner-only like the audit log.
+    #[test]
+    fn saving_replaces_the_file_atomically_and_owner_only() {
+        let dir = std::env::temp_dir().join(format!("npt-settings-atomic-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+
+        Settings::default().save_to(&path).expect("first save");
+        let edited = Settings {
+            sla_days: 9,
+            ..Settings::default()
+        };
+        edited.save_to(&path).expect("overwrite");
+
+        assert_eq!(Settings::load_from(&path).expect("load").sla_days, 9);
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .expect("list")
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n != "settings.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temporary files left behind: {leftovers:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }
