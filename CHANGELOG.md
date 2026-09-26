@@ -35,6 +35,10 @@ version and start a fresh `[Unreleased]`.
   a dialog whose single-use token could no longer succeed.
 - **"Update & restart" waits until in-flight jobs finish.**
 - Patch rows with no device id can no longer be selected as action targets.
+- **Changing the reboot reason after review now requires reviewing again.** The reason is sent to
+  NinjaOne but was not covered by the confirmation.
+- Action audit and run-history records are each written in one piece, so concurrent or
+  interrupted writes can no longer split or fuse a line.
 
 **Sign-in and settings**
 

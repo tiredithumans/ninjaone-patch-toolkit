@@ -36,14 +36,18 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
 ├── src/main.rs                  # binary entry → lib::run()
 ├── src/paths.rs                 # app_dir(): the one on-disk location for settings, logs, audit + history files
-├── src/state.rs                 # AppState: auth, api client, settings, tenant-stamped result/fleet caches, job store, confirm-token slot
+├── src/state.rs                 # AppState: auth, api client, settings, result cache + memos, fleet/lookup accessors, invalidation
+├── src/state/cache.rs           # TenantCache<T>: tenant-stamped, TTL'd, epoch-gated, single-flight slot
+├── src/state/jobs.rs            # job store, single-claim poller slot, confirm-token slot
 ├── src/state/tests.rs
 ├── src/auth.rs                  # OAuth2 PKCE (S256, loopback), keyring, single-flight refresh, conditional scope + management grant
 ├── src/auth/tests.rs
 ├── src/actions.rs               # device-action domain: ActionKind/JobState/JobReport, pure plan() guardrails, build_parameters
 ├── src/actions/audit.rs         # append-only action-audit.jsonl (parameters redacted)
 ├── src/api/                     # NinjaOne Public API client
-│   ├── mod.rs                   # NinjaApiClient: /api/v2, bearer, retry policy, cursor paging, single-parse pages
+│   ├── mod.rs                   # NinjaApiClient: /api/v2, bearer, retry policy (retry_for), ReplaySafety/OutcomeUnknown, df_query
+│   ├── paging.rs                # get_paginated, parse_page/PagedRow, cursor forward-progress
+│   ├── tests.rs                 # retry / pagination / replay tests (wiremock)
 │   ├── devices.rs               # device inventory
 │   ├── patches.rs               # current patches + install-history endpoints
 │   ├── actions.rs               # WRITE path: patch scan/apply, reboot, script/run, automation-script library
@@ -66,6 +70,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
 ├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
+├── src/commands/actions/        # mod.rs handlers · confirm.rs request_hash · plan.rs build_plan · dispatch.rs send_action · poller.rs poll_tick · tests.rs
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
 ├── src/commands/patches/tests.rs
 ├── build.rs                     # tauri_build::build()
@@ -117,7 +122,7 @@ about.toml · about.hbs · about-web.hbs  # cargo-about config + templates → T
   `get_paginated` / `request_raw`; never a second reqwest/cursor loop.
 - **New device action** — 4 steps: the POST in `api/actions.rs` via `post_action`/`post_json`
   (`ReplaySafety::ActOnce`); an `ActionKind` variant with correct `is_mutating()` /
-  `supports_dry_run()`; the dispatch arm in `commands::actions::send_action`; the button in
+  `supports_dry_run()`; the dispatch arm in `commands::actions::dispatch::send_action`; the button in
   `web-rs/src/app/actions.rs::ACTION_GROUPS` under the heading that names its *mechanism*. Mirror the
   variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **New filter facet** — a device facet extends `PreparedFilter::device_allowed` (+
