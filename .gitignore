@@ -17,6 +17,13 @@
 # Screenshot tooling (Node/Playwright dev tool — see scripts/)
 /scripts/node_modules
 
+# Claude Code: per-session worktrees and personal (uncommitted) settings
+/.claude/worktrees/
+/.claude/settings.local.json
+
+# Python bytecode (scripts/ninjaone-spec-digest.py)
+__pycache__/
+
 # OS / editor cruft
 .DS_Store
 *.swp

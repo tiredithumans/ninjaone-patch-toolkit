@@ -35,6 +35,6 @@ cat >&2 <<MSG
   subject:  $subject
   expected: <type>[(scope)][!]: <description>
   types:    feat fix docs chore refactor test build ci perf style revert deps
-  scopes:   desktop web api auth export filter settings ci docs
+  scopes:   desktop web api auth actions export filter settings ci docs release
 MSG
 exit 1
