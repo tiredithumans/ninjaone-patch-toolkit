@@ -23,15 +23,17 @@ lists individual patches per server, and exports to Excel.
   only when you switch on **Patch actions**. Refresh token stored in the OS keyring; the
   client secret is optional (Native app registrations have none).
 - **Advanced filtering** — Organization, Location, Device Role, and OS Type. OS Type is
-  both the coarse NinjaOne node‑class facet (pushed into the `df` query) and a granular,
-  client‑side OS‑name substring filter.
+  both the coarse NinjaOne node‑class facet and a granular OS‑name substring filter; both
+  are matched client‑side against the device inventory (NinjaOne's patch queries ignore
+  `class` in `df`).
 - **Per‑server patch listing** by **type** (All / OS / Software) and **status**
   (Pending / Approved / Rejected / Installed, plus Failed). Installed patches are pulled
   from the patch‑install history endpoints over a configurable window.
 - **Excel export** (`.xlsx`) — a **Patches** detail sheet plus **Compliance**, **Compliance by
-  OS**, **Needs Reboot** and **Patch Failures** summary sheets. Every sheet freezes its header
-  row; the detail sheet also gets an autofilter, being the only one meant to be sliced by hand.
-  A summary sheet is written only when it has rows.
+  OS**, **Needs Reboot** and **Patch Failures** summary sheets, and an **About** sheet recording
+  when the data was fetched and which filters scoped it. Every sheet freezes its header row; the
+  detail sheet also gets an autofilter, being the only one meant to be sliced by hand. A summary
+  sheet is written only when it has rows.
 - **Patching‑ops extras**
   - Install‑history export (what actually installed / failed) over a date window.
   - Reboot & failure views (devices pending reboot; `FAILED` patches).
@@ -52,7 +54,7 @@ web-rs/      Leptos 0.8 (CSR) frontend, bundled by Trunk, talking to the backend
 
 Backend modules of note: `auth.rs` (PKCE + keyring), `api/` (client, pagination, lookups,
 devices, patches, actions), `state.rs` (tenant‑stamped whole‑fleet + result caches),
-`filter.rs` (`df` builder + client‑side facets), `rows.rs` (join → `PatchRow`, compliance,
+`filter.rs` (`df` builder + client‑side facets), `rows/` (join → `PatchRow`, compliance,
 SLA/severity/age rollups), `actions.rs` + `commands/actions.rs` (opt‑in device‑action
 guardrails, dispatch and job polling), `export.rs` (`rust_xlsxwriter`), `report.rs`
 (standalone HTML report).
@@ -87,9 +89,12 @@ Copy the generated **Client ID** (and the **Client Secret** only if you chose `W
 
 ## Prerequisites
 
-- Rust **1.98** with the `wasm32-unknown-unknown` target (pinned in `rust-toolchain.toml`).
-- [`trunk`](https://trunkrs.dev), the Tauri CLI (`cargo install tauri-cli`), and a matching
-  `wasm-bindgen-cli` (`cargo install wasm-bindgen-cli --version <lockfile version>`).
+- Rust **1.98** with the `wasm32-unknown-unknown` target (pinned in `rust-toolchain.toml`;
+  rustup installs both on first build).
+- [`just`](https://just.systems) (`cargo install just`, or brew/winget) — the task runner
+  every command below goes through.
+- [`trunk`](https://trunkrs.dev) and the Tauri CLI (`cargo install tauri-cli`). Trunk
+  downloads the `wasm-bindgen` CLI matching `web-rs/Cargo.lock` itself; no separate install.
 - Platform webview deps (WebKitGTK on Linux; bundled on macOS/Windows).
 
 ## Run
@@ -111,7 +116,7 @@ Sign-in hanging, a 404, an empty export, or blank fields? See
 
 ```sh
 just build        # distributable bundles (.dmg/.app, .msi/.nsis, AppImage)
-just verify       # every CI gate (format, lint, tests — both crates)
+just verify       # the Rust gates CI runs (format, lint, tests — both crates)
 just test         # backend unit + wiremock integration tests
 just coverage     # backend test coverage (cargo-llvm-cov) → summary + lcov report
 ```
