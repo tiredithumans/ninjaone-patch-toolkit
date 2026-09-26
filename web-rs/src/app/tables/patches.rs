@@ -59,16 +59,14 @@ pub(super) fn PatchesTable() -> impl IntoView {
     };
     // Page navigation updates the index and fetches that page on demand — of
     // headers or of rows, matching what the view is actually showing.
-    let go_to = move |target: usize| {
+    let go_to = Callback::new(move |target: usize| {
         state.query.patches_page.set(target);
         if grouped() {
             state.fetch_groups(target);
         } else {
             state.fetch_page(target);
         }
-    };
-    let go_prev = move |_| go_to(util::prev_page(page()));
-    let go_next = move |_| go_to(util::next_page(page(), page_count()));
+    });
 
     view! {
         <Show
@@ -91,25 +89,12 @@ pub(super) fn PatchesTable() -> impl IntoView {
                     }
                 }
             >
-                <Show when=move || { page_count() > 1 }>
-                    <div class="pager">
-                        <button
-                            class="btn"
-                            prop:disabled=move || page() == 0
-                            on:click=go_prev
-                        >
-                            "‹ Prev"
-                        </button>
-                        <span class="pager-info">{pager_summary}</span>
-                        <button
-                            class="btn"
-                            prop:disabled=move || { page() + 1 >= page_count() }
-                            on:click=go_next
-                        >
-                            "Next ›"
-                        </button>
-                    </div>
-                </Show>
+                <Pager
+                    page=Signal::derive(page)
+                    page_count=Signal::derive(page_count)
+                    summary=Signal::derive(pager_summary)
+                    on_page=go_to
+                />
                 <Show when=move || state.action_surface_visible()>
                     <ActionBar/>
                 </Show>

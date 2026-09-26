@@ -235,6 +235,39 @@ fn AppliedFilterChips() -> impl IntoView {
     }
 }
 
+/// Prev / "Rows 1–100 of N" / Next above a paged table, rendered only when there
+/// is more than one page. The arithmetic is `util`'s; the caller owns the page
+/// index (already clamped) and decides what moving to a page fetches.
+#[component]
+fn Pager(
+    page: Signal<usize>,
+    page_count: Signal<usize>,
+    summary: Signal<String>,
+    on_page: Callback<usize>,
+) -> impl IntoView {
+    view! {
+        <Show when=move || { page_count.get() > 1 }>
+            <div class="pager">
+                <button
+                    class="btn"
+                    prop:disabled=move || page.get() == 0
+                    on:click=move |_| on_page.run(util::prev_page(page.get()))
+                >
+                    "‹ Prev"
+                </button>
+                <span class="pager-info">{move || summary.get()}</span>
+                <button
+                    class="btn"
+                    prop:disabled=move || { page.get() + 1 >= page_count.get() }
+                    on:click=move |_| on_page.run(util::next_page(page.get(), page_count.get()))
+                >
+                    "Next ›"
+                </button>
+            </div>
+        </Show>
+    }
+}
+
 /// The contract banner shown at the top of every results tab: which tier it belongs
 /// to, what it reflects, and exactly which filters apply or are ignored. `kind` picks
 /// the accent ("filtered" = patch-filtered tier, "fleet" = device-scope-only tier).

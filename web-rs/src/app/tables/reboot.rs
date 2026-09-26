@@ -41,27 +41,14 @@ pub(super) fn RebootTable() -> impl IntoView {
                 reflects="devices in the selected device scope flagged for reboot."
                 filters="Device scope and patch Type (the pending count covers only the patch families this query fetched). Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
-            <Show when=move || { page_count() > 1 }>
-                <div class="pager">
-                    <button
-                        class="btn"
-                        prop:disabled=move || current() == 0
-                        on:click=move |_| page.set(util::prev_page(current()))
-                    >
-                        "‹ Prev"
-                    </button>
-                    <span class="pager-info">
-                        {move || util::pager_summary("Devices", current(), PATCHES_PAGE_SIZE, total())}
-                    </span>
-                    <button
-                        class="btn"
-                        prop:disabled=move || { current() + 1 >= page_count() }
-                        on:click=move |_| page.set(util::next_page(current(), page_count()))
-                    >
-                        "Next ›"
-                    </button>
-                </div>
-            </Show>
+            <Pager
+                page=Signal::derive(current)
+                page_count=Signal::derive(page_count)
+                summary=Signal::derive(move || {
+                    util::pager_summary("Devices", current(), PATCHES_PAGE_SIZE, total())
+                })
+                on_page=Callback::new(move |target| page.set(target))
+            />
             <div class="table-wrap">
                 <table>
                     <thead>
