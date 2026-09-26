@@ -6,8 +6,16 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
     // Two-click confirm for "Clear stored secret": the first click arms the
     // button, the second fires; leaving or blurring it disarms.
     let clear_armed = RwSignal::new(false);
+    // The operator picked "Custom…" and may still be typing; see
+    // `util::region_select_value`.
+    let custom_region = RwSignal::new(false);
+    // One save in flight at a time — a second click raced the first.
+    let saving = RwSignal::new(false);
 
     let save = move |_| {
+        if saving.get_untracked() {
+            return;
+        }
         let args = SaveSettingsArgs {
             instance_base_url: state.settings.f_instance.get_untracked(),
             client_id: non_empty(state.settings.f_client_id.get_untracked()),
@@ -19,6 +27,7 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
             auto_check_updates: state.settings.f_auto_update.get_untracked(),
             actions: state.settings.f_actions.get_untracked(),
         };
+        saving.set(true);
         spawn_local(async move {
             match api::save_settings(args).await {
                 Ok(v) => {
@@ -29,6 +38,7 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                 }
                 Err(e) => state.notify(Toast::err(e)),
             }
+            saving.set(false);
         });
     };
 
@@ -76,23 +86,43 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
             <div class="grid">
                 <label>
                     "Region / Instance"
-                    <select on:change=move |ev| state.settings.f_instance.set(event_target_value(&ev))>
+                    <select on:change=move |ev| {
+                        let value = event_target_value(&ev);
+                        // Custom keeps the URL already in the field for editing; it
+                        // used to write its empty value over it.
+                        let custom = value == util::REGION_CUSTOM;
+                        custom_region.set(custom);
+                        if !custom {
+                            state.settings.f_instance.set(value);
+                        }
+                    }>
                         {REGIONS
                             .iter()
                             .map(|(url, label)| {
-                                let url = url.to_string();
-                                let sel = {
-                                    let url = url.clone();
-                                    move || state.settings.f_instance.get() == url
+                                let url = *url;
+                                let sel = move || {
+                                    state.settings.f_instance.with(|i| {
+                                        util::region_select_value(i, custom_region.get()) == url
+                                    })
                                 };
                                 view! {
-                                    <option value=url.clone() selected=sel>
+                                    <option value=url prop:selected=sel>
                                         {label.to_string()}
                                     </option>
                                 }
                             })
                             .collect_view()}
-                        <option value="">"Custom…"</option>
+                        <option
+                            value=util::REGION_CUSTOM
+                            prop:selected=move || {
+                                state.settings.f_instance.with(|i| {
+                                    util::region_select_value(i, custom_region.get())
+                                        == util::REGION_CUSTOM
+                                })
+                            }
+                        >
+                            "Custom…"
+                        </option>
                     </select>
                 </label>
                 <label>
@@ -188,8 +218,8 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
             </div>
             <ActionSettingsFields/>
             <div class="row">
-                <button class="btn btn-primary" on:click=save>
-                    "Save settings"
+                <button class="btn btn-primary" prop:disabled=move || saving.get() on:click=save>
+                    {move || if saving.get() { "Saving…" } else { "Save settings" }}
                 </button>
                 <Show when=move || state.settings.has_secret.get()>
                     <button

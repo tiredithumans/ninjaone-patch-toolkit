@@ -621,6 +621,15 @@ pub enum JobState {
 }
 
 impl JobState {
+    /// Mirrors the backend's `JobState::is_terminal`. `Unknown` is deliberately not
+    /// terminal: a timed-out dispatch is polled until `/activities` resolves it.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed(_) | Self::TimedOut | Self::Skipped(_)
+        )
+    }
+
     pub fn label(&self) -> String {
         match self {
             Self::Queued => "Queued".into(),

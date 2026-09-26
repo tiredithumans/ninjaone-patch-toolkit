@@ -1,4 +1,7 @@
-use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use leptos::web_sys::HtmlElement;
+use wasm_bindgen::JsCast;
 
 use super::*;
 
@@ -32,15 +35,7 @@ pub(crate) fn Results() -> impl IntoView {
                     rows_total: r.rows_total,
                     devices_total: r.devices_total,
                     failures: r.failures.len(),
-                    // Distinct devices across every failure group: the groups
-                    // overlap (one device usually fails several patches), so the
-                    // per-group counts cannot simply be added.
-                    failing_devices: r
-                        .failures
-                        .iter()
-                        .flat_map(|f| f.device_names.iter())
-                        .collect::<BTreeSet<_>>()
-                        .len(),
+                    failing_devices: util::failing_device_count(&r.failures),
                     orgs: r.compliance.len(),
                     reboot: r.reboot_devices.len(),
                 };
@@ -51,23 +46,41 @@ pub(crate) fn Results() -> impl IntoView {
 
     view! {
         <section class="panel results">
-            <div class="tabs" role="tablist">
-                <div class="tab-group">
-                    <span class="tab-group-label">"Filtered results"</span>
-                    <TabButton this=Tab::Patches label="Patches"/>
-                    <TabButton this=Tab::Failures label="Failures"/>
-                </div>
-                <span class="tab-divider" aria-hidden="true"></span>
-                <div class="tab-group">
-                    <span class="tab-group-label">"Fleet health"</span>
-                    <TabButton this=Tab::Compliance label="Compliance"/>
-                    <TabButton this=Tab::Reboot label="Needs Reboot"/>
-                    <TabButton this=Tab::Trend label="Trend"/>
-                </div>
-                <span class="tab-divider" aria-hidden="true"></span>
-                <div class="tab-group">
-                    <span class="tab-group-label">"Activity"</span>
-                    <TabButton this=Tab::Jobs label="Jobs"/>
+            <div class="tabs">
+                // Only tabs are owned by the tablist: the group captions are visual
+                // grouping (hidden from the accessibility tree, the tabs carry their
+                // own names) and the summary line sits outside it. Arrow keys move
+                // between tabs (roving tabindex), per the WAI-ARIA tabs pattern.
+                <div
+                    class="tab-list"
+                    role="tablist"
+                    aria-label="Results views"
+                    on:keydown=move |ev| {
+                        let Some(next) = util::tab_after_key(tab.get_untracked(), &ev.key()) else {
+                            return;
+                        };
+                        ev.prevent_default();
+                        tab.set(next);
+                        focus_tab(next);
+                    }
+                >
+                    <div class="tab-group" role="presentation">
+                        <span class="tab-group-label" aria-hidden="true">"Filtered results"</span>
+                        <TabButton this=Tab::Patches label="Patches"/>
+                        <TabButton this=Tab::Failures label="Failures"/>
+                    </div>
+                    <span class="tab-divider" aria-hidden="true"></span>
+                    <div class="tab-group" role="presentation">
+                        <span class="tab-group-label" aria-hidden="true">"Fleet health"</span>
+                        <TabButton this=Tab::Compliance label="Compliance"/>
+                        <TabButton this=Tab::Reboot label="Needs Reboot"/>
+                        <TabButton this=Tab::Trend label="Trend"/>
+                    </div>
+                    <span class="tab-divider" aria-hidden="true"></span>
+                    <div class="tab-group" role="presentation">
+                        <span class="tab-group-label" aria-hidden="true">"Activity"</span>
+                        <TabButton this=Tab::Jobs label="Jobs"/>
+                    </div>
                 </div>
                 <span class="result-summary">{summary}</span>
             </div>
@@ -107,7 +120,12 @@ pub(crate) fn Results() -> impl IntoView {
                 </div>
             </Show>
             <AppliedFilterChips/>
-            <div role="tabpanel" aria-labelledby=move || tab_dom_id(tab.get())>
+            <div
+                id=TAB_PANEL_ID
+                role="tabpanel"
+                tabindex="0"
+                aria-labelledby=move || tab_dom_id(tab.get())
+            >
                 {move || match tab.get() {
                     Tab::Patches => view! { <PatchesTable/> }.into_any(),
                     Tab::Compliance => view! { <ComplianceTab/> }.into_any(),
@@ -118,6 +136,20 @@ pub(crate) fn Results() -> impl IntoView {
                 }}
             </div>
         </section>
+    }
+}
+
+/// The one tabpanel every tab controls (its content is swapped on selection).
+const TAB_PANEL_ID: &str = "results-tabpanel";
+
+/// Moves keyboard focus to a tab button after an arrow-key selection. JS-backed,
+/// so it stays here; which tab to move to is `util::tab_after_key`.
+fn focus_tab(tab: Tab) {
+    if let Some(el) = document()
+        .get_element_by_id(tab_dom_id(tab))
+        .and_then(|e| e.dyn_into::<HtmlElement>().ok())
+    {
+        let _ = el.focus();
     }
 }
 
@@ -134,7 +166,8 @@ fn tab_dom_id(tab: Tab) -> &'static str {
 }
 
 /// One results tab button with proper tab semantics. `aria-selected` is set as a
-/// string — Leptos drops boolean-ish ARIA attributes when they're false.
+/// string — Leptos drops boolean-ish ARIA attributes when they're false. Only the
+/// selected tab is in the Tab order (roving tabindex); the arrow keys reach the rest.
 #[component]
 fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -142,9 +175,12 @@ fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
     view! {
         <button
             id=tab_dom_id(this)
+            type="button"
             role="tab"
             class=move || tab_class(tab.get(), this)
             aria-selected=move || (tab.get() == this).to_string()
+            aria-controls=TAB_PANEL_ID
+            tabindex=move || if tab.get() == this { "0" } else { "-1" }
             on:click=move |_| tab.set(this)
         >
             {label}
@@ -330,7 +366,7 @@ fn PatchesTable() -> impl IntoView {
                             <th scope="col" class="col-select">
                                 <input
                                     type="checkbox"
-                                    aria-label="Select every device on this page"
+                                    aria-label="Select every patch row on this page"
                                     prop:checked=move || state.page_selection_state().0
                                     prop:indeterminate=move || state.page_selection_state().1
                                     on:change=move |ev| {
@@ -372,43 +408,10 @@ fn PatchesTable() -> impl IntoView {
                                 .map(|r| {
                                     let sev = sev_class(&r.severity);
                                     let stat = status_class(&r.status);
-                                    // Ticks this patch on this device. Apply still
-                                    // installs everything approved on the device —
-                                    // the per-row detail is what a kbAllowList
-                                    // script is given.
-                                    // One shared copy, not two. Both closures need
-                                    // an owned `'static` row, and `PatchRow` carries
-                                    // a dozen-plus `String`s — so cloning it twice per
-                                    // row meant ~200 row copies for every reactive
-                                    // re-render of a 100-row page. An `Rc` gives each
-                                    // closure a handle for a refcount bump, and the
-                                    // cells below still move out of `r` itself.
-                                    let shared = std::sync::Arc::new(r.clone());
-                                    let row = std::sync::Arc::clone(&shared);
-                                    let checked_row = shared;
-                                    let label = format!(
-                                        "Select {} on {}",
-                                        r.kb.clone().unwrap_or_else(|| r.name.clone()),
-                                        r.device_name,
-                                    );
+                                    let row = Arc::new(r.clone());
                                     view! {
                                         <tr>
-                                            <td class="col-select">
-                                                <input
-                                                    type="checkbox"
-                                                    aria-label=label
-                                                    prop:checked=move || {
-                                                        state.is_row_selected(&checked_row)
-                                                    }
-                                                    on:change=move |ev| {
-                                                        state
-                                                            .toggle_row_selection(
-                                                                &row,
-                                                                event_target_checked(&ev),
-                                                            )
-                                                    }
-                                                />
-                                            </td>
+                                            <RowCheckbox row=row/>
                                             <td>{r.organization}</td>
                                             <td>{r.location.unwrap_or_default()}</td>
                                             <td>{r.device_role.unwrap_or_default()}</td>
@@ -510,6 +513,7 @@ fn GroupedPatches() -> impl IntoView {
                             let sub = g.sublabel.clone().unwrap_or_default();
                             let label = g.label.clone();
                             let aria = format!("Select all loaded patches in {label}");
+                            let tick_label = label.clone();
                             view! {
                                 <li class="group">
                                     <div class="group-head">
@@ -526,6 +530,7 @@ fn GroupedPatches() -> impl IntoView {
                                                 state
                                                     .toggle_group_selection(
                                                         &k_tick,
+                                                        tick_label.clone(),
                                                         event_target_checked(&ev),
                                                     )
                                             }
@@ -605,6 +610,39 @@ fn GroupedPatches() -> impl IntoView {
     }
 }
 
+/// The select cell of one patch row — the flat table and a group's members render
+/// the same checkbox, which ticks exactly this patch on this device. `Apply` still
+/// installs everything approved on the device; the per-row detail is what a
+/// `kbAllowList` script is given.
+///
+/// Takes the row behind an `Arc`: both closures need an owned `'static` row, and
+/// `PatchRow` carries a dozen-plus `String`s, so cloning it per closure meant ~200
+/// row copies for every reactive re-render of a 100-row page. An `Arc` makes each
+/// closure's copy a refcount bump.
+#[component]
+fn RowCheckbox(row: Arc<PatchRow>) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let label = format!(
+        "Select {} on {}",
+        row.kb
+            .clone()
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| row.name.clone()),
+        row.device_name,
+    );
+    let checked_row = Arc::clone(&row);
+    view! {
+        <td class="col-select">
+            <input
+                type="checkbox"
+                aria-label=label
+                prop:checked=move || state.is_row_selected(&checked_row)
+                on:change=move |ev| state.toggle_row_selection(&row, event_target_checked(&ev))
+            />
+        </td>
+    }
+}
+
 /// The member rows inside an expanded group. Deliberately a compact table rather
 /// than the full detail grid — the group header already carries the shared columns.
 #[component]
@@ -618,33 +656,12 @@ fn GroupMembers(rows: Vec<PatchRow>) -> impl IntoView {
                     {rows
                         .into_iter()
                         .map(|r| {
-                            // Same sharing as the flat table above.
-                            let shared = std::sync::Arc::new(r.clone());
-                            let row = std::sync::Arc::clone(&shared);
-                            let checked_row = shared;
                             let sev = sev_class(&r.severity);
                             let stat = status_class(&r.status);
-                            let aria = format!(
-                                "Select {} on {}",
-                                r.kb.clone().unwrap_or_else(|| r.name.clone()),
-                                r.device_name,
-                            );
+                            let row = Arc::new(r.clone());
                             view! {
                                 <tr>
-                                    <td class="col-select">
-                                        <input
-                                            type="checkbox"
-                                            aria-label=aria
-                                            prop:checked=move || state.is_row_selected(&checked_row)
-                                            on:change=move |ev| {
-                                                state
-                                                    .toggle_row_selection(
-                                                        &row,
-                                                        event_target_checked(&ev),
-                                                    )
-                                            }
-                                        />
-                                    </td>
+                                    <RowCheckbox row=row/>
                                     // In a device group the members are patches; in a
                                     // patch group they are the devices it's missing on.
                                     <td>
@@ -1167,22 +1184,26 @@ pub(crate) fn TrendTab() -> impl IntoView {
                     </p>
                     <TrendLine
                         title="Compliance"
-                        unit="%"
+                        percent=true
+                        higher_is_better=true
                         values={runs.iter().filter_map(|r| r.compliance_pct()).collect::<Vec<_>>()}
                     />
                     <TrendLine
                         title="Pending patches"
-                        unit=""
+                        percent=false
+                        higher_is_better=false
                         values={runs.iter().map(|r| r.rows_total as f64).collect::<Vec<_>>()}
                     />
                     <TrendLine
                         title="Aged criticals"
-                        unit=""
+                        percent=false
+                        higher_is_better=false
                         values={runs.iter().map(|r| r.aged_critical as f64).collect::<Vec<_>>()}
                     />
                     <TrendLine
                         title="Devices needing reboot"
-                        unit=""
+                        percent=false
+                        higher_is_better=false
                         values={runs.iter().map(|r| r.needs_reboot as f64).collect::<Vec<_>>()}
                     />
                 }

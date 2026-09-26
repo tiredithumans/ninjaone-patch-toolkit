@@ -64,7 +64,7 @@ impl Toast {
 
 /// Live record counts streamed from the backend while a query runs.
 #[derive(Clone, Copy, Default)]
-pub(super) struct Progress {
+pub(crate) struct Progress {
     pub(super) devices: usize,
     pub(super) os_patches: usize,
     pub(super) sw_patches: usize,
@@ -270,9 +270,33 @@ pub(crate) struct QueryState {
     /// Member rows per opened group. A key present in `expanded` but absent here
     /// is still loading — which is what the view renders a spinner from.
     pub(super) members: RwSignal<BTreeMap<String, Vec<PatchRow>>>,
+    /// Stamp of the newest page/group-header request. A response carrying an older
+    /// stamp is dropped: requests overlap (Next clicked twice, a sort change while
+    /// a page is loading, a refresh landing mid-page) and resolve in any order, so
+    /// without it a slow response overwrote a newer one on screen.
+    pub(super) view_seq: RwSignal<u64>,
+    /// Bumped whenever `members` is thrown away (new result, new grouping). A
+    /// member fetch started before that is from a result no longer on screen, so
+    /// it must neither fill the cache nor tick anything into the selection.
+    pub(super) members_gen: RwSignal<u64>,
 }
 
 impl QueryState {
+    /// Stamps a new page/group-header request; see `view_seq`.
+    pub(super) fn next_view_seq(self) -> u64 {
+        let seq = util::next_query_seq(self.view_seq.get_untracked());
+        self.view_seq.set(seq);
+        seq
+    }
+
+    /// Collapses every group and forgets the loaded members, invalidating any
+    /// member fetch still in flight.
+    pub(super) fn reset_members(self) {
+        self.expanded.update(|e| e.clear());
+        self.members.update(|m| m.clear());
+        self.members_gen.update(|g| *g = util::next_query_seq(*g));
+    }
+
     pub(super) fn new() -> Self {
         Self {
             result: RwSignal::new(None),
@@ -286,6 +310,8 @@ impl QueryState {
             groups_total: RwSignal::new(0),
             expanded: RwSignal::new(BTreeSet::new()),
             members: RwSignal::new(BTreeMap::new()),
+            view_seq: RwSignal::new(0),
+            members_gen: RwSignal::new(0),
         }
     }
 }
@@ -306,6 +332,9 @@ pub(crate) struct RunState {
     pub(super) progress: RwSignal<Progress>,
     pub(super) query_seq: RwSignal<u64>,
     pub(super) refresh_secs: RwSignal<u32>,
+    /// A manual run requested while another was in flight, waiting for it to
+    /// settle. Holds the queued run's `force` flag; see `util::queue_run`.
+    pub(super) queued: RwSignal<Option<bool>>,
 }
 
 impl RunState {
@@ -319,6 +348,7 @@ impl RunState {
             progress: RwSignal::new(Progress::default()),
             query_seq: RwSignal::new(0),
             refresh_secs: RwSignal::new(0),
+            queued: RwSignal::new(None),
         }
     }
 
@@ -431,9 +461,11 @@ impl UiState {
     }
 
     pub(super) fn notify(self, t: Toast) {
-        // Auto-dismiss after a few seconds (errors linger a little longer); a
-        // newer toast supersedes this one via the generation guard.
-        let ms = if t.error { 7000 } else { 4000 };
+        // Auto-dismiss after a few seconds; a newer toast supersedes this one via
+        // the generation guard. An error stays three times as long: it usually
+        // carries a backend message worth reading in full, and 7s was not enough
+        // to read one — let alone act on it — before it vanished.
+        let ms = if t.error { 12_000 } else { 4000 };
         let generation = self.toast_gen.get_untracked().wrapping_add(1);
         self.toast_gen.set(generation);
         self.toast.set(Some(t));
@@ -509,6 +541,10 @@ pub(crate) struct ActionState {
     /// Type-to-confirm text for the forced-reboot tier.
     pub(super) confirm_input: RwSignal<String>,
     pub(super) dispatching: RwSignal<bool>,
+    /// Why the last `run_action` from the open dialog failed. Shown inside the
+    /// dialog, and it disables Run: the confirm token is single-use and already
+    /// spent, so the only way forward is a fresh plan (or Cancel).
+    pub(super) dispatch_error: RwSignal<Option<String>>,
     /// `(sent, total)` while a batch is going out, so a 25-device dispatch shows
     /// movement instead of a frozen "Dispatching…".
     pub(super) dispatch_progress: RwSignal<Option<(usize, usize)>>,
@@ -543,6 +579,7 @@ impl ActionState {
             pending: RwSignal::new(None),
             confirm_input: RwSignal::new(String::new()),
             dispatching: RwSignal::new(false),
+            dispatch_error: RwSignal::new(None),
             dispatch_progress: RwSignal::new(None),
             jobs: RwSignal::new(Vec::new()),
             results_stale: RwSignal::new(false),
@@ -647,6 +684,14 @@ impl AppState {
         self.reload_locations();
     }
 
+    /// Clears the organization scope — through the same reload as a toggle, so the
+    /// location list goes back to every location and no longer-offered location
+    /// stays selected.
+    pub(super) fn clear_orgs(self) {
+        self.filters.org_ids.set(Vec::new());
+        self.reload_locations();
+    }
+
     /// Reloads the location list for the current organization selection, then prunes
     /// any selected location that is no longer offered.
     pub(super) fn reload_locations(self) {
@@ -687,15 +732,9 @@ impl AppState {
     /// (this runs imperatively at Run time, not inside a reactive scope).
     pub(super) fn snapshot_filters(self) -> AppliedFilters {
         let statuses = self.filters.statuses.get_untracked();
-        // The lookback bounds *both* install-history statuses, not just INSTALLED:
-        // `QueryPlan` sets `installed_after` whenever any `is_install_history()`
-        // status is requested, and the query always sends `install_after_days`. Tying
-        // the chip to INSTALLED alone meant a FAILED-only run — the failure dashboard —
-        // was silently truncated to the window with nothing on screen saying so, so an
-        // operator reading "12 failures" had no way to know it meant "12 in 30 days".
-        let install_days = statuses
-            .iter()
-            .any(|s| s == "INSTALLED" || s == "FAILED")
+        // An operator reading "12 failures" must be able to see it meant "12 in 30
+        // days" — see `util::needs_install_window`.
+        let install_days = util::needs_install_window(&statuses)
             .then(|| self.filters.install_days.get_untracked());
 
         let organizations = util::names_for(
@@ -770,11 +809,16 @@ impl AppState {
         match util::run_decision(
             self.run.busy.get_untracked(),
             self.run.refreshing.get_untracked(),
+            silent,
             self.session.demo.get_untracked(),
             self.is_authed(),
             statuses.is_empty(),
         ) {
             util::RunDecision::AlreadyRunning => return,
+            util::RunDecision::Queue => {
+                self.run.queued.update(|q| *q = util::queue_run(*q, force));
+                return;
+            }
             util::RunDecision::Demo => {
                 self.run_demo_query(silent);
                 return;
@@ -830,6 +874,7 @@ impl AppState {
             let superseded = util::is_superseded(self.run.query_seq.get_untracked(), seq);
             if superseded {
                 flag.set(false);
+                self.run_queued();
                 return;
             }
             match outcome {
@@ -862,18 +907,22 @@ impl AppState {
                     // summary — so without this the previous query's headers and
                     // cached members stayed on screen against the new result's counts,
                     // and re-ticking a checkbox could select a device/patch pair that
-                    // isn't in the current result at all. The flat rows behind a
+                    // isn't in the current result at all. `reset_members` also
+                    // invalidates a member fetch still in flight, which would
+                    // otherwise land old-result rows in the new view (and, from a
+                    // group checkbox, in the selection). The flat rows behind a
                     // grouped view are never drawn, so fetching them alongside was a
                     // wasted round trip on every auto-refresh tick; switching back to
                     // flat re-fetches page 0 through `set_group_by`.
+                    self.query.reset_members();
                     if grouped {
-                        self.query.expanded.update(|e| e.clear());
-                        self.query.members.update(|m| m.clear());
                         self.fetch_groups(page);
                     } else if page == 0 && self.query.patches_sort.get_untracked().is_none() {
                         // Page 0 ships inline with the summary (canonical order), so
                         // seed it directly; a later page — or a silent refresh with an
-                        // active sort — is fetched instead.
+                        // active sort — is fetched instead. Stamped like a fetch, so
+                        // a page request still in flight cannot overwrite it.
+                        self.query.next_view_seq();
                         self.query.page_rows.set(r.rows.clone());
                     } else {
                         self.fetch_page(page);
@@ -890,9 +939,15 @@ impl AppState {
                     self.query.result.set(Some(r));
                     self.query.applied_filters.set(Some(snapshot));
                     self.query.query_error.set(None);
-                    // The underlying rows just changed, so a selection made against
-                    // the previous result no longer describes what is on screen.
-                    self.clear_selection();
+                    if silent {
+                        // Same scope, fresher data: keep what the operator ticked,
+                        // minus anything this refresh no longer lists.
+                        self.prune_selection_after_refresh(seq);
+                    } else {
+                        // A new scope: a selection made against the previous result
+                        // no longer describes what is on screen.
+                        self.clear_selection();
+                    }
                     self.actions.results_stale.set(false);
                 }
                 // The toast announces the failure (aria-live); the banner keeps it
@@ -908,16 +963,99 @@ impl AppState {
                 .last_duration_ms
                 .set(Some(js_sys::Date::now() - started));
             flag.set(false);
+            self.run_queued();
+        });
+    }
+
+    /// Starts the manual run queued behind the one that just settled, if any.
+    fn run_queued(self) {
+        let mut queued = self.run.queued.get_untracked();
+        if let Some(force) = util::take_queued_run(
+            &mut queued,
+            self.run.busy.get_untracked(),
+            self.run.refreshing.get_untracked(),
+        ) {
+            self.run.queued.set(queued);
+            self.run_query_inner(false, force);
+        }
+    }
+
+    /// After a silent refresh, re-checks every selected device against its rows in
+    /// the new result and drops the ticked patches that are gone (installed,
+    /// rejected, or the device left the scope) — see `util::prune_device_selection`.
+    ///
+    /// Reads the backend's by-device grouping, which serves from the result just
+    /// cached — no NinjaOne traffic. Abandoned if another run lands meanwhile: a
+    /// manual run clears the selection itself, and a newer refresh prunes again.
+    fn prune_selection_after_refresh(self, seq: u64) {
+        let devices: Vec<i64> = self
+            .actions
+            .selected
+            .with_untracked(|s| s.keys().copied().collect());
+        if devices.is_empty() {
+            return;
+        }
+        spawn_local(async move {
+            let mut fresh = Vec::with_capacity(devices.len());
+            for id in devices {
+                // A failed (or full, so possibly partial) read keeps that device
+                // as it was rather than drop a selection the operator can't
+                // rebuild from memory; the backend re-plans against live state
+                // before any dispatch anyway.
+                if let Ok(rows) = api::get_patch_group_members(
+                    GroupBy::Device,
+                    id.to_string(),
+                    0,
+                    SELECTION_PRUNE_LIMIT,
+                )
+                .await
+                    && rows.len() < SELECTION_PRUNE_LIMIT
+                {
+                    fresh.push((id, rows));
+                }
+            }
+            if util::is_superseded(self.run.query_seq.get_untracked(), seq) {
+                return;
+            }
+            let mut removed = 0;
+            self.actions.selected.update(|sel| {
+                for (id, rows) in &fresh {
+                    removed += util::prune_device_selection(sel, *id, rows);
+                }
+            });
+            if removed > 0 {
+                self.notify(Toast::ok(format!(
+                    "Auto-refresh: {removed} selected patch row(s) are no longer listed and were deselected"
+                )));
+            }
         });
     }
 
     /// Loads the detail rows for `page` from the backend's cached result into
     /// `page_rows`. Paging fetches just the visible window rather than holding the
-    /// whole row set in the frontend.
+    /// whole row set in the frontend. Demo mode pages (and sorts) its in-memory
+    /// sample instead — there is no backend to ask, and switching the demo back to
+    /// the Flat view used to fail with "only available in the desktop app".
     pub(super) fn fetch_page(self, page: usize) {
         let sort = self.query.patches_sort.get_untracked();
+        let seq = self.query.next_view_seq();
+        if self.session.demo.get_untracked() {
+            let mut rows = self.demo_rows();
+            if let Some(sort) = sort {
+                sort_patch_rows(&mut rows, sort);
+            }
+            let (start, end) = util::page_bounds(page, PATCHES_PAGE_SIZE, rows.len());
+            self.query.page_rows.set(rows[start..end].to_vec());
+            self.query.query_error.set(None);
+            return;
+        }
         spawn_local(async move {
-            match api::get_patch_rows(page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE, sort).await {
+            let outcome =
+                api::get_patch_rows(page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE, sort).await;
+            if util::is_superseded(self.query.view_seq.get_untracked(), seq) {
+                return;
+            }
+            match outcome {
                 Ok(rows) => {
                     self.query.page_rows.set(rows);
                     self.query.query_error.set(None);
@@ -929,20 +1067,21 @@ impl AppState {
             }
         });
     }
-
     /// Switches the Patches view between flat rows and a grouped view.
     ///
-    /// Resets paging and every expand, because group keys and page offsets mean
-    /// different things in each mode — carrying them over would open arbitrary
-    /// groups. Demo mode groups its in-memory sample instead of round-tripping.
+    /// Resets paging, every expand and the previous mode's group headers, because
+    /// group keys and page offsets mean different things in each mode — carrying
+    /// them over would open arbitrary groups, and By device ↔ By patch briefly
+    /// rendered the other mode's headers until the new page landed. Demo mode groups
+    /// its in-memory sample instead of round-tripping.
     pub(super) fn set_group_by(self, group_by: Option<GroupBy>) {
         if self.query.group_by.get_untracked() == group_by {
             return;
         }
         self.query.group_by.set(group_by);
         self.query.patches_page.set(0);
-        self.query.expanded.update(|e| e.clear());
-        self.query.members.update(|m| m.clear());
+        self.query.groups.set(Vec::new());
+        self.query.reset_members();
         match group_by {
             None => self.fetch_page(0),
             Some(_) => self.fetch_groups(0),
@@ -954,6 +1093,7 @@ impl AppState {
         let Some(group_by) = self.query.group_by.get_untracked() else {
             return;
         };
+        let seq = self.query.next_view_seq();
         if self.session.demo.get_untracked() {
             let all = demo::group_rows(&self.demo_rows(), group_by);
             self.query.groups_total.set(all.len());
@@ -966,8 +1106,14 @@ impl AppState {
             return;
         }
         spawn_local(async move {
-            match api::get_patch_groups(group_by, page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE).await
-            {
+            let outcome =
+                api::get_patch_groups(group_by, page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE).await;
+            // A newer header request (another page, another mode, a new result)
+            // owns the view now.
+            if util::is_superseded(self.query.view_seq.get_untracked(), seq) {
+                return;
+            }
+            match outcome {
                 Ok(response) => {
                     self.query.groups_total.set(response.total);
                     self.query.query_error.set(None);
@@ -994,6 +1140,25 @@ impl AppState {
         });
     }
 
+    /// Fetches one group's members (capped at `GROUP_MEMBER_LIMIT`), from the demo
+    /// sample or the backend. `None` when the view moved on while it was loading —
+    /// a new result or a new grouping — in which case the rows belong to a result
+    /// no longer on screen and must be neither cached nor selected.
+    async fn load_group_members(
+        self,
+        group_by: GroupBy,
+        key: String,
+    ) -> Option<Result<Vec<PatchRow>, String>> {
+        if self.session.demo.get_untracked() {
+            return Some(Ok(demo::group_members(&self.demo_rows(), group_by, &key)));
+        }
+        let generation = self.query.members_gen.get_untracked();
+        let outcome = api::get_patch_group_members(group_by, key, 0, GROUP_MEMBER_LIMIT).await;
+        let stale = util::is_superseded(self.query.members_gen.get_untracked(), generation)
+            || self.query.group_by.get_untracked() != Some(group_by);
+        (!stale).then_some(outcome)
+    }
+
     /// Opens or closes a group, fetching its members the first time it opens.
     /// Members are cached per key, so re-opening is free and a collapse doesn't
     /// discard what was already loaded.
@@ -1014,15 +1179,11 @@ impl AppState {
         let Some(group_by) = self.query.group_by.get_untracked() else {
             return;
         };
-        if self.session.demo.get_untracked() {
-            let rows = demo::group_members(&self.demo_rows(), group_by, &key);
-            self.query.members.update(|m| {
-                m.insert(key, rows);
-            });
-            return;
-        }
         spawn_local(async move {
-            match api::get_patch_group_members(group_by, key.clone(), 0, GROUP_MEMBER_LIMIT).await {
+            let Some(outcome) = self.load_group_members(group_by, key.clone()).await else {
+                return;
+            };
+            match outcome {
                 Ok(rows) => self.query.members.update(|m| {
                     m.insert(key, rows);
                 }),
@@ -1038,7 +1199,8 @@ impl AppState {
         });
     }
 
-    /// The sample rows behind demo-mode grouping — the displayed result's rows.
+    /// The sample rows behind demo-mode paging and grouping — the displayed
+    /// result's rows, in the sample's canonical order.
     fn demo_rows(self) -> Vec<PatchRow> {
         self.query
             .result
@@ -1050,8 +1212,11 @@ impl AppState {
     /// silently do nothing.
     ///
     /// Members are capped at `GROUP_MEMBER_LIMIT`, so one click can never select
-    /// more rows than the expanded group would show.
-    pub(super) fn toggle_group_selection(self, key: &str, checked: bool) {
+    /// more rows than the expanded group would show. Ticking a group whose members
+    /// the operator has not seen also opens it and says how many rows it took: a
+    /// by-patch group can hold hundreds of devices, and selecting them behind a
+    /// collapsed header left the only trace in the action bar's running total.
+    pub(super) fn toggle_group_selection(self, key: &str, label: String, checked: bool) {
         if let Some(rows) = self.query.members.with_untracked(|m| m.get(key).cloned()) {
             for row in &rows {
                 self.toggle_row_selection(row, checked);
@@ -1062,21 +1227,24 @@ impl AppState {
             return;
         };
         let key = key.to_string();
-        if self.session.demo.get_untracked() {
-            let rows = demo::group_members(&self.demo_rows(), group_by, &key);
-            for row in &rows {
-                self.toggle_row_selection(row, checked);
-            }
-            self.query.members.update(|m| {
-                m.insert(key, rows);
-            });
-            return;
-        }
         spawn_local(async move {
-            match api::get_patch_group_members(group_by, key.clone(), 0, GROUP_MEMBER_LIMIT).await {
+            let Some(outcome) = self.load_group_members(group_by, key.clone()).await else {
+                return;
+            };
+            match outcome {
                 Ok(rows) => {
                     for row in &rows {
                         self.toggle_row_selection(row, checked);
+                    }
+                    if checked {
+                        self.notify(Toast::ok(util::group_selection_note(
+                            &label,
+                            rows.len(),
+                            rows.len() >= GROUP_MEMBER_LIMIT,
+                        )));
+                        self.query.expanded.update(|e| {
+                            e.insert(key.clone());
+                        });
                     }
                     self.query.members.update(|m| {
                         m.insert(key, rows);
@@ -1101,24 +1269,12 @@ impl AppState {
     }
 
     /// Cycles a Patches-table column through none → ascending → descending and
-    /// re-fetches page 1 in the new order. Demo mode sorts its in-memory rows
-    /// instead — the sample ships whole, so there is no backend to re-page from.
+    /// re-fetches page 1 in the new order (demo mode re-sorts its in-memory sample
+    /// inside `fetch_page`).
     pub(super) fn cycle_sort(self, key: RowSortKey) {
         let next = next_sort(self.query.patches_sort.get_untracked(), key);
         self.query.patches_sort.set(next);
         self.query.patches_page.set(0);
-        if self.session.demo.get_untracked() {
-            match next {
-                Some(s) => self.query.page_rows.update(|rows| sort_patch_rows(rows, s)),
-                // Unsorted = the sample's canonical order, kept on `result`.
-                None => self.query.page_rows.set(
-                    self.query
-                        .result
-                        .with_untracked(|r| r.as_ref().map(|r| r.rows.clone()).unwrap_or_default()),
-                ),
-            }
-            return;
-        }
         self.fetch_page(0);
     }
 
@@ -1136,8 +1292,6 @@ impl AppState {
         self.session.demo.set(true);
     }
 
-    /// Demo-mode counterpart to `run_query`: filters the in-memory sample with the
-    /// current facets (no backend, no auth) and recomputes the row count.
     /// Narrows the filters to one organization and shows the matching patch rows.
     ///
     /// The rollup tabs used to be terminal: reading "Contoso · 63% · 41 pending
@@ -1200,6 +1354,8 @@ impl AppState {
         self.run_query();
     }
 
+    /// Demo-mode counterpart to `run_query`: filters the in-memory sample with the
+    /// current facets (no backend, no auth) and recomputes the row count.
     pub(super) fn run_demo_query(self, silent: bool) {
         let statuses = self.filters.statuses.get_untracked();
         if statuses.is_empty() {
@@ -1215,17 +1371,20 @@ impl AppState {
             Some(self.filters.install_days.get_untracked()),
         );
         self.query.patches_page.set(0);
-        self.query.page_rows.set(r.rows.clone());
+        // A run returns to the canonical order, as on the live path; leaving the
+        // sort in place drew a ▲ on a header over rows that were not sorted by it.
+        self.query.patches_sort.set(None);
         self.query.result.set(Some(r));
         // Same reason as the live path: a grouped view's headers and members don't
         // ride along with the result, so they'd otherwise describe the last query.
-        // `fetch_groups` re-derives them from `demo_rows()`, which reads the result
-        // just set above.
+        // Both fetches re-derive from `demo_rows()`, which reads the result just set.
+        self.query.reset_members();
         if self.query.group_by.get_untracked().is_some() {
-            self.query.expanded.update(|e| e.clear());
-            self.query.members.update(|m| m.clear());
             self.fetch_groups(0);
+        } else {
+            self.fetch_page(0);
         }
+        self.clear_selection();
         self.query
             .applied_filters
             .set(Some(self.snapshot_filters()));
@@ -1258,6 +1417,11 @@ impl AppState {
             self.filters.org_ids.set(Vec::new());
             self.filters.loc_ids.set(Vec::new());
             self.filters.role_ids.set(Vec::new());
+            // So are the lists themselves: the switch drops the grant, and until the
+            // next sign-in reloads them the pickers offered the old tenant's names.
+            self.lookups.orgs.set(Vec::new());
+            self.lookups.locations.set(Vec::new());
+            self.lookups.roles.set(Vec::new());
         }
     }
 
@@ -1273,6 +1437,10 @@ impl AppState {
         self.actions.jobs.set(Vec::new());
         self.actions.pending.set(None);
         self.actions.confirm_input.set(String::new());
+        self.actions.dispatch_error.set(None);
+        // A run queued behind one from the old session would fire into the new
+        // one (or, signed out, just to say "Sign in first").
+        self.run.queued.set(None);
     }
 
     /// Drops everything derived from the last query: the summary, the current page,
@@ -1284,8 +1452,9 @@ impl AppState {
         self.query.patches_page.set(0);
         self.query.patches_sort.set(None);
         self.query.groups.set(Vec::new());
-        self.query.expanded.update(|e| e.clear());
-        self.query.members.update(|m| m.clear());
+        self.query.reset_members();
+        // Invalidates a page/header request still in flight for the dropped result.
+        self.query.next_view_seq();
         self.query.applied_filters.set(None);
         self.query.query_error.set(None);
         self.clear_selection();
@@ -1313,23 +1482,14 @@ impl AppState {
             .set(f.os_name_contains.unwrap_or_default());
         self.filters.search.set(f.search.unwrap_or_default());
         // Restore the release-date filter UI from the stored bounds.
-        match (f.detected_within_days, f.detected_after, f.detected_before) {
-            (Some(d), _, _) => {
-                self.filters.detected_window.set(d.to_string());
-                self.filters.detected_after_date.set(String::new());
-                self.filters.detected_before_date.set(String::new());
-            }
-            (None, after, before) if after.is_some() || before.is_some() => {
-                self.filters.detected_window.set("custom".to_string());
-                self.filters.detected_after_date.set(epoch_to_date(after));
-                self.filters.detected_before_date.set(epoch_to_date(before));
-            }
-            _ => {
-                self.filters.detected_window.set(String::new());
-                self.filters.detected_after_date.set(String::new());
-                self.filters.detected_before_date.set(String::new());
-            }
-        }
+        let (window, after, before) = util::detected_window_fields(
+            f.detected_within_days,
+            f.detected_after,
+            f.detected_before,
+        );
+        self.filters.detected_window.set(window);
+        self.filters.detected_after_date.set(after);
+        self.filters.detected_before_date.set(before);
         // Load the locations for the restored org scope, then restore the saved
         // location selection — the list has to exist before the ids can be pruned
         // against it.
@@ -1567,6 +1727,7 @@ impl AppState {
             return;
         }
         self.actions.confirm_input.set(String::new());
+        self.actions.dispatch_error.set(None);
         self.actions.dispatching.set(true);
         spawn_local(async move {
             match api::plan_action(request.clone()).await {
@@ -1583,6 +1744,38 @@ impl AppState {
     pub(super) fn cancel_plan(self) {
         self.actions.pending.set(None);
         self.actions.confirm_input.set(String::new());
+        self.actions.dispatch_error.set(None);
+    }
+
+    /// Asks for a fresh plan — and so a fresh confirm token — for the request held
+    /// in the dialog, after a dispatch from it failed and spent the old token.
+    ///
+    /// Re-plans the *same* request rather than rebuilding it from the selection:
+    /// the dialog is still showing what the operator approved, and the backend
+    /// re-checks every guardrail against current state either way.
+    pub(super) fn replan(self) {
+        let Some(pending) = self.actions.pending.get_untracked() else {
+            return;
+        };
+        let mut request = pending.request;
+        request.confirm_token = None;
+        self.actions.dispatching.set(true);
+        spawn_local(async move {
+            match api::plan_action(request.clone()).await {
+                Ok(plan) => {
+                    self.actions.dispatch_error.set(None);
+                    self.actions.confirm_input.set(String::new());
+                    self.actions
+                        .pending
+                        .set(Some(PendingAction { request, plan }));
+                }
+                Err(e) => self
+                    .actions
+                    .dispatch_error
+                    .set(Some(format!("Couldn't re-plan: {e}"))),
+            }
+            self.actions.dispatching.set(false);
+        });
     }
 
     /// Dispatches the plan currently held in the modal.
@@ -1605,10 +1798,11 @@ impl AppState {
                     self.actions.pending.set(None);
                     self.actions.confirm_input.set(String::new());
                     // Seed from the response rather than re-fetching; the backend
-                    // poller advances these rows over `action:progress`.
+                    // poller advances these rows over `action:progress`, which may
+                    // already have delivered them — hence merge, not append.
                     self.actions
                         .jobs
-                        .update(|jobs| jobs.extend(batch.jobs.clone()));
+                        .update(|jobs| util::merge_jobs(jobs, batch.jobs.clone()));
                     self.ui.active_tab.set(Tab::Jobs);
                     if mutating && batch.dispatched > 0 {
                         // The on-screen result predates the change we just made.
@@ -1624,7 +1818,10 @@ impl AppState {
                     };
                     self.notify(Toast::ok(msg));
                 }
-                Err(e) => self.notify(Toast::err(e)),
+                // Kept in the dialog, which stays open: a toast behind the overlay
+                // vanished after a few seconds and left a Run button that could
+                // only fail again, its single-use token already spent.
+                Err(e) => self.actions.dispatch_error.set(Some(e)),
             }
             self.actions.dispatching.set(false);
             self.actions.dispatch_progress.set(None);

@@ -5,22 +5,39 @@ use super::*;
 #[component]
 pub(crate) fn RunControls() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // One save dialog at a time: each export opens a native Save dialog, and a
+    // double-click used to stack two of them over the same workbook.
+    let exporting = RwSignal::new(false);
+    let export_disabled = move || {
+        exporting.get()
+            || state.query.result.with(|r| r.is_none())
+            || state.session.web_mode.get()
+            || state.session.demo.get()
+    };
 
     view! {
         <section class="panel">
             <div class="controls">
+                // Enabled during an auto-refresh on purpose: a click then queues
+                // behind it (see `util::run_decision`) and says so.
                 <button
                     class="btn btn-primary"
                     prop:disabled=move || state.run.busy.get()
                     on:click=move |_| state.run_query()
                 >
-                    {move || if state.run.busy.get() { "Running…" } else { "Run query" }}
+                    {move || {
+                        if state.run.busy.get() {
+                            "Running…"
+                        } else if state.run.queued.get().is_some() {
+                            "Queued…"
+                        } else {
+                            "Run query"
+                        }
+                    }}
                 </button>
                 <button
                     class="btn"
-                    prop:disabled=move || {
-                        state.query.result.get().is_none() || state.session.web_mode.get() || state.session.demo.get()
-                    }
+                    prop:disabled=export_disabled
                     title=move || {
                         if state.session.web_mode.get() || state.session.demo.get() {
                             "Excel export needs a live query in the desktop app"
@@ -29,12 +46,17 @@ pub(crate) fn RunControls() -> impl IntoView {
                         }
                     }
                     on:click=move |_| {
+                        if exporting.get_untracked() {
+                            return;
+                        }
+                        exporting.set(true);
                         spawn_local(async move {
                             match api::export_patches().await {
                                 Ok(Some(p)) => state.notify(Toast::ok(format!("Exported to {p}"))),
                                 Ok(None) => {}
                                 Err(e) => state.notify(Toast::err(e)),
                             }
+                            exporting.set(false);
                         });
                     }
                 >
@@ -42,9 +64,7 @@ pub(crate) fn RunControls() -> impl IntoView {
                 </button>
                 <button
                     class="btn"
-                    prop:disabled=move || {
-                        state.query.result.get().is_none() || state.session.web_mode.get() || state.session.demo.get()
-                    }
+                    prop:disabled=export_disabled
                     title=move || {
                         if state.session.web_mode.get() || state.session.demo.get() {
                             "The HTML report needs a live query in the desktop app"
@@ -53,6 +73,10 @@ pub(crate) fn RunControls() -> impl IntoView {
                         }
                     }
                     on:click=move |_| {
+                        if exporting.get_untracked() {
+                            return;
+                        }
+                        exporting.set(true);
                         spawn_local(async move {
                             match api::export_report().await {
                                 Ok(Some(p)) => {
@@ -61,6 +85,7 @@ pub(crate) fn RunControls() -> impl IntoView {
                                 Ok(None) => {}
                                 Err(e) => state.notify(Toast::err(e)),
                             }
+                            exporting.set(false);
                         });
                     }
                 >
@@ -113,7 +138,11 @@ pub(crate) fn RunControls() -> impl IntoView {
                         }}
                     </span>
                 </Show>
-                <PresetRow/>
+                // Presets persist through the backend's settings file, which the
+                // browser demo does not have: every save or delete could only fail.
+                <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
+                    <PresetRow/>
+                </Show>
             </div>
             <Show when=move || state.run.busy.get()>
                 <div class="query-progress">
@@ -174,8 +203,12 @@ pub(crate) fn RunControls() -> impl IntoView {
 #[component]
 fn PresetRow() -> impl IntoView {
     let state = expect_context::<AppState>();
+    let saving = RwSignal::new(false);
 
     let save_preset = move |_| {
+        if saving.get_untracked() {
+            return;
+        }
         let name = state.settings.preset_name.get_untracked();
         if name.trim().is_empty() {
             state.notify(Toast::err("Name the preset first"));
@@ -188,6 +221,7 @@ fn PresetRow() -> impl IntoView {
             statuses: Some(state.filters.statuses.get_untracked()),
             install_days: Some(state.filters.install_days.get_untracked()),
         };
+        saving.set(true);
         spawn_local(async move {
             match api::save_preset(preset).await {
                 Ok(p) => {
@@ -197,6 +231,7 @@ fn PresetRow() -> impl IntoView {
                 }
                 Err(e) => state.notify(Toast::err(e)),
             }
+            saving.set(false);
         });
     };
 
@@ -240,8 +275,13 @@ fn PresetRow() -> impl IntoView {
                                         }
                                         let n = del_name.clone();
                                         spawn_local(async move {
-                                            if let Ok(p) = api::delete_preset(n).await {
-                                                state.settings.presets.set(p);
+                                            match api::delete_preset(n).await {
+                                                Ok(p) => state.settings.presets.set(p),
+                                                // It used to fail silently, leaving a
+                                                // chip that looked deleted-then-not.
+                                                Err(e) => state.notify(Toast::err(format!(
+                                                    "Couldn't delete the preset: {e}"
+                                                ))),
                                             }
                                         });
                                     }
@@ -257,11 +297,12 @@ fn PresetRow() -> impl IntoView {
             }}
             <input
                 class="preset-name"
+                aria-label="Preset name"
                 placeholder="Preset name"
                 prop:value=move || state.settings.preset_name.get()
                 on:input=move |ev| state.settings.preset_name.set(event_target_value(&ev))
             />
-            <button class="btn btn-ghost" on:click=save_preset>
+            <button class="btn btn-ghost" prop:disabled=move || saving.get() on:click=save_preset>
                 "Save preset"
             </button>
         </div>

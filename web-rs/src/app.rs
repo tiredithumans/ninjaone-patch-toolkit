@@ -32,10 +32,10 @@ use toaster::Toaster;
 use update::UpdateSplash;
 use util::{
     FilterInputs, MdBlock, MdSpan, SummaryCounts, action_blocked_reason, action_disabled_reason,
-    aged_badge, aria_sort, epoch_to_date, filter_chips, filter_params, format_duration,
-    group_thousands, is_fleet_tab, job_mode_label, next_sort, non_empty, parse_changelog,
-    parse_clamped, parse_optional_id, patch_key, selection_summary, sev_class, sort_glyph,
-    sort_patch_rows, status_class, summary_line, tab_class,
+    aged_badge, aria_sort, filter_chips, filter_params, format_duration, group_thousands,
+    is_fleet_tab, job_mode_label, next_sort, non_empty, parse_changelog, parse_clamped,
+    parse_optional_id, patch_key, selection_summary, sev_class, sort_glyph, sort_patch_rows,
+    status_class, summary_line, tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;
@@ -46,6 +46,12 @@ const PATCHES_PAGE_SIZE: usize = 100;
 /// stops a single click selecting thousands of rows the operator never saw. Well
 /// above the 25-device blast-radius cap the backend enforces on dispatch.
 const GROUP_MEMBER_LIMIT: usize = 500;
+
+/// Rows read per selected device when an auto-refresh re-checks the selection —
+/// the backend's page cap. A device whose read comes back full may have more rows
+/// than were read, so its selection is left as it was rather than pruned against a
+/// partial list.
+const SELECTION_PRUNE_LIMIT: usize = 1_000;
 
 const REGIONS: [(&str, &str); 5] = [
     ("https://app.ninjarmm.com", "North America (app)"),
@@ -85,20 +91,9 @@ pub fn App() -> impl IntoView {
         // Initial load. The OS-type facet is static, so load it immediately rather
         // than gating it behind sign-in with the org/role/location lookups.
         state.load_node_classes();
-        spawn_local(async move {
-            if let Ok(a) = api::auth_status().await {
-                let authed = a.authenticated;
-                let can_act = authed && a.actions_enabled && a.write_enabled;
-                state.session.auth.set(Some(a));
-                if authed {
-                    state.load_lookups();
-                }
-                if can_act {
-                    state.load_scripts();
-                    state.refresh_jobs();
-                }
-            }
-        });
+        // What to load once signed in (and once actions become usable) is decided
+        // by the effects below, off the auth status itself — not here.
+        state.session.refresh_auth();
         spawn_local(async move {
             if let Ok(s) = api::get_settings().await {
                 let auto = s.auto_check_updates;
@@ -132,15 +127,10 @@ pub fn App() -> impl IntoView {
         if ev.query_id != state.run.query_seq.get_untracked() {
             return;
         }
-        state.run.progress.update(|p| match ev.stage.as_str() {
-            "devices" => p.devices = ev.loaded,
-            "osPatches" => p.os_patches = ev.loaded,
-            "swPatches" => p.sw_patches = ev.loaded,
-            "osInstalls" => p.os_installs = ev.loaded,
-            "swInstalls" => p.sw_installs = ev.loaded,
-            "joining" => p.joining = true,
-            _ => {}
-        });
+        state
+            .run
+            .progress
+            .update(|p| util::apply_progress_stage(p, &ev.stage, ev.loaded));
     });
 
     // Live job status from the backend poller. Rows arrive already advanced, so
@@ -156,14 +146,32 @@ pub fn App() -> impl IntoView {
         if ev.jobs.is_empty() {
             return;
         }
-        state.actions.jobs.update(|jobs| {
-            for incoming in ev.jobs {
-                match jobs.iter_mut().find(|j| j.id == incoming.id) {
-                    Some(slot) => *slot = incoming,
-                    None => jobs.push(incoming),
-                }
-            }
-        });
+        state
+            .actions
+            .jobs
+            .update(|jobs| util::merge_jobs(jobs, ev.jobs));
+    });
+
+    // Load what a session needs whenever the auth status *becomes* the state that
+    // needs it — at launch (the backend may already hold a session), after sign-in,
+    // after re-authorization, and when actions are switched on in Settings. These
+    // used to be loaded once at startup, so an operator who signed in (or enabled
+    // actions) afterwards got an empty script picker and job list until a restart.
+    // Keyed on transitions so an unrelated auth refresh does not refetch them.
+    Effect::new(move |was_authed: Option<bool>| {
+        let authed = state.is_authed();
+        if authed && was_authed != Some(true) {
+            state.load_lookups();
+        }
+        authed
+    });
+    Effect::new(move |could_act: Option<bool>| {
+        let can_act = state.blocked_reason().is_none();
+        if can_act && could_act != Some(true) {
+            state.load_scripts();
+            state.refresh_jobs();
+        }
+        can_act
     });
 
     // Tick the elapsed-time display roughly twice a second while a query runs.
