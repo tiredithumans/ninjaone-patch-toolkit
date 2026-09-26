@@ -10,10 +10,17 @@ from endpoint names or memory.**
 ## Reuse the shared retry + pagination
 
 Every call goes through `NinjaApiClient`: `{base}/api/v2{path}`, bearer auth, retry on timeout /
-connect failure / **5xx** / 429 (honors `Retry-After`) / 401 (forces a token refresh).
-`get_paginated` handles **both** a bare JSON array **and** the `{ results, cursor }` envelope,
-where `cursor` may be a string or a `{ name, offset, … }` object; it stops when a page returns 0
-rows even if the server echoes a stale token. Don't hand-roll a second reqwest/cursor loop.
+connect failure / **5xx** / 429 (honors `Retry-After`, capped at `MAX_RETRY_AFTER_SECS` = 60 s —
+the header is server-controlled, and an uncapped value parked a dispatch for as long as it asked)
+/ 401 (forces a token refresh). `get_paginated` handles **both** a bare JSON array **and** the
+`{ results, cursor }` envelope, where `cursor` may be a string or a `{ name, offset, … }` object;
+it stops when a page returns 0 rows even if the server echoes a stale token. Don't hand-roll a
+second reqwest/cursor loop.
+
+Only an endpoint the spec gives paging parameters goes through `get_paginated`. `/roles` declares
+none (see `docs/api/ninjaone-surface.md`), so it is one `get_json`: paged with `after`, a tenant
+with a full page of roles got the same page back for the second request, which the forward-progress
+guard below rightly reports as a stall.
 
 ## Paginated bodies are deserialized straight into `T`; everything else goes through `Value`
 
@@ -78,8 +85,22 @@ A reporting pull is dozens of *sequential* cursor pages, so a gateway 502 on a l
 discard every page already accumulated — 5xx is the most common transient failure on that path,
 far more so than 429. But a 5xx on an acting POST is exactly the ambiguity
 `ReplaySafety::ActOnce` exists for (the gateway may have failed *after* the job reached the device
-queue), so writes still fail through to `JobState::Unknown` and are polled, never replayed.
-429/401 stay replayable for both.
+queue), so writes are never replayed. 429/401 stay replayable for both.
+
+## An ambiguous write fails with the `OutcomeUnknown` type, never a phrase
+
+Every `ActOnce` failure after which the action may still have reached NinjaOne fails with
+`api::OutcomeUnknown`: a timeout or a connection lost after send (anything but `is_connect()` /
+`is_builder()`), a 5xx, and a 2xx whose body cannot be decoded (or, for `script/run`, has a shape
+`parse_dispatch_response` does not recognize). The dispatch site checks `api::is_outcome_unknown`
+— a downcast that sees through added `.context()` — and records `JobState::Unknown`, which is
+polled and never replayed. A 4xx, a connect failure and a refusal before sending stay plain errors
+and become `Failed`.
+
+This used to be `msg.contains("may already")`, a phrase only the timeout arm produced, while this
+note already claimed a 5xx became `Unknown`. It didn't: a gateway 502 on an apply, a connection
+reset mid-POST, or an unreadable 200 was recorded as `Failed` while the device could be installing
+— and `Failed` reads as "safe to press Apply again".
 
 ## reqwest's default features are off, so every one it drops must be re-added explicitly
 
