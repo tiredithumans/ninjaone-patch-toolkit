@@ -102,10 +102,13 @@ pub async fn query_patches(
         ));
     }
     // Validated before the token is claimed: a malformed range must not supersede a
-    // good query that is still in flight. `QueryPlan::build` re-checks it.
-    args.filter
-        .install_range(Utc::now().timestamp())
-        .map_err(UiError::new)?;
+    // good query that is still in flight. `QueryPlan::build` re-checks it — and, like
+    // it, only when the range can matter at all.
+    if args.statuses.iter().any(|s| s.is_install_history()) {
+        args.filter
+            .install_range(Utc::now().timestamp())
+            .map_err(UiError::new)?;
+    }
     let settings = state.settings_snapshot();
     // Claimed before any fetch so overlapping queries are ordered by *start*, and so
     // the result is stamped with the tenant it was actually fetched under. Redeemed
@@ -274,9 +277,6 @@ impl QueryPlan {
         now: DateTime<Utc>,
     ) -> anyhow::Result<Self> {
         let mut filter = args.filter;
-        let install_range = filter
-            .install_range(now.timestamp())
-            .map_err(anyhow::Error::msg)?;
         // Resolve the relative first-seen window into an absolute lower bound; the
         // filter is applied client-side in build_rows, which has no clock.
         if let Some(days) = filter.detected_within_days {
@@ -327,7 +327,17 @@ impl QueryPlan {
             .unwrap_or(install_window_days)
             .clamp(1, MAX_WINDOW_DAYS);
         // An absolute range replaces the relative lookback rather than intersecting
-        // it — see `FilterParams::installed_after`.
+        // it — see `FilterParams::installed_after`. Validated only when it can
+        // matter: with no install status the window is never used, and the Filters
+        // panel hides the control, so a stale range left in it must not fail a
+        // Pending query with an error whose cause is off screen.
+        let install_range = if want_installs {
+            filter
+                .install_range(now.timestamp())
+                .map_err(anyhow::Error::msg)?
+        } else {
+            None
+        };
         let install_window = match install_range {
             Some(range) => InstallWindow {
                 after: range.after,

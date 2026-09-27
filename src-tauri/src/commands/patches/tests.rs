@@ -263,6 +263,22 @@ fn an_absolute_install_range_replaces_the_relative_lookback() {
         inverted.is_err(),
         "an inverted range is refused, not swapped"
     );
+
+    // The same stale range on a Pending-only query is never used (and its control
+    // is hidden), so it must not fail the query.
+    let pending = QueryPlan::build(
+        PatchQueryArgs {
+            filter: FilterParams {
+                installed_after: Some(before),
+                installed_before: Some(after),
+                ..FilterParams::default()
+            },
+            ..args_with(vec![PatchStatus::Pending], PatchType::All)
+        },
+        30,
+        now,
+    );
+    assert!(pending.is_ok(), "an unused range is not validated");
 }
 
 /// The relative first-seen window is resolved to an absolute bound here because
