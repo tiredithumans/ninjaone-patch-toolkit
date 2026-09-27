@@ -18,8 +18,9 @@ mod presets;
 mod query;
 mod selection;
 mod view;
+mod view_link;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tab {
     Patches,
     Compliance,
@@ -290,6 +291,9 @@ pub(crate) struct QueryState {
     /// member fetch started before that is from a result no longer on screen, so
     /// it must neither fill the cache nor tick anything into the selection.
     pub(super) members_gen: RwSignal<u64>,
+    /// The sort the next manual run lands on instead of the canonical order —
+    /// set by applying a shared view link, consumed (and cleared) by that run.
+    pub(super) sort_on_next_run: RwSignal<Option<RowSort>>,
 }
 
 impl QueryState {
@@ -323,6 +327,7 @@ impl QueryState {
             members: RwSignal::new(BTreeMap::new()),
             view_seq: RwSignal::new(0),
             members_gen: RwSignal::new(0),
+            sort_on_next_run: RwSignal::new(None),
         }
     }
 }
@@ -346,6 +351,11 @@ pub(crate) struct RunState {
     /// A manual run requested while another was in flight, waiting for it to
     /// settle. Holds the queued run's `force` flag; see `util::queue_run`.
     pub(super) queued: RwSignal<Option<bool>>,
+    /// The operator paused auto-refresh without switching it off, so the chosen
+    /// cadence survives. Cleared by picking a cadence.
+    pub(super) refresh_paused: RwSignal<bool>,
+    /// Time left until the next automatic refresh; see `util::advance_refresh`.
+    pub(super) refresh_clock: RwSignal<util::RefreshClock>,
 }
 
 impl RunState {
@@ -360,6 +370,8 @@ impl RunState {
             query_seq: RwSignal::new(0),
             refresh_secs: RwSignal::new(0),
             queued: RwSignal::new(None),
+            refresh_paused: RwSignal::new(false),
+            refresh_clock: RwSignal::new(util::RefreshClock::start(0, 0.0)),
         }
     }
 
@@ -451,6 +463,25 @@ pub(crate) struct UiState {
     /// (false) by default.
     pub(super) filters_collapsed: RwSignal<bool>,
     pub(super) active_tab: RwSignal<Tab>,
+    /// The keyboard-shortcuts help dialog.
+    pub(super) shortcuts_open: RwSignal<bool>,
+    /// Light / Dark / System, remembered per machine.
+    pub(super) theme: RwSignal<util::Theme>,
+    /// Column ids hidden in the Patches table, remembered per machine; see
+    /// `util::columns`.
+    pub(super) hidden_patch_columns: RwSignal<BTreeSet<String>>,
+    /// The last view code the operator copied, kept on screen in a read-only field
+    /// so it can be selected by hand when the clipboard refuses.
+    pub(super) view_code: RwSignal<Option<String>>,
+    /// A view link held back because it was shared from another instance.
+    pub(super) pending_view: RwSignal<Option<PendingView>>,
+}
+
+/// A decoded view link waiting for the operator to confirm it.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingView {
+    pub view: util::SharedView,
+    pub warning: String,
 }
 
 impl UiState {
@@ -468,6 +499,15 @@ impl UiState {
                 api::ui_pref(api::PREF_FILTERS_COLLAPSED).unwrap_or(false),
             ),
             active_tab: RwSignal::new(Tab::Patches),
+            shortcuts_open: RwSignal::new(false),
+            theme: RwSignal::new(util::Theme::from_pref(
+                api::ui_pref_str(api::PREF_THEME).as_deref(),
+            )),
+            hidden_patch_columns: RwSignal::new(util::parse_hidden_columns(
+                api::ui_pref_str(api::PREF_PATCH_COLUMNS).as_deref(),
+            )),
+            view_code: RwSignal::new(None),
+            pending_view: RwSignal::new(None),
         }
     }
 

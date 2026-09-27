@@ -12,6 +12,7 @@ mod filters;
 mod header;
 mod modal;
 mod settings;
+mod shortcuts;
 mod state;
 mod tables;
 mod toaster;
@@ -26,6 +27,7 @@ use controls::RunControls;
 use filters::Filters;
 use header::Header;
 use settings::SettingsPanel;
+use shortcuts::KeyboardShortcuts;
 use state::*;
 use tables::Results;
 use toaster::Toaster;
@@ -182,26 +184,34 @@ pub fn App() -> impl IntoView {
     })
     .forget();
 
-    // Auto-refresh: rebuild the interval whenever the cadence or auth changes.
-    let interval = StoredValue::new_local(None::<gloo_timers::callback::Interval>);
+    // Auto-refresh: a one-second ticker advances a visible countdown and fires when
+    // it runs out. The countdown holds while paused, while a dialog is open and
+    // while the window is hidden — a tick re-pages the whole-fleet patch feeds, and
+    // nobody is reading a minimized window — and restarts once a run lands. The
+    // rule and the arithmetic are `util::refresh_hold` / `util::advance_refresh`.
+    gloo_timers::callback::Interval::new(1000, move || state.tick_auto_refresh()).forget();
+
+    // Colour theme: applied on launch and on every change, remembered per machine.
     Effect::new(move |_| {
-        let secs = state.run.refresh_secs.get();
-        let authed = state.is_authed();
-        interval.set_value(None);
-        if secs > 0 && authed {
-            let iv = gloo_timers::callback::Interval::new(secs * 1000, move || {
-                // A tick re-pages the whole-fleet patch feeds. Nobody is reading the
-                // result while the window is hidden, so skip it rather than download
-                // a fleet into a minimized window all night — the next visible tick
-                // picks up fresh state anyway.
-                if api::document_hidden() {
-                    return;
-                }
-                state.run_query_auto();
-            });
-            interval.set_value(Some(iv));
-        }
+        let theme = state.ui.theme.get();
+        api::set_root_theme(theme.attr());
+        api::set_ui_pref_str(api::PREF_THEME, theme.pref_value());
     });
+
+    if state.session.web_mode.get_untracked() {
+        // A demo URL carrying `#view=…` opens that view (after the demo's facets
+        // are seeded, so its ids resolve), and from then on the fragment follows
+        // the controls so the address bar is always a shareable link.
+        let fragment = api::location_fragment();
+        if fragment.starts_with(util::FRAGMENT_KEY) {
+            state.open_view_link(&fragment);
+        }
+        Effect::new(move |_| {
+            state.track_view();
+            let code = util::encode_view(&state.current_view());
+            api::replace_fragment(&format!("{}{code}", util::FRAGMENT_KEY));
+        });
+    }
 
     view! {
         <Show when=move || state.session.backend_missing.get()>
@@ -238,6 +248,7 @@ pub fn App() -> impl IntoView {
             <Toaster/>
             <UpdateSplash/>
             <ConfirmActionModal/>
+            <KeyboardShortcuts/>
         </main>
         </Show>
     }

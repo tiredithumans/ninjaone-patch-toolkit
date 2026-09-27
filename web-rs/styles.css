@@ -13,6 +13,19 @@
   --accent-2: #5eead4;
   --danger: #f87171;
   --warn: #fbbf24;
+  --info: #60a5fa;
+
+  /* Text/background pairs the rules below used to spell as literal hex. Tokens so
+     the light palette can restate them — a literal is a colour the theme cannot
+     reach, which is how a pale-pink error line ends up on a white page. */
+  --on-accent: #06231f;
+  --danger-fg: #fca5a5;
+  --warn-fg: #fcd34d;
+  --info-fg: #93c5fd;
+  --accent-soft: rgba(56, 189, 172, 0.18);
+  --danger-soft: rgba(248, 113, 113, 0.18);
+  --overlay: rgba(0, 0, 0, 0.55);
+  --shadow: rgba(0, 0, 0, 0.4);
 
   /* Severity palette — ONE definition per band, referenced by all three rule
      families below (`.sev-*` badges, `.chart .seg-*` bar fills, `.chart-swatch.seg-*`
@@ -43,6 +56,97 @@
   --sev-optional-fg: #cbd5e1;
   --sev-unknown: #6b7280;
   --sev-unknown-fg: #9ca3af;
+}
+
+/* Light palette. The dark `:root` above stays the fallback (and what a System
+   choice shows on a dark or unspecified OS); this restates EVERY token, so no
+   dark-tuned value leaks onto a white page. It appears twice because CSS has no
+   way to share a declaration block between a media query and an attribute
+   selector: once for System on a light OS, once for an explicit Light choice.
+   `the_light_palette_overrides_every_root_token` (util/theme.rs) fails if either
+   copy misses a token.
+
+   Severity bands are darker here, not the dark palette's pastels: the solid colour
+   fills chart bars on white, and `-fg` is badge text on a 16-20% tint of it, so both
+   need contrast against a light background. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #f4f6f9;
+    --panel: #ffffff;
+    --panel-2: #eef1f5;
+    --border: #d3d9e2;
+    --text: #1b1f2a;
+    --muted: #535c6e;
+    --accent: #0b7a6f;
+    --accent-2: #0a6960;
+    --danger: #dc2626;
+    --warn: #b45309;
+    --info: #2563eb;
+    --on-accent: #ffffff;
+    --danger-fg: #b91c1c;
+    --warn-fg: #92400e;
+    --info-fg: #1d4ed8;
+    --accent-soft: rgba(11, 122, 111, 0.12);
+    --danger-soft: rgba(220, 38, 38, 0.1);
+    --overlay: rgba(15, 23, 42, 0.45);
+    --shadow: rgba(15, 23, 42, 0.16);
+    --sev-critical: #dc2626;
+    --sev-critical-fg: #991b1b;
+    --sev-important: #ea580c;
+    --sev-important-fg: #9a3412;
+    --sev-security: #c026d3;
+    --sev-security-fg: #86198f;
+    --sev-moderate: #a16207;
+    --sev-moderate-fg: #854d0e;
+    --sev-recommended: #0891b2;
+    --sev-recommended-fg: #155e75;
+    --sev-low: #2563eb;
+    --sev-low-fg: #1e40af;
+    --sev-optional: #64748b;
+    --sev-optional-fg: #334155;
+    --sev-unknown: #6b7280;
+    --sev-unknown-fg: #4b5563;
+  }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6f9;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --border: #d3d9e2;
+  --text: #1b1f2a;
+  --muted: #535c6e;
+  --accent: #0b7a6f;
+  --accent-2: #0a6960;
+  --danger: #dc2626;
+  --warn: #b45309;
+  --info: #2563eb;
+  --on-accent: #ffffff;
+  --danger-fg: #b91c1c;
+  --warn-fg: #92400e;
+  --info-fg: #1d4ed8;
+  --accent-soft: rgba(11, 122, 111, 0.12);
+  --danger-soft: rgba(220, 38, 38, 0.1);
+  --overlay: rgba(15, 23, 42, 0.45);
+  --shadow: rgba(15, 23, 42, 0.16);
+  --sev-critical: #dc2626;
+  --sev-critical-fg: #991b1b;
+  --sev-important: #ea580c;
+  --sev-important-fg: #9a3412;
+  --sev-security: #c026d3;
+  --sev-security-fg: #86198f;
+  --sev-moderate: #a16207;
+  --sev-moderate-fg: #854d0e;
+  --sev-recommended: #0891b2;
+  --sev-recommended-fg: #155e75;
+  --sev-low: #2563eb;
+  --sev-low-fg: #1e40af;
+  --sev-optional: #64748b;
+  --sev-optional-fg: #334155;
+  --sev-unknown: #6b7280;
+  --sev-unknown-fg: #4b5563;
 }
 
 * {
@@ -331,7 +435,7 @@ select:disabled {
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #06231f;
+  color: var(--on-accent);
   font-weight: 600;
 }
 
@@ -386,16 +490,16 @@ select:disabled {
 /* Two-click confirm: the first click "arms" a destructive control, the second
    fires it (mouseleave/blur disarm). Reuses the danger palette as a warning. */
 .x-armed {
-  background: rgba(248, 113, 113, 0.18);
+  background: var(--danger-soft);
   border-radius: 6px;
-  color: #fca5a5;
+  color: var(--danger-fg);
   font-size: 12px;
   font-weight: 600;
 }
 
 .btn-armed {
   border-color: var(--danger);
-  color: #fca5a5;
+  color: var(--danger-fg);
 }
 
 .seg {
@@ -409,7 +513,7 @@ select:disabled {
 
 .seg-on {
   background: var(--accent);
-  color: #06231f;
+  color: var(--on-accent);
   border-color: var(--accent);
   font-weight: 600;
 }
@@ -588,18 +692,18 @@ tbody tr:hover {
 }
 
 .stat-installed {
-  background: rgba(56, 189, 172, 0.18);
+  background: var(--accent-soft);
   color: var(--accent-2);
 }
 
 .stat-approved {
-  background: rgba(96, 165, 250, 0.16);
-  color: #93c5fd;
+  background: color-mix(in srgb, var(--info) 16%, transparent);
+  color: var(--info-fg);
 }
 
 .stat-pending {
-  background: rgba(251, 191, 36, 0.16);
-  color: #fcd34d;
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn-fg);
 }
 
 .stat-rejected {
@@ -608,8 +712,8 @@ tbody tr:hover {
 }
 
 .stat-failed {
-  background: rgba(248, 113, 113, 0.18);
-  color: #fca5a5;
+  background: var(--danger-soft);
+  color: var(--danger-fg);
 }
 
 .toast {
@@ -623,7 +727,7 @@ tbody tr:hover {
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--panel);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 24px var(--shadow);
   max-width: 480px;
 }
 
@@ -633,7 +737,7 @@ tbody tr:hover {
 
 .toast-err {
   border-color: var(--danger);
-  color: #fca5a5;
+  color: var(--danger-fg);
 }
 
 /* Persistent record of the last failed query in the results area — same danger
@@ -646,8 +750,8 @@ tbody tr:hover {
   padding: 8px 12px;
   border: 1px solid var(--danger);
   border-radius: 8px;
-  background: rgba(248, 113, 113, 0.1);
-  color: #fca5a5;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger-fg);
   font-size: 13px;
 }
 
@@ -740,7 +844,7 @@ tbody tr:hover {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -756,7 +860,7 @@ tbody tr:hover {
   width: min(560px, 100%);
   max-height: 80vh;
   overflow-y: auto;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 20px 60px var(--shadow);
 }
 
 /* The container is focused programmatically on open (see app/modal.rs) so the
@@ -1337,7 +1441,7 @@ tbody tr:hover {
   padding: 8px 12px;
   border: 1px solid var(--danger);
   border-radius: 8px;
-  color: #fca5a5;
+  color: var(--danger-fg);
   font-size: 13px;
 }
 
@@ -1543,9 +1647,9 @@ tbody tr:hover {
 /* The active view mode. `.chip` is also used for multi-select facets, so this
    only ever rides on the mode buttons, which are single-select. */
 .chip-on {
-  background: var(--accent-soft, rgba(56, 189, 172, 0.18));
-  border-color: var(--accent-2, #38bdac);
-  color: var(--accent-2, #38bdac);
+  background: var(--accent-soft);
+  border-color: var(--accent-2);
+  color: var(--accent-2);
 }
 
 .groups {
@@ -1683,7 +1787,7 @@ tbody tr:hover {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
+  box-shadow: 0 8px 24px var(--shadow);
 }
 
 .scope-picker__tools {
@@ -1805,4 +1909,136 @@ tbody tr:hover {
 .backend-missing h2 {
   color: var(--danger);
   margin-top: 0;
+}
+
+/* Motion. Honour the OS setting: no sliding, fading or animated width changes.
+   The indeterminate progress bar becomes a static half-strength bar — it still
+   says "working", it just stops moving. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .progress-indeterminate {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
+}
+
+/* --- Operator UX: auto-refresh countdown, view links, column chooser, shortcuts --- */
+
+.refresh-countdown {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.view-link {
+  margin-top: 8px;
+}
+
+.view-code {
+  flex: 1 1 260px;
+  min-width: 0;
+  max-width: 520px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.view-link-warning {
+  margin-top: 8px;
+}
+
+.patches-toolbar {
+  justify-content: space-between;
+}
+
+.patches-toolbar .view-modes {
+  margin: 0;
+}
+
+.column-menu {
+  position: relative;
+}
+
+.column-menu > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.column-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.column-menu__panel {
+  position: absolute;
+  right: 0;
+  z-index: 20;
+  margin-top: 4px;
+  min-width: 220px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  box-shadow: 0 8px 24px var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.column-menu__item {
+  display: flex;
+  flex-direction: row;
+  color: var(--text);
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.column-menu__note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.shortcuts-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0 4px;
+}
+
+.shortcuts-table th,
+.shortcuts-table td {
+  text-align: left;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  font-weight: normal;
+  white-space: normal;
+}
+
+.shortcuts-table th {
+  white-space: nowrap;
+  width: 1%;
+  padding-right: 16px;
+}
+
+kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-align: center;
 }

@@ -26,7 +26,7 @@ pub(crate) fn Filters() -> impl IntoView {
     let fleet = move || is_fleet_tab(state.ui.active_tab.get());
 
     view! {
-        <section class="panel">
+        <section class="panel" id=super::shortcuts::FILTERS_PANEL_ID>
             <div class="row">
                 <h2>"Filters"</h2>
                 <Show when=move || state.lookups.loading_lookups()>
@@ -246,6 +246,7 @@ pub(crate) fn Filters() -> impl IntoView {
                 <div class="control-group">
                     <span class="chips-label" id="filter-search-label">"Search (KB or name):"</span>
                     <input
+                        id=super::shortcuts::SEARCH_INPUT_ID
                         type="search"
                         aria-labelledby="filter-search-label"
                         placeholder="e.g. KB5040434"

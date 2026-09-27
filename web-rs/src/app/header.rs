@@ -23,6 +23,34 @@ pub(crate) fn Header() -> impl IntoView {
                 </div>
             </div>
             <div class="actions">
+                <label class="inline theme-choice">
+                    "Theme"
+                    <select on:change=move |ev| {
+                        state.ui.theme.set(util::Theme::from_pref(Some(&event_target_value(&ev))))
+                    }>
+                        {util::Theme::ALL
+                            .into_iter()
+                            .map(|t| {
+                                view! {
+                                    <option
+                                        value=t.pref_value()
+                                        prop:selected=move || state.ui.theme.get() == t
+                                    >
+                                        {t.label()}
+                                    </option>
+                                }
+                            })
+                            .collect_view()}
+                    </select>
+                </label>
+                <button
+                    class="btn btn-ghost"
+                    aria-label="Keyboard shortcuts"
+                    title="Keyboard shortcuts (?)"
+                    on:click=move |_| state.ui.shortcuts_open.set(true)
+                >
+                    "?"
+                </button>
                 <Show when=move || state.session.web_mode.get()>
                     <span class="pill pill-demo">"Demo"</span>
                     <a

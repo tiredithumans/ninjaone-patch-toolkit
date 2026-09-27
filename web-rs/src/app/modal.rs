@@ -92,3 +92,14 @@ pub(crate) fn focus_trap() -> (NodeRef<Div>, impl Fn(&KeyboardEvent) + Clone + '
     };
     (dialog, on_tab)
 }
+
+/// Whether any modal dialog is on screen. Read from the DOM rather than from
+/// state, so a dialog added later is covered without being listed anywhere: the
+/// keyboard shortcuts stand down, and auto-refresh holds, while one is open.
+pub(crate) fn any_modal_open() -> bool {
+    document()
+        .query_selector("[aria-modal=\"true\"]")
+        .ok()
+        .flatten()
+        .is_some()
+}
