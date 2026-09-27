@@ -606,7 +606,7 @@ fn patch_matches(
                 .any(|s| s.eq_ignore_ascii_case(&row.severity)))
         && f.search.as_deref().is_none_or(|q| search_matches(row, q))
         && first_seen_in_window(row, f)
-        && install_in_window(row, install_after_days)
+        && install_in_window(row, f, install_after_days)
 }
 
 fn type_matches(patch_type: &str, row_type: &str) -> bool {
@@ -654,14 +654,22 @@ fn first_seen_in_window(row: &PatchRow, f: &FilterParams) -> bool {
     true
 }
 
-fn install_in_window(row: &PatchRow, install_after_days: Option<i64>) -> bool {
+fn install_in_window(row: &PatchRow, f: &FilterParams, install_after_days: Option<i64>) -> bool {
     // The window only constrains install-history rows (INSTALLED / FAILED).
     let is_history =
         row.status.eq_ignore_ascii_case("INSTALLED") || row.status.eq_ignore_ascii_case("FAILED");
-    let Some(days) = install_after_days.filter(|_| is_history) else {
+    if !is_history {
+        return true;
+    }
+    let installed = row.installed_date.as_deref().and_then(date_to_epoch);
+    // An absolute range replaces the relative lookback, as it does backend-side.
+    if let Some(after) = f.installed_after {
+        return installed.is_some_and(|t| t >= after && f.installed_before.is_none_or(|b| t <= b));
+    }
+    let Some(days) = install_after_days else {
         return true;
     };
-    match row.installed_date.as_deref().and_then(date_to_epoch) {
+    match installed {
         Some(installed) => installed >= SAMPLE_NOW_EPOCH - days * 86_400,
         None => false,
     }

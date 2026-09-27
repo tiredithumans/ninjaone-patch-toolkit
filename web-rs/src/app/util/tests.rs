@@ -604,6 +604,86 @@ fn a_custom_window_tolerates_one_open_end() {
     assert!(f.detected_before.is_some());
 }
 
+fn install_inputs(custom: bool, after: &str, before: &str) -> FilterInputs {
+    FilterInputs {
+        install_custom: custom,
+        install_after: after.into(),
+        install_before: before.into(),
+        ..Default::default()
+    }
+}
+
+/// A custom install range reaches the backend as two absolute bounds, the "to"
+/// day included whole; in "Last N days" mode nothing is sent even though the
+/// hidden date inputs still hold the last range, or they would keep overriding the
+/// relative window backend-side.
+#[test]
+fn a_custom_install_range_is_sent_only_in_custom_mode() {
+    let f = filter_params(install_inputs(true, "2026-01-01", "2026-01-31"));
+    assert_eq!(f.installed_after, Some(1_767_225_600));
+    assert_eq!(f.installed_before, Some(1_769_903_999));
+
+    let open = filter_params(install_inputs(true, "2026-01-01", ""));
+    assert_eq!(
+        (open.installed_after, open.installed_before),
+        (Some(1_767_225_600), None)
+    );
+
+    let relative = filter_params(install_inputs(false, "2026-01-01", "2026-01-31"));
+    assert_eq!(
+        (relative.installed_after, relative.installed_before),
+        (None, None)
+    );
+}
+
+/// The chip says which control was in force, and a custom range with no dates —
+/// which sends nothing, so the backend uses the lookback — says the lookback.
+#[test]
+fn the_install_chip_names_the_range_or_the_lookback() {
+    assert_eq!(
+        install_window_label(false, 30, "2026-01-01", ""),
+        "last 30d"
+    );
+    assert_eq!(
+        install_window_label(true, 30, "2026-03-01", "2026-03-31"),
+        "2026-03-01 \u{2192} 2026-03-31"
+    );
+    assert_eq!(
+        install_window_label(true, 30, "2026-03-01", ""),
+        "since 2026-03-01"
+    );
+    assert_eq!(
+        install_window_label(true, 30, "", "2026-03-31"),
+        "until 2026-03-31"
+    );
+    assert_eq!(install_window_label(true, 14, " ", ""), "last 14d");
+}
+
+/// The inline hint flags exactly the shapes the backend refuses on input alone.
+#[test]
+fn the_install_range_hint_flags_what_the_backend_would_refuse() {
+    assert_eq!(install_range_problem("", ""), None);
+    assert_eq!(install_range_problem("2026-03-01", ""), None);
+    assert_eq!(install_range_problem("2026-03-01", "2026-03-01"), None);
+    assert!(install_range_problem("", "2026-03-31").is_some());
+    assert!(install_range_problem("2026-03-31", "2026-03-01").is_some());
+}
+
+/// Restoring a preset inverts `filter_params`: the saved end-of-day bound floors
+/// back to the day the operator picked, and no range means the relative control.
+#[test]
+fn install_window_fields_invert_the_saved_range() {
+    let f = filter_params(install_inputs(true, "2026-03-01", "2026-03-31"));
+    assert_eq!(
+        install_window_fields(f.installed_after, f.installed_before),
+        (true, "2026-03-01".to_string(), "2026-03-31".to_string())
+    );
+    assert_eq!(
+        install_window_fields(None, None),
+        (false, String::new(), String::new())
+    );
+}
+
 #[test]
 fn identity_and_text_facets_pass_through_with_blanks_dropped() {
     let f = filter_params(FilterInputs {
@@ -1311,7 +1391,7 @@ fn filter_chips_emits_only_non_default_facets() {
         detected_window: "7".to_string(),
         detected_after: String::new(),
         detected_before: String::new(),
-        install_days: Some(30),
+        install_window: Some("last 30d".to_string()),
     };
     let chips = filter_chips(&full);
     let labels: Vec<&str> = chips.iter().map(|c| c.label.as_str()).collect();

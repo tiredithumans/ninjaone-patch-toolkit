@@ -36,6 +36,13 @@ pub struct FilterParams {
     pub detected_after: Option<i64>,
     #[serde(default)]
     pub detected_before: Option<i64>,
+    /// Absolute install-history range (Unix seconds). When `installed_after` is set
+    /// it replaces the relative install lookback backend-side; both `None` = the
+    /// lookback applies. Mirrors `filter::FilterParams::installed_*`.
+    #[serde(default)]
+    pub installed_after: Option<i64>,
+    #[serde(default)]
+    pub installed_before: Option<i64>,
 }
 
 /// Mirror of the backend's `rows::PatchFamilies` — the honest scope of every
