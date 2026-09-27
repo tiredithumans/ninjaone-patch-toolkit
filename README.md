@@ -183,6 +183,12 @@ being sent an empty list.
 
 ### Setting up the remediation scripts
 
+Reference scripts that implement this contract ship in [`remediation/`](./remediation/README.md):
+`Install-SelectedWindowsUpdates.ps1` installs only the listed KBs through the Windows Update
+Agent. `Install-SelectedSoftwarePatches.ps1` decodes and validates the product list, but it
+installs nothing until you supply an install mechanism, and until then it exits `10`. That
+README covers how to import them, the exact parameter format and the exit codes.
+
 NinjaOne has **no script‑upload API**, so add the scripts by hand under **Administration →
 Library → Automation**, then paste each numeric ID (from the script's URL) into **Settings →
 Patch actions**. Two IDs are configured separately, because the two patch families are targeted

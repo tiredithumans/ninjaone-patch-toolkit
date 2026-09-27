@@ -103,6 +103,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 docs/design/                     # rationale behind the rules below, one note per domain
 docs/api/ninjaone-surface.md     # generated digest of the NinjaOne API surface we consume (ninjaone-contract job)
 docs/RELEASING.md · docs/TROUBLESHOOTING.md
+remediation/                     # reference "Apply selected" PowerShell scripts + Pester tests; tests/fixtures pins build_parameters
 scripts/                         # screenshot tooling (Playwright; not shipped), changelog-notes.sh, check-license-lists.sh, ninjaone-spec-digest.py
 about.toml · about.hbs · about-web.hbs  # cargo-about config + templates → THIRD-PARTY-LICENSES.md (`just licenses`)
 .githooks/                       # commit-msg (conventional commits) + pre-push (just verify); installed by `just setup`
