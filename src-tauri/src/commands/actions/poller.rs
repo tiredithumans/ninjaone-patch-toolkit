@@ -1,8 +1,8 @@
 //! The background job poller that walks dispatched jobs to a terminal state.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tauri::{AppHandle, Manager};
 use tracing::warn;
 
@@ -10,6 +10,7 @@ use super::dispatch::invalidate_after;
 use super::{ActionProgressEvent, emit_progress};
 use crate::actions::{ActionKind, JobReport, JobState, audit};
 use crate::api::NinjaApiClient;
+use crate::model::Activity;
 use crate::state::AppState;
 
 /// How often the poller re-reads the activity feed for unresolved jobs.
@@ -28,6 +29,10 @@ pub(super) fn spawn_job_poller(app: &AppHandle) {
         let Some(mut claim) = app.state::<AppState>().try_claim_job_poller() else {
             return;
         };
+        // Series uids the feed has shown on a real activity (see `feed_reads`).
+        // Lives with the poller task: a fresh poller starts empty and simply reads
+        // device-wide until it has seen each one again.
+        let mut confirmed_series: HashSet<String> = HashSet::new();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
 
@@ -48,7 +53,7 @@ pub(super) fn spawn_job_poller(app: &AppHandle) {
                 }
             }
 
-            poll_tick(&app, pending, api).await;
+            poll_tick(&app, pending, api, &mut confirmed_series).await;
         }
     });
 }
@@ -56,7 +61,12 @@ pub(super) fn spawn_job_poller(app: &AppHandle) {
 /// One pass over the unresolved jobs: read each device's activity feed, advance
 /// every job it resolves, invalidate what a settled action changed, close out the
 /// audit records and tell the frontend.
-async fn poll_tick(app: &AppHandle, pending: Vec<JobReport>, api: NinjaApiClient) {
+async fn poll_tick(
+    app: &AppHandle,
+    pending: Vec<JobReport>,
+    api: NinjaApiClient,
+    confirmed_series: &mut HashSet<String>,
+) {
     let now = Utc::now();
     // Activity ids already bound to a job, so the third-tier correlation
     // heuristic can't hand the same activity to two jobs. Seeded from the
@@ -69,59 +79,7 @@ async fn poll_tick(app: &AppHandle, pending: Vec<JobReport>, api: NinjaApiClient
         .iter()
         .filter_map(|j| j.activity_id)
         .collect();
-    // The feed reads fan out; the correlation that consumes them does not.
-    //
-    // This was a serial `await` per job, so a tick cost the sum of every
-    // pending job's round trip and grew linearly with the batch — while
-    // dispatch on the very same path already uses a `JoinSet`. The reads are
-    // independent, so they run together.
-    //
-    // `advance_job` still runs strictly in `pending` order below, because
-    // `claimed` is threaded through it: the third-tier heuristic binds an
-    // activity to whichever job reaches it first, and no two jobs may claim
-    // the same one. Fanning out the *resolution* as well would make which job
-    // wins depend on network timing.
-    let feeds = {
-        let mut set = tokio::task::JoinSet::new();
-        for (idx, job) in pending.iter().enumerate() {
-            let api = api.clone();
-            let device_id = job.device_id;
-            let since = job.dispatched_ts - 5;
-            set.spawn(async move { (idx, api.activities(Some(device_id), Some(since)).await) });
-        }
-        let mut out: Vec<Option<_>> = (0..pending.len()).map(|_| None).collect();
-        while let Some(joined) = set.join_next().await {
-            match joined {
-                Ok((idx, result)) => out[idx] = Some(result),
-                Err(err) => warn!(?err, "activity poll task failed"),
-            }
-        }
-        out
-    };
-
-    let mut updates = Vec::new();
-    for (mut job, feed) in pending.into_iter().zip(feeds) {
-        match feed {
-            Some(Ok(list)) => crate::actions::advance_job(&mut job, &list, now, &mut claimed),
-            Some(Err(err)) => {
-                // A transient failure to *read* the feed is not a failure
-                // of the job. Hold state and let the timeout decide.
-                warn!(?err, device_id = job.device_id, "activity poll failed");
-                if job.is_past_timeout(now) {
-                    job.finish(JobState::TimedOut, now);
-                }
-            }
-            // The join failed (panic or cancellation). Same treatment: this
-            // says nothing about the job, so hold state and let the timeout
-            // decide rather than inventing an outcome.
-            None => {
-                if job.is_past_timeout(now) {
-                    job.finish(JobState::TimedOut, now);
-                }
-            }
-        }
-        updates.push(job);
-    }
+    let updates = resolve_pending(&api, pending, &mut claimed, confirmed_series, now).await;
 
     let settled: Vec<JobReport> = updates
         .iter()
@@ -174,4 +132,133 @@ async fn poll_tick(app: &AppHandle, pending: Vec<JobReport>, api: NinjaApiClient
             jobs: updates,
         },
     );
+}
+
+/// One `/activities` read in a tick: the device it covers, the series it may be
+/// narrowed to, and the time floor applied to what comes back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FeedRead {
+    pub(super) device_id: i64,
+    pub(super) series_uid: Option<String>,
+    pub(super) since_ts: i64,
+}
+
+/// Plans a tick's reads: **one per device**, however many of its jobs are pending.
+///
+/// This used to be one read per *job*, so a device carrying a scan, an apply and a
+/// reboot was asked for the same feed three times a tick — yet the feed is per
+/// device, and every job on it is matched against the same list. The floor is the
+/// earliest of those jobs' dispatch times, less the same 5 s skew allowance
+/// `match_activity` uses, so no job loses an activity it could have matched; each
+/// job's own floor still applies inside the third-tier heuristic.
+///
+/// A read is narrowed to `seriesUid` only when the device has exactly one pending
+/// job and that job's series uid has already been *seen on an activity*
+/// (`confirmed_series`). A dispatch response's uid is not proof on its own —
+/// `parse_dispatch_response` takes a bare `uid` as a last resort, which may be an
+/// echoed script uid no activity carries — and a read narrowed to a series that
+/// never appears would starve the job until its timeout, where the device-wide read
+/// would have resolved it through the third tier.
+pub(super) fn feed_reads(
+    pending: &[JobReport],
+    confirmed_series: &HashSet<String>,
+) -> Vec<FeedRead> {
+    let mut by_device: BTreeMap<i64, Vec<&JobReport>> = BTreeMap::new();
+    for job in pending {
+        by_device.entry(job.device_id).or_default().push(job);
+    }
+    by_device
+        .into_iter()
+        .map(|(device_id, jobs)| {
+            let series_uid = match jobs.as_slice() {
+                [only] => only
+                    .series_uid
+                    .clone()
+                    .filter(|uid| confirmed_series.contains(uid)),
+                _ => None,
+            };
+            let earliest = jobs.iter().map(|j| j.dispatched_ts).min().unwrap_or(0);
+            FeedRead {
+                device_id,
+                series_uid,
+                since_ts: earliest - 5,
+            }
+        })
+        .collect()
+}
+
+/// Reads each device's feed once and advances every pending job against it.
+///
+/// The reads fan out; the correlation that consumes them does not. `advance_job`
+/// runs strictly in `pending` order because `claimed` is threaded through it: the
+/// third-tier heuristic binds an activity to whichever job reaches it first, and no
+/// two jobs may claim the same one. Fanning out the *resolution* as well would make
+/// which job wins depend on network timing. Two jobs on one device now read the
+/// very same list, which is the case that exclusion was written for.
+///
+/// `confirmed_series` gains every pending job's series uid that its device's feed
+/// shows on a real activity, so later ticks may narrow to it (see [`feed_reads`]).
+pub(super) async fn resolve_pending(
+    api: &NinjaApiClient,
+    pending: Vec<JobReport>,
+    claimed: &mut HashSet<i64>,
+    confirmed_series: &mut HashSet<String>,
+    now: DateTime<Utc>,
+) -> Vec<JobReport> {
+    let mut feeds: HashMap<i64, anyhow::Result<Vec<Activity>>> = HashMap::new();
+    let mut set = tokio::task::JoinSet::new();
+    for read in feed_reads(&pending, confirmed_series) {
+        let api = api.clone();
+        set.spawn(async move {
+            let result = api
+                .activities(
+                    Some(read.device_id),
+                    read.series_uid.as_deref(),
+                    Some(read.since_ts),
+                )
+                .await;
+            (read.device_id, result)
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((device_id, result)) => {
+                feeds.insert(device_id, result);
+            }
+            Err(err) => warn!(?err, "activity poll task failed"),
+        }
+    }
+
+    for job in &pending {
+        if let (Some(uid), Some(Ok(list))) = (job.series_uid.as_deref(), feeds.get(&job.device_id))
+            && list.iter().any(|a| a.series_uid.as_deref() == Some(uid))
+        {
+            confirmed_series.insert(uid.to_string());
+        }
+    }
+
+    let mut updates = Vec::with_capacity(pending.len());
+    for mut job in pending {
+        match feeds.get(&job.device_id) {
+            Some(Ok(list)) => crate::actions::advance_job(&mut job, list, now, claimed),
+            Some(Err(err)) => {
+                // A transient failure to *read* the feed is not a failure of the
+                // job. Hold state and let the timeout decide.
+                warn!(?err, device_id = job.device_id, "activity poll failed");
+                if job.is_past_timeout(now) {
+                    job.finish(JobState::TimedOut, now);
+                }
+            }
+            // The join failed (panic or cancellation). Same treatment: this says
+            // nothing about the job, so hold state and let the timeout decide
+            // rather than inventing an outcome.
+            None => {
+                if job.is_past_timeout(now) {
+                    job.finish(JobState::TimedOut, now);
+                }
+            }
+        }
+        updates.push(job);
+    }
+    updates
 }
