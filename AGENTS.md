@@ -35,7 +35,7 @@ Skills live in `.claude/skills/` and Claude Code loads their descriptions automa
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
 ├── src/main.rs                  # binary entry → lib::run()
-├── src/paths.rs                 # app_dir(): the one on-disk location for settings, logs, audit + history files
+├── src/paths.rs                 # app_dir(): the one on-disk location for settings, logs, audit + history, window-state files
 ├── src/state.rs                 # AppState: auth, api client, settings, result cache + memos, fleet/lookup accessors, invalidation
 ├── src/state/cache.rs           # TenantCache<T>: tenant-stamped, TTL'd, epoch-gated, single-flight slot
 ├── src/state/jobs.rs            # job store, single-claim poller slot, confirm-token slot
@@ -67,6 +67,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/history.rs               # append-only run-history.jsonl (one rollup line per query) + RunRecord
 ├── src/export.rs                # rust_xlsxwriter workbook (Patches [+ Patches (n) past the row limit] / Compliance / by OS / Needs-Reboot / Failures / About)
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
+├── src/window_state.rs          # main window geometry: debounced save, clamped restore before first show
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
 ├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
@@ -74,7 +75,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
 ├── src/commands/patches/tests.rs
 ├── build.rs                     # tauri_build::build()
-├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint)
+├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint); main window starts hidden
 ├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
 └── capabilities/default.json    # webview capabilities: `core:default` only (the save dialog runs in Rust)
 
@@ -84,20 +85,22 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ├── src/app/
 │   ├── state.rs                 # AppState wrapper + Copy sub-structs by concern; no test module — logic goes to util
 │   ├── state/                   # impl AppState, one file per concern (no test modules)
-│   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs
+│   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs · view_link.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
 │   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
 │   ├── tables/                  # one file per results tab: patches · compliance · failures · reboot · trend
 │   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · toaster.rs · update.rs
+│   ├── shortcuts.rs             # global key handler + help dialog; the key map is util::shortcut_for
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
 │       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · tests.rs
+│       └── refresh.rs · shortcuts.rs · columns.rs · view_link.rs · theme.rs (own test modules)
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
 ├── index.html                   # Trunk entry (wasm + CSS links)
 ├── tests/backend-grouping.json  # backend-generated fixture the demo's grouping is asserted against
-├── styles.css                   # plain global CSS (BEM-ish names); --sev-* band tokens on :root
+├── styles.css                   # plain global CSS (BEM-ish names); every colour a :root token, light palette via data-theme
 └── Trunk.toml                   # WASM build/serve (127.0.0.1:8080); never set public_url here
 
 docs/design/                     # rationale behind the rules below, one note per domain
@@ -291,6 +294,9 @@ Frontend:
 - **Non-trivial logic does not belong in a `#[component]` body or in `state.rs`** — put it in the
   `util` module as a free function and test it there. → `docs/design/frontend.md#non-trivial-logic-does-not-belong-in-a-component-body`
 - **A dialog calls `modal::focus_trap()` in the closure that creates it**, per instance. → `docs/design/frontend.md#frontend-reactivity-is-closure-based-leptos-csr`
+- **Per-machine view prefs (theme, hidden columns) are `localStorage` via `api::ui_pref_str`**, and
+  every access may throw. **No shortcut reaches a mutating action** (`util::shortcut_for`). A view
+  link carries no selection or credential and warns across instances. → `docs/design/frontend.md#operator-ux`
 - **`api::is_tauri()` gates every backend touch; `demo.rs` is the only sample-data source and
   demo mode is web-only.** Never set `public_url` in `Trunk.toml`. → `docs/design/frontend.md#demo-mode--browserpages-guard`
 

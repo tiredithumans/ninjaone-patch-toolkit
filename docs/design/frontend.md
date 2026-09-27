@@ -143,3 +143,60 @@ staying unreachable. What lives in
   the group-header count and the confirm-dialog gate
   (`needs_typed_confirmation`/`can_confirm_action`). The pager arithmetic once caused a "98% of
   groups unreachable" bug while sitting inline in `tables.rs`.
+- The operator-UX rules below: `refresh_hold`/`advance_refresh`/`countdown_label`,
+  `shortcut_for`/`is_text_entry`, the `columns` helpers, `encode_view`/`decode_view`, `Theme`.
+  These newer files carry their own `#[cfg(test)] mod tests` rather than growing `tests.rs`.
+
+## Operator UX
+
+Per-machine view conveniences — none of them configuration, so none go through
+`settings.json` (see `api::ui_pref`) — and the rules each one keeps.
+
+**Auto-refresh countdown.** A one-second ticker (`AppState::tick_auto_refresh`) advances a
+wall-clock countdown (`util::advance_refresh`; ticks are throttled in the background, so counting
+them drifts). `util::refresh_hold` decides, in this order, why it waits: the operator's **Pause**,
+an open dialog (any `aria-modal` element, plus the Settings panel), a hidden window, a run in
+flight. A run restarts the full cadence, so a manual Run also pushes the next automatic one out.
+**A selection is deliberately not a hold**: a refresh already prunes the selection to rows still
+listed, and after a dispatch the selection is still there exactly while the operator watches the
+patches land — pausing on it would switch the cadence off when it is most wanted. Picking a
+cadence lifts a pause.
+
+**Keyboard shortcuts.** `util::shortcut_for` is the whole key map and `SHORTCUT_HELP` the help
+dialog/README table (`every_documented_key_is_bound`). It stands down while typing
+(`util::is_text_entry` — a focused checkbox is *not* typing, since focus stays on it after ticking
+a row), under any modal, on auto-repeat and with Ctrl/Alt/Meta (Shift is allowed: `?` is
+Shift+/). **No key reaches a mutating action, an export or sign-out**; `r` runs the (read-only)
+query, and `[`/`]` page the Patches table through the same `go_to_patches_page` as the pager.
+
+**Column chooser.** Stored as the set of *hidden* column ids (`util::column_id`, a slug of the
+header label), so a column another build adds is visible by default and an id this build does not
+know is kept and ignored. Hiding is positional CSS generated per table
+(`util::hidden_columns_css`), not a filtered cell list, so adding a column touches only
+`PATCH_COLUMNS` and the row markup. Device and Patch are required. Exports ignore it.
+
+**Shareable view links.** `v1.` + base64url of a short JSON object: the preset shape
+(`FilterParams`, type, statuses, install window) plus tab, grouping, sort and the instance
+**host**. Never the selection, a credential or a client id
+(`the_code_carries_no_selection_or_credentials`). The version sits outside the payload so a
+future format is refused before parsing; decoding drops unknown statuses/severities/tabs/sort keys,
+clamps numbers to what the controls accept, caps text, and `apply_view` prunes org/role/class ids
+against the loaded lookups. A code from another host is held behind an **Apply anyway** banner —
+its organization ids mean something else there. The web demo keeps the code in the URL fragment
+(`history.replaceState`, so Back is not an undo stack of checkboxes) and applies it on load; the
+desktop copies a bare code via `navigator.clipboard` — a web API, not a Tauri capability, and not
+governed by the CSP — and always leaves it in a read-only field in case the clipboard refuses.
+
+**Themes and motion.** Every colour in `styles.css` is a `:root` token (the dark palette, and the
+fallback). A light palette restates *every* token twice — under
+`@media (prefers-color-scheme: light)` for System, and under `:root[data-theme="light"]` for an
+explicit choice — which `the_light_palette_overrides_every_root_token` enforces; a missed token
+leaks a dark pastel onto white. Charts read the same tokens through classes, so they follow.
+`prefers-reduced-motion` stops transitions and the indeterminate progress slide.
+
+**Window geometry** (backend, `src-tauri/src/window_state.rs`). Its own `window-state.json`, not a
+`Settings` field, so a drag never goes through `replace_settings`. Saved debounced on
+move/resize (on a blocking thread) and synchronously on close; restored in `setup` before the
+hidden-at-launch window is shown. `window_state::placement` keeps a saved position only when a
+grab-able strip of the title bar lands on a current monitor's work area, otherwise lets the OS
+place the window, and always fits the size to the monitor.

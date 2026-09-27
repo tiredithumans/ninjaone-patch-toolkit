@@ -17,6 +17,10 @@ the job poller — `async` only buys you off the UI thread. That covers three ki
   operator picks a file; `auth::store_tokens`' keyring write, made while `refresh_lock` is held,
   i.e. exactly when every other `access_token()` caller is queued behind it.
 
+One deliberate exception: `window_state` writes its few-dozen-byte file synchronously on the
+event-loop thread when the window **closes**, because a task spawned at that moment may never run;
+its move/resize saves are debounced onto a blocking thread like everything else.
+
 **This list is illustrative, not exhaustive** — do not read it as an inventory of everywhere the
 rule applies. An earlier version named "four places … and all of them are wrapped", and that
 phrasing is precisely why four *more* blocking sites read as compliant to every reviewer until they
