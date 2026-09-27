@@ -91,7 +91,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · toaster.rs · update.rs
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
-│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · tests.rs
+│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · guardrails.rs · tests.rs
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
@@ -221,6 +221,12 @@ Write path (device actions) — violating these silently widens the blast radius
   de-duplicated (a repeated id is a `plan()` blocker); `run_action` re-plans and re-checks. → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
 - **Guardrails go in `actions::plan` (`blockers`/`warnings`), not in a dialog.** The `dry_run`
   check is also asserted at the dispatch site. → `docs/design/actions.md#guardrails-live-in-actionsplan`
+- **A dry run needs a library script that declares `dryRun`** (`DryRunSupport::Declared`); typed
+  parameters, built-in actions and an unreadable library block it. → `docs/design/actions.md#a-dry-run-is-allowed-only-for-a-script-that-declares-dryrun`
+- **The window override is per dispatch** (Settings permits, the action bar requests, cleared after
+  dispatch, audited as `windowOverride`); the window is this computer's clock. → `docs/design/actions.md#the-maintenance-window`
+- **"Apply all" previews APPROVED/MANUAL counts from the *cached* current patches only** — `plan()`
+  never fetches; a cold cache is "unknown", not zero. → `docs/design/actions.md#apply-all-shows-what-it-will-install-before-it-is-confirmed`
 - **One dispatch surface (`ActionBar`); `Run as` / reboot / `Dry run` are rendered once** and
   labelled with the kinds they reach. → `docs/design/actions.md#there-is-one-dispatch-surface-and-the-run-options-are-shared`
 - **After a non-dry-run mutating action call `invalidate_current_patches()`** (and

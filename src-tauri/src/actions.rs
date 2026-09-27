@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use chrono::{DateTime, Datelike, Local, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Activity, ActivityOutcome, Device, RebootMode};
+use crate::model::{Activity, ActivityOutcome, Device, Patch, PatchStatus, RebootMode};
 use crate::settings::ActionSettings;
 
 pub mod audit;
@@ -94,9 +94,13 @@ impl ActionKind {
         self.is_mutating()
     }
 
-    /// Whether NinjaOne offers a real preview for this action. Only a library
-    /// script does (via its own `dryRun` parameter); the native endpoints have no
-    /// preview mode at all, so a "dry run" of them dispatches nothing.
+    /// Whether this kind *can* preview at all. Only a library script can (via its
+    /// own `dryRun` parameter); the native endpoints have no preview mode, so a "dry
+    /// run" of them dispatches nothing.
+    ///
+    /// Necessary, not sufficient: a script previews only if it actually reads
+    /// `dryRun`, which is a property of the library entry, not of the kind — see
+    /// [`DryRunSupport`], which `plan()` checks on top of this.
     pub fn supports_dry_run(self) -> bool {
         self.runs_a_script()
     }
@@ -304,6 +308,12 @@ pub struct ActionPlan {
     /// in the confirmation dialog — the toolkit never sends a string the operator
     /// has not seen.
     pub parameters_preview: Option<String>,
+    /// What a native "Apply all" will install, per device, from the cached current
+    /// patches. `None` for every other kind.
+    pub apply_preview: Option<ApplyPreview>,
+    /// True when this dispatch goes out *because* the operator overrode a closed
+    /// maintenance window — recorded on the audit trail, so a bypass is never silent.
+    pub window_overridden: bool,
     pub confirm_token: Option<String>,
 }
 
@@ -333,8 +343,171 @@ pub struct PlanInput<'a> {
     /// hand-typed parameters). The remediation kinds need at least one; the
     /// KB-encoded kinds need each to be a KB number (see [`kb_number`]).
     pub targets: &'a [&'a str],
+    /// Whether the resolved script can honor `dryRun`. Consulted only for a dry run
+    /// of a script-running kind; see [`DryRunSupport`].
+    pub dry_run_support: DryRunSupport,
+    /// The *cached* whole-fleet current patches of the family a native apply
+    /// installs, or `None` when that cache is cold (and for every other kind). The
+    /// planner never fetches: a plan that paged a six-figure feed to draw a preview
+    /// would make the confirm dialog wait on it.
+    pub current_patches: Option<CachedFamily<'a>>,
     /// Injected so the maintenance-window check is testable.
     pub now: DateTime<Local>,
+}
+
+/// One family of the cached whole-fleet current patches, as [`plan`] reads it.
+#[derive(Clone, Copy)]
+pub struct CachedFamily<'a> {
+    pub patches: &'a [Patch],
+    pub fetched_at: DateTime<Utc>,
+}
+
+/// Whether the script a request resolves to can be told to preview.
+///
+/// A dry run appends `dryRun=true` to the composed parameter string, and that is
+/// all it does — NinjaOne has no preview mode of its own. A script that never reads
+/// `dryRun` simply runs for real while the Jobs tab says "Dry run". So a dry run is
+/// allowed only for a library script that *declares* a `dryRun` variable or
+/// parameter, the same evidence [`AutomationScript::accepts_kb_allow_list`] uses to
+/// gate per-KB targeting.
+///
+/// [`AutomationScript::accepts_kb_allow_list`]: crate::model::AutomationScript::accepts_kb_allow_list
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DryRunSupport {
+    /// Not evaluated because the request is not a dry run of a script. If a dry run
+    /// ever arrives with this, it is treated as unverified and blocked.
+    NotChecked,
+    /// The library entry declares `dryRun`.
+    Declared,
+    /// The library entry declares no `dryRun`; carries its name for the message.
+    NotDeclared { script: String },
+    /// A NinjaOne built-in action, which takes no `dryRun` at all.
+    BuiltInAction,
+    /// The operator typed the parameter string, which is sent verbatim — the toolkit
+    /// never rewrites it, so it cannot add `dryRun=true` to it.
+    TypedParameters,
+    /// The library could not be read, or no longer lists the script.
+    Unverified(String),
+}
+
+/// What a native apply will install on one device, counted from the cached
+/// current patches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPreviewDevice {
+    pub device_id: i64,
+    pub device_name: String,
+    /// Records with status `APPROVED` — what the apply endpoint installs.
+    pub approved: usize,
+    /// Records with status `MANUAL` (NinjaOne's "pending approval"), which the apply
+    /// endpoint does *not* install until someone approves them in NinjaOne.
+    pub pending_manual: usize,
+}
+
+/// The confirm dialog's "what will this install" block for a native apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPreview {
+    /// `"OS"` or `"software"`.
+    pub family: String,
+    /// False when the family's current patches were not cached — the counts are
+    /// then unknown rather than zero, and `devices` is empty.
+    pub known: bool,
+    /// One row per eligible device, in plan order.
+    pub devices: Vec<ApplyPreviewDevice>,
+    pub approved_total: usize,
+    pub pending_manual_total: usize,
+    /// When the counted patch data was fetched, so the dialog can say how old the
+    /// counts are. `None` when unknown.
+    pub data_fetched_at: Option<String>,
+}
+
+/// Counts what a native apply of `kind` would install on each eligible device.
+///
+/// `None` for anything but the two native applies. The status comparison is
+/// case-insensitive and uses [`PatchStatus::api_value`], so "pending approval" is
+/// NinjaOne's `MANUAL`, not the operator-facing "Pending".
+pub fn apply_preview(
+    kind: ActionKind,
+    eligible: &[PlannedTarget],
+    cached: Option<CachedFamily<'_>>,
+) -> Option<ApplyPreview> {
+    if !kind.exceeds_selection() {
+        return None;
+    }
+    let family = patch_family_label(kind).to_string();
+    let Some(cached) = cached else {
+        return Some(ApplyPreview {
+            family,
+            known: false,
+            devices: Vec::new(),
+            approved_total: 0,
+            pending_manual_total: 0,
+            data_fetched_at: None,
+        });
+    };
+    // One pass over the whole-fleet feed, counting only the devices in the plan.
+    let mut counts: HashMap<i64, (usize, usize)> =
+        eligible.iter().map(|t| (t.device_id, (0, 0))).collect();
+    let approved = PatchStatus::Approved.api_value();
+    let manual = PatchStatus::Pending.api_value();
+    for p in cached.patches {
+        let (Some(id), Some(status)) = (p.device_id, p.status.as_deref()) else {
+            continue;
+        };
+        let Some(c) = counts.get_mut(&id) else {
+            continue;
+        };
+        let status = status.trim();
+        if status.eq_ignore_ascii_case(approved) {
+            c.0 += 1;
+        } else if status.eq_ignore_ascii_case(manual) {
+            c.1 += 1;
+        }
+    }
+    let devices: Vec<ApplyPreviewDevice> = eligible
+        .iter()
+        .map(|t| {
+            let (approved, pending_manual) = counts.get(&t.device_id).copied().unwrap_or_default();
+            ApplyPreviewDevice {
+                device_id: t.device_id,
+                device_name: t.device_name.clone(),
+                approved,
+                pending_manual,
+            }
+        })
+        .collect();
+    Some(ApplyPreview {
+        family,
+        known: true,
+        approved_total: devices.iter().map(|d| d.approved).sum(),
+        pending_manual_total: devices.iter().map(|d| d.pending_manual).sum(),
+        devices,
+        data_fetched_at: Some(fmt_ts(cached.fetched_at)),
+    })
+}
+
+/// "OS" or "software", for the messages about a patch family.
+fn patch_family_label(kind: ActionKind) -> &'static str {
+    match kind {
+        ActionKind::SoftwarePatchScan
+        | ActionKind::SoftwarePatchApply
+        | ActionKind::SoftwarePatchRemediate => "software",
+        _ => "OS",
+    }
+}
+
+/// A device-name list for a message, capped so a 25-device batch stays one sentence.
+pub fn summarize_names(names: &[&str]) -> String {
+    const SHOWN: usize = 5;
+    if names.len() <= SHOWN {
+        return names.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        names[..SHOWN].join(", "),
+        names.len() - SHOWN
+    )
 }
 
 /// Decides what an action would do and whether the guardrails permit it.
@@ -388,6 +561,7 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
 
     let mut warnings = Vec::new();
     let mut blockers = Vec::new();
+    let mut window_overridden = false;
 
     if eligible.is_empty() {
         blockers.push("No eligible devices — nothing would be dispatched.".into());
@@ -455,16 +629,29 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
             ));
         }
         if s.require_maintenance_window && !window_is_open(s, input.now) {
+            let window = window_label(s, input.now);
             if input.override_window && s.allow_window_override {
-                warnings.push(
-                    "Outside the maintenance window — proceeding because the override is enabled."
-                        .into(),
-                );
-            } else {
+                window_overridden = true;
+                warnings.push(format!(
+                    "Outside the maintenance window ({window}) — proceeding only because this \
+                     dispatch overrides it. The override is recorded in the audit trail."
+                ));
+            } else if s.allow_window_override {
                 blockers.push(format!(
-                    "Outside the maintenance window ({}). Wait for the window, or enable the \
-                     override in Settings → Patch actions.",
-                    window_label(s)
+                    "Outside the maintenance window ({window}). Wait for the window to open, or \
+                     tick \"Override the maintenance window for this dispatch\" in the action bar \
+                     and plan again."
+                ));
+            } else {
+                // This used to say "enable the override in Settings", which named only
+                // half of it: the Settings checkbox merely *permits* an override, and
+                // the per-dispatch one that requests it had no control at all.
+                blockers.push(format!(
+                    "Outside the maintenance window ({window}). Wait for the window to open. \
+                     Overriding it is switched off — to allow it, tick \"Allow overriding the \
+                     maintenance window\" in Settings → Patch actions and save, then tick \
+                     \"Override the maintenance window for this dispatch\" in the action bar and \
+                     plan again."
                 ));
             }
         }
@@ -480,6 +667,10 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
              Turn off Dry run to send it for real.",
             input.kind.label()
         ));
+    } else if dry_run && let Some(why) = dry_run_refusal(&input.dry_run_support) {
+        // The opposite failure: a script that ignores `dryRun` *does* dispatch, and
+        // runs for real while every surface says "Dry run".
+        blockers.push(why);
     }
 
     // The native apply endpoints (`/device/{id}/patch/{os,software}/apply`) have no
@@ -488,10 +679,7 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
     // "By patch" and ticking one row makes the opposite reading the obvious one, so
     // say it outright rather than leaving it to a code comment.
     if let Some(targeted) = input.kind.targeted_counterpart() {
-        let family = match input.kind {
-            ActionKind::SoftwarePatchApply => "software",
-            _ => "OS",
-        };
+        let family = patch_family_label(input.kind);
         warnings.push(format!(
             "Installs every approved {family} patch on each device, not just the selected rows — \
              NinjaOne has no per-patch apply endpoint. The selection only chose the {} device(s) \
@@ -510,6 +698,29 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
                 )
             }
         ));
+    }
+
+    // What that backlog actually is, per device. A device with nothing approved is
+    // the surprising case: the apply "succeeds" and installs nothing, while the
+    // patches the operator was looking at sit in MANUAL waiting for approval.
+    let apply_preview = apply_preview(input.kind, &eligible, input.current_patches);
+    if let Some(preview) = apply_preview.as_ref().filter(|p| p.known) {
+        let empty: Vec<&str> = preview
+            .devices
+            .iter()
+            .filter(|d| d.approved == 0)
+            .map(|d| d.device_name.as_str())
+            .collect();
+        if !empty.is_empty() {
+            warnings.push(format!(
+                "{} device(s) have no approved {} patches, so nothing will install on them ({}). \
+                 Patches pending approval (NinjaOne status MANUAL) must be approved in NinjaOne \
+                 first.",
+                empty.len(),
+                preview.family,
+                summarize_names(&empty)
+            ));
+        }
     }
 
     // The targeted half of the pair. Both blockers describe a request that cannot
@@ -580,7 +791,41 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
         reboot_expected,
         dry_run,
         parameters_preview: None,
+        apply_preview,
+        window_overridden,
         confirm_token: None,
+    }
+}
+
+/// Why a dry run of a script cannot be honored, or `None` when it can.
+fn dry_run_refusal(support: &DryRunSupport) -> Option<String> {
+    const OFF: &str = "Turn off Dry run to send it for real.";
+    match support {
+        DryRunSupport::Declared => None,
+        DryRunSupport::NotDeclared { script } => Some(format!(
+            "\"{script}\" declares no dryRun script variable or parameter, so it cannot be told \
+             to preview — a dry run would run it for real. {OFF} To preview with it, add a dryRun \
+             variable to the script in the NinjaOne library."
+        )),
+        DryRunSupport::BuiltInAction => Some(format!(
+            "NinjaOne built-in actions take no dryRun parameter — a dry run would run it for \
+             real. {OFF}"
+        )),
+        DryRunSupport::TypedParameters => Some(format!(
+            "Hand-typed parameters are sent verbatim, so the toolkit cannot add dryRun=true to \
+             them — a dry run would run the script for real. Clear the Parameters box to compose \
+             them from the selection (which adds dryRun=true), or {}",
+            OFF.to_lowercase()
+        )),
+        DryRunSupport::Unverified(why) => Some(format!(
+            "Couldn't confirm that the script declares a dryRun variable ({why}), so a dry run \
+             could run it for real. Try again, or {}",
+            OFF.to_lowercase()
+        )),
+        DryRunSupport::NotChecked => Some(format!(
+            "Couldn't confirm that the script declares a dryRun variable, so a dry run could run \
+             it for real. {OFF}"
+        )),
     }
 }
 
@@ -614,7 +859,11 @@ fn window_is_open(s: &ActionSettings, now: DateTime<Local>) -> bool {
     }
 }
 
-fn window_label(s: &ActionSettings) -> String {
+/// The window as the operator configured it, e.g. `Mon/Tue 02:00–05:00`, followed
+/// by the clock it is checked against. [`window_is_open`] reads *this computer's*
+/// local time — not the devices' time zones, which NinjaOne does not expose here —
+/// so the label says so, with the offset, rather than a bare "local".
+fn window_label(s: &ActionSettings, now: DateTime<Local>) -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     let days: Vec<&str> = s
         .window_days
@@ -623,14 +872,15 @@ fn window_label(s: &ActionSettings) -> String {
         .collect();
     let hhmm = |m: u16| format!("{:02}:{:02}", m / 60, m % 60);
     format!(
-        "{} {}–{} local",
+        "{} {}–{}, this computer's time (UTC{})",
         if days.is_empty() {
             "no days".to_string()
         } else {
             days.join("/")
         },
         hhmm(s.window_start_minute),
-        hhmm(s.window_end_minute)
+        hhmm(s.window_end_minute),
+        now.format("%:z")
     )
 }
 
@@ -895,6 +1145,10 @@ mod tests {
             // Enough that the remediation kinds aren't blocked for an empty
             // selection; the tests that care about that set it explicitly.
             targets: &["KB5040434"],
+            // Honest by default so the dry-run tests that are about something else
+            // aren't blocked by the script check; the tests that care set it.
+            dry_run_support: DryRunSupport::Declared,
+            current_patches: None,
             now: inside_window(),
         }
     }
@@ -1056,6 +1310,297 @@ mod tests {
         });
         assert!(!p.is_blocked());
         assert!(p.warnings.iter().any(|w| w.contains("override")));
+    }
+
+    /// The blocker used to say "enable the override in Settings", which named only
+    /// the permission: the per-dispatch request had no control at all. It must name
+    /// both steps that apply, and the window it is enforcing.
+    #[test]
+    fn the_window_blocker_names_the_real_steps_and_the_window() {
+        let devices = vec![device(1, "srv-a", 1, false)];
+        let ids = [1];
+        let names = orgs();
+        let gated = ActionSettings {
+            require_maintenance_window: true,
+            ..ActionSettings::default()
+        };
+
+        // Override not permitted: both the Settings permission and the per-dispatch
+        // checkbox are named, as is the window and the clock it is read on.
+        let p = plan(PlanInput {
+            now: outside_window(),
+            ..input(ActionKind::OsPatchApply, &ids, &devices, &names, &gated)
+        });
+        let b = p
+            .blockers
+            .iter()
+            .find(|b| b.contains("maintenance window"))
+            .expect("a window blocker");
+        assert!(b.contains("Mon/Tue/Wed/Thu/Fri 02:00–05:00"), "{b}");
+        assert!(b.contains("this computer's time (UTC"), "{b}");
+        assert!(b.contains("Allow overriding the maintenance window"), "{b}");
+        assert!(
+            b.contains("Override the maintenance window for this dispatch"),
+            "{b}"
+        );
+        assert!(!p.window_overridden);
+
+        // Permitted but not requested: only the per-dispatch step is left to do.
+        let overridable = ActionSettings {
+            allow_window_override: true,
+            ..gated.clone()
+        };
+        let p = plan(PlanInput {
+            now: outside_window(),
+            ..input(
+                ActionKind::OsPatchApply,
+                &ids,
+                &devices,
+                &names,
+                &overridable,
+            )
+        });
+        let b = p
+            .blockers
+            .iter()
+            .find(|b| b.contains("maintenance window"))
+            .expect("a window blocker");
+        assert!(
+            b.contains("Override the maintenance window for this dispatch"),
+            "{b}"
+        );
+        assert!(
+            !b.contains("Settings"),
+            "the Settings step is already done: {b}"
+        );
+
+        // Used: the plan says so, which is what the audit trail records.
+        let p = plan(PlanInput {
+            now: outside_window(),
+            override_window: true,
+            ..input(
+                ActionKind::OsPatchApply,
+                &ids,
+                &devices,
+                &names,
+                &overridable,
+            )
+        });
+        assert!(!p.is_blocked(), "{:?}", p.blockers);
+        assert!(p.window_overridden);
+        assert!(p.warnings.iter().any(|w| w.contains("audit trail")));
+
+        // Requested inside an open window: nothing was bypassed, so nothing is
+        // recorded as an override.
+        let p = plan(PlanInput {
+            override_window: true,
+            ..input(
+                ActionKind::OsPatchApply,
+                &ids,
+                &devices,
+                &names,
+                &overridable,
+            )
+        });
+        assert!(!p.window_overridden);
+
+        // A scan changes nothing, so the window never applies to it.
+        let p = plan(PlanInput {
+            now: outside_window(),
+            ..input(ActionKind::OsPatchScan, &ids, &devices, &names, &gated)
+        });
+        assert!(!p.is_blocked());
+    }
+
+    /// A dry run only appends `dryRun=true`; a script that doesn't read it runs for
+    /// real under a "Dry run" label. Every way the planner can fail to *know* the
+    /// script reads it is a blocker — only a declared `dryRun` passes.
+    #[test]
+    fn a_dry_run_is_allowed_only_for_a_script_that_declares_dry_run() {
+        let devices = vec![device(1, "srv-a", 1, false)];
+        let ids = [1];
+        let names = orgs();
+        let settings = with_scripts();
+
+        for kind in [ActionKind::Script, ActionKind::OsPatchRemediate] {
+            let p = plan(PlanInput {
+                dry_run: true,
+                dry_run_support: DryRunSupport::Declared,
+                ..input(kind, &ids, &devices, &names, &settings)
+            });
+            assert!(!p.is_blocked(), "{kind:?}: {:?}", p.blockers);
+
+            for (support, says) in [
+                (
+                    DryRunSupport::NotDeclared {
+                        script: "Install-Kbs".into(),
+                    },
+                    "\"Install-Kbs\" declares no dryRun",
+                ),
+                (DryRunSupport::BuiltInAction, "built-in actions"),
+                (DryRunSupport::TypedParameters, "Hand-typed parameters"),
+                (
+                    DryRunSupport::Unverified("library unreachable".into()),
+                    "library unreachable",
+                ),
+                (DryRunSupport::NotChecked, "Couldn't confirm"),
+            ] {
+                let p = plan(PlanInput {
+                    dry_run: true,
+                    dry_run_support: support.clone(),
+                    ..input(kind, &ids, &devices, &names, &settings)
+                });
+                assert!(
+                    p.blockers
+                        .iter()
+                        .any(|b| b.contains(says) && b.contains("for real")),
+                    "{kind:?} with {support:?}: {:?}",
+                    p.blockers
+                );
+            }
+
+            // Not a dry run: whether the script could preview is irrelevant.
+            let p = plan(PlanInput {
+                dry_run: false,
+                dry_run_support: DryRunSupport::NotDeclared {
+                    script: "Install-Kbs".into(),
+                },
+                ..input(kind, &ids, &devices, &names, &settings)
+            });
+            assert!(!p.is_blocked(), "{kind:?}: {:?}", p.blockers);
+        }
+    }
+
+    fn cached(patches: &[Patch]) -> CachedFamily<'_> {
+        CachedFamily {
+            patches,
+            fetched_at: Utc.with_ymd_and_hms(2026, 7, 29, 10, 0, 0).unwrap(),
+        }
+    }
+
+    fn os_patch(device_id: i64, kb: &str, status: &str) -> Patch {
+        serde_json::from_value(json!({
+            "id": format!("{device_id}-{kb}"),
+            "name": format!("Update {kb}"),
+            "kbNumber": kb,
+            "severity": "CRITICAL",
+            "status": status,
+            "type": "PATCH",
+            "deviceId": device_id,
+            "timestamp": 1_750_000_000.0,
+        }))
+        .expect("os patch")
+    }
+
+    fn planned(id: i64, name: &str) -> PlannedTarget {
+        PlannedTarget {
+            device_id: id,
+            device_name: name.into(),
+            organization: "Contoso".into(),
+            offline: false,
+        }
+    }
+
+    /// "Apply all" installs what NinjaOne has APPROVED — not what the operator
+    /// ticked, and not what is pending approval (`MANUAL`). The preview counts
+    /// exactly that, per device, and only for the devices in the plan.
+    #[test]
+    fn apply_preview_counts_approved_and_pending_manual_per_device() {
+        let patches = vec![
+            os_patch(1, "KB1", "APPROVED"),
+            os_patch(1, "KB2", "approved"), // case-insensitive
+            os_patch(1, "KB3", "MANUAL"),
+            os_patch(1, "KB4", "REJECTED"),
+            os_patch(2, "KB1", "MANUAL"),
+            os_patch(3, "KB1", "APPROVED"), // not in the plan
+        ];
+        let eligible = vec![planned(1, "srv-a"), planned(2, "srv-b")];
+
+        let p = apply_preview(ActionKind::OsPatchApply, &eligible, Some(cached(&patches)))
+            .expect("a native apply gets a preview");
+        assert!(p.known);
+        assert_eq!(p.family, "OS");
+        assert_eq!(
+            p.devices,
+            vec![
+                ApplyPreviewDevice {
+                    device_id: 1,
+                    device_name: "srv-a".into(),
+                    approved: 2,
+                    pending_manual: 1,
+                },
+                ApplyPreviewDevice {
+                    device_id: 2,
+                    device_name: "srv-b".into(),
+                    approved: 0,
+                    pending_manual: 1,
+                },
+            ]
+        );
+        assert_eq!((p.approved_total, p.pending_manual_total), (2, 2));
+        assert_eq!(
+            p.data_fetched_at.as_deref(),
+            Some("2026-07-29 10:00:00 UTC")
+        );
+
+        let sw = apply_preview(ActionKind::SoftwarePatchApply, &eligible, None).unwrap();
+        assert_eq!(sw.family, "software");
+        assert!(!sw.known, "a cold cache is unknown, not zero");
+        assert!(sw.devices.is_empty() && sw.data_fetched_at.is_none());
+
+        for kind in [
+            ActionKind::OsPatchRemediate,
+            ActionKind::OsPatchScan,
+            ActionKind::Reboot,
+            ActionKind::Script,
+        ] {
+            assert!(
+                apply_preview(kind, &eligible, Some(cached(&patches))).is_none(),
+                "{kind:?} installs no approved backlog"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_all_warns_for_a_device_with_nothing_approved_but_only_when_known() {
+        let devices = vec![device(1, "srv-a", 1, false), device(2, "srv-b", 1, false)];
+        let ids = [1, 2];
+        let names = orgs();
+        let settings = ActionSettings::default();
+        let patches = vec![os_patch(1, "KB1", "APPROVED"), os_patch(2, "KB1", "MANUAL")];
+
+        let p = plan(PlanInput {
+            current_patches: Some(cached(&patches)),
+            ..input(ActionKind::OsPatchApply, &ids, &devices, &names, &settings)
+        });
+        assert!(!p.is_blocked(), "a warning, not a blocker");
+        let w = p
+            .warnings
+            .iter()
+            .find(|w| w.contains("nothing will install"))
+            .expect("a zero-approved warning");
+        assert!(w.contains("1 device(s)") && w.contains("srv-b"), "{w}");
+        assert!(!w.contains("srv-a"), "{w}");
+        assert!(
+            w.contains("MANUAL") && w.contains("approved in NinjaOne"),
+            "{w}"
+        );
+        assert_eq!(p.apply_preview.as_ref().map(|a| a.approved_total), Some(1));
+
+        // Cold cache: the preview says unknown and the planner does not guess.
+        let p = plan(input(
+            ActionKind::OsPatchApply,
+            &ids,
+            &devices,
+            &names,
+            &settings,
+        ));
+        assert!(p.apply_preview.as_ref().is_some_and(|a| !a.known));
+        assert!(
+            !p.warnings
+                .iter()
+                .any(|w| w.contains("nothing will install"))
+        );
     }
 
     #[test]
@@ -1926,6 +2471,44 @@ mod tests {
             value["kind"], "SCRIPT",
             "ActionKind must stay SCREAMING_SNAKE"
         );
+    }
+
+    /// `web-rs/src/types.rs` mirrors these keys; a rename here would silently drop
+    /// the Apply-all preview from the confirm dialog.
+    #[test]
+    fn action_plan_serializes_the_preview_keys_the_frontend_reads() {
+        let eligible = vec![planned(1, "srv-a")];
+        let patches = vec![os_patch(1, "KB1", "APPROVED")];
+        let plan = ActionPlan {
+            apply_preview: apply_preview(
+                ActionKind::OsPatchApply,
+                &eligible,
+                Some(cached(&patches)),
+            ),
+            ..ActionPlan::default()
+        };
+        let value = serde_json::to_value(&plan).expect("serialize");
+        assert!(value.get("windowOverridden").is_some());
+        let preview = &value["applyPreview"];
+        for key in [
+            "family",
+            "known",
+            "devices",
+            "approvedTotal",
+            "pendingManualTotal",
+            "dataFetchedAt",
+        ] {
+            assert!(
+                preview.get(key).is_some(),
+                "ApplyPreview is missing `{key}`"
+            );
+        }
+        for key in ["deviceId", "deviceName", "approved", "pendingManual"] {
+            assert!(
+                preview["devices"][0].get(key).is_some(),
+                "ApplyPreviewDevice is missing `{key}`"
+            );
+        }
     }
 
     /// The tagged representation the frontend switches on. A `Failed` row must

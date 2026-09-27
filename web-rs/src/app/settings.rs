@@ -463,6 +463,7 @@ fn ActionSettingsFields() -> impl IntoView {
                 />
                 "Only allow changes inside a maintenance window"
             </label>
+            <MaintenanceWindowFields/>
             <label class="inline" class:settings-disabled=move || !enabled()>
                 <input
                     type="checkbox"
@@ -475,6 +476,102 @@ fn ActionSettingsFields() -> impl IntoView {
                 />
                 "Allow overriding the maintenance window"
             </label>
+            <p class="settings-hint">
+                "When allowed, the action bar offers \"Override the maintenance window for this dispatch\". It applies to one dispatch only and is recorded on the audit trail."
+            </p>
         </fieldset>
+    }
+}
+
+/// The maintenance window's days and hours.
+///
+/// These fields existed in `ActionSettings` with no editor, so the only window an
+/// operator could enforce was the built-in Mon–Fri 02:00–05:00. The backend
+/// re-validates on save (times inside a day, days 0–6, at least one day when
+/// enforced) and stores the days sorted and de-duplicated.
+#[component]
+fn MaintenanceWindowFields() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let a = state.settings.f_actions;
+    let enabled = move || a.with(|s| s.enabled);
+
+    view! {
+        <div class="settings-window" class:settings-disabled=move || !enabled()>
+            <div class="settings-window-days" role="group" aria-label="Maintenance window days">
+                <span class="settings-window-label">"Window opens on"</span>
+                {util::WINDOW_DAY_NAMES
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        let day = i as u8;
+                        view! {
+                            <label class="inline">
+                                <input
+                                    type="checkbox"
+                                    prop:disabled=move || !enabled()
+                                    prop:checked=move || a.with(|s| s.window_days.contains(&day))
+                                    on:change=move |ev| {
+                                        let on = event_target_checked(&ev);
+                                        a.update(|s| {
+                                            s.window_days = util::toggle_window_day(
+                                                &s.window_days,
+                                                day,
+                                                on,
+                                            )
+                                        });
+                                    }
+                                />
+                                {*name}
+                            </label>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+            <div class="row">
+                <label>
+                    "Opens at"
+                    <input
+                        type="time"
+                        prop:disabled=move || !enabled()
+                        prop:value=move || util::minutes_to_hhmm(a.with(|s| s.window_start_minute))
+                        on:change=move |ev| {
+                            if let Some(m) = util::parse_hhmm(&event_target_value(&ev)) {
+                                a.update(|s| s.window_start_minute = m);
+                            }
+                        }
+                    />
+                </label>
+                <label>
+                    "Closes at"
+                    <input
+                        type="time"
+                        prop:disabled=move || !enabled()
+                        prop:value=move || util::minutes_to_hhmm(a.with(|s| s.window_end_minute))
+                        on:change=move |ev| {
+                            if let Some(m) = util::parse_hhmm(&event_target_value(&ev)) {
+                                a.update(|s| s.window_end_minute = m);
+                            }
+                        }
+                    />
+                </label>
+            </div>
+            <p class="settings-hint">
+                <strong>{move || a.with(util::window_summary)}</strong>
+                // `actions::window_is_open` reads the clock of the machine running
+                // the toolkit — NinjaOne exposes no device time zone here — so the
+                // hint says whose clock, rather than a bare "local".
+                " — in this computer's local time, which is what the toolkit checks before dispatching; not the devices' time zones. A closing time earlier than the opening time wraps past midnight, and the day is the day the window opens."
+            </p>
+            {move || {
+                a.with(util::window_settings_problem)
+                    .map(|problem| {
+                        view! {
+                            <p class="settings-hint settings-problem" role="alert">
+                                {problem}
+                            </p>
+                        }
+                    })
+            }}
+        </div>
     }
 }

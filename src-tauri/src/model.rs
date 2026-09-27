@@ -676,6 +676,29 @@ impl AutomationScript {
             .any(matches)
             || self.script_parameters.iter().any(|p| matches(p))
     }
+
+    /// Whether this script can be told to preview — i.e. it declares a `dryRun`
+    /// script variable or parameter (case-insensitive).
+    ///
+    /// A toolkit dry run only appends `dryRun=true` to the parameters; NinjaOne has
+    /// no preview mode of its own. A script that never reads it runs for real, so
+    /// `plan()` allows a dry run only for a script that declares it.
+    ///
+    /// Stricter than [`accepts_kb_allow_list`](Self::accepts_kb_allow_list)'s
+    /// substring match: a variable must be *named* `dryRun`, and a parameter line
+    /// must contain `dryRun` as a whole token (`-DryRun`, `dryRun=$true`), so a
+    /// `NoDryRunSupport` flag cannot read as a declaration.
+    pub fn accepts_dry_run(&self) -> bool {
+        const DRY_RUN: &str = "dryrun";
+        self.script_variables
+            .iter()
+            .filter_map(|v| v.name.as_deref())
+            .any(|n| n.trim().eq_ignore_ascii_case(DRY_RUN))
+            || self.script_parameters.iter().any(|p| {
+                p.split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|token| token.eq_ignore_ascii_case(DRY_RUN))
+            })
+    }
 }
 
 /// Credential choices available for `runAs` on a given device.
@@ -918,6 +941,34 @@ mod tests {
             ..script()
         };
         assert!(!unrelated.accepts_kb_allow_list());
+    }
+
+    /// A dry run is honest only for a script that reads `dryRun`; anything else
+    /// runs for real under a "Dry run" label, so the match must not over-accept.
+    #[test]
+    fn dry_run_support_is_detected_from_a_declared_variable_or_parameter_token() {
+        let var = |name: &str| AutomationScript {
+            script_variables: vec![ScriptVariable {
+                name: Some(name.into()),
+            }],
+            ..script()
+        };
+        let param = |line: &str| AutomationScript {
+            script_parameters: vec![line.into()],
+            ..script()
+        };
+        assert!(var("dryRun").accepts_dry_run());
+        assert!(var("  DRYRUN ").accepts_dry_run());
+        assert!(param("-DryRun").accepts_dry_run());
+        assert!(param("kbAllowList=$kbs dryRun=$true").accepts_dry_run());
+
+        assert!(!script().accepts_dry_run(), "declares nothing");
+        assert!(!var("dryRunMode").accepts_dry_run(), "a different variable");
+        assert!(
+            !param("-NoDryRunSupport").accepts_dry_run(),
+            "a substring is not a declaration"
+        );
+        assert!(!var("kbAllowList").accepts_dry_run());
     }
 
     #[test]

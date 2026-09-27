@@ -4,8 +4,8 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, AuthStatus, JobReport, JobState, Location, Organization, PatchFamilies, PatchRow,
-    RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
+    ActionKind, ActionSettings, AuthStatus, JobReport, JobState, Location, Organization,
+    PatchFamilies, PatchRow, RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -2076,4 +2076,223 @@ fn severity_rank_accepts_labels_raw_values_and_aliases() {
     for label in ["Critical", "Security", "Recommended", "Unknown"] {
         assert_eq!(sev_ordinal(label), 7 - severity_rank(label));
     }
+}
+// --- Dispatch guardrails: maintenance window, honest dry run, Apply-all preview ---
+
+#[test]
+fn window_times_round_trip_through_the_time_input() {
+    assert_eq!(minutes_to_hhmm(0), "00:00");
+    assert_eq!(minutes_to_hhmm(125), "02:05");
+    assert_eq!(minutes_to_hhmm(1439), "23:59");
+    assert_eq!(parse_hhmm("02:05"), Some(125));
+    assert_eq!(parse_hhmm("23:59:00"), Some(1439), "seconds are tolerated");
+    for m in [0u16, 1, 59, 60, 719, 1439] {
+        assert_eq!(parse_hhmm(&minutes_to_hhmm(m)), Some(m));
+    }
+    // A cleared or garbled field keeps the stored time instead of becoming 00:00.
+    for bad in ["", "24:00", "12:60", "noon", "12"] {
+        assert_eq!(parse_hhmm(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn toggling_a_window_day_keeps_the_list_canonical() {
+    assert_eq!(toggle_window_day(&[5, 1], 3, true), vec![1, 3, 5]);
+    assert_eq!(toggle_window_day(&[1, 3, 5], 3, false), vec![1, 5]);
+    // Idempotent both ways, and a duplicate in the input is folded.
+    assert_eq!(toggle_window_day(&[1, 1, 5], 1, true), vec![1, 5]);
+    assert_eq!(toggle_window_day(&[1, 5], 3, false), vec![1, 5]);
+}
+
+#[test]
+fn the_window_summary_matches_the_backend_blocker_and_flags_a_wrap() {
+    let a = ActionSettings::default();
+    assert_eq!(window_summary(&a), "Mon/Tue/Wed/Thu/Fri 02:00–05:00");
+    let wrapping = ActionSettings {
+        window_days: vec![6, 0],
+        window_start_minute: 22 * 60,
+        window_end_minute: 4 * 60,
+        ..ActionSettings::default()
+    };
+    assert_eq!(
+        window_summary(&wrapping),
+        "Sun/Sat 22:00–04:00 (wraps past midnight)"
+    );
+    let none = ActionSettings {
+        window_days: vec![],
+        ..ActionSettings::default()
+    };
+    assert!(window_summary(&none).starts_with("no days"));
+}
+
+#[test]
+fn a_window_the_backend_would_refuse_is_flagged_before_save() {
+    let ok = ActionSettings::default();
+    assert_eq!(window_settings_problem(&ok), None);
+    let zero = ActionSettings {
+        window_end_minute: ok.window_start_minute,
+        ..ok.clone()
+    };
+    assert!(window_settings_problem(&zero).is_some());
+    let no_days = ActionSettings {
+        require_maintenance_window: true,
+        window_days: vec![],
+        ..ok.clone()
+    };
+    assert!(window_settings_problem(&no_days).is_some());
+    // Empty days are fine while the window isn't enforced.
+    let unenforced = ActionSettings {
+        window_days: vec![],
+        ..ok
+    };
+    assert_eq!(window_settings_problem(&unenforced), None);
+}
+
+#[test]
+fn the_override_is_offered_only_when_the_window_is_enforced_and_overridable() {
+    let base = ActionSettings {
+        enabled: true,
+        require_maintenance_window: true,
+        allow_window_override: true,
+        ..ActionSettings::default()
+    };
+    assert!(window_override_offered(&base));
+    for off in [
+        ActionSettings {
+            enabled: false,
+            ..base.clone()
+        },
+        ActionSettings {
+            require_maintenance_window: false,
+            ..base.clone()
+        },
+        ActionSettings {
+            allow_window_override: false,
+            ..base.clone()
+        },
+    ] {
+        assert!(!window_override_offered(&off), "{off:?}");
+    }
+}
+
+/// A dry run only appends `dryRun=true`. A script that ignores it runs for real,
+/// so the button must say so — but only when the UI actually knows.
+#[test]
+fn a_dry_run_disables_only_the_scripts_known_not_to_preview() {
+    use ActionKind::*;
+    // Known not to preview: disabled with a reason, for both script paths.
+    for kind in [OsPatchRemediate, SoftwarePatchRemediate, Script] {
+        let why = dry_run_disabled_reason(kind, true, Some(false), false).unwrap();
+        assert!(why.contains("run for real"), "{kind:?}: {why}");
+    }
+    // Declared, unknown, or not a dry run: the backend decides, the button stays live.
+    assert_eq!(
+        dry_run_disabled_reason(OsPatchRemediate, true, Some(true), false),
+        None
+    );
+    assert_eq!(
+        dry_run_disabled_reason(OsPatchRemediate, true, None, false),
+        None
+    );
+    assert_eq!(
+        dry_run_disabled_reason(OsPatchRemediate, false, Some(false), false),
+        None
+    );
+    // The native kinds never receive the flag (the request omits it for them).
+    assert_eq!(
+        dry_run_disabled_reason(OsPatchApply, true, Some(false), false),
+        None
+    );
+    // A typed string cannot carry the toolkit's flag, whatever the script declares.
+    let why = dry_run_disabled_reason(Script, true, Some(true), true).unwrap();
+    assert!(why.contains("verbatim"), "{why}");
+    // ...but a remediation kind has no typed string, so that input is irrelevant.
+    assert_eq!(
+        dry_run_disabled_reason(OsPatchRemediate, true, Some(true), true),
+        None
+    );
+}
+
+#[test]
+fn the_dry_run_caveat_names_only_scripts_known_not_to_preview() {
+    assert_eq!(dry_run_caveat(&[]), None);
+    assert_eq!(
+        dry_run_caveat(&[("OS remediation".into(), Some(true)), ("x".into(), None)]),
+        None
+    );
+    let note = dry_run_caveat(&[
+        ("OS remediation \"Install-Kbs\"".into(), Some(true)),
+        ("software remediation \"Update-Apps\"".into(), Some(false)),
+    ])
+    .unwrap();
+    assert!(
+        note.contains("Update-Apps") && !note.contains("Install-Kbs"),
+        "{note}"
+    );
+}
+
+#[test]
+fn the_apply_preview_states_what_will_and_will_not_install() {
+    use crate::types::{ApplyPreview, ApplyPreviewDevice};
+    let devices = vec![
+        ApplyPreviewDevice {
+            device_id: 1,
+            device_name: "srv-a".into(),
+            approved: 3,
+            pending_manual: 0,
+        },
+        ApplyPreviewDevice {
+            device_id: 2,
+            device_name: "srv-b".into(),
+            approved: 0,
+            pending_manual: 2,
+        },
+    ];
+    let p = ApplyPreview {
+        family: "OS".into(),
+        known: true,
+        devices: devices.clone(),
+        approved_total: 3,
+        pending_manual_total: 2,
+        data_fetched_at: Some("2026-07-29 10:00:00 UTC".into()),
+    };
+    let summary = apply_preview_summary(&p);
+    assert!(
+        summary.contains("install 3 approved OS patch(es) across 2 device(s)"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("2 more pending approval will not install"),
+        "{summary}"
+    );
+    assert!(summary.contains("2026-07-29 10:00:00 UTC"), "{summary}");
+
+    assert_eq!(
+        apply_preview_line(&devices[0]),
+        "srv-a — 3 approved will install"
+    );
+    assert_eq!(
+        apply_preview_line(&devices[1]),
+        "srv-b — nothing approved — nothing will install; 2 pending approval"
+    );
+
+    // Cold cache: unknown, never "0 approved".
+    let unknown = ApplyPreview {
+        family: "software".into(),
+        known: false,
+        ..ApplyPreview::default()
+    };
+    let summary = apply_preview_summary(&unknown);
+    assert!(
+        summary.contains("unknown (patch data not loaded)"),
+        "{summary}"
+    );
+    assert!(!summary.contains(" 0 "), "{summary}");
+}
+
+#[test]
+fn the_audit_trail_marks_a_window_override() {
+    assert_eq!(audit_mode_label(false, false), "Live");
+    assert_eq!(audit_mode_label(false, true), "Live (window override)");
+    assert_eq!(audit_mode_label(true, false), "Dry run");
 }

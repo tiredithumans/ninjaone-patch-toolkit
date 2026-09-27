@@ -182,6 +182,14 @@ fn validate_action_settings(a: &ActionSettings) -> Result<(), UiError> {
     Ok(())
 }
 
+/// Sorts and de-duplicates the window days. Already range-checked; a repeated day
+/// is harmless to `window_is_open` but reads as a bug in the blocker's
+/// "Mon/Mon/Tue" label and in `settings.json`, so it is folded rather than refused.
+fn normalize_window_days(days: &mut Vec<u8>) {
+    days.sort_unstable();
+    days.dedup();
+}
+
 /// What a save changed that the caller has to act on.
 #[derive(Debug, PartialEq, Eq)]
 struct SaveEffects {
@@ -221,6 +229,7 @@ fn merge_settings(
     next.auto_check_updates = args.auto_check_updates;
     next.actions = args.actions;
     next.actions.run_as = next.actions.run_as.trim().to_string();
+    normalize_window_days(&mut next.actions.window_days);
     (next, effects)
 }
 
@@ -523,6 +532,21 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    /// The editor toggles days in click order; the stored list is canonical.
+    #[test]
+    fn window_days_are_saved_sorted_and_deduplicated() {
+        let mut a = args(11434, 30, 30);
+        a.actions.window_days = vec![5, 1, 3, 1, 5];
+        a.actions.require_maintenance_window = true;
+        assert!(validate_action_settings(&a.actions).is_ok());
+        let (next, _) = merge_settings(
+            &Settings::default(),
+            Settings::default().instance_base_url,
+            a,
+        );
+        assert_eq!(next.actions.window_days, vec![1, 3, 5]);
     }
 
     /// Saving used to drop every whole-fleet cache no matter what changed, so

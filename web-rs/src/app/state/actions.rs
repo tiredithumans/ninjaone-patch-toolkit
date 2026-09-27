@@ -18,6 +18,70 @@ impl AppState {
         })
     }
 
+    /// The library script `kind` would run: the configured remediation script for
+    /// its family, or the one picked in the script picker. Tracked.
+    fn dispatched_script_id(self, kind: ActionKind) -> Option<i64> {
+        if kind.is_remediation() {
+            self.settings.f_actions.with(|a| {
+                if kind.is_os_family() {
+                    a.os_patch_script_id
+                } else {
+                    a.software_patch_script_id
+                }
+            })
+        } else if kind == ActionKind::Script {
+            self.actions.script_id.get()
+        } else {
+            None
+        }
+    }
+
+    /// Whether the script `kind` would run declares `dryRun`: `None` when unknown
+    /// (no script, library not loaded, or the id is not in it). Tracked.
+    pub(in crate::app) fn script_declares_dry_run(self, kind: ActionKind) -> Option<bool> {
+        let id = self.dispatched_script_id(kind)?;
+        self.actions
+            .scripts
+            .with(|list| list.iter().find(|s| s.id == id).map(|s| s.accepts_dry_run))
+    }
+
+    /// Why Dry run makes `kind` unavailable right now, if the UI can tell. Tracked.
+    pub(in crate::app) fn dry_run_reason(self, kind: ActionKind) -> Option<String> {
+        util::dry_run_disabled_reason(
+            kind,
+            self.actions.dry_run.get(),
+            self.script_declares_dry_run(kind),
+            self.actions.script_params.with(|p| !p.trim().is_empty()),
+        )
+    }
+
+    /// (what it is, whether it declares `dryRun`) for every script the Dry run
+    /// checkbox currently reaches, for its caveat line. Tracked.
+    pub(in crate::app) fn dry_run_scripts(self) -> Vec<(String, Option<bool>)> {
+        let name = |id: i64| {
+            self.actions.scripts.with(|list| {
+                list.iter()
+                    .find(|s| s.id == id)
+                    .map(|s| format!("\"{}\"", s.name))
+                    .unwrap_or_else(|| format!("script #{id}"))
+            })
+        };
+        [
+            (ActionKind::OsPatchRemediate, "OS remediation"),
+            (ActionKind::SoftwarePatchRemediate, "software remediation"),
+            (ActionKind::Script, "picked"),
+        ]
+        .into_iter()
+        .filter_map(|(kind, what)| {
+            let id = self.dispatched_script_id(kind)?;
+            Some((
+                format!("{what} script {}", name(id)),
+                self.script_declares_dry_run(kind),
+            ))
+        })
+        .collect()
+    }
+
     pub(in crate::app) fn load_scripts(self) {
         if !self.can_act() {
             return;
@@ -94,7 +158,13 @@ impl AppState {
         let opts = util::RunOptions {
             use_kb_targeting: self.actions.use_kb_targeting.get_untracked(),
             include_offline: self.actions.include_offline.get_untracked(),
-            override_window: self.actions.override_window.get_untracked(),
+            // Only while the checkbox is on screen: a tick left behind after the
+            // window stopped being enforced (or overridable) must not ride along.
+            override_window: self.actions.override_window.get_untracked()
+                && self
+                    .settings
+                    .f_actions
+                    .with_untracked(util::window_override_offered),
             dry_run: self.actions.dry_run.get_untracked(),
             script_reboot: self.actions.script_reboot.get_untracked(),
             run_as: self.actions.run_as.get_untracked(),
@@ -198,6 +268,9 @@ impl AppState {
                 Ok(batch) => {
                     self.actions.pending.set(None);
                     self.actions.confirm_input.set(String::new());
+                    // An override is for *this* dispatch. Left ticked, it would
+                    // silently bypass the window for every later one too.
+                    self.actions.override_window.set(false);
                     // Seed from the response rather than re-fetching; the backend
                     // poller advances these rows over `action:progress`, which may
                     // already have delivered them — hence merge, not append.

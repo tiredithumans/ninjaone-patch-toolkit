@@ -418,5 +418,8 @@ mod tests {
             scripts[2].accepts_kb_allow_list(),
             "a positional script parameter counts too"
         );
+        // Only the first declares dryRun, so only it may be dry-run.
+        assert!(scripts[0].accepts_dry_run());
+        assert!(!scripts[1].accepts_dry_run() && !scripts[2].accepts_dry_run());
     }
 }
