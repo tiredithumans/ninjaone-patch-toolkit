@@ -24,9 +24,9 @@ use crate::types::{OrgSeverity, SeverityCounts};
 /// band's colour *and* again as Unknown, overflowing the track and overstating every
 /// visible width, with nothing failing. The backend hit exactly this and fixed it the
 /// same way (`rows::SeverityCounts::BANDS`); this is the frontend's copy of that fix.
-type SevBand = (&'static str, &'static str, fn(&SeverityCounts) -> usize);
+pub(crate) type SevBand = (&'static str, &'static str, fn(&SeverityCounts) -> usize);
 
-const SEV_BANDS: [SevBand; 8] = [
+pub(crate) const SEV_BANDS: [SevBand; 8] = [
     ("Critical", "seg-critical", |c| c.critical),
     ("Important", "seg-important", |c| c.important),
     ("Security", "seg-security", |c| c.security),

@@ -335,7 +335,20 @@ pub fn on_query_progress(mut handler: impl FnMut(QueryProgressEvent) + 'static) 
     cb.forget();
 }
 
+ipc!(
+    /// One device's facts, per-device rollup and detail rows for the drill-down,
+    /// read from the backend's cached result. `None` when that result no longer
+    /// holds the device (a re-query or tenant switch since the click).
+    device_detail(device_id: i64) -> Option<DeviceDetail>
+);
+
 ipc!(export_patches as "export_patches_xlsx", () -> Option<String>);
+
+ipc!(
+    /// Writes the cached detail rows as a formula-guarded, UTF-8 CSV. Backend-only,
+    /// like the other two exports.
+    export_csv() -> Option<String>
+);
 
 ipc!(
     /// Writes the cached query result as a self-contained HTML executive report

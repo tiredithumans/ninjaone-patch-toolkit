@@ -22,7 +22,7 @@ enforces it. The **rationale** behind each rule lives in [`docs/design/`](./docs
 | **Verify** | `just verify` — the Rust gates CI runs (fmt, clippy, tests, both crates); the justfile is the list. CI adds the Trunk build and the gates in `docs/design/ci.md`. |
 | **Crates** | `src-tauri` (backend) + `web-rs` (frontend WASM). No cargo workspace. |
 | **IPC** | Global `window.__TAURI__.core.invoke` (`withGlobalTauri`), wrapped in `web-rs/src/api.rs`. |
-| **NinjaOne spec** | `docs/api/ninjaone-surface.md` is the committed digest of the surface we consume; the weekly `ninjaone-contract` CI job fails when the vendor's spec moves. Verify shapes/params/enums there or in <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> — never infer them. A fixture must emit the vendor's keys, not the ones the code hopes for: `DeviceSoftwarePatch` is `title`/`impact`/`productIdentifier` and **no** `kbNumber` — build it with `model::software_patch_json`. |
+| **NinjaOne spec** | `docs/api/ninjaone-surface.md` is the committed digest of the surface we consume; the weekly `ninjaone-contract` CI job fails when the vendor's spec moves. Verify shapes/params/enums there or in <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> — never infer them. A fixture must emit the vendor's keys, not the ones the code hopes for: build a `DeviceSoftwarePatch` with `model::software_patch_json` (it has **no** `kbNumber`). |
 
 ## Skills
 
@@ -34,7 +34,6 @@ Skills live in `.claude/skills/` and Claude Code loads their descriptions automa
 ```
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
-├── src/main.rs                  # binary entry → lib::run()
 ├── src/paths.rs                 # app_dir(): the one on-disk location for settings, logs, audit + history, window-state files
 ├── src/state.rs                 # AppState: auth, api client, settings, result cache + memos, fleet/lookup accessors, invalidation
 ├── src/state/cache.rs           # TenantCache<T>: tenant-stamped, TTL'd, epoch-gated, single-flight slot
@@ -56,16 +55,17 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/rows/                    # join → PatchRow and every rollup off the cached result
 │   ├── mod.rs                   # QueryResult / QuerySummary + re-exports of every submodule
 │   ├── join.rs                  # device↔patch join, Interner, DeviceLabels, build_rows
-│   ├── compliance.rs            # compliance / by-OS / reboot rollups, rollup_device, compliance_scope_note, SlaCutoffs
+│   ├── compliance.rs            # compliance / by-OS / per-device rollups (apply_device_health), rollup_device, scope note, SlaCutoffs
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
 │   ├── backlog.rs · install_time.rs  # worst devices / offline backlog; first seen → installed median
-│   ├── groups.rs                # grouping, sorting, paging over the cache
+│   ├── groups.rs                # grouping, sorting, paging, device_detail over the cache
 │   ├── scope.rs                 # QueryScope export provenance
 │   ├── table.rs                 # TableCell / TableColumn / format_pct / clamp_cell / join_capped — the shared column definition
 │   └── tests.rs
 ├── src/history.rs               # append-only run-history.jsonl (one rollup + per-org line per query) + RunRecord
 ├── src/changes.rs               # per-scope run-snapshots/ → RunChanges (changes since the previous comparable run)
-├── src/export.rs                # rust_xlsxwriter workbook: detail (split past the row limit), rollup, device-list, Changes, About sheets
+├── src/export.rs                # rust_xlsxwriter workbook: detail, rollup, Devices, device-list, Changes, About; UTC date cells
+├── src/csv_export.rs            # detail-row CSV: BOM, CRLF, RFC 4180 quoting, formula-injection guard
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
 ├── src/window_state.rs          # window geometry: debounced save, clamped restore before first show
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, SLA policy, presets); atomic save, corrupt file quarantined
@@ -73,13 +73,11 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
 ├── src/commands/actions/        # mod.rs handlers · confirm.rs request_hash · plan.rs build_plan · dispatch.rs send_action · poller.rs poll_tick · tests.rs
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
-├── build.rs                     # tauri_build::build()
 ├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint); main window starts hidden
 ├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
 └── capabilities/default.json    # webview capabilities: `core:default` only (the save dialog runs in Rust)
 
 web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 crate
-├── src/main.rs                  # entry: panic hook + mount App
 ├── src/app.rs                   # module decls, shared consts (SEVERITY_OPTIONS), App root + startup wiring
 ├── src/app/
 │   ├── state.rs                 # AppState wrapper + Copy sub-structs by concern; no test module — logic goes to util
@@ -87,7 +85,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs · view_link.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
 │   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
-│   ├── tables/                  # one file per results tab: patches · compliance (+ backlog) · failures · reboot · trend (+ changes panel)
+│   ├── tables/                  # one file per results tab (+ changes panel, backlog, device drill-down dialog)
 │   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · toaster.rs · update.rs
 │   ├── shortcuts.rs             # key handler + help dialog (map: util::shortcut_for)
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
@@ -96,7 +94,6 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
-├── index.html                   # Trunk entry (wasm + CSS links)
 ├── tests/backend-grouping.json  # backend-generated fixture the demo's grouping is asserted against
 ├── styles.css                   # plain global CSS (BEM-ish names); every colour a :root token, light palette via data-theme
 └── Trunk.toml                   # WASM build/serve (127.0.0.1:8080); never set public_url here
@@ -159,7 +156,7 @@ Backend — commands, cache, concurrency:
   summary; `TenantChanged`/`Poisoned` are errors (`commands::patches::summary_for`). → `docs/design/query-cache.md#the-write-is-generation--and-tenant-gated`
 - **Tenant switch, sign-out, sign-in and re-authorize all call `clear_session()`** on the frontend
   and `clear_session_state` on the backend. → `docs/design/query-cache.md#a-tenant-switch-a-sign-out-a-sign-in-and-a-re-authorization-all-clear-the-frontend`
-- **Paging/grouping/sorting commands return empty on a cache miss, never an error.** Sort/group
+- **Paging/grouping/sorting commands (and `device_detail`) return empty on a cache miss, never an error.** Sort/group
   memos live in `CachedResult` (built on `spawn_blocking`, stored only if `Arc::ptr_eq` holds); the
   cached rows are never reordered. Group headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
 - **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`, `changes`, `worst_devices`, …) ride on both `QueryResult` and
@@ -247,9 +244,8 @@ NinjaOne API client:
 
 Filter:
 
-- **A device facet extends `PreparedFilter::device_allowed`; a patch facet is a client-side
-  `*_allowed()`.** `prepare()` once per query; `build_rows` re-checks every row against the scope
-  — the install `df` is bandwidth, not the boundary. → `docs/design/filter.md`
+- **`prepare()` once per query; `build_rows` re-checks every row against the scope** — the install
+  `df` is bandwidth, not the boundary. → `docs/design/filter.md`
 - **`organization_ids`/`location_ids`/`role_ids` are multi-select** (empty = all; OR within, AND
   across; `filter::ids` accepts bare or list). `df` grammar: `org=1`, `org in (1, 2)`, token `loc`,
   no `class`. → `docs/design/filter.md#the-three-identity-facets-are-multi-select`
@@ -265,7 +261,11 @@ Compliance and rollups — violating these silently misreports a fleet:
 - **Both exports print both clocks, the instance, app version, the result's `sla_policy`, and the
   `QueryScope` facets in two tiers** (`facets` narrow every sheet; `patch_facets` only the detail
   rows), built from the `QueryPlan`, never the request. Date bounds are absolute UTC via
-  `DateTime::from_timestamp`. → `docs/design/compliance.md#both-exports-state-the-facets-from-rowsqueryscope`
+  `DateTime::from_timestamp`. The CSV states scope + clocks in its file name only. → `docs/design/compliance.md#both-exports-state-the-facets-from-rowsqueryscope`
+- **Dates are `TableCell::DateTime` (Unix seconds)**: real Excel date-times in UTC; CSV text cells
+  are formula-guarded, numbers never. → `docs/design/compliance.md#the-workbook-writes-real-date-times-in-utc`
+- **The Devices sheet and the drill-down read one per-device rollup** (`apply_device_health`); an
+  excluded device's counts are blank, not zero. → `docs/design/compliance.md#one-per-device-rollup-for-the-devices-sheet-and-the-drill-down`
 - **`Type` is a device-tier chip** — rollups cover only the fetched families. → `docs/design/compliance.md#the-fleet-health-rollups-do-depend-on-the-patch-type-facet`
 - **`is_pending` is an exclude list** (not `REJECTED`/`INSTALLED`); current sources get
   `status_override = MANUAL`; `current_status_set` carries every selected status. → `docs/design/compliance.md#rowsis_pending-is-an-exclude-list`
@@ -319,15 +319,12 @@ Frontend:
 
 ## Verification playbook
 
-`just verify` runs the Rust gates of CI's backend and frontend jobs in their order; run it before
-declaring a change done. The individual recipes (`fmt-check`, `clippy`, `test`, `web-clippy`,
-`web-test`, …) are callable on their own — see `just --list`. For behavior a unit test can't
-prove, run `just dev` and exercise the view. Hook or shell-script changes: `.claude/hooks/test.sh`
+`just verify` runs CI's Rust gates for both crates; run it before declaring a change done (each
+recipe also runs alone — `just --list`). For behavior a unit test can't prove, run `just dev`. Hook or shell-script changes: `.claude/hooks/test.sh`
 + `shellcheck`. A dependency bump: `just licenses` and commit `THIRD-PARTY-LICENSES.md`.
 
-Gates `verify` does not run (Trunk `web-build`, coverage, audit/deny, licenses, the NinjaOne
-contract, shellcheck + hook tests, actionlint, conventional commits, CodeQL, manifest versions,
-screenshot tooling, the release verify job) → `docs/design/ci.md`. `cargo-audit` is a required
+Gates `verify` does not run (Trunk build, coverage, audit/deny, licenses, the NinjaOne contract,
+hook tests, actionlint, CodeQL, …) → `docs/design/ci.md`. `cargo-audit` is a required
 check on `main`, so a green local `verify` can still fail CI on a new advisory.
 
 ## Keeping this file up to date

@@ -2144,4 +2144,42 @@ kbd {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   text-align: center;
+/* --- Device drill-down (tables/device.rs) --- */
+/* Wider than the confirm/update dialogs: it carries a patch table. */
+.modal-wide {
+  width: min(920px, 100%);
+}
+
+.device-drill-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.device-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 8px 16px;
+  margin: 0 0 12px;
+}
+
+.device-fact dt {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.device-fact dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+}
+
+.device-bands {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
 }

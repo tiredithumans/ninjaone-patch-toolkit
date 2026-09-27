@@ -442,6 +442,7 @@ mod tests {
             node_class: Some(class.into()),
             offline: None,
             os: None,
+            last_contact: None,
         }
     }
 

@@ -2313,6 +2313,12 @@ fn reboot_device(id: i64, name: &str, offline: bool) -> DeviceSummary {
         os_name: Some("Windows Server 2022".into()),
         offline,
         pending_count: 2,
+        needs_reboot: true,
+        rollup_scope: crate::types::RollupScope::Included,
+        pending_by_severity: crate::types::SeverityCounts::default(),
+        aged_critical: 0,
+        failed_installs: None,
+        last_contact: None,
     }
 }
 
@@ -2729,5 +2735,98 @@ fn install_time_median_percentile_and_labels() {
     assert_eq!(
         time_to_install_sample_note(&t),
         "3 installed records measured; 1 skipped (missing a time, or installed before first seen)."
+    );
+}
+
+fn drill_device() -> crate::types::DeviceSummary {
+    crate::types::DeviceSummary {
+        device_id: 7,
+        device_name: "srv07".into(),
+        organization: "Contoso".into(),
+        location: None,
+        device_role: Some("Web Server".into()),
+        os_name: Some("Windows Server 2022".into()),
+        pending_count: 0,
+        needs_reboot: true,
+        offline: false,
+        rollup_scope: crate::types::RollupScope::Included,
+        pending_by_severity: Default::default(),
+        aged_critical: 0,
+        failed_installs: None,
+        last_contact: Some("2026-06-26 14:31 UTC".into()),
+    }
+}
+
+/// The drill-down's fact list keeps its shape: an absent value is a dash, not a
+/// missing line, and the two flags read as words.
+#[test]
+fn device_facts_keep_their_shape_when_values_are_missing() {
+    let facts = device_facts(&drill_device());
+    let labels: Vec<&str> = facts.iter().map(|(l, _)| *l).collect();
+    assert_eq!(
+        labels,
+        [
+            "Organization",
+            "Location",
+            "Device Role",
+            "OS",
+            "Status",
+            "Last contact",
+            "Needs reboot"
+        ]
+    );
+    let value = |label: &str| {
+        facts
+            .iter()
+            .find(|(l, _)| *l == label)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(value("Location"), "—");
+    assert_eq!(value("Status"), "Online");
+    assert_eq!(value("Needs reboot"), "Yes");
+    assert_eq!(value("Last contact"), "2026-06-26 14:31 UTC");
+
+    let offline = crate::types::DeviceSummary {
+        offline: true,
+        last_contact: None,
+        ..drill_device()
+    };
+    let facts = device_facts(&offline);
+    assert!(facts.contains(&("Status", "Offline".into())));
+    assert!(facts.contains(&("Last contact", "—".into())));
+}
+
+/// An excluded device's counts are unknown, not zero — the drill-down says why
+/// instead of showing them.
+#[test]
+fn only_an_excluded_device_carries_a_rollup_note() {
+    use crate::types::RollupScope;
+    assert_eq!(rollup_scope_note(RollupScope::Included), None);
+    for scope in [RollupScope::Offline, RollupScope::NonPatchable] {
+        let note = rollup_scope_note(scope).expect("an exclusion explains itself");
+        assert!(note.starts_with("Excluded from compliance"), "{note}");
+    }
+    assert!(
+        rollup_scope_note(RollupScope::Offline)
+            .unwrap()
+            .contains("unknown rather than zero")
+    );
+}
+
+#[test]
+fn failed_installs_are_unknown_unless_failed_was_queried() {
+    assert_eq!(failed_installs_label(Some(0)), "0");
+    assert_eq!(failed_installs_label(Some(3)), "3");
+    assert!(failed_installs_label(None).contains("Failed status"));
+}
+
+/// A capped list says so; a complete one says nothing.
+#[test]
+fn a_capped_device_row_list_is_labelled_as_partial() {
+    assert_eq!(device_rows_note(12, 12), None);
+    assert_eq!(
+        device_rows_note(1_000, 1_250),
+        Some("Showing the first 1,000 of 1,250 rows — sorting applies to these.".into())
     );
 }

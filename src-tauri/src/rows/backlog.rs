@@ -97,7 +97,7 @@ pub fn build_device_backlogs(
             continue;
         };
         let acc = list.entry(id).or_default();
-        acc.pending.bump(p.severity_enum());
+        acc.pending.add(p.severity_enum());
         if sla.is_aged(p) {
             acc.past_sla += 1;
         }

@@ -11,6 +11,7 @@
 mod changelog;
 mod changes;
 mod columns;
+mod device;
 mod filters;
 mod format;
 mod guardrails;
@@ -28,6 +29,7 @@ mod view_link;
 pub(crate) use changelog::*;
 pub(crate) use changes::*;
 pub(crate) use columns::*;
+pub(crate) use device::*;
 pub(crate) use filters::*;
 pub(crate) use format::*;
 pub(crate) use guardrails::*;

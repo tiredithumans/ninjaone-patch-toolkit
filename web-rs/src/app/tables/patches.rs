@@ -186,7 +186,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                             <td>{r.organization}</td>
                                             <td>{r.location.unwrap_or_default()}</td>
                                             <td>{r.device_role.unwrap_or_default()}</td>
-                                            <td>{r.device_name}</td>
+                                            <td><DeviceLink device_id=r.device_id name=r.device_name/></td>
                                             <td>{r.os_name.unwrap_or_default()}</td>
                                             <td>{r.patch_type}</td>
                                             <td>{r.kb.unwrap_or_default()}</td>

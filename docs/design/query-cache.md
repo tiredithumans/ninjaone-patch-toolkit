@@ -102,6 +102,13 @@ The three paging commands all return empty on a cache miss. A miss is a normal t
 switch, sign-out, superseded query); the frontend already renders its own empty state from the
 absent result.
 
+`device_detail` (the device drill-down) follows the same rule: `None` on a miss, which the dialog
+renders as "not in the current results". It is a read over a handle (`current_result_handle`), its
+row scan runs on `spawn_blocking`, it caps the rows at the paging limit and reports the total, and
+it is never memoized or cached itself — the frontend reloads an open drill-down whenever a new
+result lands, and a stamp (`QueryState.drill_seq`) drops a response that a newer click or reload
+has overtaken.
+
 `get_patch_rows` also takes an optional `sort` (`rows::RowSort`), applied through the memoized
 order described below — the cached rows themselves are never reordered; their canonical
 severity/org/device order feeds the export and the summary's inline first page.

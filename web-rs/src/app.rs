@@ -29,7 +29,7 @@ use header::Header;
 use settings::SettingsPanel;
 use shortcuts::KeyboardShortcuts;
 use state::*;
-use tables::Results;
+use tables::{DeviceDetailModal, Results};
 use toaster::Toaster;
 use update::UpdateSplash;
 use util::{
@@ -249,6 +249,7 @@ pub fn App() -> impl IntoView {
             <UpdateSplash/>
             <ConfirmActionModal/>
             <KeyboardShortcuts/>
+            <DeviceDetailModal/>
         </main>
         </Show>
     }

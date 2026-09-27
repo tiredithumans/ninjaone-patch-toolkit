@@ -294,6 +294,31 @@ pub(crate) struct QueryState {
     /// The sort the next manual run lands on instead of the canonical order —
     /// set by applying a shared view link, consumed (and cleared) by that run.
     pub(super) sort_on_next_run: RwSignal<Option<RowSort>>,
+    /// The open device drill-down, if any. A view over `result`, so a new result
+    /// reloads it and clearing the result closes it.
+    pub(super) drill: RwSignal<Option<DeviceDrill>>,
+    /// Stamp of the newest drill-down load; an older response is dropped, the same
+    /// rule as `view_seq` (two quick clicks must not land the first device's rows
+    /// under the second device's name).
+    pub(super) drill_seq: RwSignal<u64>,
+}
+
+/// The device drill-down dialog's state.
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceDrill {
+    pub device_id: i64,
+    /// The name it was opened from, shown while loading and if the load fails.
+    pub name: String,
+    pub load: DrillLoad,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum DrillLoad {
+    Loading,
+    Ready(Box<DeviceDetail>),
+    /// The cached result no longer holds the device (re-queried, tenant switch).
+    Gone,
+    Failed(String),
 }
 
 impl QueryState {
@@ -328,6 +353,8 @@ impl QueryState {
             view_seq: RwSignal::new(0),
             members_gen: RwSignal::new(0),
             sort_on_next_run: RwSignal::new(None),
+            drill: RwSignal::new(None),
+            drill_seq: RwSignal::new(0),
         }
     }
 }

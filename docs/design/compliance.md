@@ -44,13 +44,79 @@ tested). The detail sheet carries an **Offline** column for the same reason: a s
 offline devices excluded" has to let the reader reproduce the denominator, and `PatchRow.offline`
 was already there (the in-app table draws its "offline" chip from it).
 
+## One per-device rollup for the Devices sheet and the drill-down
+
+`DeviceSummary` carries each in-scope device's share of the fleet-health numbers — pending by
+severity band, pending past SLA (`aged_critical`), failed installs and NinjaOne's `lastContact` —
+filled by `rows::apply_device_health` from the **same unnarrowed current feed** and the same
+`is_pending` / `counts_toward_backlog` / `is_aged` predicates the compliance rollups use. The
+workbook's **Devices** sheet (`DeviceSummary::DEVICE_COLUMNS`) and the in-app drill-down both read
+it, so neither can grade a device differently from the Compliance sheet that counts it.
+
+- **Every in-scope device is listed, and `RollupScope` says whether it is in the
+  [`rollup_device`](#one-population-for-every-fleet-health-rollup-via-rowsrollup_device) population
+  and, if not, why** (`Excluded (offline)` / `Excluded (non-patchable)`). The scope note says "N
+  offline and M non-patchable devices excluded"; this is where a reader finds them by name. Their
+  count cells are **blank, not zero**: an offline device's zero means "unknown", and a zero would
+  read as "clean" — the misreading the exclusion exists to prevent. The drill-down shows the reason
+  instead of the counts for the same reason.
+- **Band columns come from `SeverityCounts::BANDS`** (one `band_cell::<I>` per band); their
+  headers are a hand-written `DEVICE_BAND_HEADERS` array because a `const` cannot concatenate the
+  labels — `device_band_headers_follow_the_bands` pins the two together.
+- **`failed_installs` is `None` unless the query asked for the Failed status.** Failures live in
+  the install history, which is only fetched for an install status; without it "0 failed" is not
+  something the result can know. The sheet leaves the cell blank and says so in a footnote.
+- **Order is (organization, device name, id)**, case-insensitive (`sort_device_summaries`, applied
+  in `assemble_result`), so two runs list identically and same-named devices still sort stably.
+- **`lastContact` is display-only.** Reachability is the vendor's own `offline` flag; the timestamp
+  only lets a reader judge how stale an offline device is. It is normalised like the patch
+  timestamps (`Device::last_contact_at` → `unix_to_datetime`), so a millisecond value cannot read
+  as year 58000.
+
+The drill-down's rows are different on purpose: they are the device's **Patches-tab** rows, so
+every patch filter applies, and the dialog says so beside counts that ignore them.
+
+## The workbook writes real date-times, in UTC
+
+`TableCell::DateTime(Option<i64>)` carries an instant as Unix seconds; `export::write_cell` writes
+it as an Excel date-time (`ExcelDateTime::from_timestamp`, number format `yyyy-mm-dd hh:mm`), so
+First Seen, Installed Date, Latest Failure, Last Contact and the About sheet's two clocks sort and
+filter as dates. Written as text they sorted as strings, and "first seen before May" was a string
+compare. A date cell has no zone, so the About sheet carries a **Time zone** row stating that every
+time is UTC. An instant outside Excel's 1900–9999 range degrades to its text spelling rather than
+failing the export; `None` leaves the cell empty. The text renderers — the HTML report and the CSV —
+print the same instant through `rows::utc_text` (`2026-05-01 09:15 UTC`), the spelling the rows
+already carry, so all three artifacts show one time the same way.
+
+## The CSV export
+
+`export_csv` writes the Patches sheet's `DETAIL_COLUMNS` over every cached row (no row limit —
+CSV has none) through `csv_export::write_csv`, a small hand-written writer rather than a
+dependency: UTF-8 with a BOM (without it Excel reads the file in the ANSI code page and every
+non-ASCII name turns to mojibake), CRLF records, and RFC 4180 quoting — every text field quoted,
+embedded quotes doubled.
+
+- **Formula injection (OWASP "CSV Injection").** A text cell beginning with `=`, `+`, `-`, `@`,
+  tab or CR gets a leading `'`, so a device or patch title like `=HYPERLINK(…)` is displayed rather
+  than evaluated when the file is opened in a spreadsheet. `-` is on the list, which is why the
+  guard is applied to `TableCell::Text` only: `Count`/`Number` cells are written bare and stay
+  numeric, negative values included. The visible apostrophe on a text cell that merely starts with
+  `-` is the accepted cost.
+- **Provenance lives in the file name and nowhere else.** CSV has no comment or metadata syntax,
+  and a preamble row breaks every importer, so the proposed name carries the device scope (the
+  device facet values, or `whole-fleet`), the status selection and both clocks:
+  `ninjaone-patches_whole-fleet_pending_data-20260502T0840Z_generated-20260502T0915Z.csv`. The other
+  patch filters do not fit in a file name; the workbook's About sheet is the artifact to share when
+  they matter, and the button's tooltip says so.
+
 ## Both exports state both clocks
 
 `generated_at` is the join/rollup clock; `data_fetched_at` is when the fleet data last came from
 NinjaOne, and a re-filter recomputes over a warm cache with no round trip — so an export stamped
 only with `generated_at` dates the fleet to the moment someone pressed a button. The report header
 prints both; the workbook's **About** sheet carries them plus the scoped/offline device counts and
-the detail-row total (`export::WorkbookMeta`).
+the detail-row total (`export::WorkbookMeta`). The CSV carries both in its proposed file name (see
+above).
 
 Both also state the NinjaOne **instance** (`QueryResult::instance`, stamped at assembly from the
 settings snapshot the query ran under — `QueryResult`-only like `QueryScope`, since the frontend
@@ -276,10 +342,13 @@ unit themselves.
 
 `rows::TableColumn<T>` is the shared table definition. Every table rendered from a cached
 `QueryResult` — `FailureGroup::COLUMNS`, `DeviceSummary::COLUMNS`, `ComplianceBucket::COLUMNS`,
-`OsCompliance::COLUMNS`, plus `export.rs`'s own `DETAIL_COLUMNS` — pairs each header with the
-accessor that fills it, so a column is one declaration rather than two lists agreeing by
-convention. `export.rs` renders all five through one `write_sheet` and contributes only the width
-arrays, each length-tied to its `COLUMNS.len()`; `report.rs` renders through one `write_table`.
+`OsCompliance::COLUMNS`, `DeviceSummary::DEVICE_COLUMNS`, plus `export.rs`'s own `DETAIL_COLUMNS`
+— pairs each header with the accessor that fills it, so a column is one declaration rather than
+two lists agreeing by convention. `export.rs` renders all six through one `write_sheet` and
+contributes only the width arrays, each length-tied to its `COLUMNS.len()`; `report.rs` renders
+through one `write_table`; the CSV writes `DETAIL_COLUMNS` through `csv_export::write_csv`. The
+drill-down dialog's hand-written labels reuse these spellings ("Device Role", "Pending Patches",
+"Aged (past SLA)").
 Before this the two had diverged: the report dropped `Patch Type` from the failures table, and
 hardcoded the reboot table's headers as "Role"/"Pending patches" against the workbook's "Device
 Role"/"Pending Patches".

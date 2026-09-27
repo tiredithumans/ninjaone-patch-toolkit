@@ -82,6 +82,13 @@ the opener in `on_cleanup` — which is why it must be created *per dialog insta
 `pending.map(...)` / `info.map(...)` closure), not once per component. `web-sys` is listed in
 `web-rs/Cargo.toml` only to enable the DOM features this needs.
 
+The corollary: the closure that creates the dialog must re-run only when a *new* dialog opens.
+The device drill-down (`tables/device.rs`) keys that closure on a `Memo` of the open device id, and
+renders its loading/loaded body in a nested closure — if the loaded detail arriving (or a refresh
+reloading it) re-ran the outer closure, the new trap would record the outgoing dialog as its
+opener and return focus to a detached node on close. Escape closes it; it has no action buttons
+(dispatch stays on the one `ActionBar`).
+
 **An async response applies only if its request is still current.** Every page, group-header and
 group-member fetch is stamped (`QueryState.view_seq`, `members_gen`) and dropped on arrival if a
 newer request, a regroup, or a re-query has moved the stamp. Without it a slow sort overwrote a
@@ -102,7 +109,8 @@ from the sample and flags `demo`, but leaves the results **empty** ("Run a query
 patches") until the user presses **Run query** — exactly like the real app. **Run query** routes
 to `run_demo_query` → `demo::filtered_result(...)`, which mirrors the backend's *display*
 filtering (identity/class/text facets + date windows) over the sample rows so the demo's controls
-actually filter — Compliance/Reboot stay representative (narrowed only by org). Demo mode is
+actually filter — Compliance/Reboot stay representative (narrowed only by org; the reboot list and
+the device drill-down share `demo::sample_device_summary`, so their counts agree). Demo mode is
 **web-only**: there is no "load sample data" affordance and the desktop release never enters it
 (no auto-load → `demo` stays false and the normal auth path runs). `web_mode` also disables the
 backend-only actions (sign-in, **export**).

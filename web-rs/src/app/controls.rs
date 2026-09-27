@@ -30,6 +30,7 @@ pub(crate) fn RunControls() -> impl IntoView {
                     }}
                 </button>
                 <ExportButton kind=Export::Workbook exporting=exporting/>
+                <ExportButton kind=Export::Csv exporting=exporting/>
                 <ExportButton kind=Export::Report exporting=exporting/>
                 <Show when=move || state.run.refreshing.get()>
                     <span class="chips-label">"↻ refreshing…"</span>
@@ -142,12 +143,13 @@ pub(crate) fn RunControls() -> impl IntoView {
     }
 }
 
-/// The two exports of the cached result. Both write through a native Save dialog
-/// and need a live query in the desktop app; they differ only in the command and
-/// the wording.
+/// The exports of the cached result. All write through a native Save dialog and
+/// need a live query in the desktop app; they differ only in the command and the
+/// wording.
 #[derive(Clone, Copy)]
 enum Export {
     Workbook,
+    Csv,
     Report,
 }
 
@@ -155,6 +157,7 @@ impl Export {
     fn label(self) -> &'static str {
         match self {
             Self::Workbook => "Export to Excel",
+            Self::Csv => "Export CSV",
             Self::Report => "Export report",
         }
     }
@@ -163,13 +166,26 @@ impl Export {
     fn web_title(self) -> &'static str {
         match self {
             Self::Workbook => "Excel export needs a live query in the desktop app",
+            Self::Csv => "CSV export needs a live query in the desktop app",
             Self::Report => "The HTML report needs a live query in the desktop app",
+        }
+    }
+
+    /// Tooltip in the desktop app. Only the CSV needs one: it holds the detail rows
+    /// alone, and says where its provenance went.
+    fn title(self) -> &'static str {
+        match self {
+            Self::Csv => {
+                "The Patches rows as CSV. The file name records the device scope, \
+                 statuses and data times (UTC); use Excel export for the full filter list."
+            }
+            Self::Workbook | Self::Report => "",
         }
     }
 
     fn saved(self, path: &str) -> String {
         match self {
-            Self::Workbook => format!("Exported to {path}"),
+            Self::Workbook | Self::Csv => format!("Exported to {path}"),
             Self::Report => format!("Report saved to {path}"),
         }
     }
@@ -178,6 +194,7 @@ impl Export {
     async fn save(self) -> Result<Option<String>, String> {
         match self {
             Self::Workbook => api::export_patches().await,
+            Self::Csv => api::export_csv().await,
             Self::Report => api::export_report().await,
         }
     }
@@ -195,7 +212,7 @@ fn ExportButton(kind: Export, exporting: RwSignal<bool>) -> impl IntoView {
             prop:disabled=move || {
                 exporting.get() || state.query.result.with(|r| r.is_none()) || web_only()
             }
-            title=move || if web_only() { kind.web_title() } else { "" }
+            title=move || if web_only() { kind.web_title() } else { kind.title() }
             on:click=move |_| {
                 if exporting.get_untracked() {
                     return;

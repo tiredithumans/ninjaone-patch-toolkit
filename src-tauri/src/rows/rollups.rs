@@ -45,8 +45,9 @@ impl FailureGroup {
         ("KB", |f| TableCell::opt_text(f.kb.as_deref())),
         ("Patch", |f| TableCell::text(&f.name)),
         ("Affected Devices", |f| TableCell::Count(f.affected_devices)),
+        // The instant, not its text: the workbook writes a real date-time.
         ("Latest Failure", |f| {
-            TableCell::opt_text(f.latest_failure.as_deref())
+            TableCell::DateTime(f.latest_failure_ts)
         }),
         ("Devices", |f| {
             // Capped at Excel's per-cell limit: a patch failing on a couple of
@@ -100,15 +101,10 @@ impl SeverityCounts {
         (Severity::Unknown.label(), |c| c.unknown),
     ];
 
-    /// Total across every band. Derived from [`BANDS`](Self::BANDS) so it can never
-    /// sum a different set than the charts draw.
-    pub fn total(&self) -> usize {
-        Self::BANDS.iter().map(|(_, get)| get(self)).sum()
-    }
-
-    /// Counts one patch of `severity`. Exhaustive, so a new variant is a compile
-    /// error here rather than a count that silently lands nowhere.
-    pub fn bump(&mut self, severity: Severity) {
+    /// Counts one pending patch into its band. The single place a [`Severity`] maps
+    /// to a field, shared by the per-organization breakdown and the per-device
+    /// rollup so the two cannot file the same patch under different bands.
+    pub fn add(&mut self, severity: Severity) {
         match severity {
             Severity::Critical => self.critical += 1,
             Severity::Important => self.important += 1,
@@ -119,6 +115,12 @@ impl SeverityCounts {
             Severity::Optional => self.optional += 1,
             Severity::Unknown => self.unknown += 1,
         }
+    }
+
+    /// Total across every band. Derived from [`BANDS`](Self::BANDS) so it can never
+    /// sum a different set than the charts draw.
+    pub fn total(&self) -> usize {
+        Self::BANDS.iter().map(|(_, get)| get(self)).sum()
     }
 
     /// The non-zero bands as one cell, most urgent first — `Critical 3 · Low 1`.
@@ -318,7 +320,7 @@ pub fn build_severity_by_org(
             continue;
         };
         let org = maps.org_name_str(device.organization_id);
-        by_org.entry(org).or_default().bump(p.severity_enum());
+        by_org.entry(org).or_default().add(p.severity_enum());
     }
     let mut out: Vec<OrgSeverity> = by_org
         .into_iter()

@@ -132,13 +132,17 @@ pub struct PatchRow {
     pub installed_date: Option<String>,
 }
 
-/// A device row for the Needs-Reboot view. The backend only sends the
-/// reboot-needing subset, so this mirror omits the `needsReboot` flag (always true
-/// here) — extra fields in the JSON are ignored on deserialize.
+/// A device's facts and per-device rollup: the Needs-Reboot view's rows (the
+/// backend sends only the reboot-needing subset there) and the drill-down's
+/// header. Mirrors `rows::DeviceSummary`; the rollup fields default so an older
+/// backend's payload still loads.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSummary {
-    /// What the Needs Reboot tab's device selection is keyed by.
+    /// What the Needs Reboot tab's device selection and the drill-down are keyed by.
+    /// Always sent by the backend; defaulted only so a hand-built sample without it
+    /// still deserializes.
+    #[serde(default)]
     pub device_id: i64,
     pub device_name: String,
     pub organization: String,
@@ -150,6 +154,43 @@ pub struct DeviceSummary {
     #[serde(default)]
     pub offline: bool,
     pub pending_count: usize,
+    #[serde(default)]
+    pub needs_reboot: bool,
+    #[serde(default)]
+    pub rollup_scope: RollupScope,
+    #[serde(default)]
+    pub pending_by_severity: SeverityCounts,
+    /// Pending Critical/Important past the SLA window (or undated).
+    #[serde(default)]
+    pub aged_critical: usize,
+    /// `None` when the query did not include the Failed status — unknown, not zero.
+    #[serde(default)]
+    pub failed_installs: Option<usize>,
+    #[serde(default)]
+    pub last_contact: Option<String>,
+}
+
+/// Whether a device is in the population the fleet-health rollups describe, and
+/// if not, why. Mirrors `rows::RollupScope`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RollupScope {
+    #[default]
+    Included,
+    Offline,
+    NonPatchable,
+}
+
+/// One device's drill-down, served from the backend's cached result by
+/// `device_detail`. Mirrors `rows::DeviceDetail`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDetail {
+    /// `None` only for rows with no device in the scoped inventory.
+    pub device: Option<DeviceSummary>,
+    /// The device's rows as the Patches tab filters them, capped by the backend.
+    pub rows: Vec<PatchRow>,
+    pub rows_total: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]

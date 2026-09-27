@@ -249,6 +249,56 @@ pub fn slice_groups(all: &[PatchGroup], offset: usize, limit: usize) -> GroupPag
     }
 }
 
+/// One device as the drill-down shows it: its facts and per-device rollup, plus
+/// its detail rows. Built from the cached result on request; never cached itself.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDetail {
+    /// `None` for a device that has rows but is not in the scoped inventory — only
+    /// possible for an orphan patch, which has no device facts to show.
+    pub device: Option<super::DeviceSummary>,
+    /// The device's detail rows — the Patches tab's rows, so every patch filter
+    /// applies — in the cache's canonical order, at most `limit` of them.
+    pub rows: Vec<PatchRow>,
+    /// How many detail rows the device has in all, so a capped list says so.
+    pub rows_total: usize,
+}
+
+/// Builds the drill-down for `device_id` from the cached result, or `None` when the
+/// result has neither a summary nor a row for it (a stale click after a re-query,
+/// or an id that was never in scope). A scan of every row, so the command runs it
+/// off the async runtime.
+pub fn device_detail(
+    result: &super::QueryResult,
+    device_id: i64,
+    limit: usize,
+) -> Option<DeviceDetail> {
+    if device_id == ORPHAN_DEVICE_ID {
+        return None;
+    }
+    let device = result
+        .devices
+        .iter()
+        .find(|d| d.device_id == device_id)
+        .cloned();
+    let mut rows_total = 0;
+    let mut rows = Vec::new();
+    for r in result.rows.iter().filter(|r| r.device_id == device_id) {
+        rows_total += 1;
+        if rows.len() < limit {
+            rows.push(r.clone());
+        }
+    }
+    if device.is_none() && rows_total == 0 {
+        return None;
+    }
+    Some(DeviceDetail {
+        device,
+        rows,
+        rows_total,
+    })
+}
+
 /// One page of a single group's member rows, in the cache's canonical order.
 /// Filtering by key rather than storing members on the group keeps a fleet-wide
 /// patch group (one entry per device) off the wire until it's actually expanded.

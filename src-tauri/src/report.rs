@@ -421,6 +421,14 @@ fn write_table<T>(buf: &mut String, columns: &[TableColumn<T>], rows: &[&T]) {
                 TableCell::Number(n) => {
                     let _ = write!(buf, "<td class=\"num\">{n}</td>");
                 }
+                // The same spelling the rows carry as text, so the report reads the
+                // way the app and the old text-dated workbook did.
+                TableCell::DateTime(ts) => match ts.and_then(crate::rows::utc_text) {
+                    Some(when) => {
+                        let _ = write!(buf, "<td>{when}</td>");
+                    }
+                    None => buf.push_str("<td>\u{2014}</td>"),
+                },
             }
         }
         buf.push_str("</tr>");
@@ -907,6 +915,12 @@ mod tests {
                 needs_reboot: true,
                 offline: false,
                 pending_count: 3,
+                rollup_scope: crate::rows::RollupScope::Included,
+                pending_by_severity: SeverityCounts::default(),
+                aged_critical: 0,
+                failed_installs: None,
+                last_contact: None,
+                last_contact_ts: None,
             }],
             compliance: vec![ComplianceBucket {
                 // A hostile org name must be escaped, not rendered as markup.

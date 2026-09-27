@@ -229,6 +229,7 @@ impl AppState {
                         self.clear_selection();
                     }
                     self.actions.results_stale.set(false);
+                    self.reload_device_detail();
                 }
                 // The toast announces the failure (aria-live); the banner keeps it
                 // visible after the toast auto-dismisses.
@@ -408,6 +409,7 @@ impl AppState {
             .applied_filters
             .set(Some(self.snapshot_filters()));
         self.query.query_error.set(None);
+        self.reload_device_detail();
     }
 
     /// Everything the backend drops on sign-out, sign-in, re-authorization and a
@@ -513,5 +515,6 @@ impl AppState {
         self.query.query_error.set(None);
         self.clear_selection();
         self.actions.results_stale.set(false);
+        self.close_device();
     }
 }
