@@ -147,15 +147,18 @@ count its records touched, and a device group whose `device_id` was `Some(0)`.
 
 Fleet-wide distributions the frontend charts/failure tab need — `failures` (FAILED-install
 rollup, `build_failures`), `severity_by_org` (`build_severity_by_org`), `age_buckets`
-(`build_age_buckets`) — are computed backend-side in `rows/` and carried on **both** `QueryResult`
-(cached; the HTML report reads it) and `QuerySummary` (IPC; the dashboard reads it). They're
-bounded (one entry per failing patch / per org / 5 buckets), so they ship whole rather than paged.
+(`build_age_buckets`), `worst_devices`/`offline_backlog` (`build_device_backlogs`),
+`time_to_install` (`build_time_to_install`), plus the `sla_policy` they were aged under — are
+computed backend-side in `rows/` and carried on **both** `QueryResult` (cached; the HTML report
+reads it) and `QuerySummary` (IPC; the dashboard reads it). They're bounded (one entry per
+failing patch / per org / 5 buckets / 25 devices), so they ship whole rather than paged.
 Add such a field in lockstep: `QueryResult` + `QuerySummary` + clone in `QuerySummary::from_result`
 + the `web-rs/src/types.rs` mirror + the demo's `assemble`, and assert its key in
 `serialized_shapes_carry_every_frontend_required_key`. Keep the backend `QuerySummary` ⇄ frontend
 `QueryResult` (`web-rs/src/types.rs`) shapes in sync.
 
-The one documented exception is `QueryScope`, which lives on `QueryResult` only — see
+The documented exceptions are `QueryScope` and `instance`, which live on `QueryResult` only —
+export provenance the frontend already has — see
 [compliance.md](./compliance.md#both-exports-state-the-facets-from-rowsqueryscope).
 
 ## Whole-fleet prefetch + client-side scoping

@@ -58,16 +58,18 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/rows/                    # join → PatchRow and every rollup off the cached result
 │   ├── mod.rs                   # QueryResult / QuerySummary + re-exports of every submodule
 │   ├── join.rs                  # device↔patch join, Interner, DeviceLabels, build_rows
-│   ├── compliance.rs            # compliance / by-OS / reboot rollups, rollup_device, compliance_scope_note
+│   ├── compliance.rs            # compliance / by-OS / reboot rollups, rollup_device, compliance_scope_note, SlaCutoffs
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
+│   ├── backlog.rs               # worst devices + offline backlog (capped device lists)
+│   ├── install_time.rs          # first seen → installed median / p90 from INSTALLED rows
 │   ├── groups.rs                # grouping, sorting, paging over the cache
 │   ├── scope.rs                 # QueryScope export provenance
 │   ├── table.rs                 # TableCell / TableColumn / format_pct / clamp_cell / join_capped — the shared column definition
 │   └── tests.rs
 ├── src/history.rs               # append-only run-history.jsonl (one rollup line per query) + RunRecord
-├── src/export.rs                # rust_xlsxwriter workbook (Patches [+ Patches (n) past the row limit] / Compliance / by OS / Needs-Reboot / Failures / About)
+├── src/export.rs                # rust_xlsxwriter workbook (Patches [+ Patches (n) past the row limit] / Compliance / by OS / Needs-Reboot / Failures / Worst Devices / Offline Backlog / Time to Install / About)
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
-├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets); atomic save, corrupt file quarantined
+├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, SLA policy, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
 ├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
 ├── src/commands/actions/        # mod.rs handlers · confirm.rs request_hash · plan.rs build_plan · dispatch.rs send_action · poller.rs poll_tick · tests.rs
@@ -87,11 +89,11 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
 │   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
-│   ├── tables/                  # one file per results tab: patches · compliance · failures · reboot · trend
+│   ├── tables/                  # one file per results tab: patches · compliance (+ backlog) · failures · reboot · trend
 │   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · toaster.rs · update.rs
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
-│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · tests.rs
+│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · sla.rs · changelog.rs · jobs.rs · tests.rs
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
@@ -161,10 +163,10 @@ Backend — commands, cache, concurrency:
   grouped views are memoized inside `CachedResult`, built on `spawn_blocking` and stored only if
   `Arc::ptr_eq` still holds; the cached rows are never reordered. Group
   headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
-- **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`) ride on both `QueryResult` and
+- **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`, `worst_devices`, …) ride on both `QueryResult` and
   `QuerySummary`.** Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
-  demo's `assemble`, and `serialized_shapes_carry_every_frontend_required_key`. `QueryScope` is the
-  one `QueryResult`-only exception. → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
+  demo's `assemble`, and `serialized_shapes_carry_every_frontend_required_key`. `QueryScope` and
+  `instance` are the `QueryResult`-only exceptions. → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
 - **Every TTL'd cache slot is a `TenantCache<T>`** — it owns the tenant stamp, TTL,
   single-flight gate, and the epoch sampled before the fetch and re-checked at the store.
   Never open-code that protocol for a new slot; `last_result` is the one exception and is
@@ -258,8 +260,8 @@ Compliance and rollups — violating these silently misreports a fleet:
 - **Every surface prints `rows::compliance_scope_note`** (offline + non-patchable counts;
   `devices_total − devices_offline − devices_unpatchable` is the denominator). The frontend `util`
   mirrors it. → `docs/design/compliance.md#devices_offline-devices_unpatchable-and-patch_families-ride-on-queryresultquerysummary`
-- **Both exports print both clocks (`generated_at`, `data_fetched_at`) and the `QueryScope`
-  facets in two tiers** (`facets` narrow every sheet; `patch_facets` only the detail rows), built
+- **Both exports print both clocks (`generated_at`, `data_fetched_at`), the instance, app version,
+  the result's `sla_policy`, and the `QueryScope` facets in two tiers** (`facets` narrow every sheet; `patch_facets` only the detail rows), built
   from the `QueryPlan`, never the request. Date bounds are absolute UTC via
   `DateTime::from_timestamp`. → `docs/design/compliance.md#both-exports-state-the-facets-from-rowsqueryscope`
 - **`Type` is a device-tier chip** — rollups cover only the fetched families. → `docs/design/compliance.md#the-fleet-health-rollups-do-depend-on-the-patch-type-facet`
@@ -268,6 +270,8 @@ Compliance and rollups — violating these silently misreports a fleet:
 - **`Installed` and `Failed` route to the install-history endpoints; current patches are always
   fetched.** One requested install status is pushed down server-side; the lookback is re-applied
   client-side. → `docs/design/compliance.md#installedfailed-vs-current-patches-status-routing`
+- **SLA aging is per band** (`SlaCutoffs` from the result's `SlaPolicy`; `Unknown` takes the default).
+  "Aged (past SLA)" is Critical/Important only; the device lists' "Past SLA" is any severity. → `docs/design/compliance.md#the-sla-is-per-severity-band`
 - **`format_pct` never rounds up to 100** (caps at 99%; `pct_cell` at one decimal). → `docs/design/compliance.md#a-percentage-never-rounds-up-to-100`
 - **There is no patch release date in the API.** `first_seen_at()` is detection time; keep "First
   seen" / "since first seen" naming; fixtures must emit `timestamp`. → `docs/design/compliance.md#there-is-no-patch-release-date-in-the-ninjaone-api`
@@ -279,7 +283,7 @@ Compliance and rollups — violating these silently misreports a fleet:
 Severity:
 
 - **Two vocabularies on one field; `Security`/`Recommended` are their own variants ranked below
-  `Important`; unmapped → `Unknown`.** Adding a value touches nine sites — follow the checklist.
+  `Important`; unmapped → `Unknown`.** Adding a value touches ten sites — follow the checklist.
   Enumerate bands via `SeverityCounts::BANDS` / `charts::SEV_BANDS`, never a label match —
   `total_severity_is_the_sum_of_its_bands`, `severity_css_defines_every_band`. → `docs/design/severity.md`
 
