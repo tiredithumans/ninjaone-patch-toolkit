@@ -12,7 +12,11 @@ mod report;
 mod rows;
 mod settings;
 mod state;
+mod window_state;
 
+use std::sync::Arc;
+
+use tauri::Manager;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use state::AppState;
@@ -81,11 +85,24 @@ pub fn run() {
     init_tracing();
 
     let app_state = AppState::new().expect("failed to initialize application state");
+    let window_saver = Arc::new(window_state::WindowStateSaver::default());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(app_state)
+        // The main window is created hidden (`tauri.conf.json`) so the remembered
+        // size and position apply before its first frame instead of visibly
+        // jumping there. `show` runs whatever `restore` managed — a window that
+        // stays hidden would be a far worse failure than one at the default size.
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window(window_state::MAIN_WINDOW) {
+                window_state::restore(&window);
+                window.show()?;
+            }
+            Ok(())
+        })
+        .on_window_event(move |window, event| window_saver.on_event(window, event))
         .invoke_handler(tauri::generate_handler![
             commands::auth::sign_in,
             commands::auth::sign_out,
