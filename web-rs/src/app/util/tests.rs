@@ -2157,3 +2157,32 @@ fn severity_rank_accepts_labels_raw_values_and_aliases() {
         assert_eq!(sev_ordinal(label), 7 - severity_rank(label));
     }
 }
+
+/// The fleet line reads the two approval totals with thousands separators.
+#[test]
+fn the_approval_totals_line_names_both_halves_of_the_workflow() {
+    assert_eq!(
+        approval_totals_line(1_204, 3),
+        "1,204 awaiting approval \u{00b7} 3 approved, not installed"
+    );
+}
+
+/// "Stuck" means nothing without the threshold, and a capped list must say it is
+/// capped — the wire copy carries only the oldest devices.
+#[test]
+fn the_stuck_approvals_caption_states_the_threshold_and_the_cap() {
+    assert_eq!(stuck_approvals_caption(0, 0, 0, 30), None);
+    let one = stuck_approvals_caption(1, 1, 1, 30).unwrap();
+    assert!(one.starts_with("1 approved patch on 1 device still not installed more than 30 days"));
+    assert!(!one.contains("Showing"), "nothing was capped: {one}");
+    let capped = stuck_approvals_caption(200, 1_523, 4_100, 14).unwrap();
+    assert!(
+        capped.contains("4,100 approved patches on 1,523 devices"),
+        "{capped}"
+    );
+    assert!(capped.contains("more than 14 days"), "{capped}");
+    assert!(
+        capped.contains("Showing the oldest 200 of 1,523"),
+        "{capped}"
+    );
+}

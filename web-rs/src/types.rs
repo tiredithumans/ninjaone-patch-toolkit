@@ -162,6 +162,12 @@ pub struct ComplianceBucket {
     pub compliance_pct: f64,
     pub pending_critical: usize,
     pub aged_critical: usize,
+    /// Pending approval (vendor status `MANUAL`), any severity.
+    #[serde(default)]
+    pub awaiting_approval: usize,
+    /// `APPROVED` and still not installed, any severity.
+    #[serde(default)]
+    pub approved_not_installed: usize,
 }
 
 /// Per-OS compliance row for the Compliance tab's "Compliance by OS" section.
@@ -175,6 +181,35 @@ pub struct OsCompliance {
     pub compliance_pct: f64,
     pub pending_critical: usize,
     pub aged_critical: usize,
+    #[serde(default)]
+    pub awaiting_approval: usize,
+    #[serde(default)]
+    pub approved_not_installed: usize,
+}
+
+/// Mirror of the backend `rows::ApprovalBacklog`: fleet totals of the two approval
+/// columns and the devices whose approved patches are not installing. The
+/// `stuck_devices` list is capped on the wire; `stuck_devices_total` is not.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ApprovalBacklog {
+    pub awaiting_approval: usize,
+    pub approved_not_installed: usize,
+    pub stuck_after_days: i64,
+    pub stuck_patches: usize,
+    pub stuck_devices_total: usize,
+    pub stuck_devices: Vec<StuckDevice>,
+}
+
+/// Mirror of the backend `rows::StuckDevice` (its `deviceId` and
+/// `oldestFirstSeenTs` are not rendered, so not mirrored).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StuckDevice {
+    pub device_name: String,
+    pub organization: String,
+    pub patches: usize,
+    pub oldest_first_seen: Option<String>,
 }
 
 // Backend also sends severityRank and latestFailureTs; serde ignores undeclared
@@ -279,6 +314,9 @@ pub struct QueryResult {
     pub severity_by_org: Vec<OrgSeverity>,
     /// Pending-patch age histogram for the dashboard charts.
     pub age_buckets: Vec<AgeBucket>,
+    /// Approval workflow totals and the stuck-approval devices.
+    #[serde(default)]
+    pub approvals: ApprovalBacklog,
     pub devices_total: usize,
     /// How many of `devices_total` are offline. The compliance rollups exclude them
     /// from both the denominator and the pending counts, so the Devices column of the

@@ -22,9 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::app::util::{date_to_epoch, severity_rank};
 use crate::types::QueryResult;
 use crate::types::{
-    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams, GroupBy, Location,
-    NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role,
-    SeverityCounts,
+    AgeBucket, ApprovalBacklog, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams,
+    GroupBy, Location, NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies,
+    PatchGroup, PatchRow, Role, SeverityCounts, StuckDevice,
 };
 
 /// Wall-clock label shown in the results summary. Fixed (not "now") so the build
@@ -265,6 +265,8 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
             compliance_pct: 66.7,
             pending_critical: 5,
             aged_critical: 2,
+            awaiting_approval: 6,
+            approved_not_installed: 7,
         },
         ComplianceBucket {
             organization: "Northwind Traders".to_string(),
@@ -273,6 +275,8 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
             compliance_pct: 78.6,
             pending_critical: 3,
             aged_critical: 1,
+            awaiting_approval: 4,
+            approved_not_installed: 3,
         },
         ComplianceBucket {
             organization: "Fabrikam Inc".to_string(),
@@ -281,8 +285,41 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
             compliance_pct: 90.0,
             pending_critical: 1,
             aged_critical: 0,
+            awaiting_approval: 2,
+            approved_not_installed: 1,
         },
     ]
+}
+
+/// The approval backlog for the demo: totals summed from the (org-narrowed)
+/// compliance buckets, as the backend's equal the compliance columns' sums, and a
+/// fixed stuck-device list narrowed by the same organization facet.
+fn sample_approvals(
+    compliance: &[ComplianceBucket],
+    keep: &dyn Fn(&str) -> bool,
+) -> ApprovalBacklog {
+    let stuck: Vec<StuckDevice> = [
+        ("SEA-WKS-1187", "Contoso Ltd", 4, "2026-04-14 09:20 UTC"),
+        ("NW-APP02", "Northwind Traders", 2, "2026-05-02 17:05 UTC"),
+        ("SEA-FILE02", "Contoso Ltd", 1, "2026-05-19 03:40 UTC"),
+    ]
+    .into_iter()
+    .filter(|(_, org, _, _)| keep(org))
+    .map(|(name, org, patches, seen)| StuckDevice {
+        device_name: name.to_string(),
+        organization: org.to_string(),
+        patches,
+        oldest_first_seen: Some(seen.to_string()),
+    })
+    .collect();
+    ApprovalBacklog {
+        awaiting_approval: compliance.iter().map(|b| b.awaiting_approval).sum(),
+        approved_not_installed: compliance.iter().map(|b| b.approved_not_installed).sum(),
+        stuck_after_days: 30,
+        stuck_patches: stuck.iter().map(|d| d.patches).sum(),
+        stuck_devices_total: stuck.len(),
+        stuck_devices: stuck,
+    }
 }
 
 /// Per-OS compliance for the "Compliance by OS" section. Totals match the fleet size
@@ -295,22 +332,28 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
 /// backend's `build_compliance_by_os`, which likewise derives from the scoped set
 /// rather than from a fixed table.
 fn scoped_compliance_by_os(rows: &[PatchRow]) -> Vec<OsCompliance> {
-    // os -> (all devices, devices with a pending row, pending critical/important)
-    let mut by_os: BTreeMap<String, (BTreeSet<i64>, BTreeSet<i64>, usize)> = BTreeMap::new();
+    // os -> (all devices, devices with a pending row, pending critical/important,
+    // awaiting approval, approved-not-installed)
+    type Acc = (BTreeSet<i64>, BTreeSet<i64>, usize, usize, usize);
+    let mut by_os: BTreeMap<String, Acc> = BTreeMap::new();
     for r in rows {
         let os = r.os_name.clone().unwrap_or_else(|| "(unknown)".to_string());
         let e = by_os.entry(os).or_default();
         e.0.insert(r.device_id);
         if r.status == "PENDING" {
             e.1.insert(r.device_id);
+            e.3 += 1;
             if matches!(r.severity.as_str(), "Critical" | "Important") {
                 e.2 += 1;
             }
         }
+        if r.status == "APPROVED" {
+            e.4 += 1;
+        }
     }
     by_os
         .into_iter()
-        .map(|(os, (devices, pending, critical))| {
+        .map(|(os, (devices, pending, critical, awaiting, approved))| {
             let total = devices.len();
             let compliant = total - pending.len();
             OsCompliance {
@@ -326,6 +369,8 @@ fn scoped_compliance_by_os(rows: &[PatchRow]) -> Vec<OsCompliance> {
                 // The sample carries no SLA breach detail; the real backend
                 // computes this from first-seen age.
                 aged_critical: 0,
+                awaiting_approval: awaiting,
+                approved_not_installed: approved,
             }
         })
         .collect()
@@ -545,6 +590,7 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64]) -> QueryResult {
         .filter(|o| keep(&o.organization))
         .collect();
     let devices_total = compliance.iter().map(|b| b.devices_total).sum();
+    let approvals = sample_approvals(&compliance, &keep);
     // Both of these used to ship whole-fleet regardless of the facet, so with an
     // organization selected the Compliance tab's by-OS chart and the age histogram
     // described a fleet the rest of the screen — and `devices_total` beside them —
@@ -561,6 +607,7 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64]) -> QueryResult {
         failures,
         severity_by_org,
         age_buckets,
+        approvals,
         devices_total,
         // The sample fleet is all-online and both families are represented, so the
         // demo's scope note reads the same as a whole-fleet desktop query.
@@ -1009,6 +1056,44 @@ mod tests {
             r.rows
                 .iter()
                 .all(|r| r.os_name.as_deref() == Some("Ubuntu 22.04 LTS"))
+        );
+    }
+
+    /// The backend's approval totals are the compliance columns summed (one
+    /// population), and the organization facet narrows the stuck list too.
+    #[test]
+    fn approval_totals_match_the_compliance_columns_and_follow_the_org_facet() {
+        let all = filtered_result(&filter(), "ALL", &all_statuses(), None);
+        let sum = |r: &QueryResult, f: fn(&ComplianceBucket) -> usize| {
+            r.compliance.iter().map(f).sum::<usize>()
+        };
+        assert_eq!(
+            all.approvals.awaiting_approval,
+            sum(&all, |b| b.awaiting_approval)
+        );
+        assert_eq!(
+            all.approvals.approved_not_installed,
+            sum(&all, |b| b.approved_not_installed)
+        );
+        assert!(
+            all.approvals.stuck_devices_total > 0,
+            "the demo shows the card populated"
+        );
+
+        let northwind = FilterParams {
+            organization_ids: vec![2],
+            ..filter()
+        };
+        let r = filtered_result(&northwind, "ALL", &all_statuses(), None);
+        assert!(
+            r.approvals
+                .stuck_devices
+                .iter()
+                .all(|d| d.organization == "Northwind Traders")
+        );
+        assert_eq!(
+            r.approvals.awaiting_approval,
+            sum(&r, |b| b.awaiting_approval)
         );
     }
 

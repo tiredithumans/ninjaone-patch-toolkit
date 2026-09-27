@@ -86,6 +86,46 @@ pub(crate) fn group_count_label(by_device: bool, rows: usize, devices: usize) ->
     }
 }
 
+/// The fleet line above the stuck-approvals table: where the approval workflow
+/// stands across the rollup population.
+pub(crate) fn approval_totals_line(awaiting: usize, approved: usize) -> String {
+    format!(
+        "{} awaiting approval \u{00b7} {} approved, not installed",
+        group_thousands(awaiting),
+        group_thousands(approved)
+    )
+}
+
+/// The stuck-approvals card's caption: what "stuck" means (the threshold is not
+/// recoverable from the rows) and, when the IPC copy was capped, how many devices
+/// are not listed. `None` when nothing is stuck, so the card can say that instead.
+pub(crate) fn stuck_approvals_caption(
+    shown: usize,
+    devices_total: usize,
+    patches: usize,
+    after_days: i64,
+) -> Option<String> {
+    if devices_total == 0 {
+        return None;
+    }
+    let plural = |n: usize, one: &'static str, many: &'static str| if n == 1 { one } else { many };
+    let mut out = format!(
+        "{} approved {} on {} {} still not installed more than {after_days} days after first seen \u{2014} usually a sign the agent is not applying patches.",
+        group_thousands(patches),
+        plural(patches, "patch", "patches"),
+        group_thousands(devices_total),
+        plural(devices_total, "device", "devices"),
+    );
+    if shown < devices_total {
+        out.push_str(&format!(
+            " Showing the oldest {} of {}; the workbook's Stuck Approvals sheet lists every one.",
+            group_thousands(shown),
+            group_thousands(devices_total)
+        ));
+    }
+    Some(out)
+}
+
 /// The counts the tier-aware results summary needs — all already on `QueryResult`,
 /// so the summary can describe whichever tab is active without extra backend data.
 pub(crate) struct SummaryCounts {
