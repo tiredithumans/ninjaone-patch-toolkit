@@ -5,20 +5,25 @@
 //! Adapted from `ninjaone-patch-dashboard`'s `snapshot.rs` device↔patch join.
 //!
 //! Split by concern: `join` (device↔patch join), `compliance` (fleet-health
-//! rollups + scope note), `rollups` (failures / severity / age aggregates),
-//! `groups` (sort / page / group), `scope` (export provenance), `table` (the
-//! shared column definition). This file holds the result types every one of
-//! them feeds.
+//! rollups + scope note + SLA cutoffs), `rollups` (failures / severity / age
+//! aggregates), `backlog` (worst devices + offline backlog), `install_time`
+//! (first seen → installed), `groups` (sort / page / group), `scope` (export
+//! provenance), `table` (the shared column definition). This file holds the
+//! result types every one of them feeds.
 
+mod backlog;
 mod compliance;
 mod groups;
+mod install_time;
 mod join;
 mod rollups;
 mod scope;
 mod table;
 
+pub use backlog::*;
 pub use compliance::*;
 pub use groups::*;
+pub use install_time::*;
 pub use join::*;
 pub use rollups::*;
 pub use scope::*;
@@ -26,6 +31,7 @@ pub use table::*;
 
 use crate::changes::RunChanges;
 use crate::model::PatchRow;
+use crate::settings::SlaPolicy;
 use serde::Serialize;
 
 /// The full result of a patch query. Cached in `AppState.last_result` and read by
@@ -45,6 +51,19 @@ pub struct QueryResult {
     pub severity_by_org: Vec<OrgSeverity>,
     /// Pending-patch age histogram for the dashboard.
     pub age_buckets: Vec<AgeBucket>,
+    /// The worst online devices by pending backlog, capped.
+    pub worst_devices: DeviceBacklogList,
+    /// Offline devices still listed with pending records, capped.
+    pub offline_backlog: DeviceBacklogList,
+    /// First seen → installed, by organization and severity.
+    pub time_to_install: TimeToInstall,
+    /// The SLA policy the aging figures were computed under — stamped at assembly,
+    /// so an export after a settings change still states the policy its numbers
+    /// used.
+    pub sla_policy: SlaPolicy,
+    /// The NinjaOne instance the data came from, for the exports' provenance.
+    /// `QueryResult`-only like [`QueryScope`]: the frontend knows its own instance.
+    pub instance: String,
     pub devices_total: usize,
     /// How many of `devices_total` are offline.
     ///
@@ -112,6 +131,15 @@ pub struct QuerySummary {
     pub severity_by_org: Vec<OrgSeverity>,
     /// Pending-patch age histogram for the dashboard charts.
     pub age_buckets: Vec<AgeBucket>,
+    /// See [`QueryResult::worst_devices`].
+    pub worst_devices: DeviceBacklogList,
+    /// See [`QueryResult::offline_backlog`].
+    pub offline_backlog: DeviceBacklogList,
+    /// See [`QueryResult::time_to_install`].
+    pub time_to_install: TimeToInstall,
+    /// See [`QueryResult::sla_policy`]. The Compliance tab states it, since the
+    /// policy in Settings may have changed since this result was computed.
+    pub sla_policy: SlaPolicy,
     pub devices_total: usize,
     /// How many of `devices_total` are offline.
     ///
@@ -167,6 +195,10 @@ impl QuerySummary {
             failures: result.failures.clone(),
             severity_by_org: result.severity_by_org.clone(),
             age_buckets: result.age_buckets.clone(),
+            worst_devices: result.worst_devices.clone(),
+            offline_backlog: result.offline_backlog.clone(),
+            time_to_install: result.time_to_install.clone(),
+            sla_policy: result.sla_policy,
             devices_total: result.devices_total,
             devices_offline: result.devices_offline,
             devices_unpatchable: result.devices_unpatchable,

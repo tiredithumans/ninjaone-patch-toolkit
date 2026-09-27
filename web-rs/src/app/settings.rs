@@ -172,24 +172,6 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                         }
                     />
                 </label>
-                <label>
-                    "SLA window for aged criticals (days)"
-                    <input
-                        type="number"
-                        min="1"
-                        max="3650"
-                        prop:value=move || state.settings.f_sla.get().to_string()
-                        on:change=move |ev| {
-                            let v = parse_clamped(
-                                &event_target_value(&ev),
-                                state.settings.f_sla.get_untracked(),
-                                1,
-                                3650,
-                            );
-                            state.settings.f_sla.set(v);
-                        }
-                    />
-                </label>
                 <label class="inline">
                     <input
                         type="checkbox"
@@ -199,6 +181,7 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                     "Automatically check for updates on launch"
                 </label>
             </div>
+            <SlaSettingsFields/>
             <ActionSettingsFields/>
             <div class="row">
                 <button class="btn btn-primary" prop:disabled=move || saving.get() on:click=save>
@@ -278,10 +261,79 @@ fn save_args(
         callback_port: state.settings.f_port.get_untracked(),
         install_window_days: state.settings.f_install_days.get_untracked(),
         sla_days: state.settings.f_sla.get_untracked(),
+        sla_by_severity: state.settings.f_sla_by_severity.get_untracked(),
         client_secret,
         clear_secret,
         auto_check_updates: state.settings.f_auto_update.get_untracked(),
         actions: state.settings.f_actions.get_untracked(),
+    }
+}
+
+/// The SLA policy: a default window plus an optional override per severity band.
+///
+/// A blank band uses the default. Saving here clears no cache — the policy is read
+/// when a query is assembled, so the next Run query (a re-filter over the cached
+/// fleet data, no refetch) reflects it; the result on screen keeps the policy it
+/// was computed with, which the Compliance tab states.
+#[component]
+fn SlaSettingsFields() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let bands = state.settings.f_sla_by_severity;
+    view! {
+        <fieldset class="settings-sla">
+            <legend>"Patch SLA"</legend>
+            <p class="settings-hint">
+                "How long a pending patch may stay pending after NinjaOne first reports it. Leave a severity blank to use the default. Applies from the next Run query."
+            </p>
+            <div class="grid">
+                <label>
+                    "Default SLA (days)"
+                    <input
+                        type="number"
+                        min="1"
+                        max="3650"
+                        prop:value=move || state.settings.f_sla.get().to_string()
+                        on:change=move |ev| {
+                            let v = parse_clamped(
+                                &event_target_value(&ev),
+                                state.settings.f_sla.get_untracked(),
+                                1,
+                                3650,
+                            );
+                            state.settings.f_sla.set(v);
+                        }
+                    />
+                </label>
+                {SlaBySeverity::BANDS
+                    .iter()
+                    .map(|&(label, get, set)| {
+                        view! {
+                            <label>
+                                {format!("{label} (days)")}
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="3650"
+                                    placeholder=move || {
+                                        format!("default ({})", state.settings.f_sla.get())
+                                    }
+                                    prop:value=move || {
+                                        bands.with(get).map(|d| d.to_string()).unwrap_or_default()
+                                    }
+                                    on:change=move |ev| {
+                                        let raw = event_target_value(&ev);
+                                        bands.update(|b| {
+                                            let slot = set(b);
+                                            *slot = util::parse_optional_days(&raw, *slot);
+                                        });
+                                    }
+                                />
+                            </label>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+        </fieldset>
     }
 }
 

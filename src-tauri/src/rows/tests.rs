@@ -8,6 +8,7 @@ use crate::model::{Device, Patch, PatchRow, PatchStatus};
 
 use super::*;
 use crate::filter::FilterParams;
+use crate::settings::{SlaBySeverity, SlaPolicy};
 
 /// Composes the two halves of paging the way `AppState::with_sorted_result`
 /// does — build the order once, then slice it — so these assertions still
@@ -153,6 +154,11 @@ fn patch(device_id: i64, status: &str, sev: &str, first_seen_days_ago: Option<i6
             .map(|d| (Utc::now() - Duration::days(d)).timestamp() as f64),
         installed_timestamp: None,
     }
+}
+
+/// The default policy (30 days for every band), cut at the current clock.
+fn sla30() -> SlaCutoffs {
+    SlaCutoffs::new(&SlaPolicy::default(), Utc::now())
 }
 
 fn maps() -> LookupMaps {
@@ -465,7 +471,7 @@ fn compliance_counts_compliant_and_aged_backlog() {
     ];
     let counts = pending_counts(&refs(&current));
     let summaries = build_device_summaries(&[&d1, &d2], &counts, &maps);
-    let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, 30, Utc::now());
+    let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets.len(), 1);
     let b = &buckets[0];
     assert_eq!(b.devices_total, 2);
@@ -493,7 +499,7 @@ fn an_excluded_devices_backlog_is_excluded_too() {
     ];
     let counts = pending_counts(&refs(&current));
     let summaries = build_device_summaries(&[&offline], &counts, &maps);
-    let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, 30, Utc::now());
+    let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert!(
         buckets.is_empty(),
         "a bucket with no devices in it must not be emitted at all, \
@@ -515,7 +521,7 @@ fn an_orphan_patch_does_not_invent_an_organization() {
     let current = vec![orphan];
     let counts = pending_counts(&refs(&current));
     let summaries = build_device_summaries(&[&d], &counts, &maps);
-    let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, 30, Utc::now());
+    let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets.len(), 1, "only the real organization: {buckets:?}");
     assert_eq!(buckets[0].pending_critical, 0);
 }
@@ -535,7 +541,7 @@ fn a_current_patch_with_no_status_still_counts_as_pending() {
     let counts = pending_counts(&refs(&current));
     assert_eq!(counts.get(&1).copied(), Some(1));
     let summaries = build_device_summaries(&[&d], &counts, &maps);
-    let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, 30, Utc::now());
+    let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets[0].devices_compliant, 0);
     assert_eq!(buckets[0].pending_critical, 1);
     // 90 days old → the "61-90 days" bucket.
@@ -572,7 +578,7 @@ fn compliance_excludes_offline_devices_from_the_denominator() {
     let current = vec![patch(1, "MANUAL", "CRITICAL", Some(1))];
     let counts = pending_counts(&refs(&current));
     let summaries = build_device_summaries(&[&online, &offline], &counts, &maps);
-    let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, 30, Utc::now());
+    let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets.len(), 1);
     let b = &buckets[0];
     assert_eq!(
@@ -594,7 +600,7 @@ fn compliance_by_os_groups_devices_and_patches_by_os() {
     let current = vec![patch(1, "MANUAL", "CRITICAL", Some(45))]; // aged, on d1
     let counts = pending_counts(&refs(&current));
     let summaries = build_device_summaries(&[&d1, &d2], &counts, &maps);
-    let buckets = build_compliance_by_os(&summaries, &refs(&current), &by_id, 30, Utc::now());
+    let buckets = build_compliance_by_os(&summaries, &refs(&current), &by_id, &sla30());
     assert_eq!(buckets.len(), 2, "one bucket per distinct OS");
     // Sorted by OS name (case-insensitive): "Windows 11 Pro" before "Windows Server 2022".
     let win11 = &buckets[0];
@@ -639,7 +645,7 @@ fn query_result_serializes_camel_case_for_the_frontend() {
     );
     let counts = pending_counts(&refs(&patches));
     let devices = build_device_summaries(&[&d], &counts, &maps);
-    let compliance = build_compliance(&devices, &refs(&patches), &by_id, &maps, 30, Utc::now());
+    let compliance = build_compliance(&devices, &refs(&patches), &by_id, &maps, &sla30());
     let result = QueryResult {
         rows,
         devices,
@@ -648,6 +654,11 @@ fn query_result_serializes_camel_case_for_the_frontend() {
         failures: Vec::new(),
         severity_by_org: Vec::new(),
         age_buckets: Vec::new(),
+        worst_devices: Default::default(),
+        offline_backlog: Default::default(),
+        time_to_install: Default::default(),
+        sla_policy: Default::default(),
+        instance: "https://app.ninjarmm.com".into(),
         devices_total: 1,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -703,7 +714,7 @@ fn query_summary_trims_to_first_page_and_reboot_subset() {
     );
     let counts = pending_counts(&refs(&patches));
     let devices = build_device_summaries(&[&d1, &d2], &counts, &maps);
-    let compliance = build_compliance(&devices, &refs(&patches), &by_id, &maps, 30, Utc::now());
+    let compliance = build_compliance(&devices, &refs(&patches), &by_id, &maps, &sla30());
     let result = QueryResult {
         rows,
         devices,
@@ -712,6 +723,11 @@ fn query_summary_trims_to_first_page_and_reboot_subset() {
         failures: Vec::new(),
         severity_by_org: Vec::new(),
         age_buckets: Vec::new(),
+        worst_devices: Default::default(),
+        offline_backlog: Default::default(),
+        time_to_install: Default::default(),
+        sla_policy: Default::default(),
+        instance: "https://app.ninjarmm.com".into(),
         devices_total: 2,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -839,7 +855,7 @@ fn empty_inputs_yield_no_rows_or_compliance() {
     let by_id: HashMap<i64, &Device> = HashMap::new();
     let rows = build_rows(&by_id, &maps, &[], &FilterParams::default().prepare());
     assert!(rows.is_empty());
-    let compliance = build_compliance(&[], &[], &by_id, &maps, 30, Utc::now());
+    let compliance = build_compliance(&[], &[], &by_id, &maps, &sla30());
     assert!(compliance.is_empty());
 }
 
@@ -950,7 +966,7 @@ fn serialized_shapes_carry_every_frontend_required_key() {
         "DeviceSummary",
     );
 
-    let compliance = build_compliance(&summaries, &refs(&patches), &by_id, &maps, 30, Utc::now());
+    let compliance = build_compliance(&summaries, &refs(&patches), &by_id, &maps, &sla30());
     assert_keys_present(
         &serde_json::to_value(&compliance[0]).unwrap(),
         &[
@@ -964,7 +980,7 @@ fn serialized_shapes_carry_every_frontend_required_key() {
         "ComplianceBucket",
     );
 
-    let by_os = build_compliance_by_os(&summaries, &refs(&patches), &by_id, 30, Utc::now());
+    let by_os = build_compliance_by_os(&summaries, &refs(&patches), &by_id, &sla30());
     assert_keys_present(
         &serde_json::to_value(&by_os[0]).unwrap(),
         &[
@@ -1057,6 +1073,74 @@ fn serialized_shapes_carry_every_frontend_required_key() {
         "PatchGroup",
     );
 
+    let (worst_devices, offline_backlog) =
+        build_device_backlogs(&refs(&patches), &by_id, &maps, &sla30());
+    let worst_json = serde_json::to_value(&worst_devices).unwrap();
+    assert_keys_present(
+        &worst_json,
+        &["devices", "devicesTotal"],
+        "DeviceBacklogList",
+    );
+    assert_keys_present(
+        &worst_json["devices"][0],
+        &[
+            "deviceId",
+            "deviceName",
+            "organization",
+            "osName",
+            "pending",
+            "pendingTotal",
+            "pastSla",
+            "oldestFirstSeen",
+            "latestCollected",
+        ],
+        "DeviceBacklog",
+    );
+    let time_to_install = build_time_to_install(
+        &[installed_row(
+            "Contoso",
+            "Critical",
+            7,
+            Some(1),
+            Some(86_401),
+        )],
+        true,
+    );
+    let tti_json = serde_json::to_value(&time_to_install).unwrap();
+    assert_keys_present(
+        &tti_json,
+        &[
+            "installsQueried",
+            "overall",
+            "byOrganization",
+            "bySeverity",
+            "installedRecords",
+            "excludedRecords",
+        ],
+        "TimeToInstall",
+    );
+    assert_keys_present(
+        &tti_json["overall"],
+        &["group", "label", "samples", "medianDays", "p90Days"],
+        "InstallLatency",
+    );
+    let sla_policy = SlaPolicy::default();
+    let sla_json = serde_json::to_value(sla_policy).unwrap();
+    assert_keys_present(&sla_json, &["defaultDays", "bySeverity"], "SlaPolicy");
+    assert_keys_present(
+        &sla_json["bySeverity"],
+        &[
+            "critical",
+            "important",
+            "security",
+            "moderate",
+            "recommended",
+            "low",
+            "optional",
+        ],
+        "SlaBySeverity",
+    );
+
     let result = QueryResult {
         rows,
         devices: summaries,
@@ -1065,6 +1149,11 @@ fn serialized_shapes_carry_every_frontend_required_key() {
         failures,
         severity_by_org,
         age_buckets,
+        worst_devices,
+        offline_backlog,
+        time_to_install,
+        sla_policy,
+        instance: "https://app.ninjarmm.com".into(),
         devices_total: 1,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -1095,6 +1184,10 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "changes",
             "generatedAt",
             "dataFetchedAt",
+            "worstDevices",
+            "offlineBacklog",
+            "timeToInstall",
+            "slaPolicy",
         ],
         "QuerySummary",
     );
@@ -1200,7 +1293,7 @@ fn devices_ninjaone_cannot_patch_are_excluded_from_every_fleet_health_rollup() {
         &maps,
     );
 
-    let compliance = build_compliance(&summaries, &refs, &by_id, &maps, 30, Utc::now());
+    let compliance = build_compliance(&summaries, &refs, &by_id, &maps, &sla30());
     let org = &compliance[0];
     assert_eq!(
         org.devices_total, 2,
@@ -1211,7 +1304,7 @@ fn devices_ninjaone_cannot_patch_are_excluded_from_every_fleet_health_rollup() {
         "only the unclassed device is clean"
     );
 
-    let by_os = build_compliance_by_os(&summaries, &refs, &by_id, 30, Utc::now());
+    let by_os = build_compliance_by_os(&summaries, &refs, &by_id, &sla30());
     assert!(
         by_os.iter().all(|b| b.os != "Cisco IOS"),
         "the switch opens no by-OS bucket: {by_os:?}"
@@ -2048,7 +2141,7 @@ fn severity_and_age_rollups_cover_the_same_devices_compliance_does() {
 
     let counts = pending_counts(&current);
     let summaries = build_device_summaries(&devices.iter().collect::<Vec<_>>(), &counts, &maps);
-    let compliance = build_compliance(&summaries, &current, &by_id, &maps, 30, Utc::now());
+    let compliance = build_compliance(&summaries, &current, &by_id, &maps, &sla30());
     let severity = build_severity_by_org(&current, &by_id, &maps);
     let age = build_age_buckets(&current, &by_id, Utc::now());
 
@@ -2079,6 +2172,16 @@ fn severity_and_age_rollups_cover_the_same_devices_compliance_does() {
         age_total, compliance[0].pending_critical,
         "the age histogram counted them too"
     );
+    // The worst-devices list is over the same population; the offline device's
+    // backlog is listed separately rather than silently dropped.
+    let (worst, offline_list) = build_device_backlogs(&current, &by_id, &maps, &sla30());
+    let worst_total: usize = worst.devices.iter().map(|d| d.pending_total).sum();
+    assert_eq!(
+        worst_total, compliance[0].pending_critical,
+        "the worst-devices list counted the devices compliance excluded"
+    );
+    assert_eq!(offline_list.devices.len(), 1);
+    assert_eq!(offline_list.devices[0].pending_total, 3);
 }
 
 #[test]
@@ -2295,4 +2398,296 @@ fn demo_grouping_fixture_is_current() {
          UPDATE_FIXTURES=1 cargo test --manifest-path src-tauri/Cargo.toml \
          demo_grouping_fixture"
     );
+}
+// --- Per-severity SLA ---------------------------------------------------------
+
+fn policy(default_days: i64, by_severity: SlaBySeverity) -> SlaPolicy {
+    SlaPolicy {
+        default_days,
+        by_severity,
+    }
+}
+
+/// Each patch ages against its own band's window; a band without an override, and
+/// `Unknown` always, take the default.
+#[test]
+fn each_patch_ages_against_its_own_bands_cutoff() {
+    let sla = SlaCutoffs::new(
+        &policy(
+            30,
+            SlaBySeverity {
+                critical: Some(7),
+                important: Some(60),
+                ..SlaBySeverity::default()
+            },
+        ),
+        Utc::now(),
+    );
+    let aged = |sev: &str, days: i64| sla.is_aged(&patch(1, "MANUAL", sev, Some(days)));
+    assert!(aged("CRITICAL", 10), "past the 7-day Critical window");
+    assert!(!aged("CRITICAL", 5));
+    assert!(!aged("IMPORTANT", 45), "inside the 60-day Important window");
+    assert!(aged("IMPORTANT", 61));
+    assert!(aged("MODERATE", 45), "no override: the 30-day default");
+    assert!(!aged("MODERATE", 10));
+    assert!(
+        aged("something-new", 45),
+        "unmapped → Unknown → the default"
+    );
+    assert!(!aged("something-new", 10));
+    assert!(
+        sla.is_aged(&patch(1, "MANUAL", "LOW", None)),
+        "undated still can't be proven recent"
+    );
+}
+
+/// The compliance table's aged column follows the per-band policy too.
+#[test]
+fn the_compliance_aged_column_uses_the_band_cutoffs() {
+    let d = device(1, 10, "Windows Server 2022");
+    let by_id = HashMap::from([(1, &d)]);
+    let maps = maps();
+    let current = vec![
+        patch(1, "MANUAL", "CRITICAL", Some(10)),
+        patch(1, "MANUAL", "IMPORTANT", Some(45)),
+    ];
+    let counts = pending_counts(&refs(&current));
+    let summaries = build_device_summaries(&[&d], &counts, &maps);
+    let flat = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
+    assert_eq!(flat[0].aged_critical, 1, "30 days flat: only the Important");
+    let banded = SlaCutoffs::new(
+        &policy(
+            30,
+            SlaBySeverity {
+                critical: Some(7),
+                important: Some(60),
+                ..SlaBySeverity::default()
+            },
+        ),
+        Utc::now(),
+    );
+    let per_band = build_compliance(&summaries, &refs(&current), &by_id, &maps, &banded);
+    assert_eq!(
+        per_band[0].aged_critical, 1,
+        "per band: only the Critical (10d > 7d; 45d < 60d)"
+    );
+    assert_eq!(per_band[0].pending_critical, 2);
+}
+
+// --- Worst devices + offline backlog -------------------------------------------
+
+#[test]
+fn severity_breakdown_and_urgency_order_follow_the_bands() {
+    let a = SeverityCounts {
+        critical: 1,
+        low: 9,
+        ..Default::default()
+    };
+    let b = SeverityCounts {
+        important: 5,
+        ..Default::default()
+    };
+    assert_eq!(a.breakdown(), "Critical 1 · Low 9");
+    assert_eq!(SeverityCounts::default().breakdown(), "");
+    assert_eq!(
+        a.cmp_urgency(&b),
+        Ordering::Greater,
+        "one Critical beats five Important"
+    );
+    assert_eq!(a.cmp_urgency(&a), Ordering::Equal);
+    let mut c = SeverityCounts::default();
+    for s in [
+        crate::model::Severity::Critical,
+        crate::model::Severity::Unknown,
+        crate::model::Severity::Unknown,
+    ] {
+        c.bump(s);
+    }
+    assert_eq!((c.critical, c.unknown, c.total()), (1, 2, 3));
+}
+
+/// Past SLA first, then the most urgent breakdown, then device id — and the
+/// order is the same however the `HashMap` iterates.
+#[test]
+fn worst_devices_rank_deterministically() {
+    let devices: Vec<Device> = (1..=5).map(|id| device(id, 10, "Windows 11")).collect();
+    let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+    let current = vec![
+        // 1: one past-SLA Low.
+        patch(1, "MANUAL", "LOW", Some(45)),
+        // 2: one fresh Critical, nothing past SLA.
+        patch(2, "MANUAL", "CRITICAL", Some(1)),
+        // 3: two past SLA.
+        patch(3, "MANUAL", "OPTIONAL", Some(45)),
+        patch(3, "MANUAL", "OPTIONAL", Some(90)),
+        // 4: one past-SLA Critical — ties device 1 on past SLA, beats it on urgency.
+        patch(4, "MANUAL", "CRITICAL", Some(45)),
+        // 5: identical to 1, so only the id orders them.
+        patch(5, "MANUAL", "LOW", Some(45)),
+        // Not pending: ignored entirely.
+        patch(2, "REJECTED", "CRITICAL", Some(400)),
+    ];
+    let (worst, offline) = build_device_backlogs(&refs(&current), &by_id, &maps(), &sla30());
+    let order: Vec<i64> = worst.devices.iter().map(|d| d.device_id).collect();
+    assert_eq!(order, [3, 4, 1, 5, 2]);
+    assert_eq!(worst.devices_total, 5);
+    assert!(offline.devices.is_empty());
+
+    let three = &worst.devices[0];
+    assert_eq!((three.past_sla, three.pending_total), (2, 2));
+    assert_eq!(three.pending.optional, 2);
+    assert_eq!(three.organization, "Contoso");
+    assert_eq!(three.os_name.as_deref(), Some("Windows 11"));
+    assert!(
+        three.oldest_first_seen_ts < three.latest_collected_ts,
+        "oldest is the 90-day record, latest the 45-day one"
+    );
+}
+
+#[test]
+fn the_device_lists_are_capped_but_count_every_device() {
+    let devices: Vec<Device> = (1..=40).map(|id| device(id, 10, "Windows 11")).collect();
+    let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+    let current: Vec<Patch> = (1..=40)
+        .map(|id| patch(id, "MANUAL", "LOW", Some(1)))
+        .collect();
+    let (worst, _) = build_device_backlogs(&refs(&current), &by_id, &maps(), &sla30());
+    assert_eq!(worst.devices.len(), DEVICE_BACKLOG_LIMIT);
+    assert_eq!(worst.devices_total, 40);
+    assert_eq!(worst.devices[0].device_id, 1, "ties fall to the lowest id");
+}
+
+/// The worst list is exactly the `rollup_device` population; the offline list is
+/// the scoped, patchable, offline devices it leaves out — never a switch, never an
+/// orphan, never an online device.
+#[test]
+fn worst_devices_use_the_rollup_population_and_offline_backlog_its_complement() {
+    let online = device(1, 10, "Windows Server 2022");
+    let mut offline = device(2, 10, "Windows Server 2022");
+    offline.offline = Some(true);
+    let mut offline_switch = device(3, 10, "Cisco IOS");
+    offline_switch.offline = Some(true);
+    offline_switch.node_class = Some("NMS_SWITCH".into());
+    let mut online_switch = device(4, 10, "Cisco IOS");
+    online_switch.node_class = Some("NMS_SWITCH".into());
+    let devices = [online, offline, offline_switch, online_switch];
+    let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+    let current: Vec<Patch> = [1, 2, 2, 3, 4, 999]
+        .into_iter()
+        .map(|id| patch(id, "MANUAL", "CRITICAL", Some(5)))
+        .collect();
+    let (worst, offline_list) = build_device_backlogs(&refs(&current), &by_id, &maps(), &sla30());
+    assert_eq!(
+        worst
+            .devices
+            .iter()
+            .map(|d| d.device_id)
+            .collect::<Vec<_>>(),
+        [1]
+    );
+    assert_eq!(
+        offline_list
+            .devices
+            .iter()
+            .map(|d| (d.device_id, d.pending_total))
+            .collect::<Vec<_>>(),
+        [(2, 2)]
+    );
+    assert!(offline_list.devices[0].latest_collected.is_some());
+}
+
+// --- First seen → installed ----------------------------------------------------
+
+#[test]
+fn median_and_nearest_rank_percentile() {
+    assert_eq!(median(&[5]), 5.0);
+    assert_eq!(median(&[1, 3, 9]), 3.0, "odd: the middle value");
+    assert_eq!(
+        median(&[1, 3, 5, 9]),
+        4.0,
+        "even: the mean of the two middles"
+    );
+    assert_eq!(median(&[]), 0.0);
+    let ten: Vec<i64> = (1..=10).collect();
+    assert_eq!(nearest_rank(&ten, 90), 9);
+    assert_eq!(nearest_rank(&[7], 90), 7);
+    assert_eq!(nearest_rank(&[1, 2], 90), 2);
+    assert_eq!(nearest_rank(&[], 90), 0);
+}
+
+fn installed_row(
+    org: &str,
+    sev: &'static str,
+    rank: u8,
+    seen: Option<i64>,
+    at: Option<i64>,
+) -> PatchRow {
+    PatchRow {
+        organization: org.into(),
+        severity: sev,
+        severity_rank: rank,
+        status: "INSTALLED".into(),
+        first_seen_ts: seen,
+        installed_ts: at,
+        ..failed_row(1, "srv1", "KB1", at)
+    }
+}
+
+#[test]
+fn time_to_install_measures_only_usable_installed_records() {
+    const DAY: i64 = 86_400;
+    let t0 = 1_780_000_000;
+    let rows = vec![
+        installed_row("Contoso", "Important", 6, Some(t0), Some(t0 + 2 * DAY)),
+        installed_row("Contoso", "Critical", 7, Some(t0), Some(t0 + 4 * DAY)),
+        installed_row("Fabrikam", "Critical", 7, Some(t0), Some(t0 + 10 * DAY)),
+        // Excluded: missing either time, or installed before first seen.
+        installed_row("Contoso", "Critical", 7, None, Some(t0)),
+        installed_row("Contoso", "Critical", 7, Some(t0), None),
+        installed_row("Contoso", "Critical", 7, Some(t0 + DAY), Some(t0)),
+        // Not an install at all.
+        failed_row(1, "srv1", "KB1", Some(t0)),
+    ];
+    let t = build_time_to_install(&rows, true);
+    assert_eq!((t.installed_records, t.excluded_records), (6, 3));
+    let overall = t.overall.as_ref().expect("three measured");
+    assert_eq!(overall.samples, 3);
+    assert_eq!(overall.median_days, 4.0);
+    assert_eq!(overall.p90_days, 10.0);
+
+    let orgs: Vec<(&str, usize, f64)> = t
+        .by_organization
+        .iter()
+        .map(|l| (l.label.as_str(), l.samples, l.median_days))
+        .collect();
+    assert_eq!(orgs, [("Contoso", 2, 3.0), ("Fabrikam", 1, 10.0)]);
+    let sevs: Vec<(&str, usize, f64)> = t
+        .by_severity
+        .iter()
+        .map(|l| (l.label.as_str(), l.samples, l.median_days))
+        .collect();
+    assert_eq!(
+        sevs,
+        [("Critical", 2, 7.0), ("Important", 1, 2.0)],
+        "most urgent band first"
+    );
+    assert_eq!(t.empty_reason(), None);
+    assert_eq!(t.table_rows().len(), 1 + 2 + 2);
+}
+
+#[test]
+fn time_to_install_says_why_it_is_empty() {
+    let not_asked = build_time_to_install(&[], false);
+    assert!(
+        not_asked
+            .empty_reason()
+            .unwrap()
+            .contains("Installed status")
+    );
+    let unusable = build_time_to_install(
+        &[installed_row("Contoso", "Critical", 7, None, Some(1))],
+        true,
+    );
+    assert!(unusable.overall.is_none());
+    assert!(unusable.empty_reason().unwrap().contains("both"));
 }

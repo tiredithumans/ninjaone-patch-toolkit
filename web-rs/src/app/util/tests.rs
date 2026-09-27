@@ -2617,3 +2617,117 @@ fn retryable_batches_group_definite_failures_newest_first() {
     );
     assert_eq!(batches[0].detail, "Apply selected OS patches");
 }
+
+// --- SLA policy, device lists, first seen → installed ---------------------------
+
+/// Blank clears a band back to the default; a number is clamped; junk keeps the
+/// previous value rather than silently clearing an override.
+#[test]
+fn per_band_sla_inputs_parse_blank_as_default() {
+    assert_eq!(parse_optional_days("", Some(7)), None);
+    assert_eq!(parse_optional_days("  ", Some(7)), None);
+    assert_eq!(parse_optional_days("14", None), Some(14));
+    assert_eq!(parse_optional_days("0", None), Some(1));
+    assert_eq!(parse_optional_days("99999", None), Some(MAX_SLA_DAYS));
+    assert_eq!(parse_optional_days("abc", Some(7)), Some(7));
+}
+
+/// Each band's getter and setter reach the same, distinct field, and the wire
+/// keys are the backend's.
+#[test]
+fn every_sla_band_reads_and_writes_its_own_field() {
+    use crate::types::SlaBySeverity;
+    let mut s = SlaBySeverity::default();
+    for (i, (_, _, set)) in SlaBySeverity::BANDS.iter().enumerate() {
+        *set(&mut s) = Some(i as i64 + 1);
+    }
+    for (i, (_, get, _)) in SlaBySeverity::BANDS.iter().enumerate() {
+        assert_eq!(get(&s), Some(i as i64 + 1));
+    }
+    let json = serde_json::to_value(s).unwrap();
+    for (i, key) in [
+        "critical",
+        "important",
+        "security",
+        "moderate",
+        "recommended",
+        "low",
+        "optional",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(json[key], i as i64 + 1, "{key}");
+    }
+}
+
+/// Mirrors `settings::SlaPolicy::describe`, which the exports print.
+#[test]
+fn the_sla_summary_matches_the_exports() {
+    use crate::types::{SlaBySeverity, SlaPolicy};
+    let mut p = SlaPolicy::default();
+    assert_eq!(sla_policy_summary(&p), "30 days (default)");
+    p.by_severity = SlaBySeverity {
+        important: Some(14),
+        critical: Some(1),
+        ..SlaBySeverity::default()
+    };
+    assert_eq!(
+        sla_policy_summary(&p),
+        "30 days (default); Critical 1 day, Important 14 days"
+    );
+    assert_eq!(sla_days_for(&p, "Critical"), 1);
+    assert_eq!(sla_days_for(&p, "important"), 14);
+    assert_eq!(sla_days_for(&p, "Moderate"), 30, "no override");
+    assert_eq!(sla_days_for(&p, "Unknown"), 30, "never overridable");
+}
+
+#[test]
+fn a_capped_device_list_says_so() {
+    use crate::types::DeviceBacklogList;
+    let complete = DeviceBacklogList::default();
+    assert_eq!(device_list_caption(&complete), None);
+    let capped = DeviceBacklogList {
+        devices: Vec::new(),
+        devices_total: 3,
+    };
+    assert_eq!(
+        device_list_caption(&capped).as_deref(),
+        Some("Showing the top 0 of 3 devices.")
+    );
+}
+
+#[test]
+fn install_time_median_percentile_and_labels() {
+    use crate::types::{InstallLatency, TimeToInstall};
+    assert_eq!(median(&[1, 3, 9]), 3.0);
+    assert_eq!(median(&[1, 3, 5, 9]), 4.0);
+    assert_eq!(median(&[]), 0.0);
+    assert_eq!(nearest_rank(&(1..=10).collect::<Vec<_>>(), 90), 9);
+    assert_eq!(nearest_rank(&[4], 90), 4);
+    assert_eq!(format_days(1.0), "1.0 day");
+    assert_eq!(format_days(2.25), "2.3 days");
+    assert_eq!(format_days(0.04), "0.0 days");
+
+    let mut t = TimeToInstall::default();
+    assert!(
+        time_to_install_empty_reason(&t)
+            .unwrap()
+            .contains("Installed status")
+    );
+    t.installs_queried = true;
+    assert!(time_to_install_empty_reason(&t).unwrap().contains("both"));
+    t.overall = Some(InstallLatency {
+        label: "All installs".into(),
+        samples: 3,
+        median_days: 1.0,
+        p90_days: 2.0,
+    });
+    t.installed_records = 4;
+    t.excluded_records = 1;
+    assert_eq!(time_to_install_empty_reason(&t), None);
+    assert_eq!(
+        time_to_install_sample_note(&t),
+        "3 installed records measured; 1 skipped (missing a time, or installed before first seen)."
+    );
+}

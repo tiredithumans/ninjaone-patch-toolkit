@@ -1,6 +1,7 @@
 //! The Compliance tab: scope note, charts, and the per-organization and per-OS
 //! rollup tables (the organization one drills down to its rows).
 
+use super::backlog::{DeviceBacklogSections, SlaPolicyNote, TimeToInstallSection};
 use super::*;
 
 /// The scope sentence under the Compliance tab's banner. Reads the population and
@@ -67,6 +68,7 @@ pub(super) fn ComplianceTab() -> impl IntoView {
                 filters="Device scope (Org / Location / Role / OS Type / OS name) and patch Type. Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
             <ComplianceScopeNote/>
+            <SlaPolicyNote/>
             <ComplianceCharts/>
             <ComplianceRollupTable first_col="Organization" rows=org_rows drill=RollupDrill::Organization/>
             <section class="compliance-os">
@@ -76,6 +78,8 @@ pub(super) fn ComplianceTab() -> impl IntoView {
                 </div>
                 <ComplianceRollupTable first_col="OS" rows=os_rows/>
             </section>
+            <DeviceBacklogSections/>
+            <TimeToInstallSection/>
         </Show>
     }
 }

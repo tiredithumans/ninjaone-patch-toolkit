@@ -6,6 +6,7 @@ use wasm_bindgen::JsCast;
 
 use super::*;
 
+mod backlog;
 mod changes;
 mod compliance;
 mod failures;

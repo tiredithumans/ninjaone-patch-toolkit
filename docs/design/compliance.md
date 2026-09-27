@@ -1,7 +1,8 @@
 # What a compliance number means
 
 Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
-Code: `src-tauri/src/rows/` (`compliance.rs`, `rollups.rs`, `scope.rs`, `join.rs`),
+Code: `src-tauri/src/rows/` (`compliance.rs`, `rollups.rs`, `backlog.rs`, `install_time.rs`,
+`scope.rs`, `join.rs`), `src-tauri/src/settings.rs` (`SlaPolicy`),
 `src-tauri/src/export.rs`, `src-tauri/src/report.rs`, `src-tauri/src/commands/patches.rs`,
 `web-rs/src/app/util/`.
 
@@ -29,7 +30,7 @@ the excluded population — the gap being exactly the offline backlog, and unrec
 page. `build_age_buckets` therefore takes `devices_by_id`; taking only the patches made it the one
 rollup structurally *unable* to apply the exclusion. A new rollup over the current feed goes
 through `rollup_device` too — `severity_and_age_rollups_cover_the_same_devices_compliance_does`
-pins the three against each other.
+pins the three against each other, and the worst-devices list alongside them.
 
 ## `devices_offline`, `devices_unpatchable` and `patch_families` ride on `QueryResult`/`QuerySummary`
 
@@ -51,6 +52,85 @@ only with `generated_at` dates the fleet to the moment someone pressed a button.
 prints both; the workbook's **About** sheet carries them plus the scoped/offline device counts and
 the detail-row total (`export::WorkbookMeta`).
 
+Both also state the NinjaOne **instance** (`QueryResult::instance`, stamped at assembly from the
+settings snapshot the query ran under — `QueryResult`-only like `QueryScope`, since the frontend
+knows its own instance), the **app version** (`export::APP_VERSION`, the backend crate's
+`CARGO_PKG_VERSION`), and the **SLA policy** (`SlaPolicy::describe`). Two workbooks from two
+tenants, or from before and after an SLA change, were otherwise indistinguishable once saved.
+
+## The SLA is per severity band
+
+`Settings.sla_days` is the default window; `Settings.sla_by_severity` (`SlaBySeverity`) holds an
+optional override per band. It has no `Unknown` field: an unmapped severity carries no urgency to
+set a target for, so it always takes the default. Every field is `#[serde(default)]`, so a
+settings file (or frontend) from before this existed loads with no overrides and ages exactly as
+before. Save-time validation rejects an override outside `1..=MAX_WINDOW_DAYS` (blank is always
+valid); `Settings::sla_policy()` clamps again, because a hand-edited file reaches
+`Duration::days`, which panics on overflow.
+
+- **Cut once per query, per band.** `rows::SlaCutoffs` precomputes one cutoff per `Severity`
+  (indexed by `rank()`, unique per variant) and `is_aged` reads the patch's own band. Undated
+  patches still count as aged.
+- **Two "past SLA" figures, on purpose.** The compliance tables' "Aged (past SLA)" stays the
+  Critical/Important subset of the column beside it ("Pending Critical/Important"), so the two
+  still reconcile. The worst-devices and offline lists' "Past SLA" counts *every* pending record
+  against its own band's window — that is what the overrides for Moderate/Low/Optional are for.
+  With the default policy (30 days everywhere) an old Optional backlog therefore counts; set a
+  longer window for the low bands if that is not the target.
+- **The result carries the policy it was computed with** (`QueryResult`/`QuerySummary`
+  `sla_policy`). An export after a settings change states the numbers' policy, not the new one,
+  and the Compliance tab prints it for the same reason.
+- **Changing it clears no cache.** The policy is read from the settings snapshot when a query is
+  assembled; only an instance/client-id change invalidates fleet data. The next **Run query** — a
+  re-filter over the warm cache, no refetch — reflects the new policy; the result on screen keeps
+  its own until then.
+- The run history's `aged_critical` is recorded under whatever policy each run used, so a trend
+  across a policy change moves for that reason alone.
+
+## Worst devices and the offline backlog
+
+`rows::build_device_backlogs` makes one pass over the unnarrowed current feed and returns two
+capped (`DEVICE_BACKLOG_LIMIT` = 25) lists, each with the total that qualified so every surface
+can say "top 25 of N":
+
+- **`worst_devices`** is the `rollup_device` population — the devices the compliance table
+  counts — ranked by past-SLA records, then by the most urgent breakdown
+  (`SeverityCounts::cmp_urgency`: more Criticals wins, then Important, … down `BANDS`), then by
+  device id. The breakdown order already implies the larger total wherever the bands differ, so
+  total pending needs no step of its own; the id makes the order total (the accumulator is a
+  `HashMap`).
+- **`offline_backlog`** is its deliberate complement: scoped, patchable devices that are offline
+  yet still appear in NinjaOne's current feed with pending records. The "offline devices report
+  no current patch records" line above is why they are excluded from the rollups — a zero says
+  nothing about them — but the whole-fleet feed does carry whatever was last collected for them,
+  and dropping it everywhere made that backlog invisible. The records may be stale; every surface
+  says so.
+- **No last-contact time.** `Device` deserializes no last-contact field, and the committed spec
+  digest (`docs/api/ninjaone-surface.md`) does not cover the device schema, so none is invented.
+  The list shows `latest_collected` instead — the newest `timestamp` on the device's pending
+  records, NinjaOne's "collected/updated" time — labelled "Latest patch data collected", not
+  "last contact".
+
+## First seen → installed is indicative only
+
+`rows::build_time_to_install` measures `installed_ts − first_seen_ts` over the INSTALLED detail
+rows, overall, by organization and by severity (most urgent band first): median (mean of the two
+middles for an even count) and a nearest-rank p90 (always an observed value), with the sample
+size. A record missing either time, or installed before it was first seen, is counted in
+`excluded_records` and skipped.
+
+- **The caveat is the point.** `timestamp` is "Date/Time when data was collected/updated"; on an
+  install-history record that can sit close to the install itself, so the figure can understate
+  the real lag. Every surface labels it "First seen → installed" and prints the caveat.
+- **Built from the detail rows, like the failures rollup**, so it follows the patch facets
+  (status, severity, search, first-seen window, install lookback) as well as the device scope.
+  The exports list it with the patch-filter tier; the Compliance tab — whose banner says patch
+  filters are ignored there — says this section is the exception.
+- **Empty says why.** Without the Installed status there is nothing to measure
+  (`installs_queried: false`), which `TimeToInstall::empty_reason` (mirrored in `util::sla`)
+  distinguishes from "no record had both times". The workbook omits the sheet and says why on
+  **About**.
+
 ## Both exports state the facets, from `rows::QueryScope`
 
 Built by `build_query_scope` in `assemble_result` out of the `QueryPlan` the fetch actually ran
@@ -68,10 +148,10 @@ number in them describes a different population.
 - **Two tiers, and both exports say which is which.** `QueryScope.facets` holds the facets that
   narrow every sheet and section (device scope + `Patch type`); `QueryScope.patch_facets` holds
   the ones that narrow only the detail rows (`Status`, `Severity`, `Search`, the first-seen
-  window, the install lookback) — the compliance, severity, age and reboot sections are computed
-  from the *unnarrowed* current feed. The About sheet prints them under "Filters (every sheet)"
-  and "Patch filters (Patches and Patch Failures sheets only)"; the report under matching
-  captions. The in-app Compliance tab already dims those chips with "Ignored on this tab", but a
+  window, the install lookback) — the compliance, severity, age, reboot and device-list sections
+  are computed from the *unnarrowed* current feed. The About sheet prints them under "Filters
+  (every sheet)" and "Patch filters (Patches, Patch Failures and Time to Install sheets only)";
+  the report under matching captions. The in-app Compliance tab already dims those chips with "Ignored on this tab", but a
   workbook that listed `Severity: CRITICAL` beside the Compliance sheet with no such note read as
   a critical-only backlog. A new facet goes in the tier its scope actually has.
 - Date bounds are **absolute** (`%Y-%m-%d %H:%M UTC`), with the relative window in parentheses
@@ -189,7 +269,10 @@ overflow the bar. See [severity.md](./severity.md).
 
 The Leptos tables are hand-written and are not wired to `COLUMNS`, so they are kept spelled
 identically by review: "Compliance %", "Pending Critical/Important", "Aged (past SLA)", "Device
-Role", "Pending Patches", and the Failures table's seven columns including "Patch Type".
+Role", "Pending Patches", the Failures table's seven columns including "Patch Type", and the
+two device lists (`DeviceBacklog::WORST_COLUMNS` / `OFFLINE_COLUMNS`). The in-app first seen →
+installed table drops `InstallLatency::COLUMNS`' "(Days)" suffixes because its cells carry the
+unit themselves.
 
 `rows::TableColumn<T>` is the shared table definition. Every table rendered from a cached
 `QueryResult` — `FailureGroup::COLUMNS`, `DeviceSummary::COLUMNS`, `ComplianceBucket::COLUMNS`,

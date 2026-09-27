@@ -5,9 +5,11 @@ use rust_xlsxwriter::{Color, Format, Workbook};
 
 use crate::model::PatchRow;
 use crate::rows::{
-    ComplianceBucket, DeviceSummary, FailureGroup, OsCompliance, QueryScope, TableCell,
-    TableColumn, clamp_cell,
+    ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceSummary, FailureGroup,
+    InstallLatency, OFFLINE_BACKLOG_NOTE, OsCompliance, QueryScope, TIME_TO_INSTALL_NOTE,
+    TableCell, TableColumn, TimeToInstall, WORST_DEVICES_NOTE, clamp_cell,
 };
+use crate::settings::SlaPolicy;
 
 /// Data rows one worksheet can hold: Excel's 1,048,576-row limit less the header.
 const MAX_SHEET_DATA_ROWS: usize = 1_048_575;
@@ -62,6 +64,11 @@ const OS_SUMMARY_WIDTHS: [f64; OsCompliance::COLUMNS.len()] = [28.0, 10.0, 11.0,
 const REBOOT_WIDTHS: [f64; DeviceSummary::COLUMNS.len()] = [24.0, 18.0, 18.0, 22.0, 26.0, 14.0];
 const FAILURE_WIDTHS: [f64; FailureGroup::COLUMNS.len()] =
     [11.0, 11.0, 12.0, 40.0, 16.0, 20.0, 60.0];
+const WORST_WIDTHS: [f64; DeviceBacklog::WORST_COLUMNS.len()] =
+    [24.0, 22.0, 26.0, 10.0, 15.0, 20.0, 40.0];
+const OFFLINE_WIDTHS: [f64; DeviceBacklog::OFFLINE_COLUMNS.len()] =
+    [24.0, 22.0, 26.0, 26.0, 15.0, 10.0, 40.0];
+const INSTALL_TIME_WIDTHS: [f64; InstallLatency::COLUMNS.len()] = [14.0, 28.0, 17.0, 34.0, 20.0];
 
 /// Column widths for the About sheet's label/value pair.
 const ABOUT_WIDTHS: [f64; 2] = [24.0, 64.0];
@@ -92,6 +99,18 @@ pub struct WorkbookMeta<'a> {
     pub scope_note: &'a str,
     /// What changed since the previous comparable run; the Changes sheet.
     pub changes: &'a RunChanges,
+    /// The NinjaOne instance the data came from.
+    pub instance: &'a str,
+    /// The SLA policy the aging figures were computed under — the result's, not
+    /// whatever Settings holds at export time.
+    pub sla_policy: &'a SlaPolicy,
+}
+
+/// The per-device and install-time aggregates, each written to its own sheet.
+pub struct BacklogSheets<'a> {
+    pub worst_devices: &'a DeviceBacklogList,
+    pub offline_backlog: &'a DeviceBacklogList,
+    pub time_to_install: &'a TimeToInstall,
 }
 
 fn header_format() -> Format {
@@ -103,11 +122,13 @@ fn header_format() -> Format {
 
 /// Writes a workbook with a Patches detail sheet (one row per device×patch), a
 /// Compliance summary sheet, a Compliance by OS sheet, a Needs Reboot sheet for
-/// devices flagged for reboot, a Patch Failures sheet rolling up FAILED installs, a
-/// Changes sheet when there is a previous comparable run to compare against, and an
-/// About sheet carrying the provenance in [`WorkbookMeta`]. Data sheets with
+/// devices flagged for reboot, a Patch Failures sheet rolling up FAILED installs,
+/// Worst Devices / Offline Backlog / Time to Install sheets from [`BacklogSheets`],
+/// a Changes sheet when there is a previous comparable run to compare against, and
+/// an About sheet carrying the provenance in [`WorkbookMeta`]. Data sheets with
 /// no rows are omitted; Patches and About are always written. Detail rows past one
 /// sheet's capacity continue on `Patches (2)`, `Patches (3)`, …
+#[allow(clippy::too_many_arguments)]
 pub fn write_workbook(
     path: &str,
     rows: &[PatchRow],
@@ -115,6 +136,7 @@ pub fn write_workbook(
     compliance_by_os: &[OsCompliance],
     reboot_devices: &[DeviceSummary],
     failures: &[FailureGroup],
+    backlogs: &BacklogSheets<'_>,
     meta: &WorkbookMeta<'_>,
 ) -> Result<()> {
     write_workbook_split(
@@ -124,6 +146,7 @@ pub fn write_workbook(
         compliance_by_os,
         reboot_devices,
         failures,
+        backlogs,
         meta,
         MAX_SHEET_DATA_ROWS,
     )
@@ -139,6 +162,7 @@ fn write_workbook_split(
     compliance_by_os: &[OsCompliance],
     reboot_devices: &[DeviceSummary],
     failures: &[FailureGroup],
+    backlogs: &BacklogSheets<'_>,
     meta: &WorkbookMeta<'_>,
     rows_per_sheet: usize,
 ) -> Result<()> {
@@ -186,7 +210,7 @@ fn write_workbook_split(
         // Stated on the sheet itself: a workbook outlives the session it came from,
         // and a bare "Compliance %" column says nothing about which devices and
         // which patch families produced it.
-        write_footnote(&mut workbook, compliance.len(), meta.scope_note)?;
+        write_footnotes(&mut workbook, compliance.len(), &[meta.scope_note])?;
     }
     if !compliance_by_os.is_empty() {
         write_sheet(
@@ -198,7 +222,7 @@ fn write_workbook_split(
             compliance_by_os,
             false,
         )?;
-        write_footnote(&mut workbook, compliance_by_os.len(), meta.scope_note)?;
+        write_footnotes(&mut workbook, compliance_by_os.len(), &[meta.scope_note])?;
     }
     if !reboot_devices.is_empty() {
         write_sheet(
@@ -222,6 +246,59 @@ fn write_workbook_split(
             false,
         )?;
     }
+    let sla_line = format!("SLA policy: {}.", meta.sla_policy.describe());
+    for (name, columns, widths, list, note) in [
+        (
+            "Worst Devices",
+            &DeviceBacklog::WORST_COLUMNS,
+            &WORST_WIDTHS,
+            backlogs.worst_devices,
+            WORST_DEVICES_NOTE,
+        ),
+        (
+            "Offline Backlog",
+            &DeviceBacklog::OFFLINE_COLUMNS,
+            &OFFLINE_WIDTHS,
+            backlogs.offline_backlog,
+            OFFLINE_BACKLOG_NOTE,
+        ),
+    ] {
+        if list.devices.is_empty() {
+            continue;
+        }
+        write_sheet(
+            &mut workbook,
+            &header,
+            name,
+            columns,
+            widths,
+            &list.devices,
+            false,
+        )?;
+        write_footnotes(
+            &mut workbook,
+            list.devices.len(),
+            &[&list_count(list), note, &sla_line],
+        )?;
+    }
+    let install_rows: Vec<InstallLatency> = backlogs
+        .time_to_install
+        .table_rows()
+        .into_iter()
+        .cloned()
+        .collect();
+    if !install_rows.is_empty() {
+        write_sheet(
+            &mut workbook,
+            &header,
+            "Time to Install",
+            &InstallLatency::COLUMNS,
+            &INSTALL_TIME_WIDTHS,
+            &install_rows,
+            false,
+        )?;
+        write_footnotes(&mut workbook, install_rows.len(), &[TIME_TO_INSTALL_NOTE])?;
+    }
 
     // Written whenever there is a baseline, even with nothing in it: "nothing
     // changed since Tuesday" is an answer. With no baseline there is nothing to
@@ -233,7 +310,7 @@ fn write_workbook_split(
     // Last, so the workbook still opens on the detail table the operator asked for
     // (Excel activates the first sheet), and so the provenance sits outside every
     // data range rather than trailing a sheet someone will sort or filter.
-    write_about_sheet(&mut workbook, &header, meta, rows.len())?;
+    write_about_sheet(&mut workbook, &header, meta, backlogs, rows.len())?;
 
     workbook.save(path).context("save workbook")?;
     Ok(())
@@ -245,19 +322,31 @@ fn write_about_sheet(
     workbook: &mut Workbook,
     header: &Format,
     meta: &WorkbookMeta<'_>,
+    backlogs: &BacklogSheets<'_>,
     detail_rows: usize,
 ) -> Result<()> {
     let devices_total = meta.devices_total.to_string();
     let devices_offline = meta.devices_offline.to_string();
     let devices_unpatchable = meta.devices_unpatchable.to_string();
     let detail_rows = detail_rows.to_string();
-    let entries: [(&str, &str); 6] = [
+    let sla_policy = meta.sla_policy.describe();
+    // A missing Time to Install sheet is otherwise indistinguishable from one a
+    // renderer dropped; say why it is absent.
+    let time_to_install = backlogs
+        .time_to_install
+        .empty_reason()
+        .unwrap_or("See the Time to Install sheet.");
+    let entries: [(&str, &str); 10] = [
         ("Generated", meta.generated_at),
         ("Patch data fetched", meta.data_fetched_at),
+        ("NinjaOne instance", meta.instance),
+        ("App version", APP_VERSION),
+        ("SLA policy", &sla_policy),
         ("Devices in scope", &devices_total),
         ("Offline devices", &devices_offline),
         ("Non-patchable devices", &devices_unpatchable),
         ("Detail rows", &detail_rows),
+        ("First seen \u{2192} installed", time_to_install),
     ];
 
     let sheet = workbook.add_worksheet();
@@ -286,7 +375,7 @@ fn write_about_sheet(
     for (heading, facets) in [
         ("Filters (every sheet)", &meta.scope.facets),
         (
-            "Patch filters (Patches and Patch Failures sheets only)",
+            "Patch filters (Patches, Patch Failures and Time to Install sheets only)",
             &meta.scope.patch_facets,
         ),
     ] {
@@ -339,17 +428,37 @@ fn write_changes_sheet(
     Ok(())
 }
 
-/// Writes a scope sentence one blank row under the last data row of the sheet just
+/// Writes note lines one blank row under the last data row of the sheet just
 /// added. Takes the row count rather than the sheet so it can run after
 /// [`write_sheet`] has handed the worksheet back to the workbook.
-fn write_footnote(workbook: &mut Workbook, data_rows: usize, note: &str) -> Result<()> {
+fn write_footnotes(workbook: &mut Workbook, data_rows: usize, notes: &[&str]) -> Result<()> {
     let last = workbook.worksheets().len() - 1;
     let sheet = workbook.worksheet_from_index(last)?;
-    sheet
-        .write_string((data_rows + 2) as u32, 0, note)
-        .context("write scope note")?;
+    for (i, note) in notes.iter().enumerate() {
+        sheet
+            .write_string((data_rows + 2 + i) as u32, 0, *note)
+            .context("write sheet note")?;
+    }
     Ok(())
 }
+
+/// "Top 25 of 140 devices." — the lists are capped, and a capped list that doesn't
+/// say so reads as complete.
+fn list_count(list: &DeviceBacklogList) -> String {
+    if list.devices_total > list.devices.len() {
+        format!(
+            "Top {} of {} devices.",
+            list.devices.len(),
+            list.devices_total
+        )
+    } else {
+        let n = list.devices_total;
+        format!("{n} {}.", if n == 1 { "device" } else { "devices" })
+    }
+}
+
+/// The version of the app that wrote the export, for the provenance block.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Writes one sheet from a column table: headers, then every row's cells through
 /// the same accessors that produced those headers.
@@ -441,6 +550,42 @@ mod tests {
             }),
             scope_note: NOTE,
             changes: CHANGES.get_or_init(RunChanges::default),
+            instance: "https://eu.ninjarmm.com",
+            sla_policy: &SLA,
+        }
+    }
+
+    static SLA: SlaPolicy = SlaPolicy {
+        default_days: 30,
+        by_severity: crate::settings::SlaBySeverity {
+            critical: Some(7),
+            important: None,
+            security: None,
+            moderate: None,
+            recommended: None,
+            low: None,
+            optional: None,
+        },
+    };
+
+    static NO_DEVICES: DeviceBacklogList = DeviceBacklogList {
+        devices: Vec::new(),
+        devices_total: 0,
+    };
+    static NO_INSTALLS: TimeToInstall = TimeToInstall {
+        installs_queried: false,
+        overall: None,
+        by_organization: Vec::new(),
+        by_severity: Vec::new(),
+        installed_records: 0,
+        excluded_records: 0,
+    };
+
+    fn no_backlogs() -> BacklogSheets<'static> {
+        BacklogSheets {
+            worst_devices: &NO_DEVICES,
+            offline_backlog: &NO_DEVICES,
+            time_to_install: &NO_INSTALLS,
         }
     }
 
@@ -499,6 +644,7 @@ mod tests {
             &compliance_by_os,
             &[],
             &[],
+            &no_backlogs(),
             &meta(),
         )
         .unwrap();
@@ -542,6 +688,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &no_backlogs(),
             &meta(),
         )
         .unwrap();
@@ -565,6 +712,11 @@ mod tests {
             "Offline devices|1",
             "Non-patchable devices|1",
             "Detail rows|1",
+            "NinjaOne instance|https://eu.ninjarmm.com",
+            "SLA policy|30 days (default); Critical 7 days",
+            // No Installed status in the query: the About sheet says why the
+            // Time to Install sheet is absent.
+            "Select the Installed status",
         ] {
             assert!(
                 joined.contains(expected),
@@ -572,6 +724,10 @@ mod tests {
             );
         }
         assert!(joined.contains(NOTE), "the scope sentence rides along too");
+        assert!(
+            joined.contains(&format!("App version|{APP_VERSION}")),
+            "the version that wrote the file:\n{joined}"
+        );
 
         // And the facets, without which two workbooks off the same fleet under
         // different filters are indistinguishable once saved.
@@ -591,7 +747,7 @@ mod tests {
         // critical-only backlog.
         let every = joined.find("Filters (every sheet)").expect("fleet heading");
         let patch = joined
-            .find("Patch filters (Patches and Patch Failures sheets only)")
+            .find("Patch filters (Patches, Patch Failures and Time to Install sheets only)")
             .expect("patch heading");
         let status = joined.find("Status|Pending, Failed").unwrap();
         let orgs = joined.find("Organizations|Contoso").unwrap();
@@ -617,7 +773,17 @@ mod tests {
                 ..sample_row()
             },
         ];
-        write_workbook(&path.to_string_lossy(), &rows, &[], &[], &[], &[], &meta()).unwrap();
+        write_workbook(
+            &path.to_string_lossy(),
+            &rows,
+            &[],
+            &[],
+            &[],
+            &[],
+            &no_backlogs(),
+            &meta(),
+        )
+        .unwrap();
 
         let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
         let range = wb.worksheet_range("Patches").unwrap();
@@ -658,6 +824,7 @@ mod tests {
             &[],
             &reboot,
             &[],
+            &no_backlogs(),
             &meta(),
         )
         .unwrap();
@@ -732,6 +899,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &no_backlogs(),
             &with_changes,
         )
         .unwrap();
@@ -759,7 +927,17 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         // No baseline: no sheet, rather than an empty table reading "nothing changed".
-        write_workbook(&path.to_string_lossy(), &[], &[], &[], &[], &[], &meta()).unwrap();
+        write_workbook(
+            &path.to_string_lossy(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &no_backlogs(),
+            &meta(),
+        )
+        .unwrap();
         let wb: Xlsx<_> = open_workbook(&path).unwrap();
         assert!(!wb.sheet_names().contains(&"Changes".to_string()));
         let _ = std::fs::remove_file(&path);
@@ -788,6 +966,7 @@ mod tests {
             &[],
             &[],
             &failures,
+            &no_backlogs(),
             &meta(),
         )
         .unwrap();
@@ -850,6 +1029,7 @@ mod tests {
             &[],
             &[],
             &failures,
+            &no_backlogs(),
             &meta,
         )
         .expect("the export no longer fails on a long cell");
@@ -891,6 +1071,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &no_backlogs(),
             &meta(),
             2,
         )
@@ -914,6 +1095,121 @@ mod tests {
             }
         }
         assert_eq!(seen, ["srv0", "srv1", "srv2", "srv3", "srv4"]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The worst-devices, offline-backlog and time-to-install sheets: written
+    /// through the shared columns, each with the notes that say what it covers.
+    #[test]
+    fn writes_the_backlog_and_install_time_sheets() {
+        use crate::rows::{DeviceBacklog, InstallLatency, SeverityCounts};
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = std::env::temp_dir().join("npt-export-backlogs.xlsx");
+        let device = DeviceBacklog {
+            device_id: 7,
+            device_name: "srv07".into(),
+            organization: "Contoso".into(),
+            os_name: Some("Windows Server 2022".into()),
+            pending: SeverityCounts {
+                critical: 2,
+                low: 1,
+                ..Default::default()
+            },
+            pending_total: 3,
+            past_sla: 2,
+            oldest_first_seen: Some("2026-03-01 00:00 UTC".into()),
+            oldest_first_seen_ts: Some(1_772_323_200),
+            latest_collected: Some("2026-04-01 00:00 UTC".into()),
+            latest_collected_ts: Some(1_775_001_600),
+        };
+        let worst = DeviceBacklogList {
+            devices: vec![device.clone()],
+            devices_total: 40,
+        };
+        let offline = DeviceBacklogList {
+            devices: vec![device],
+            devices_total: 1,
+        };
+        let latency = |group, label: &str| InstallLatency {
+            group,
+            label: label.into(),
+            samples: 4,
+            median_days: 2.25,
+            p90_days: 9.0,
+        };
+        let installs = TimeToInstall {
+            installs_queried: true,
+            overall: Some(latency("Overall", "All installs")),
+            by_organization: vec![latency("Organization", "Contoso")],
+            by_severity: vec![latency("Severity", "Critical")],
+            installed_records: 5,
+            excluded_records: 1,
+        };
+        let backlogs = BacklogSheets {
+            worst_devices: &worst,
+            offline_backlog: &offline,
+            time_to_install: &installs,
+        };
+        write_workbook(
+            &path.to_string_lossy(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &backlogs,
+            &meta(),
+        )
+        .unwrap();
+
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let sheets = wb.sheet_names().to_owned();
+        assert_eq!(sheets.last().map(String::as_str), Some("About"));
+        let dump = |wb: &mut Xlsx<_>, name: &str| -> String {
+            wb.worksheet_range(name)
+                .unwrap()
+                .rows()
+                .map(|r| {
+                    r.iter()
+                        .map(|c| c.to_string())
+                        .collect::<Vec<_>>()
+                        .join("|")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let w = dump(&mut wb, "Worst Devices");
+        assert!(w.starts_with(
+            "Organization|Device|OS|Past SLA|Pending Patches|Oldest First Seen|Pending by Severity"
+        ));
+        assert!(
+            w.contains(
+                "Contoso|srv07|Windows Server 2022|2|3|2026-03-01 00:00 UTC|Critical 2 · Low 1"
+            ),
+            "{w}"
+        );
+        assert!(
+            w.contains("Top 1 of 40 devices."),
+            "a capped list says so:\n{w}"
+        );
+        assert!(w.contains(WORST_DEVICES_NOTE));
+        assert!(w.contains("SLA policy: 30 days (default); Critical 7 days."));
+
+        let o = dump(&mut wb, "Offline Backlog");
+        assert!(o.contains("Latest Patch Data Collected"));
+        assert!(o.contains("2026-04-01 00:00 UTC"));
+        assert!(o.contains("1 device."));
+        assert!(o.contains(OFFLINE_BACKLOG_NOTE));
+
+        let t = dump(&mut wb, "Time to Install");
+        assert!(t.contains("Overall|All installs|4|2.3|9"), "{t}");
+        assert!(t.contains("Organization|Contoso"));
+        assert!(t.contains("Severity|Critical"));
+        assert!(t.contains(TIME_TO_INSTALL_NOTE));
+
+        let about = dump(&mut wb, "About");
+        assert!(about.contains("See the Time to Install sheet."));
 
         let _ = std::fs::remove_file(&path);
     }

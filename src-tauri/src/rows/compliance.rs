@@ -10,6 +10,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
 use crate::model::{Device, Patch, Severity};
+use crate::settings::SlaPolicy;
 
 use super::join::UNKNOWN_LABEL;
 use super::rollups::is_pending;
@@ -102,13 +103,50 @@ fn counts_toward_backlog(p: &Patch) -> bool {
     is_pending(p.status.as_deref()) && p.severity_enum().rank() >= Severity::Important.rank()
 }
 
-/// Whether a pending patch has aged past the SLA cutoff.
+/// The SLA cutoff for every severity band at one instant: a patch first seen
+/// before its band's cutoff is past SLA.
 ///
-/// A patch NinjaOne has never timestamped can't be proven recent, so it is flagged
-/// for review rather than assumed within SLA (which would understate the backlog).
-fn is_aged(p: &Patch, sla_cutoff: DateTime<Utc>) -> bool {
-    p.first_seen_at().map(|r| r < sla_cutoff).unwrap_or(true)
+/// Computed once per query rather than once per patch, indexed by
+/// [`Severity::rank`] (unique per variant, `0..=7`). Each band's window comes from
+/// [`SlaPolicy::days_for`] — its override, else the default; `Unknown` always takes
+/// the default.
+pub struct SlaCutoffs([DateTime<Utc>; 8]);
+
+impl SlaCutoffs {
+    pub fn new(policy: &SlaPolicy, now: DateTime<Utc>) -> Self {
+        let mut cutoffs = [now; 8];
+        for severity in SEVERITIES {
+            cutoffs[severity.rank() as usize] = now - Duration::days(policy.days_for(severity));
+        }
+        Self(cutoffs)
+    }
+
+    pub fn cutoff_for(&self, severity: Severity) -> DateTime<Utc> {
+        self.0[severity.rank() as usize]
+    }
+
+    /// Whether a pending patch has aged past its band's SLA cutoff.
+    ///
+    /// A patch NinjaOne has never timestamped can't be proven recent, so it is
+    /// flagged for review rather than assumed within SLA (which would understate
+    /// the backlog).
+    pub fn is_aged(&self, p: &Patch) -> bool {
+        let cutoff = self.cutoff_for(p.severity_enum());
+        p.first_seen_at().map(|r| r < cutoff).unwrap_or(true)
+    }
 }
+
+/// Every variant, so [`SlaCutoffs::new`] fills each slot of its rank-indexed array.
+const SEVERITIES: [Severity; 8] = [
+    Severity::Critical,
+    Severity::Important,
+    Severity::Security,
+    Severity::Moderate,
+    Severity::Recommended,
+    Severity::Low,
+    Severity::Optional,
+    Severity::Unknown,
+];
 
 /// The device a fleet-health rollup should attribute a patch to, or `None` when the
 /// patch falls outside the population every one of those rollups describes: the
@@ -156,8 +194,7 @@ fn accumulate_compliance<'a>(
     summaries: &'a [DeviceSummary],
     current_patches: &'a [&Patch],
     devices_by_id: &HashMap<i64, &'a Device>,
-    sla_days: i64,
-    now: DateTime<Utc>,
+    sla: &SlaCutoffs,
     device_key: impl Fn(&'a DeviceSummary) -> Cow<'a, str>,
     patch_key: impl Fn(Option<&'a Device>) -> Cow<'a, str>,
 ) -> HashMap<String, ComplianceAcc> {
@@ -182,7 +219,6 @@ fn accumulate_compliance<'a>(
         }
     }
 
-    let sla_cutoff = now - Duration::days(sla_days);
     for p in current_patches {
         let Some(device) = rollup_device(devices_by_id, p.device_id) else {
             continue;
@@ -196,7 +232,7 @@ fn accumulate_compliance<'a>(
             None => by_key.entry(key.into_owned()).or_default(),
         };
         acc.pending_critical += 1;
-        if is_aged(p, sla_cutoff) {
+        if sla.is_aged(p) {
             acc.aged_critical += 1;
         }
     }
@@ -205,21 +241,20 @@ fn accumulate_compliance<'a>(
 }
 
 /// Computes per-org compliance from device summaries and the current (pending/
-/// approved) patches. `sla_days` flags aged Critical/Important backlog.
+/// approved) patches. `sla` flags aged Critical/Important backlog, each patch
+/// against its own band's cutoff.
 pub fn build_compliance(
     summaries: &[DeviceSummary],
     current_patches: &[&Patch],
     devices_by_id: &HashMap<i64, &Device>,
     maps: &LookupMaps,
-    sla_days: i64,
-    now: DateTime<Utc>,
+    sla: &SlaCutoffs,
 ) -> Vec<ComplianceBucket> {
     let by_org = accumulate_compliance(
         summaries,
         current_patches,
         devices_by_id,
-        sla_days,
-        now,
+        sla,
         |s| Cow::Borrowed(s.organization.as_str()),
         |d| Cow::Borrowed(maps.org_name_str(d.and_then(|d| d.organization_id))),
     );
@@ -261,15 +296,13 @@ pub fn build_compliance_by_os(
     summaries: &[DeviceSummary],
     current_patches: &[&Patch],
     devices_by_id: &HashMap<i64, &Device>,
-    sla_days: i64,
-    now: DateTime<Utc>,
+    sla: &SlaCutoffs,
 ) -> Vec<OsCompliance> {
     let by_os = accumulate_compliance(
         summaries,
         current_patches,
         devices_by_id,
-        sla_days,
-        now,
+        sla,
         |s| Cow::Borrowed(s.os_name.as_deref().unwrap_or(UNKNOWN_LABEL)),
         |d| Cow::Borrowed(d.and_then(|d| d.os_name_str()).unwrap_or(UNKNOWN_LABEL)),
     );

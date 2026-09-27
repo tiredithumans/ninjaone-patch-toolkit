@@ -13,11 +13,12 @@ use crate::filter::FilterParams;
 use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
     GroupBy, GroupPage, LookupMaps, PatchFamilies, PatchSource, QueryResult, QuerySummary, RowSort,
-    build_age_buckets, build_compliance, build_compliance_by_os, build_device_summaries,
-    build_failures, build_groups, build_query_scope, build_rows, build_severity_by_org,
-    group_member_page, page_rows, pending_counts, slice_groups, sort_order,
+    SlaCutoffs, build_age_buckets, build_compliance, build_compliance_by_os, build_device_backlogs,
+    build_device_summaries, build_failures, build_groups, build_query_scope, build_rows,
+    build_severity_by_org, build_time_to_install, group_member_page, page_rows, pending_counts,
+    slice_groups, sort_order,
 };
-use crate::settings::MAX_WINDOW_DAYS;
+use crate::settings::{MAX_WINDOW_DAYS, SlaPolicy};
 use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
 
 /// The org/location/role lookups a query joins against, shared behind the cache's
@@ -153,10 +154,13 @@ pub async fn query_patches(
         devices_fut,
         current_fut,
         settings.install_window_days,
-        // Clamped for the same panic-guard reason as the install window: the SLA
-        // window reaches `Duration::days` in the compliance rollups, and a
-        // settings.json predating the range validation can still hold anything.
-        settings.sla_days.clamp(1, MAX_WINDOW_DAYS),
+        // Clamped (inside `sla_policy`) for the same panic-guard reason as the
+        // install window: every SLA window reaches `Duration::days` in the rollups,
+        // and a settings.json predating the range validation can hold anything.
+        // Read per query, so an SLA change in Settings reaches the next Run query
+        // — a re-filter over the warm cache — with no refetch.
+        settings.sla_policy(),
+        settings.instance_base_url.clone(),
         args,
         Utc::now(),
         &progress,
@@ -410,7 +414,8 @@ async fn run_query<L, D, C>(
     devices_fut: D,
     current_fut: C,
     install_window_days: i64,
-    sla_days: i64,
+    sla: SlaPolicy,
+    instance: String,
     args: PatchQueryArgs,
     now: DateTime<Utc>,
     progress: &(dyn Fn(&'static str, usize) + Send + Sync),
@@ -495,7 +500,7 @@ where
     // runs for seconds with no `.await` in it. Left inline it held a tokio worker for
     // that whole time, stalling unrelated IPC commands and the job poller. Everything
     // it needs is owned and `Send`, so moving it is just a `spawn_blocking`.
-    tauri::async_runtime::spawn_blocking(move || assemble_result(&plan, src, sla_days, now))
+    tauri::async_runtime::spawn_blocking(move || assemble_result(&plan, src, sla, instance, now))
         .await
         .context("join/rollup task failed")
 }
@@ -505,7 +510,8 @@ where
 fn assemble_result(
     plan: &QueryPlan,
     src: FetchedSources,
-    sla_days: i64,
+    sla: SlaPolicy,
+    instance: String,
     now: DateTime<Utc>,
 ) -> QueryResult {
     let maps = LookupMaps::build(
@@ -644,16 +650,12 @@ fn assemble_result(
         .collect();
     let counts = pending_counts(&all_current);
     let summaries = build_device_summaries(&scoped_devices, &counts, &maps);
-    let compliance = build_compliance(
-        &summaries,
-        &all_current,
-        &devices_by_id,
-        &maps,
-        sla_days,
-        now,
-    );
+    let cutoffs = SlaCutoffs::new(&sla, now);
+    let compliance = build_compliance(&summaries, &all_current, &devices_by_id, &maps, &cutoffs);
     let compliance_by_os =
-        build_compliance_by_os(&summaries, &all_current, &devices_by_id, sla_days, now);
+        build_compliance_by_os(&summaries, &all_current, &devices_by_id, &cutoffs);
+    let (worst_devices, offline_backlog) =
+        build_device_backlogs(&all_current, &devices_by_id, &maps, &cutoffs);
 
     // Dashboard/failure rollups. Failures are derived from the FAILED rows already
     // joined (present only when the FAILED status was requested — no extra fetch);
@@ -661,6 +663,8 @@ fn assemble_result(
     let failures = build_failures(&rows);
     let severity_by_org = build_severity_by_org(&all_current, &devices_by_id, &maps);
     let age_buckets = build_age_buckets(&all_current, &devices_by_id, now);
+    let time_to_install =
+        build_time_to_install(&rows, plan.statuses.contains(&PatchStatus::Installed));
 
     let families = PatchFamilies {
         os: plan.include_os,
@@ -675,6 +679,11 @@ fn assemble_result(
         failures,
         severity_by_org,
         age_buckets,
+        worst_devices,
+        offline_backlog,
+        time_to_install,
+        sla_policy: sla,
+        instance,
         devices_total: scoped_devices.len(),
         // Counted over the same scoped set the compliance rollups draw from, so the
         // two device numbers on screen are reconcilable: `devices_total` is every

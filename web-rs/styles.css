@@ -1157,6 +1157,13 @@ tbody tr:hover {
   gap: 6px;
 }
 
+/* A device's pending backlog inside one table cell. */
+.chart-legend.breakdown {
+  padding: 0;
+  gap: 4px 10px;
+  color: inherit;
+}
+
 /* Drill-down affordance on a rollup value: reads as the data it replaces until
    hovered/focused, so the tables stay scannable rather than turning into a wall of
    links. A real <button> keeps it keyboard-reachable and announced. */
@@ -1637,14 +1644,16 @@ tbody tr:hover {
   color: var(--warn);
 }
 
-.settings-actions {
+.settings-actions,
+.settings-sla {
   margin-top: 14px;
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 8px;
 }
 
-.settings-actions legend {
+.settings-actions legend,
+.settings-sla legend {
   padding: 0 6px;
   font-size: 12px;
   color: var(--muted);

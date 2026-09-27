@@ -4,7 +4,7 @@ use tauri::State;
 use crate::error::UiError;
 use crate::settings::{
     ActionSettings, MAX_ACTION_CONCURRENCY, MAX_DEVICES_PER_ACTION_CEILING, MAX_WINDOW_DAYS,
-    Preset, Settings, is_loopback_host,
+    Preset, Settings, SlaBySeverity, is_loopback_host,
 };
 use crate::state::AppState;
 
@@ -16,6 +16,7 @@ pub struct SettingsView {
     pub callback_port: u16,
     pub install_window_days: i64,
     pub sla_days: i64,
+    pub sla_by_severity: SlaBySeverity,
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
@@ -39,6 +40,7 @@ fn view(state: &AppState) -> SettingsView {
         callback_port: s.callback_port,
         install_window_days: s.install_window_days,
         sla_days: s.sla_days,
+        sla_by_severity: s.sla_by_severity,
         has_client_secret: state.auth.has_client_secret(),
         presets: s.presets,
         auto_check_updates: s.auto_check_updates,
@@ -60,6 +62,10 @@ pub struct SaveSettingsArgs {
     pub callback_port: u16,
     pub install_window_days: i64,
     pub sla_days: i64,
+    /// Omitted by a frontend that predates per-severity SLAs, which then saves no
+    /// overrides — the single `sla_days` window applies to every band, as before.
+    #[serde(default)]
+    pub sla_by_severity: SlaBySeverity,
     /// New secret to store; ignored when empty/None unless `clear_secret` is set.
     #[serde(default)]
     pub client_secret: Option<String>,
@@ -83,6 +89,7 @@ impl std::fmt::Debug for SaveSettingsArgs {
             .field("callback_port", &self.callback_port)
             .field("install_window_days", &self.install_window_days)
             .field("sla_days", &self.sla_days)
+            .field("sla_by_severity", &self.sla_by_severity)
             .field(
                 "client_secret",
                 &self.client_secret.as_ref().map(|_| "<redacted>"),
@@ -131,6 +138,12 @@ fn validate_settings_input(args: &SaveSettingsArgs) -> Result<(), UiError> {
     if args.sla_days < 1 || args.sla_days > MAX_WINDOW_DAYS {
         return Err(UiError::new(format!(
             "SLA (days) must be between 1 and {MAX_WINDOW_DAYS}."
+        )));
+    }
+    if let Some(band) = args.sla_by_severity.first_out_of_range() {
+        return Err(UiError::new(format!(
+            "{} SLA (days) must be between 1 and {MAX_WINDOW_DAYS}, or blank to use the default.",
+            band.label()
         )));
     }
     validate_action_settings(&args.actions)?;
@@ -226,6 +239,7 @@ fn merge_settings(
     next.callback_port = args.callback_port;
     next.install_window_days = args.install_window_days;
     next.sla_days = args.sla_days;
+    next.sla_by_severity = args.sla_by_severity;
     next.auto_check_updates = args.auto_check_updates;
     next.actions = args.actions;
     next.actions.run_as = next.actions.run_as.trim().to_string();
@@ -377,8 +391,8 @@ pub async fn delete_preset(
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionSettings, MAX_WINDOW_DAYS, SaveEffects, SaveSettingsArgs, Settings, merge_settings,
-        require_https_instance, validate_action_settings, validate_settings_input,
+        ActionSettings, MAX_WINDOW_DAYS, SaveEffects, SaveSettingsArgs, Settings, SlaBySeverity,
+        merge_settings, require_https_instance, validate_action_settings, validate_settings_input,
     };
 
     #[test]
@@ -400,6 +414,7 @@ mod tests {
             callback_port,
             install_window_days,
             sla_days,
+            sla_by_severity: SlaBySeverity::default(),
             client_secret: None,
             clear_secret: false,
             auto_check_updates: true,
@@ -427,6 +442,38 @@ mod tests {
         assert!(validate_settings_input(&args(11434, 30, MAX_WINDOW_DAYS + 1)).is_err());
         assert!(validate_settings_input(&args(11434, i64::MAX, 30)).is_err());
         assert!(validate_settings_input(&args(11434, 30, i64::MAX)).is_err());
+    }
+
+    /// A per-band override is held to the same bound as the default window; blank
+    /// (`None`) is always valid and means "use the default".
+    #[test]
+    fn per_severity_sla_overrides_are_range_checked() {
+        let with = |sla: SlaBySeverity| SaveSettingsArgs {
+            sla_by_severity: sla,
+            ..args(11434, 30, 30)
+        };
+        assert!(validate_settings_input(&with(SlaBySeverity::default())).is_ok());
+        assert!(
+            validate_settings_input(&with(SlaBySeverity {
+                critical: Some(7),
+                optional: Some(MAX_WINDOW_DAYS),
+                ..SlaBySeverity::default()
+            }))
+            .is_ok()
+        );
+        let err = validate_settings_input(&with(SlaBySeverity {
+            critical: Some(0),
+            ..SlaBySeverity::default()
+        }))
+        .expect_err("a zero-day override is a typo");
+        assert!(err.message.starts_with("Critical SLA"), "{}", err.message);
+        assert!(
+            validate_settings_input(&with(SlaBySeverity {
+                low: Some(MAX_WINDOW_DAYS + 1),
+                ..SlaBySeverity::default()
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -574,6 +621,11 @@ mod tests {
         assert_eq!(same_tenant(|a| a.auto_check_updates = false), unchanged);
         assert_eq!(same_tenant(|a| a.callback_port = 12000), unchanged);
         assert_eq!(same_tenant(|a| a.sla_days = 7), unchanged);
+        assert_eq!(
+            same_tenant(|a| a.sla_by_severity.critical = Some(3)),
+            unchanged,
+            "an SLA change is applied at the next query's assembly, not by a refetch"
+        );
         assert_eq!(
             same_tenant(|a| a.client_secret = Some("s".into())),
             unchanged
