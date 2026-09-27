@@ -1903,6 +1903,8 @@ mod tests {
             "activityId",
             "seriesUid",
             "exitCode",
+            // What a Jobs-tab retry is rebuilt from.
+            "request",
         ] {
             assert!(value.get(key).is_some(), "JobReport is missing `{key}`");
         }
