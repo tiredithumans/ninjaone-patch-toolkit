@@ -128,7 +128,7 @@ scans every row for its key, so it too runs on a handle in `spawn_blocking`.
 
 ## Grouping is backend-side too
 
-The Patches tab's *By device* / *By patch* modes go through `get_patch_groups` (headers + total,
+The Patches tab's *By device* / *By patch* / *By product* modes go through `get_patch_groups` (headers + total,
 `rows::build_groups` memoized, then `rows::slice_groups`) and `get_patch_group_members` (one group's rows, `rows::group_member_page`).
 The frontend only ever holds one page, so it cannot group a fleet it has never seen — never
 regroup `page_rows` client-side. Group headers carry **no** members: a by-patch group can span the
@@ -136,6 +136,22 @@ whole fleet, so members load on expand, capped at `GROUP_MEMBER_LIMIT`. `rows::g
 identity the frontend echoes back, so no per-request state is kept backend-side and a stale key
 matches nothing. `demo.rs` mirrors `group_key`/`build_groups` by hand for the browser demo — keep
 the two in step.
+
+### *By product* folds versions, and falls back to the patch key
+
+NinjaOne's third-party feed folds the version into the title and has no product-name field, so
+by patch every Chrome build was its own group. `DeviceSoftwarePatch.productIdentifier` (a uuid
+shared by every version) is now bound on `Patch` and interned onto `PatchRow`, and
+`GroupBy::Product` keys a software row with one by it: `SOFTWARE␟<id>`, **two** fields where a
+patch key has three, so `GroupKeyMatcher` tells them apart by shape and neither can pass for the
+other. Every other row — every OS patch, and a software record missing its identifier — keeps its
+exact by-patch key, and under product mode a row that *has* a product never matches a patch key,
+so members still partition the rows. The label is derived (`rows::product_display_name`): each
+member title loses one trailing version token (`strip_version_token` — starts with a digit, holds
+a `.`, only `[A-Za-z0-9.-_+]`, so "Office 2016" stays whole) and the most common result wins,
+ties broken case-insensitively so the label does not depend on row order; the sublabel counts the
+versions. The demo carries a copy of both helpers (`util::product_display_name`), pinned by the
+regenerated `web-rs/tests/backend-grouping.json` (`byProduct`, `keysByProduct`).
 
 Rows whose patch record carried no `deviceId` get `PatchRow.device_id = rows::ORPHAN_DEVICE_ID`
 (0 — NinjaOne ids start at 1). They still share one *By device* bucket, but its `device_id` is
@@ -147,9 +163,12 @@ count its records touched, and a device group whose `device_id` was `Some(0)`.
 
 Fleet-wide distributions the frontend charts/failure tab need — `failures` (FAILED-install
 rollup, `build_failures`), `severity_by_org` (`build_severity_by_org`), `age_buckets`
-(`build_age_buckets`) — are computed backend-side in `rows/` and carried on **both** `QueryResult`
+(`build_age_buckets`), `approvals` (`build_approval_backlog`) — are computed backend-side in `rows/` and carried on **both** `QueryResult`
 (cached; the HTML report reads it) and `QuerySummary` (IPC; the dashboard reads it). They're
-bounded (one entry per failing patch / per org / 5 buckets), so they ship whole rather than paged.
+bounded (one entry per failing patch / per org / 5 buckets), so they ship whole rather than paged —
+except `approvals.stuck_devices`, which is one entry per *device* and so is capped on the summary
+(`ApprovalBacklog::capped(STUCK_DEVICES_SUMMARY_CAP)`, oldest first, totals kept) while the cached
+result keeps every one for the workbook.
 Add such a field in lockstep: `QueryResult` + `QuerySummary` + clone in `QuerySummary::from_result`
 + the `web-rs/src/types.rs` mirror + the demo's `assemble`, and assert its key in
 `serialized_shapes_carry_every_frontend_required_key`. Keep the backend `QuerySummary` ⇄ frontend
@@ -213,7 +232,7 @@ whole-fleet caches are tenant-scoped, so `clear_lookups_cache` drops them too.
 `run_query` filters the cached `Arc`s into `Vec<&Patch>`, and the rollups (`pending_counts`,
 `build_compliance`, `build_compliance_by_os`, `build_severity_by_org`, `build_age_buckets`) plus
 `PatchSource.patches` all take `&[&Patch]`. A whole-fleet third-party feed runs to six figures and
-each `Patch` owns **seven** `Option<String>`s, so cloning the scoped subset — and again into
+each `Patch` owns **eight** `Option<String>`s, so cloning the scoped subset — and again into
 `all_current` — costs millions of allocations per query for data the cache already owns and
 outlives. Keep new rollups on `&[&Patch]`; don't reintroduce an owned `Vec<Patch>` to make a
 signature more convenient.

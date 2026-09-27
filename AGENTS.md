@@ -160,9 +160,10 @@ Backend — commands, cache, concurrency:
 - **Paging/grouping/sorting commands return empty on a cache miss, never an error.** Sorted and
   grouped views are memoized inside `CachedResult`, built on `spawn_blocking` and stored only if
   `Arc::ptr_eq` still holds; the cached rows are never reordered. Group
-  headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
-- **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`) ride on both `QueryResult` and
-  `QuerySummary`.** Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
+  headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`
+  (incl. `GroupBy::Product`), pinned by `web-rs/tests/backend-grouping.json`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
+- **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`, `approvals`) ride on both `QueryResult` and
+  `QuerySummary`** (`approvals.stuck_devices` capped on the summary). Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
   demo's `assemble`, and `serialized_shapes_carry_every_frontend_required_key`. `QueryScope` is the
   one `QueryResult`-only exception. → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
 - **Every TTL'd cache slot is a `TenantCache<T>`** — it owns the tenant stamp, TTL,
@@ -264,10 +265,12 @@ Compliance and rollups — violating these silently misreports a fleet:
   `DateTime::from_timestamp`. → `docs/design/compliance.md#both-exports-state-the-facets-from-rowsqueryscope`
 - **`Type` is a device-tier chip** — rollups cover only the fetched families. → `docs/design/compliance.md#the-fleet-health-rollups-do-depend-on-the-patch-type-facet`
 - **`is_pending` is an exclude list** (not `REJECTED`/`INSTALLED`); current sources get
-  `status_override = MANUAL`; `current_status_set` carries every selected status. → `docs/design/compliance.md#rowsis_pending-is-an-exclude-list`
+  `status_override = MANUAL`; `current_status_set` carries every selected status. The approval
+  split (`approval_state`) reads the vendor status, never that override. → `docs/design/compliance.md#rowsis_pending-is-an-exclude-list`
 - **`Installed` and `Failed` route to the install-history endpoints; current patches are always
   fetched.** One requested install status is pushed down server-side; the lookback is re-applied
-  client-side. → `docs/design/compliance.md#installedfailed-vs-current-patches-status-routing`
+  client-side. An absolute range (`installed_after/before`) replaces it — validated by
+  `install_range`, both bounds pushed down and re-applied. → `docs/design/compliance.md#installedfailed-vs-current-patches-status-routing`
 - **`format_pct` never rounds up to 100** (caps at 99%; `pct_cell` at one decimal). → `docs/design/compliance.md#a-percentage-never-rounds-up-to-100`
 - **There is no patch release date in the API.** `first_seen_at()` is detection time; keep "First
   seen" / "since first seen" naming; fixtures must emit `timestamp`. → `docs/design/compliance.md#there-is-no-patch-release-date-in-the-ninjaone-api`

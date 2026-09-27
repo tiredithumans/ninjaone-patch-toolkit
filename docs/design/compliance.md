@@ -82,7 +82,8 @@ number in them describes a different population.
 - Patch families are stated **once**, as the block's `Patch type` entry — the Type facet and the
   rollups' family scope are the same value, and two adjacent rows saying it read as two things.
 - The install lookback is named only when the status selection actually reached the history
-  endpoints (`plan.want_installs`), and a query with no **device-tier** facet emits an explicit
+  endpoints (`plan.want_installs`), as `Install history since <bound> (last N days)`; a custom
+  absolute range prints `since` and `until` with no parenthetical (`rows::InstallWindow`), and a query with no **device-tier** facet emits an explicit
   whole-fleet sentence: on a printed artifact, missing lines are indistinguishable from a renderer
   that dropped them. The sentence sits in `facets` (every sheet), so only a device facet
   (`FilterParams::has_identity_scope`) may remove it — a severity- or search-only query once
@@ -93,7 +94,9 @@ number in them describes a different population.
   unfiltered run (whole-fleet line + patch type) read as scoped; and a bool cannot tell org A's
   runs from org B's. The fingerprint is a canonical JSON spelling of every facet (ids sorted,
   needles trimmed and lowercased, relative windows as `30d` because the absolute bound moves each
-  run); records from before it read back with an empty `scope_key`. `QueryPlan` keeps `statuses` verbatim for this — the two derived `HashSet`s are
+  run); records from before it read back with an empty `scope_key`. The install lookback is not in
+  it for the same reason; an *absolute* install range is a different question and is appended as
+  an `installed` part — only when present, so every older fingerprint still matches its line. `QueryPlan` keeps `statuses` verbatim for this — the two derived `HashSet`s are
   unordered and spelled in NinjaOne's wire vocabulary, so `MANUAL` ⇄ "Pending" would be a second
   place to get the mapping wrong (`PatchStatus::label`).
 
@@ -106,6 +109,31 @@ families instead of claiming Type is ignored. The `Type` chip is therefore a **d
 (`filter_chips` marks it `patch: false`), never struck through on the fleet tabs, and the Filters
 panel renders the Type control *outside* the fold that hides the row-only facets there — for a
 while the chip said "Ignored on this tab" directly above a banner saying the opposite.
+
+## Awaiting approval and approved-not-installed are read from the vendor status
+
+Both compliance rollups carry `awaiting_approval` (vendor status `MANUAL`, NinjaOne's "Pending") and
+`approved_not_installed` (`APPROVED`), over the same `rollup_device` population and across **every**
+severity — the split describes the workflow, not the urgency, unlike the Critical/Important SLA
+columns beside it. They matter because the two stall for different reasons: `MANUAL` waits on a
+person, `APPROVED` on the agent, and `is_pending` scores both the same.
+
+The split reads `Patch.status` off the **cached record** (`rows::approval_state`), never a row's
+display status. `assemble_result` gives the current sources `status_override = MANUAL` so an
+untyped record matches the Pending selection — but that override only ever reaches `build_rows`;
+the rollups take the raw feed. Reading the row status would file every untyped record as "awaiting
+approval", a claim the vendor never made. So an untyped, `FAILED` or never-seen status is pending
+(it still breaks compliance) and in **neither** column: the two can sum to less than the pending
+count, and that gap is the records whose workflow state NinjaOne did not say.
+
+`QueryResult.approvals` (`rows::ApprovalBacklog`) carries the fleet totals — equal to the columns
+summed, one population — plus the **stuck approvals**: per device, the `APPROVED` patches first seen
+more than `sla_days` ago, oldest first. No operator decision is holding those up, so they point at
+agents (never-opening maintenance windows, a broken patch engine) rather than at a backlog. The
+threshold is the SLA window because that is already this app's "too long" knob; a second one would
+only let the two disagree. An undated approved patch counts as stuck, the same rule `is_aged` uses.
+The workbook writes every stuck device on a **Stuck Approvals** sheet with the threshold as a
+footnote; the report and the Compliance tab show the oldest ones and say how many more there are.
 
 ## "Compliant" and "Pending Critical/Important" grade differently, on purpose
 
@@ -145,14 +173,15 @@ overflow the bar. See [severity.md](./severity.md).
 ## Table headers come from `rows::TableColumn` spellings
 
 The Leptos tables are hand-written and are not wired to `COLUMNS`, so they are kept spelled
-identically by review: "Compliance %", "Pending Critical/Important", "Aged (past SLA)", "Device
-Role", "Pending Patches", and the Failures table's seven columns including "Patch Type".
+identically by review: "Compliance %", "Pending Critical/Important", "Aged (past SLA)",
+"Awaiting Approval", "Approved, Not Installed", "Device Role", "Pending Patches", the Failures
+table's seven columns including "Patch Type", and `StuckDevice::COLUMNS`.
 
 `rows::TableColumn<T>` is the shared table definition. Every table rendered from a cached
 `QueryResult` — `FailureGroup::COLUMNS`, `DeviceSummary::COLUMNS`, `ComplianceBucket::COLUMNS`,
-`OsCompliance::COLUMNS`, plus `export.rs`'s own `DETAIL_COLUMNS` — pairs each header with the
+`OsCompliance::COLUMNS`, `StuckDevice::COLUMNS`, plus `export.rs`'s own `DETAIL_COLUMNS` — pairs each header with the
 accessor that fills it, so a column is one declaration rather than two lists agreeing by
-convention. `export.rs` renders all five through one `write_sheet` and contributes only the width
+convention. `export.rs` renders every one through one `write_sheet` and contributes only the width
 arrays, each length-tied to its `COLUMNS.len()`; `report.rs` renders through one `write_table`.
 Before this the two had diverged: the report dropped `Patch Type` from the failures table, and
 hardcoded the reboot table's headers as "Role"/"Pending patches" against the workbook's "Device
@@ -231,4 +260,18 @@ compliance/severity/age rollups, which need the full `MANUAL`/`APPROVED`/`REJECT
 what the widely used community PowerShell module sends and what this app has always sent, but the
 response carries no evidence the bound was honored, and both exports print "Install history since
 <date>" on the strength of it — so `assemble_result` drops install records whose `installedAt`
-predates `plan.installed_after` (undated records are kept; the window cannot prove them out).
+predates the window (undated records are kept; the window cannot prove them out).
+
+### An absolute install range replaces the lookback
+
+`FilterParams.installed_after`/`installed_before` (Unix seconds; the To day included whole by the
+frontend) let an operator review one past patch cycle. When set they **replace** the relative
+lookback rather than intersect it — a 30-day default silently truncating "review March" is the
+failure this avoids — and they travel on `FilterParams`, so presets save them. They are validated
+by `FilterParams::install_range` (a start is required; start ≤ end; not in the future; span ≤
+`MAX_WINDOW_DAYS`), **refused rather than repaired**, and only when an install status is selected:
+the Filters panel hides the control otherwise, and a stale range must not fail a Pending query with
+its cause off screen. `query_patches` checks before claiming the `QueryToken`, so a malformed range
+cannot supersede a good query in flight; `QueryPlan::build` re-checks. Both bounds are pushed down
+(`installedAfter`/`installedBefore`, as unspecified in the spec as each other) and both are
+re-applied client-side, inclusive, with undated records kept as for the lookback.
