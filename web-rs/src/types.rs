@@ -201,6 +201,109 @@ pub struct SeverityCounts {
     pub unknown: usize,
 }
 
+/// One device's pending backlog. Mirrors `rows::DeviceBacklog`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceBacklog {
+    pub device_id: i64,
+    pub device_name: String,
+    pub organization: String,
+    pub os_name: Option<String>,
+    pub pending: SeverityCounts,
+    pub pending_total: usize,
+    /// Pending records of any severity past their own band's SLA (undated counts).
+    pub past_sla: usize,
+    pub oldest_first_seen: Option<String>,
+    /// The newest `timestamp` on the device's pending records — a collection time,
+    /// not a last-contact time.
+    pub latest_collected: Option<String>,
+}
+
+/// A capped device list plus how many devices qualified. Mirrors
+/// `rows::DeviceBacklogList`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceBacklogList {
+    #[serde(default)]
+    pub devices: Vec<DeviceBacklog>,
+    #[serde(default)]
+    pub devices_total: usize,
+}
+
+/// One first-seen → installed distribution, in days. Mirrors `rows::InstallLatency`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallLatency {
+    pub label: String,
+    pub samples: usize,
+    pub median_days: f64,
+    pub p90_days: f64,
+}
+
+/// Mirrors `rows::TimeToInstall`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TimeToInstall {
+    pub installs_queried: bool,
+    pub overall: Option<InstallLatency>,
+    pub by_organization: Vec<InstallLatency>,
+    pub by_severity: Vec<InstallLatency>,
+    pub installed_records: usize,
+    pub excluded_records: usize,
+}
+
+/// Per-severity SLA overrides in days; `None` = use the default. Mirrors
+/// `settings::SlaBySeverity` and round-trips through the Settings panel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SlaBySeverity {
+    pub critical: Option<i64>,
+    pub important: Option<i64>,
+    pub security: Option<i64>,
+    pub moderate: Option<i64>,
+    pub recommended: Option<i64>,
+    pub low: Option<i64>,
+    pub optional: Option<i64>,
+}
+
+/// One overridable band: its label, and how to read and write its override.
+pub type SlaBand = (
+    &'static str,
+    fn(&SlaBySeverity) -> Option<i64>,
+    fn(&mut SlaBySeverity) -> &mut Option<i64>,
+);
+
+impl SlaBySeverity {
+    /// Every overridable band, most urgent first. `Unknown` has no override — it
+    /// always takes the default, as in the backend.
+    pub const BANDS: [SlaBand; 7] = [
+        ("Critical", |s| s.critical, |s| &mut s.critical),
+        ("Important", |s| s.important, |s| &mut s.important),
+        ("Security", |s| s.security, |s| &mut s.security),
+        ("Moderate", |s| s.moderate, |s| &mut s.moderate),
+        ("Recommended", |s| s.recommended, |s| &mut s.recommended),
+        ("Low", |s| s.low, |s| &mut s.low),
+        ("Optional", |s| s.optional, |s| &mut s.optional),
+    ];
+}
+
+/// The SLA policy a result was computed under. Mirrors `settings::SlaPolicy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SlaPolicy {
+    pub default_days: i64,
+    pub by_severity: SlaBySeverity,
+}
+
+impl Default for SlaPolicy {
+    fn default() -> Self {
+        Self {
+            default_days: 30,
+            by_severity: SlaBySeverity::default(),
+        }
+    }
+}
+
 /// Which key the Patches view groups its rows by. Mirrors `rows::GroupBy`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -272,6 +375,19 @@ pub struct QueryResult {
     pub severity_by_org: Vec<OrgSeverity>,
     /// Pending-patch age histogram for the dashboard charts.
     pub age_buckets: Vec<AgeBucket>,
+    /// The worst online devices by pending backlog (capped).
+    #[serde(default)]
+    pub worst_devices: DeviceBacklogList,
+    /// Offline devices still listed with pending patches (capped).
+    #[serde(default)]
+    pub offline_backlog: DeviceBacklogList,
+    /// First seen → installed, by organization and severity.
+    #[serde(default)]
+    pub time_to_install: TimeToInstall,
+    /// The SLA policy this result's aging figures were computed under — may differ
+    /// from Settings if the policy changed since.
+    #[serde(default)]
+    pub sla_policy: SlaPolicy,
     pub devices_total: usize,
     /// How many of `devices_total` are offline. The compliance rollups exclude them
     /// from both the denominator and the pending counts, so the Devices column of the
@@ -319,6 +435,8 @@ pub struct SettingsView {
     pub callback_port: u16,
     pub install_window_days: i64,
     pub sla_days: i64,
+    #[serde(default)]
+    pub sla_by_severity: SlaBySeverity,
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
@@ -455,6 +573,7 @@ pub struct SaveSettingsArgs {
     pub callback_port: u16,
     pub install_window_days: i64,
     pub sla_days: i64,
+    pub sla_by_severity: SlaBySeverity,
     pub client_secret: Option<String>,
     pub clear_secret: bool,
     pub auto_check_updates: bool,

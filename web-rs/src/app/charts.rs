@@ -145,6 +145,17 @@ fn severity_segments(c: &SeverityCounts, track: f64) -> Vec<Segment> {
     out
 }
 
+/// The non-zero bands of one breakdown as (label, swatch class, count), most urgent
+/// first — for a table cell that shows a device's pending backlog inline. Derived
+/// from [`SEV_BANDS`] like the chart, so the two cannot disagree about the bands.
+pub(crate) fn severity_breakdown(c: &SeverityCounts) -> Vec<(&'static str, &'static str, usize)> {
+    SEV_BANDS
+        .iter()
+        .map(|(label, class, read)| (*label, *class, read(c)))
+        .filter(|(_, _, n)| *n > 0)
+        .collect()
+}
+
 /// The compliance overview charts (compliance / severity / age) shown at the top of
 /// the Compliance tab, above the per-org table. The caller gates on a query result.
 #[component]
@@ -533,6 +544,25 @@ mod tests {
             (spanned - 400.0).abs() < 1e-9,
             "segments tile the full track"
         );
+    }
+
+    #[test]
+    fn severity_breakdown_lists_non_zero_bands_most_urgent_first() {
+        let counts = SeverityCounts {
+            low: 2,
+            critical: 1,
+            unknown: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            severity_breakdown(&counts),
+            [
+                ("Critical", "seg-critical", 1),
+                ("Low", "seg-low", 2),
+                ("Unknown", "seg-unknown", 4)
+            ]
+        );
+        assert!(severity_breakdown(&SeverityCounts::default()).is_empty());
     }
 
     #[test]

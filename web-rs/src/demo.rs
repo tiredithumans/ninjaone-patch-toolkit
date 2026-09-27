@@ -19,12 +19,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::app::util::{date_to_epoch, severity_rank};
+use crate::app::util::{date_to_epoch, median, nearest_rank, severity_rank, sla_days_for};
 use crate::types::QueryResult;
 use crate::types::{
-    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams, GroupBy, Location,
-    NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role,
-    SeverityCounts,
+    AgeBucket, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceSummary, FailureGroup,
+    FilterParams, GroupBy, InstallLatency, Location, NodeClass, OrgSeverity, Organization,
+    OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role, SeverityCounts, SlaBySeverity,
+    SlaPolicy, TimeToInstall,
 };
 
 /// Wall-clock label shown in the results summary. Fixed (not "now") so the build
@@ -509,6 +510,180 @@ fn scoped_age_buckets(rows: &[PatchRow]) -> Vec<AgeBucket> {
         .collect()
 }
 
+/// The demo's SLA policy: a tighter window for Critical so the sample shows a
+/// per-band override at work (the Critical patches first seen mid-June are past it
+/// by the snapshot date; nothing else is).
+const DEMO_SLA: SlaPolicy = SlaPolicy {
+    default_days: 30,
+    by_severity: SlaBySeverity {
+        critical: Some(14),
+        important: None,
+        security: None,
+        moderate: None,
+        recommended: None,
+        low: None,
+        optional: None,
+    },
+};
+
+/// Mirrors the backend's cap on each device list.
+const DEVICE_LIST_LIMIT: usize = 25;
+
+/// Counts one row into its band, keyed by rank — the same classification
+/// `severity_rank` gives the sort, so an unmapped label lands in Unknown exactly as
+/// the backend's `Severity::from_raw` sends it there.
+fn bump(c: &mut SeverityCounts, severity: &str) {
+    match severity_rank(severity) {
+        7 => c.critical += 1,
+        6 => c.important += 1,
+        5 => c.security += 1,
+        4 => c.moderate += 1,
+        3 => c.recommended += 1,
+        2 => c.low += 1,
+        1 => c.optional += 1,
+        _ => c.unknown += 1,
+    }
+}
+
+/// The worst devices over the pending rows on screen, ranked like the backend's
+/// `rows::build_device_backlogs`: past SLA, then the most urgent breakdown, then id.
+/// Like the demo's by-OS rollup it derives from the scoped rows (the sample fleet
+/// is all online).
+fn demo_worst_devices(rows: &[PatchRow]) -> DeviceBacklogList {
+    let mut by_device: BTreeMap<i64, DeviceBacklog> = BTreeMap::new();
+    for r in rows
+        .iter()
+        .filter(|r| matches!(r.status.as_str(), "PENDING" | "APPROVED"))
+    {
+        let d = by_device
+            .entry(r.device_id)
+            .or_insert_with(|| DeviceBacklog {
+                device_id: r.device_id,
+                device_name: r.device_name.clone(),
+                organization: r.organization.clone(),
+                os_name: r.os_name.clone(),
+                pending: SeverityCounts::default(),
+                pending_total: 0,
+                past_sla: 0,
+                oldest_first_seen: None,
+                latest_collected: None,
+            });
+        bump(&mut d.pending, &r.severity);
+        d.pending_total += 1;
+        let seen = r.first_seen_date.as_deref().and_then(date_to_epoch);
+        let sla_secs = sla_days_for(&DEMO_SLA, &r.severity) * 86_400;
+        if seen.is_none_or(|s| s < SAMPLE_NOW_EPOCH - sla_secs) {
+            d.past_sla += 1;
+        }
+        // YYYY-MM-DD compares chronologically as text.
+        if let Some(date) = r.first_seen_date.clone() {
+            if d.oldest_first_seen.as_ref().is_none_or(|o| date < *o) {
+                d.oldest_first_seen = Some(date.clone());
+            }
+            if d.latest_collected.as_ref().is_none_or(|l| date > *l) {
+                d.latest_collected = Some(date);
+            }
+        }
+    }
+    let devices_total = by_device.len();
+    let urgency = |c: &SeverityCounts| {
+        [
+            c.critical,
+            c.important,
+            c.security,
+            c.moderate,
+            c.recommended,
+            c.low,
+            c.optional,
+            c.unknown,
+        ]
+    };
+    let mut devices: Vec<DeviceBacklog> = by_device.into_values().collect();
+    devices.sort_by(|a, b| {
+        b.past_sla
+            .cmp(&a.past_sla)
+            .then_with(|| urgency(&b.pending).cmp(&urgency(&a.pending)))
+            .then_with(|| a.device_id.cmp(&b.device_id))
+    });
+    devices.truncate(DEVICE_LIST_LIMIT);
+    DeviceBacklogList {
+        devices,
+        devices_total,
+    }
+}
+
+/// One offline laptop still listed with pending patches, so the demo's offline
+/// section has something to show. It sits outside `demo_rows` on purpose: offline
+/// devices are excluded from every other rollup, and the sample rows are all online.
+fn sample_offline_backlog() -> Vec<DeviceBacklog> {
+    vec![DeviceBacklog {
+        device_id: device_id_of("ATX-LT-0412"),
+        device_name: "ATX-LT-0412".to_string(),
+        organization: "Northwind Traders".to_string(),
+        os_name: Some("Windows 11 Pro".to_string()),
+        pending: SeverityCounts {
+            critical: 1,
+            important: 2,
+            ..SeverityCounts::default()
+        },
+        pending_total: 3,
+        past_sla: 3,
+        oldest_first_seen: Some("2026-04-14 00:00 UTC".to_string()),
+        latest_collected: Some("2026-05-02 08:10 UTC".to_string()),
+    }]
+}
+
+/// First seen → installed over the INSTALLED rows on screen, mirroring the
+/// backend's `rows::build_time_to_install` (median + nearest-rank p90, overall /
+/// by org / by severity, most urgent band first).
+fn demo_time_to_install(rows: &[PatchRow], statuses: &[String]) -> TimeToInstall {
+    let mut all: Vec<i64> = Vec::new();
+    let mut by_org: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    let mut by_sev: BTreeMap<(std::cmp::Reverse<u8>, String), Vec<i64>> = BTreeMap::new();
+    let mut installed_records = 0;
+    for r in rows.iter().filter(|r| r.status == "INSTALLED") {
+        installed_records += 1;
+        let seen = r.first_seen_date.as_deref().and_then(date_to_epoch);
+        let at = r.installed_date.as_deref().and_then(date_to_epoch);
+        let (Some(seen), Some(at)) = (seen, at) else {
+            continue;
+        };
+        if at < seen {
+            continue;
+        }
+        let secs = at - seen;
+        all.push(secs);
+        by_org.entry(r.organization.clone()).or_default().push(secs);
+        by_sev
+            .entry((
+                std::cmp::Reverse(severity_rank(&r.severity)),
+                r.severity.clone(),
+            ))
+            .or_default()
+            .push(secs);
+    }
+    let latency = |label: String, mut secs: Vec<i64>| {
+        secs.sort_unstable();
+        InstallLatency {
+            label,
+            samples: secs.len(),
+            median_days: median(&secs) / 86_400.0,
+            p90_days: nearest_rank(&secs, 90) as f64 / 86_400.0,
+        }
+    };
+    TimeToInstall {
+        installs_queried: statuses.iter().any(|s| s.eq_ignore_ascii_case("INSTALLED")),
+        excluded_records: installed_records - all.len(),
+        installed_records,
+        overall: (!all.is_empty()).then(|| latency("All installs".to_string(), all)),
+        by_organization: by_org.into_iter().map(|(o, s)| latency(o, s)).collect(),
+        by_severity: by_sev
+            .into_iter()
+            .map(|((_, label), s)| latency(label, s))
+            .collect(),
+    }
+}
+
 pub fn filtered_result(
     filter: &FilterParams,
     patch_type: &str,
@@ -521,13 +696,13 @@ pub fn filtered_result(
         .filter(|d| patch_matches(&d.row, filter, patch_type, statuses, install_after_days))
         .map(|d| d.row)
         .collect();
-    assemble(rows, &filter.organization_ids)
+    assemble(rows, &filter.organization_ids, statuses)
 }
 
 /// Builds a `QueryResult` from already-filtered display rows, narrowing the rollups
 /// to `org_filter` (the organization facet) when one is set. An empty `org_filter`
 /// means every organization, matching the real facet.
-fn assemble(rows: Vec<PatchRow>, org_filter: &[i64]) -> QueryResult {
+fn assemble(rows: Vec<PatchRow>, org_filter: &[i64], statuses: &[String]) -> QueryResult {
     // Failures derive from the already-filtered rows, so the tab reacts to filters.
     let failures = demo_failures(&rows);
     let names: Vec<&str> = org_filter.iter().copied().filter_map(org_name).collect();
@@ -544,7 +719,16 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64]) -> QueryResult {
         .into_iter()
         .filter(|o| keep(&o.organization))
         .collect();
-    let devices_total = compliance.iter().map(|b| b.devices_total).sum();
+    let offline: Vec<DeviceBacklog> = sample_offline_backlog()
+        .into_iter()
+        .filter(|d| keep(&d.organization))
+        .collect();
+    let devices_offline = offline.len();
+    // Online devices in the rollups plus the offline ones they exclude — the same
+    // reconciliation the backend's scope note states.
+    let devices_total = compliance.iter().map(|b| b.devices_total).sum::<usize>() + devices_offline;
+    let worst_devices = demo_worst_devices(&rows);
+    let time_to_install = demo_time_to_install(&rows, statuses);
     // Both of these used to ship whole-fleet regardless of the facet, so with an
     // organization selected the Compliance tab's by-OS chart and the age histogram
     // described a fleet the rest of the screen — and `devices_total` beside them —
@@ -561,10 +745,17 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64]) -> QueryResult {
         failures,
         severity_by_org,
         age_buckets,
+        worst_devices,
+        offline_backlog: DeviceBacklogList {
+            devices_total: offline.len(),
+            devices: offline,
+        },
+        time_to_install,
+        sla_policy: DEMO_SLA,
         devices_total,
-        // The sample fleet is all-online and both families are represented, so the
-        // demo's scope note reads the same as a whole-fleet desktop query.
-        devices_offline: 0,
+        // Both families are represented and one sample laptop is offline, so the
+        // demo's scope note reads like a whole-fleet desktop query.
+        devices_offline,
         devices_unpatchable: 0,
         patch_families: PatchFamilies {
             os: true,
@@ -843,7 +1034,11 @@ mod tests {
         assert!(!r.compliance.is_empty());
         assert!(!r.reboot_devices.is_empty());
         let summed: usize = r.compliance.iter().map(|b| b.devices_total).sum();
-        assert_eq!(r.devices_total, summed);
+        assert_eq!(
+            r.devices_total,
+            summed + r.devices_offline + r.devices_unpatchable,
+            "the scope note's reconciliation: in-rollup + offline + non-patchable"
+        );
         assert!(
             r.compliance
                 .iter()
@@ -926,6 +1121,51 @@ mod tests {
             r.failures.is_empty(),
             "no FAILED rows selected → empty failure rollup, like the real app"
         );
+    }
+
+    #[test]
+    fn the_demo_carries_every_backlog_and_install_time_aggregate() {
+        let r = filtered_result(&filter(), "ALL", &all_statuses(), Some(3650));
+        assert!(!r.worst_devices.devices.is_empty());
+        assert_eq!(r.worst_devices.devices_total, r.worst_devices.devices.len());
+        // The Critical override (14 days) is what puts a device past SLA: every
+        // sample patch is younger than the 30-day default.
+        let first = &r.worst_devices.devices[0];
+        assert!(
+            first.past_sla > 0 && first.pending.critical > 0,
+            "{first:?}"
+        );
+        assert!(
+            r.worst_devices
+                .devices
+                .windows(2)
+                .all(|w| w[0].past_sla >= w[1].past_sla),
+            "ranked by past SLA first"
+        );
+        assert_eq!(r.offline_backlog.devices.len(), r.devices_offline);
+        assert_eq!(r.sla_policy.by_severity.critical, Some(14));
+
+        let t = &r.time_to_install;
+        assert!(t.installs_queried);
+        let overall = t.overall.as_ref().expect("the sample has installs");
+        assert_eq!(overall.samples, t.installed_records - t.excluded_records);
+        assert_eq!(t.by_severity[0].label, "Critical", "most urgent band first");
+
+        // Without the Installed status the table says why it is empty.
+        let pending = filtered_result(&filter(), "ALL", &["PENDING".to_string()], None);
+        assert!(!pending.time_to_install.installs_queried);
+        assert!(pending.time_to_install.overall.is_none());
+    }
+
+    #[test]
+    fn the_offline_sample_narrows_with_the_org_facet() {
+        let contoso = FilterParams {
+            organization_ids: vec![1],
+            ..filter()
+        };
+        let r = filtered_result(&contoso, "ALL", &all_statuses(), Some(3650));
+        assert!(r.offline_backlog.devices.is_empty());
+        assert_eq!(r.devices_offline, 0);
     }
 
     #[test]

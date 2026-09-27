@@ -15,6 +15,7 @@ mod jobs;
 mod pager;
 mod query;
 mod selection;
+mod sla;
 mod sort;
 
 pub(crate) use changelog::*;
@@ -24,6 +25,7 @@ pub(crate) use jobs::*;
 pub(crate) use pager::*;
 pub(crate) use query::*;
 pub(crate) use selection::*;
+pub(crate) use sla::*;
 pub(crate) use sort::*;
 
 #[cfg(test)]
