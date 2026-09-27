@@ -63,7 +63,7 @@ const REBOOT_WIDTHS: [f64; DeviceSummary::COLUMNS.len()] = [24.0, 18.0, 18.0, 22
 const FAILURE_WIDTHS: [f64; FailureGroup::COLUMNS.len()] =
     [11.0, 11.0, 12.0, 40.0, 16.0, 20.0, 60.0];
 const WORST_WIDTHS: [f64; DeviceBacklog::WORST_COLUMNS.len()] =
-    [24.0, 22.0, 26.0, 10.0, 15.0, 40.0, 20.0];
+    [24.0, 22.0, 26.0, 10.0, 15.0, 20.0, 40.0];
 const OFFLINE_WIDTHS: [f64; DeviceBacklog::OFFLINE_COLUMNS.len()] =
     [24.0, 22.0, 26.0, 26.0, 15.0, 10.0, 40.0];
 const INSTALL_TIME_WIDTHS: [f64; InstallLatency::COLUMNS.len()] = [14.0, 28.0, 17.0, 34.0, 20.0];
@@ -1055,11 +1055,13 @@ mod tests {
                 .join("\n")
         };
         let w = dump(&mut wb, "Worst Devices");
+        assert!(w.starts_with(
+            "Organization|Device|OS|Past SLA|Pending Patches|Oldest First Seen|Pending by Severity"
+        ));
         assert!(
-            w.starts_with("Organization|Device|OS|Past SLA|Pending Patches|Pending by Severity")
-        );
-        assert!(
-            w.contains("Contoso|srv07|Windows Server 2022|2|3|Critical 2 · Low 1"),
+            w.contains(
+                "Contoso|srv07|Windows Server 2022|2|3|2026-03-01 00:00 UTC|Critical 2 · Low 1"
+            ),
             "{w}"
         );
         assert!(

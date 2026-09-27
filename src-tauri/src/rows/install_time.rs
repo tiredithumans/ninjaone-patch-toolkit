@@ -173,10 +173,10 @@ impl InstallLatency {
         ("Breakdown", |l| TableCell::text(l.group)),
         ("Group", |l| TableCell::text(&l.label)),
         ("Installs Measured", |l| TableCell::Count(l.samples)),
-        ("Median Days (First Seen \u{2192} Installed)", |l| {
+        ("First Seen \u{2192} Installed (Median Days)", |l| {
             days_cell(l.median_days)
         }),
-        ("90th Percentile Days", |l| days_cell(l.p90_days)),
+        ("90th Percentile (Days)", |l| days_cell(l.p90_days)),
     ];
 }
 

@@ -168,11 +168,11 @@ impl DeviceBacklog {
         ("OS", |d| TableCell::opt_text(d.os_name.as_deref())),
         ("Past SLA", |d| TableCell::Count(d.past_sla)),
         ("Pending Patches", |d| TableCell::Count(d.pending_total)),
-        ("Pending by Severity", |d| {
-            TableCell::Text(d.pending.breakdown())
-        }),
         ("Oldest First Seen", |d| {
             TableCell::opt_text(d.oldest_first_seen.as_deref())
+        }),
+        ("Pending by Severity", |d| {
+            TableCell::Text(d.pending.breakdown())
         }),
     ];
 
