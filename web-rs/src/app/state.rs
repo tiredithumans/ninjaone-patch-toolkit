@@ -532,6 +532,11 @@ pub(crate) struct ActionState {
     /// device id → what was checked. Survives page changes; cleared by every
     /// successful query, because the underlying rows changed.
     pub(super) selected: RwSignal<BTreeMap<i64, DeviceSelection>>,
+    /// The Needs Reboot tab's **device-level** selection (`util::SelectionSource`).
+    /// Its entries carry no patch rows, and it is a separate map from `selected` so
+    /// ticking a device there can never tick any of its patch rows. Cleared and
+    /// pruned alongside `selected`.
+    pub(super) device_selected: RwSignal<BTreeMap<i64, DeviceSelection>>,
     pub(super) scripts: RwSignal<Vec<ScriptSummary>>,
     pub(super) scripts_loading: RwSignal<bool>,
     pub(super) script_id: RwSignal<Option<i64>>,
@@ -575,6 +580,7 @@ impl ActionState {
     pub(super) fn new() -> Self {
         Self {
             selected: RwSignal::new(BTreeMap::new()),
+            device_selected: RwSignal::new(BTreeMap::new()),
             scripts: RwSignal::new(Vec::new()),
             scripts_loading: RwSignal::new(false),
             script_id: RwSignal::new(None),

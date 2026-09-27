@@ -4,8 +4,8 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, AuthStatus, JobReport, JobState, Location, Organization, PatchFamilies, PatchRow,
-    RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
+    ActionKind, AuthStatus, DeviceSummary, JobReport, JobRequest, JobState, Location, Organization,
+    PatchFamilies, PatchRow, RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -991,6 +991,8 @@ fn is_fleet_tab_flags_compliance_and_reboot() {
 fn job(kind: ActionKind, dry_run: bool) -> JobReport {
     JobReport {
         id: 1,
+        batch_id: 1,
+        device_id: 7,
         device_name: "srv-1".into(),
         organization: "Contoso".into(),
         kind,
@@ -1002,6 +1004,7 @@ fn job(kind: ActionKind, dry_run: bool) -> JobReport {
         activity_id: None,
         series_uid: None,
         exit_code: None,
+        request: None,
     }
 }
 
@@ -2076,4 +2079,321 @@ fn severity_rank_accepts_labels_raw_values_and_aliases() {
     for label in ["Critical", "Security", "Recommended", "Unknown"] {
         assert_eq!(sev_ordinal(label), 7 - severity_rank(label));
     }
+}
+
+// --- Needs Reboot tab: device-level selection ----------------------------------
+
+fn reboot_device(id: i64, name: &str, offline: bool) -> DeviceSummary {
+    DeviceSummary {
+        device_id: id,
+        device_name: name.into(),
+        organization: "Contoso".into(),
+        location: None,
+        device_role: None,
+        os_name: Some("Windows Server 2022".into()),
+        offline,
+        pending_count: 2,
+    }
+}
+
+/// A device-level selection reaches only what acts on a device as a whole: reboot
+/// and the two scans. Everything needing patch rows says why it is unavailable,
+/// and the Patches tab's row selection keeps every kind.
+#[test]
+fn a_device_selection_reaches_only_reboot_and_the_scans() {
+    for kind in ActionKind::ALL {
+        let allowed = matches!(
+            kind,
+            ActionKind::Reboot | ActionKind::OsPatchScan | ActionKind::SoftwarePatchScan
+        );
+        assert_eq!(device_selection_allows(kind), allowed, "{kind:?}");
+        assert_eq!(
+            source_disabled_reason(SelectionSource::Devices, kind).is_none(),
+            allowed,
+            "{kind:?}"
+        );
+        assert_eq!(
+            source_disabled_reason(SelectionSource::PatchRows, kind),
+            None,
+            "{kind:?}"
+        );
+    }
+    let why = source_disabled_reason(SelectionSource::Devices, ActionKind::OsPatchRemediate)
+        .expect("remediation needs rows");
+    assert!(why.contains("Patches tab"), "{why}");
+}
+
+/// Ticking a device adds a device with no patch rows — nothing built from it can
+/// target a patch — and the sentinel id never enters.
+#[test]
+fn ticking_a_reboot_device_selects_the_device_and_no_patch_rows() {
+    let mut sel = BTreeMap::new();
+    apply_device_selection(&mut sel, &reboot_device(7, "srv-7", true), true);
+    apply_device_selection(&mut sel, &reboot_device(8, "srv-8", false), true);
+    assert_eq!(sel.keys().copied().collect::<Vec<_>>(), vec![7, 8]);
+    assert!(sel.values().all(|d| d.patches.is_empty()));
+    assert!(sel[&7].offline);
+
+    apply_device_selection(&mut sel, &reboot_device(7, "srv-7", true), false);
+    assert_eq!(sel.keys().copied().collect::<Vec<_>>(), vec![8]);
+
+    apply_device_selection(
+        &mut sel,
+        &reboot_device(ORPHAN_DEVICE_ID, "(no device)", false),
+        true,
+    );
+    assert!(!sel.contains_key(&ORPHAN_DEVICE_ID));
+}
+
+/// The request from a device-level selection carries device ids and the reboot
+/// options only — never a target list, never the script-only options, even when
+/// those are set on the shared controls.
+#[test]
+fn a_device_selection_builds_a_device_level_request() {
+    let mut sel = BTreeMap::new();
+    apply_device_selection(&mut sel, &reboot_device(7, "srv-7", false), true);
+    apply_device_selection(&mut sel, &reboot_device(9, "srv-9", true), true);
+    let opts = RunOptions {
+        use_kb_targeting: true,
+        include_offline: true,
+        dry_run: true,
+        run_as: "SYSTEM".into(),
+        script_reboot: RebootChoice::Auto,
+        reboot_mode_forced: true,
+        reason: "July cycle".into(),
+        script_id: Some(5),
+        script_params: "-Verbose".into(),
+        ..RunOptions::default()
+    };
+
+    let req = build_device_action_request(ActionKind::Reboot, &sel, &opts).expect("reboot");
+    assert_eq!(req.device_ids, vec![7, 9]);
+    assert!(req.device_targets.is_empty());
+    assert_eq!(req.reboot_mode, Some(RebootMode::Forced));
+    assert_eq!(req.reason.as_deref(), Some("July cycle"));
+    assert!(req.include_offline);
+    assert!(!req.dry_run, "the native endpoints have no preview mode");
+    assert_eq!(req.run_as, None);
+    assert_eq!((req.script_id, req.parameters), (None, None));
+
+    let scan =
+        build_device_action_request(ActionKind::SoftwarePatchScan, &sel, &opts).expect("scan");
+    assert_eq!(scan.device_ids, vec![7, 9]);
+    assert_eq!(scan.reboot_mode, None);
+
+    for kind in [
+        ActionKind::OsPatchRemediate,
+        ActionKind::SoftwarePatchRemediate,
+        ActionKind::OsPatchApply,
+        ActionKind::Script,
+    ] {
+        assert!(
+            build_device_action_request(kind, &sel, &opts).is_none(),
+            "{kind:?}"
+        );
+    }
+}
+
+/// An auto-refresh keeps the device selection minus the devices no longer flagged,
+/// and takes their offline state from the fresh list.
+#[test]
+fn a_refresh_prunes_devices_that_no_longer_need_a_reboot() {
+    let mut sel = BTreeMap::new();
+    for d in [
+        reboot_device(1, "a", false),
+        reboot_device(2, "b", false),
+        reboot_device(3, "c", false),
+    ] {
+        apply_device_selection(&mut sel, &d, true);
+    }
+    let fresh = [reboot_device(1, "a", true), reboot_device(3, "c", false)];
+    assert_eq!(prune_device_level_selection(&mut sel, &fresh), 1);
+    assert_eq!(sel.keys().copied().collect::<Vec<_>>(), vec![1, 3]);
+    assert!(sel[&1].offline, "the fresh offline flag is taken");
+    assert_eq!(prune_device_level_selection(&mut sel, &[]), 2);
+    assert!(sel.is_empty());
+}
+
+#[test]
+fn the_device_page_header_reads_all_some_or_none() {
+    let page = [reboot_device(1, "a", false), reboot_device(2, "b", false)];
+    let mut sel = BTreeMap::new();
+    assert_eq!(device_page_selection_state(&sel, &page), (false, false));
+    apply_device_selection(&mut sel, &page[0], true);
+    assert_eq!(device_page_selection_state(&sel, &page), (false, true));
+    apply_device_selection(&mut sel, &page[1], true);
+    assert_eq!(device_page_selection_state(&sel, &page), (true, false));
+    assert_eq!(device_page_selection_state(&sel, &[]), (false, false));
+}
+
+#[test]
+fn the_device_selection_summary_counts_devices_and_offline_only() {
+    assert_eq!(device_selection_summary(0, 0), None);
+    assert_eq!(
+        device_selection_summary(1_200, 0).as_deref(),
+        Some("1,200 device(s) selected")
+    );
+    assert_eq!(
+        device_selection_summary(3, 1).as_deref(),
+        Some("3 device(s) selected · 1 offline")
+    );
+}
+
+// --- Jobs tab: retry ---------------------------------------------------------------
+
+fn failed_job(id: u64, batch_id: u64, device_id: i64, targets: &[&str]) -> JobReport {
+    JobReport {
+        id,
+        batch_id,
+        device_id,
+        device_name: format!("srv-{device_id}"),
+        kind: ActionKind::OsPatchRemediate,
+        detail: "Apply selected OS patches".into(),
+        dry_run: true,
+        state: JobState::Failed("400 not applicable".into()),
+        request: Some(JobRequest {
+            run_as: Some("SYSTEM".into()),
+            reboot: RebootChoice::Auto,
+            include_offline: true,
+            targets: targets.iter().map(|t| t.to_string()).collect(),
+            ..JobRequest::default()
+        }),
+        ..job(ActionKind::OsPatchRemediate, true)
+    }
+}
+
+/// Only a definite failure is retryable. `Unknown` may already have acted — a
+/// replay is exactly what `ReplaySafety::ActOnce` refuses — and a job still in
+/// flight or finished has nothing to retry.
+#[test]
+fn only_a_definite_failure_with_a_recorded_request_is_retryable() {
+    assert_eq!(retry_blocked_reason(&failed_job(1, 1, 7, &["KB1"])), None);
+
+    let unrecorded = JobReport {
+        request: None,
+        ..failed_job(1, 1, 7, &["KB1"])
+    };
+    assert!(retry_blocked_reason(&unrecorded).is_some());
+
+    for state in [
+        JobState::Unknown("NinjaOne answered 502".into()),
+        JobState::Queued,
+        JobState::Running,
+        JobState::Completed,
+        JobState::TimedOut,
+        JobState::Skipped("offline".into()),
+    ] {
+        let job = JobReport {
+            state: state.clone(),
+            ..failed_job(1, 1, 7, &["KB1"])
+        };
+        assert!(retry_blocked_reason(&job).is_some(), "{state:?}");
+        assert!(retry_request(&[&job]).is_err(), "{state:?}");
+    }
+    let unknown = JobReport {
+        state: JobState::Unknown("timeout".into()),
+        ..failed_job(1, 1, 7, &["KB1"])
+    };
+    assert!(
+        retry_blocked_reason(&unknown)
+            .unwrap()
+            .contains("never replayed")
+    );
+}
+
+/// A retry is the original dispatch, rebuilt for the failed devices: each gets back
+/// only its own targets, the recorded run-as / reboot / offline / dry-run choices,
+/// no confirm token (so it must be planned and confirmed afresh) and never the
+/// maintenance-window override.
+#[test]
+fn a_retry_rebuilds_the_original_request_for_each_failed_device() {
+    let a = failed_job(1, 4, 7, &["KB500"]);
+    let b = failed_job(2, 4, 8, &["KB600", "KB601"]);
+    let req = retry_request(&[&a, &b]).expect("rebuilt");
+
+    assert_eq!(req.kind, ActionKind::OsPatchRemediate);
+    assert_eq!(req.device_ids, vec![7, 8]);
+    assert_eq!(req.device_targets[&7], vec!["KB500".to_string()]);
+    assert_eq!(
+        req.device_targets[&8],
+        vec!["KB600".to_string(), "KB601".to_string()]
+    );
+    assert_eq!(req.run_as.as_deref(), Some("SYSTEM"));
+    assert_eq!(req.reboot, RebootChoice::Auto);
+    assert!(req.include_offline && req.dry_run);
+    assert!(!req.override_window, "a window override is never inherited");
+    assert_eq!(
+        req.confirm_token, None,
+        "a retry is planned and confirmed afresh"
+    );
+
+    // A reboot keeps its mode and reason.
+    let reboot = JobReport {
+        kind: ActionKind::Reboot,
+        dry_run: false,
+        request: Some(JobRequest {
+            reboot_mode: Some(RebootMode::Forced),
+            reason: Some("July cycle".into()),
+            ..JobRequest::default()
+        }),
+        ..failed_job(3, 5, 9, &[])
+    };
+    let req = retry_request(&[&reboot]).expect("reboot");
+    assert_eq!(req.device_ids, vec![9]);
+    assert!(req.device_targets.is_empty());
+    assert_eq!(req.reboot_mode, Some(RebootMode::Forced));
+    assert_eq!(req.reason.as_deref(), Some("July cycle"));
+}
+
+/// Jobs dispatched with different actions or options are never merged into one
+/// request — one of them would silently run with the other's options.
+#[test]
+fn a_retry_refuses_to_merge_different_dispatches() {
+    let a = failed_job(1, 4, 7, &["KB500"]);
+    assert!(retry_request(&[]).is_err());
+
+    let other_kind = JobReport {
+        kind: ActionKind::OsPatchApply,
+        ..failed_job(2, 4, 8, &[])
+    };
+    assert!(retry_request(&[&a, &other_kind]).is_err());
+
+    let other_mode = JobReport {
+        dry_run: false,
+        ..failed_job(2, 4, 8, &["KB600"])
+    };
+    assert!(retry_request(&[&a, &other_mode]).is_err());
+
+    let mut other_opts = failed_job(2, 4, 8, &["KB600"]);
+    if let Some(r) = other_opts.request.as_mut() {
+        r.run_as = Some("domain-admin".into());
+    }
+    assert!(retry_request(&[&a, &other_opts]).is_err());
+}
+
+/// "Retry failed" is offered per batch with two or more retryable jobs, newest
+/// batch first; `Unknown` rows never count.
+#[test]
+fn retryable_batches_group_definite_failures_newest_first() {
+    let jobs = vec![
+        failed_job(1, 3, 7, &["KB1"]),
+        failed_job(2, 3, 8, &["KB2"]),
+        JobReport {
+            state: JobState::Unknown("timeout".into()),
+            ..failed_job(3, 3, 9, &["KB3"])
+        },
+        // A single failure is served by its own row's button.
+        failed_job(4, 5, 7, &["KB4"]),
+        failed_job(5, 6, 7, &["KB5"]),
+        failed_job(6, 6, 8, &["KB6"]),
+    ];
+    let batches = retryable_batches(&jobs);
+    assert_eq!(
+        batches
+            .iter()
+            .map(|b| (b.batch_id, b.job_ids.clone()))
+            .collect::<Vec<_>>(),
+        vec![(6, vec![5, 6]), (3, vec![1, 2])]
+    );
+    assert_eq!(batches[0].detail, "Apply selected OS patches");
 }

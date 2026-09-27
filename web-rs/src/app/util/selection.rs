@@ -4,7 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::types::{ActionKind, ActionRequest, AuthStatus, PatchRow, RebootChoice, RebootMode};
+use crate::types::{
+    ActionKind, ActionRequest, AuthStatus, DeviceSummary, PatchRow, RebootChoice, RebootMode,
+};
 
 use super::super::state::{DeviceSelection, SelectedPatch};
 use super::*;
@@ -457,4 +459,147 @@ pub(crate) fn group_selection_note(label: &str, rows: usize, capped: bool) -> St
             group_thousands(rows)
         )
     }
+}
+
+// --- Device-level selection (the Needs Reboot tab) -----------------------------
+
+/// Which selection the action bar is dispatching against.
+///
+/// The Patches tab selects **patch rows**, and a device is implied by its ticked
+/// rows. The Needs Reboot tab lists devices, not patches, so it selects **devices**
+/// — a separate map, so ticking a device there can never tick any of its patch rows
+/// (or vice versa), and the per-row rule the remediation path depends on stays
+/// intact. Both feed the same `ActionBar`: one dispatch surface, told which
+/// selection it is looking at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum SelectionSource {
+    #[default]
+    PatchRows,
+    Devices,
+}
+
+/// Whether `kind` can be dispatched from a device-level selection.
+///
+/// Only the kinds that act on a device as a whole *and* whose reach the Needs
+/// Reboot tab actually shows: a reboot and the two scans. The remediation kinds need
+/// per-patch targets a device row does not carry; the native "Apply all" needs none,
+/// but it installs a backlog this tab never lists, so it stays where the patches it
+/// reaches are on screen; a library script is chosen next to the patch selection it
+/// may target.
+pub(crate) fn device_selection_allows(kind: ActionKind) -> bool {
+    matches!(
+        kind,
+        ActionKind::Reboot | ActionKind::OsPatchScan | ActionKind::SoftwarePatchScan
+    )
+}
+
+/// Why `kind` is unavailable from this selection source, if it is.
+pub(crate) fn source_disabled_reason(source: SelectionSource, kind: ActionKind) -> Option<String> {
+    match source {
+        SelectionSource::PatchRows => None,
+        SelectionSource::Devices if device_selection_allows(kind) => None,
+        SelectionSource::Devices => Some(format!(
+            "\"{}\" needs the patch rows it installs — select them on the Patches tab. From \
+             here you can reboot or scan the selected devices.",
+            kind.label()
+        )),
+    }
+}
+
+/// Ticks or unticks one device on the Needs Reboot tab. The entry carries no patch
+/// rows: a device-level selection has none, and nothing built from it may target any.
+pub(crate) fn apply_device_selection(
+    sel: &mut BTreeMap<i64, DeviceSelection>,
+    device: &DeviceSummary,
+    checked: bool,
+) {
+    // Same guard as the row path: the sentinel id is never a real dispatch target.
+    if checked && device.device_id == ORPHAN_DEVICE_ID {
+        return;
+    }
+    if checked {
+        sel.insert(
+            device.device_id,
+            DeviceSelection {
+                name: device.device_name.clone(),
+                organization: device.organization.clone(),
+                offline: device.offline,
+                patches: BTreeMap::new(),
+            },
+        );
+    } else {
+        sel.remove(&device.device_id);
+    }
+}
+
+/// Re-checks a device-level selection against a fresh reboot list, dropping every
+/// device no longer flagged (it rebooted, or left the scope) and refreshing the
+/// offline flag of the rest. Returns how many devices it dropped.
+///
+/// Same reasoning as [`prune_device_selection`]: an auto-refresh keeps the
+/// operator's selection, but never one that points at a device the refresh just
+/// showed no longer needs the action.
+pub(crate) fn prune_device_level_selection(
+    sel: &mut BTreeMap<i64, DeviceSelection>,
+    fresh: &[DeviceSummary],
+) -> usize {
+    let before = sel.len();
+    sel.retain(
+        |id, entry| match fresh.iter().find(|d| d.device_id == *id) {
+            Some(d) => {
+                entry.offline = d.offline;
+                true
+            }
+            None => false,
+        },
+    );
+    before - sel.len()
+}
+
+/// `(all checked, some checked)` for a page of devices — the header checkbox's
+/// checked/indeterminate state.
+pub(crate) fn device_page_selection_state(
+    sel: &BTreeMap<i64, DeviceSelection>,
+    page: &[DeviceSummary],
+) -> (bool, bool) {
+    if page.is_empty() {
+        return (false, false);
+    }
+    let selected = page
+        .iter()
+        .filter(|d| sel.contains_key(&d.device_id))
+        .count();
+    (
+        selected == page.len(),
+        selected > 0 && selected < page.len(),
+    )
+}
+
+/// The action bar's summary for a device-level selection. `None` when nothing is
+/// selected. No patch-row count: there are none, and "0 patch row(s)" would read as
+/// a selection that targets nothing.
+pub(crate) fn device_selection_summary(devices: usize, offline: usize) -> Option<String> {
+    if devices == 0 {
+        return None;
+    }
+    let mut text = format!("{} device(s) selected", group_thousands(devices));
+    if offline > 0 {
+        text.push_str(&format!(" · {offline} offline"));
+    }
+    Some(text)
+}
+
+/// The request a device-level selection dispatches for `kind`, or `None` when
+/// `kind` is not available from it ([`device_selection_allows`]).
+///
+/// Goes through [`build_action_request`] rather than assembling its own, so the run
+/// options reach exactly the kinds they reach from the Patches tab. For the allowed
+/// kinds that means `device_ids` plus the reboot mode/reason and "Include offline" —
+/// never a target list, never a script.
+pub(crate) fn build_device_action_request(
+    kind: ActionKind,
+    selected: &BTreeMap<i64, DeviceSelection>,
+    opts: &RunOptions,
+) -> Option<ActionRequest> {
+    device_selection_allows(kind).then(|| build_action_request(kind, selected, opts))
 }

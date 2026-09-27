@@ -138,11 +138,17 @@ pub struct PatchRow {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSummary {
+    /// What the Needs Reboot tab's device selection is keyed by.
+    pub device_id: i64,
     pub device_name: String,
     pub organization: String,
     pub location: Option<String>,
     pub device_role: Option<String>,
     pub os_name: Option<String>,
+    /// Counted in the action bar's summary: an action against an offline device is
+    /// queued, not run.
+    #[serde(default)]
+    pub offline: bool,
     pub pending_count: usize,
 }
 
@@ -591,14 +597,14 @@ impl ActionKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum RebootMode {
     Normal,
     Forced,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RebootChoice {
     #[default]
@@ -654,14 +660,18 @@ impl JobState {
     }
 }
 
-// The backend also sends batchId, deviceId, dispatchedTs and finishedAt; serde
-// ignores fields not declared here. The correlators (`activityId`/`seriesUid`) ARE
-// kept: NinjaOne v2 has no script-output endpoint, so they are how an operator
-// finds the run in the NinjaOne console.
+// The backend also sends dispatchedTs and finishedAt; serde ignores fields not
+// declared here. The correlators (`activityId`/`seriesUid`) ARE kept: NinjaOne v2
+// has no script-output endpoint, so they are how an operator finds the run in the
+// NinjaOne console.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobReport {
     pub id: u64,
+    /// Groups a batch's rows for "Retry failed".
+    pub batch_id: u64,
+    /// The device a retry is dispatched to.
+    pub device_id: i64,
     pub device_name: String,
     pub organization: String,
     pub kind: ActionKind,
@@ -673,6 +683,30 @@ pub struct JobReport {
     pub activity_id: Option<i64>,
     pub series_uid: Option<String>,
     pub exit_code: Option<i32>,
+    /// What a retry is rebuilt from. `None` when the backend recorded no request.
+    #[serde(default)]
+    pub request: Option<JobRequest>,
+}
+
+/// Mirror of the backend `actions::JobRequest`: the inputs of the dispatch that
+/// produced one job, for that one device. `kind` and `dry_run` live on the
+/// [`JobReport`]; the maintenance-window override is deliberately not recorded.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobRequest {
+    pub script_id: Option<i64>,
+    pub script_uid: Option<String>,
+    pub script_name: Option<String>,
+    pub parameters: Option<String>,
+    pub run_as: Option<String>,
+    #[serde(default)]
+    pub reboot: RebootChoice,
+    pub reboot_mode: Option<RebootMode>,
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub include_offline: bool,
+    #[serde(default)]
+    pub targets: Vec<String>,
 }
 
 impl JobReport {

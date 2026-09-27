@@ -1,7 +1,10 @@
-//! The Jobs list: merging live rows into it, and what "still in flight" means for
-//! the controls that must wait for dispatched work to settle.
+//! The Jobs list: merging live rows into it, rebuilding a failed job for a retry,
+//! and what "still in flight" means for the controls that must wait for dispatched
+//! work to settle.
 
-use crate::types::JobReport;
+use std::collections::BTreeMap;
+
+use crate::types::{ActionRequest, JobReport, JobRequest, JobState};
 
 /// Upserts `incoming` into `jobs` by job id: a known id is replaced in place (the
 /// row arrives already advanced), an unknown one is appended.
@@ -41,4 +44,120 @@ pub(crate) fn update_blocked_reason(dispatching: bool, in_flight: usize) -> Opti
         ));
     }
     None
+}
+
+/// Why this job has no Retry, or `None` when it may be retried.
+///
+/// Only a **definite** failure qualifies. `Unknown` means the dispatch may have
+/// reached the device — a timeout or a 5xx after send — and replaying it is exactly
+/// what `ReplaySafety::ActOnce` exists to refuse: a second reboot, or a script run
+/// twice. A job still in flight, or one that succeeded, has nothing to retry.
+pub(crate) fn retry_blocked_reason(job: &JobReport) -> Option<String> {
+    match &job.state {
+        JobState::Failed(_) if job.request.is_some() => None,
+        JobState::Failed(_) => {
+            Some("This job did not record what it was sent, so it cannot be rebuilt.".into())
+        }
+        JobState::Unknown(_) => Some(
+            "The outcome is unknown — the action may already have run on the device, so it is \
+             never replayed. Check the device in NinjaOne first."
+                .into(),
+        ),
+        _ => Some("Only a failed job can be retried.".into()),
+    }
+}
+
+/// Rebuilds the dispatch that produced `jobs`, for their devices only.
+///
+/// The result is a plain `ActionRequest` with no confirm token, so a retry goes
+/// through the normal plan → confirm flow: a fresh payload-bound approval, and every
+/// `plan()` guardrail re-run against current state. Nothing here dispatches.
+///
+/// Each device gets back only its **own** targets, exactly as the original batch
+/// sent them — never the union across the jobs being retried. The maintenance-window
+/// override is never carried (`override_window` stays false): it was approved for
+/// the original moment, not this one.
+///
+/// Several jobs are rebuilt into one request only if they were dispatched with the
+/// same kind, dry-run flag and options — i.e. rows of one batch. Anything else is
+/// refused rather than merged, since one of them would silently run with the
+/// other's options.
+pub(crate) fn retry_request(jobs: &[&JobReport]) -> Result<ActionRequest, String> {
+    let Some(first) = jobs.first() else {
+        return Err("No failed jobs to retry.".into());
+    };
+    for job in jobs {
+        if let Some(why) = retry_blocked_reason(job) {
+            return Err(format!("{}: {why}", job.device_name));
+        }
+    }
+    // `retry_blocked_reason` has vouched for every `request` being present.
+    let shared = |j: &JobReport| {
+        j.request.as_ref().map(|r| JobRequest {
+            targets: Vec::new(),
+            ..r.clone()
+        })
+    };
+    let base = shared(first);
+    if jobs
+        .iter()
+        .any(|j| j.kind != first.kind || j.dry_run != first.dry_run || shared(j) != base)
+    {
+        return Err(
+            "These jobs were dispatched with different actions or options — retry them one at \
+             a time."
+                .into(),
+        );
+    }
+    let base = base.unwrap_or_default();
+
+    let mut req = ActionRequest::new(first.kind, jobs.iter().map(|j| j.device_id).collect());
+    req.device_targets = jobs
+        .iter()
+        .filter_map(|j| {
+            let targets = &j.request.as_ref()?.targets;
+            (!targets.is_empty()).then(|| (j.device_id, targets.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    req.script_id = base.script_id;
+    req.script_uid = base.script_uid;
+    req.script_name = base.script_name;
+    req.parameters = base.parameters;
+    req.run_as = base.run_as;
+    req.reboot = base.reboot;
+    req.reboot_mode = base.reboot_mode;
+    req.reason = base.reason;
+    req.include_offline = base.include_offline;
+    req.dry_run = first.dry_run;
+    Ok(req)
+}
+
+/// A batch with more than one retryable job, for the Jobs tab's "Retry failed".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RetryBatch {
+    pub batch_id: u64,
+    pub detail: String,
+    pub job_ids: Vec<u64>,
+}
+
+/// Every batch holding two or more retryable jobs, newest batch first. A batch with
+/// a single failure is served by that row's own Retry button.
+pub(crate) fn retryable_batches(jobs: &[JobReport]) -> Vec<RetryBatch> {
+    let mut by_batch: BTreeMap<u64, RetryBatch> = BTreeMap::new();
+    for job in jobs.iter().filter(|j| retry_blocked_reason(j).is_none()) {
+        by_batch
+            .entry(job.batch_id)
+            .or_insert_with(|| RetryBatch {
+                batch_id: job.batch_id,
+                detail: job.detail.clone(),
+                job_ids: Vec::new(),
+            })
+            .job_ids
+            .push(job.id);
+    }
+    by_batch
+        .into_values()
+        .rev()
+        .filter(|b| b.job_ids.len() > 1)
+        .collect()
 }

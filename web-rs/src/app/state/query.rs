@@ -221,6 +221,7 @@ impl AppState {
                         // Same scope, fresher data: keep what the operator ticked,
                         // minus anything this refresh no longer lists.
                         self.prune_selection_after_refresh(seq);
+                        self.prune_device_selection_after_refresh();
                     } else {
                         // A new scope: a selection made against the previous result
                         // no longer describes what is on screen.

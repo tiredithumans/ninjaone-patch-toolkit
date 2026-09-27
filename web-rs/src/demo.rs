@@ -396,11 +396,15 @@ fn reboot(
     pending: usize,
 ) -> DeviceSummary {
     DeviceSummary {
+        // The same id the device's patch rows carry, so the Needs Reboot tab's
+        // device selection and the Patches tab's refer to one machine.
+        device_id: device_id_of(device),
         device_name: device.to_string(),
         organization: org.to_string(),
         location: opt(location),
         device_role: opt(role),
         os_name: opt(os),
+        offline: false,
         pending_count: pending,
     }
 }
