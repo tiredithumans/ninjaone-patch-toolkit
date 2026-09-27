@@ -103,8 +103,9 @@ fn header_format() -> Format {
 
 /// Writes a workbook with a Patches detail sheet (one row per device×patch), a
 /// Compliance summary sheet, a Compliance by OS sheet, a Needs Reboot sheet for
-/// devices flagged for reboot, a Patch Failures sheet rolling up FAILED installs,
-/// and an About sheet carrying the provenance in [`WorkbookMeta`]. Data sheets with
+/// devices flagged for reboot, a Patch Failures sheet rolling up FAILED installs, a
+/// Changes sheet when there is a previous comparable run to compare against, and an
+/// About sheet carrying the provenance in [`WorkbookMeta`]. Data sheets with
 /// no rows are omitted; Patches and About are always written. Detail rows past one
 /// sheet's capacity continue on `Patches (2)`, `Patches (3)`, …
 pub fn write_workbook(
