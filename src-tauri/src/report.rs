@@ -7,8 +7,10 @@
 use std::fmt::Write;
 
 use crate::rows::{
-    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, OrgSeverity, OsCompliance,
-    QueryResult, QueryScope, SeverityCounts, TableCell, TableColumn,
+    AgeBucket, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceSummary, FailureGroup,
+    InstallLatency, OFFLINE_BACKLOG_NOTE, OrgSeverity, OsCompliance, QueryResult, QueryScope,
+    SeverityCounts, TIME_TO_INSTALL_NOTE, TableCell, TableColumn, TimeToInstall,
+    WORST_DEVICES_NOTE,
 };
 
 /// At most this many table rows are rendered per section; a fleet-scale failure or
@@ -113,9 +115,14 @@ pub fn render_report(result: &QueryResult) -> String {
         "<header><h1>NinjaOne Patch Compliance Report</h1>\
          <p class=\"meta\">Generated {generated} \u{00b7} {devices} devices \u{00b7} {rows} patch rows</p>\
          <p class=\"meta\">Patch data fetched from NinjaOne {fetched}</p>\
+         <p class=\"meta\">Instance {instance} \u{00b7} NinjaOne Patch Toolkit v{version}</p>\
+         <p class=\"meta\">SLA policy: {sla}</p>\
          </header>",
         devices = result.devices_total,
-        rows = result.rows.len()
+        rows = result.rows.len(),
+        instance = escape_html(&result.instance),
+        version = crate::export::APP_VERSION,
+        sla = escape_html(&result.sla_policy.describe()),
     );
 
     let _ = write!(
@@ -143,6 +150,30 @@ pub fn render_report(result: &QueryResult) -> String {
 
     buf.push_str("<section><h2>Pending patch age (since first seen)</h2>");
     write_age_chart(&mut buf, &result.age_buckets);
+    buf.push_str("</section>");
+
+    buf.push_str("<section><h2>Worst devices</h2>");
+    write_device_list(
+        &mut buf,
+        &result.worst_devices,
+        &DeviceBacklog::WORST_COLUMNS,
+        WORST_DEVICES_NOTE,
+        "No online device in scope has a pending patch.",
+    );
+    buf.push_str("</section>");
+
+    buf.push_str("<section><h2>Offline devices with a pending backlog</h2>");
+    write_device_list(
+        &mut buf,
+        &result.offline_backlog,
+        &DeviceBacklog::OFFLINE_COLUMNS,
+        OFFLINE_BACKLOG_NOTE,
+        "No offline device in scope is listed with pending patches.",
+    );
+    buf.push_str("</section>");
+
+    buf.push_str("<section><h2>First seen \u{2192} installed</h2>");
+    write_time_to_install(&mut buf, &result.time_to_install);
     buf.push_str("</section>");
 
     buf.push_str("<section><h2>Top patch failures</h2>");
@@ -179,7 +210,7 @@ fn write_scope(buf: &mut String, scope: &QueryScope) {
     for (caption, facets) in [
         ("Filters (every section)", &scope.facets),
         (
-            "Patch filters (Top patch failures only)",
+            "Patch filters (First seen \u{2192} installed and Top patch failures only)",
             &scope.patch_facets,
         ),
     ] {
@@ -410,6 +441,46 @@ fn write_failures_table(buf: &mut String, failures: &[FailureGroup]) {
     }
 }
 
+/// One of the two capped device lists, with the note saying what it covers and —
+/// when capped — how many devices qualified in all.
+fn write_device_list(
+    buf: &mut String,
+    list: &DeviceBacklogList,
+    columns: &[TableColumn<DeviceBacklog>],
+    note: &str,
+    empty: &str,
+) {
+    if list.devices.is_empty() {
+        let _ = write!(buf, "<p class=\"empty\">{}</p>", escape_html(empty));
+        return;
+    }
+    let rows: Vec<&DeviceBacklog> = list.devices.iter().collect();
+    write_table(buf, columns, &rows);
+    if list.devices_total > list.devices.len() {
+        let _ = write!(
+            buf,
+            "<p class=\"empty\">Showing the top {} of {} devices.</p>",
+            list.devices.len(),
+            list.devices_total
+        );
+    }
+    let _ = write!(buf, "<p class=\"meta\">{}</p>", escape_html(note));
+}
+
+fn write_time_to_install(buf: &mut String, t: &TimeToInstall) {
+    if let Some(reason) = t.empty_reason() {
+        let _ = write!(buf, "<p class=\"empty\">{}</p>", escape_html(reason));
+        return;
+    }
+    let rows = t.table_rows();
+    write_table(buf, &InstallLatency::COLUMNS, &rows);
+    let _ = write!(
+        buf,
+        "<p class=\"meta\">{}</p>",
+        escape_html(TIME_TO_INSTALL_NOTE)
+    );
+}
+
 fn write_reboot_table(buf: &mut String, devices: &[DeviceSummary]) {
     let reboot: Vec<&DeviceSummary> = devices.iter().filter(|d| d.needs_reboot).collect();
     if reboot.is_empty() {
@@ -480,6 +551,77 @@ mod tests {
         );
     }
 
+    /// A printed report names the instance it came from, the build that wrote it
+    /// and the SLA policy its aging figures used — the result's policy, which may
+    /// differ from Settings by the time the report is saved.
+    #[test]
+    fn the_header_states_the_instance_version_and_sla_policy() {
+        let mut result = sample_result();
+        result.instance = "https://eu.ninjarmm.com".into();
+        result.sla_policy.by_severity.critical = Some(7);
+        let html = render_report(&result);
+        assert!(html.contains("Instance https://eu.ninjarmm.com"));
+        assert!(html.contains(&format!(
+            "NinjaOne Patch Toolkit v{}",
+            crate::export::APP_VERSION
+        )));
+        assert!(html.contains("SLA policy: 30 days (default); Critical 7 days"));
+    }
+
+    /// The device lists and the install-time table render through their shared
+    /// columns, disclose a cap, and say why the install-time table is empty.
+    #[test]
+    fn the_backlog_and_install_time_sections_render() {
+        use crate::rows::{DeviceBacklog, InstallLatency};
+        let mut result = sample_result();
+        let html = render_report(&result);
+        assert!(html.contains("No online device in scope has a pending patch."));
+        assert!(html.contains("Select the Installed status"));
+
+        result.worst_devices = DeviceBacklogList {
+            devices: vec![DeviceBacklog {
+                device_id: 1,
+                device_name: "<b>web-01</b>".into(),
+                organization: "Contoso".into(),
+                os_name: None,
+                pending: SeverityCounts {
+                    critical: 1,
+                    ..Default::default()
+                },
+                pending_total: 1,
+                past_sla: 1,
+                oldest_first_seen: None,
+                oldest_first_seen_ts: None,
+                latest_collected: None,
+                latest_collected_ts: None,
+            }],
+            devices_total: 30,
+        };
+        result.time_to_install = TimeToInstall {
+            installs_queried: true,
+            overall: Some(InstallLatency {
+                group: "Overall",
+                label: "All installs".into(),
+                samples: 3,
+                median_days: 4.0,
+                p90_days: 10.0,
+            }),
+            ..Default::default()
+        };
+        let html = render_report(&result);
+        for (title, _) in DeviceBacklog::WORST_COLUMNS {
+            assert!(html.contains(&format!("<th>{}</th>", escape_html(title))));
+        }
+        assert!(
+            html.contains("&lt;b&gt;web-01&lt;/b&gt;"),
+            "device names are escaped"
+        );
+        assert!(html.contains("Showing the top 1 of 30 devices."));
+        assert!(html.contains("<td>Critical 1</td>"));
+        assert!(html.contains("<td>All installs</td>"));
+        assert!(html.contains(&escape_html(TIME_TO_INSTALL_NOTE)));
+    }
+
     /// Two reports off the same fleet under different filters must not be
     /// indistinguishable once printed — every number in them describes a different
     /// population. Operator- and NinjaOne-supplied text lands here verbatim, so it
@@ -505,7 +647,7 @@ mod tests {
         // Each tier under a caption naming the sections it reaches, in order.
         let every = html.find("Filters (every section)").expect("fleet caption");
         let patch = html
-            .find("Patch filters (Top patch failures only)")
+            .find("Patch filters (First seen \u{2192} installed and Top patch failures only)")
             .expect("patch caption");
         let orgs = html.find("<dt>Organizations</dt>").unwrap();
         let status = html.find("<dt>Status</dt>").unwrap();
@@ -776,6 +918,11 @@ mod tests {
                     count: 1,
                 },
             ],
+            worst_devices: Default::default(),
+            offline_backlog: Default::default(),
+            time_to_install: Default::default(),
+            sla_policy: Default::default(),
+            instance: "https://app.ninjarmm.com".into(),
             devices_total: 10,
             devices_offline: 0,
             devices_unpatchable: 0,
@@ -802,12 +949,15 @@ mod tests {
             !html.contains("<img src=x"),
             "no unescaped patch-name markup survives"
         );
-        // All five sections are present.
+        // Every section is present.
         for heading in [
             "Compliance by organization",
             "Compliance by OS",
             "Pending patches by severity",
             "Pending patch age (since first seen)",
+            "Worst devices",
+            "Offline devices with a pending backlog",
+            "First seen \u{2192} installed",
             "Top patch failures",
             "Devices needing reboot",
         ] {
@@ -828,6 +978,11 @@ mod tests {
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
+            worst_devices: Default::default(),
+            offline_backlog: Default::default(),
+            time_to_install: Default::default(),
+            sla_policy: Default::default(),
+            instance: "https://app.ninjarmm.com".into(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,

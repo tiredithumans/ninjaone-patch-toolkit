@@ -15,6 +15,11 @@ fn empty_summary() -> QuerySummary {
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
+            worst_devices: Default::default(),
+            offline_backlog: Default::default(),
+            time_to_install: Default::default(),
+            sla_policy: Default::default(),
+            instance: "https://app.ninjarmm.com".into(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,
@@ -377,7 +382,8 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Pending]),
         fixed_now(),
         &progress,
@@ -447,7 +453,7 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": [
                 { "deviceId": 10, "kbNumber": "KBOK", "status": "INSTALLED",
-                  "installedAt": installed },
+                  "installedAt": installed, "timestamp": installed - 3 * 86_400 },
                 { "deviceId": 10, "kbNumber": "KBBAD", "status": "FAILED" }
             ],
             "cursor": ""
@@ -462,7 +468,8 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Installed]),
         fixed_now(),
         &progress,
@@ -480,6 +487,21 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
 
     // No FAILED status was requested, so the failure rollup is empty.
     assert!(result.failures.is_empty());
+
+    // The installed record carries both times, three days apart.
+    let tti = &result.time_to_install;
+    assert!(tti.installs_queried);
+    assert_eq!(
+        tti.overall.as_ref().map(|o| (o.samples, o.median_days)),
+        Some((1, 3.0))
+    );
+    // The current feed still drives the device lists: the undated MANUAL record
+    // can't be proven inside its SLA.
+    assert_eq!(result.worst_devices.devices.len(), 1);
+    assert_eq!(result.worst_devices.devices[0].past_sla, 1);
+    // Stamped with what the numbers were computed under.
+    assert_eq!(result.instance, "https://app.ninjarmm.com");
+    assert_eq!(result.sla_policy, SlaPolicy::default());
 }
 
 /// The current feed's own endpoint titles promise "Pending, Failed and Rejected"
@@ -529,7 +551,8 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(
             PatchType::Os,
             vec![PatchStatus::Pending, PatchStatus::Failed],
@@ -614,7 +637,8 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
         &progress,
@@ -678,7 +702,8 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
         &progress,
@@ -728,7 +753,8 @@ async fn a_query_records_the_facets_it_ran_under() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         scoped,
         fixed_now(),
         &progress,
@@ -810,7 +836,8 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
         &progress,
@@ -866,7 +893,8 @@ async fn installed_and_failed_query_omits_the_server_side_status_filter() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(
             PatchType::Os,
             vec![PatchStatus::Installed, PatchStatus::Failed],
@@ -931,7 +959,8 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
             })
         },
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
         &progress,
@@ -1088,7 +1117,8 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
         fleet_devices_via(&client(&server)),
         fleet_current_both_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::All, vec![PatchStatus::Pending]),
         fixed_now(),
         &progress,

@@ -105,6 +105,45 @@ impl SeverityCounts {
     pub fn total(&self) -> usize {
         Self::BANDS.iter().map(|(_, get)| get(self)).sum()
     }
+
+    /// Counts one patch of `severity`. Exhaustive, so a new variant is a compile
+    /// error here rather than a count that silently lands nowhere.
+    pub fn bump(&mut self, severity: Severity) {
+        match severity {
+            Severity::Critical => self.critical += 1,
+            Severity::Important => self.important += 1,
+            Severity::Security => self.security += 1,
+            Severity::Moderate => self.moderate += 1,
+            Severity::Recommended => self.recommended += 1,
+            Severity::Low => self.low += 1,
+            Severity::Optional => self.optional += 1,
+            Severity::Unknown => self.unknown += 1,
+        }
+    }
+
+    /// The non-zero bands as one cell, most urgent first — `Critical 3 · Low 1`.
+    /// Derived from [`BANDS`](Self::BANDS), so a table can show the whole breakdown
+    /// in one column without restating the vocabulary as eight.
+    pub fn breakdown(&self) -> String {
+        Self::BANDS
+            .iter()
+            .filter_map(|(label, get)| {
+                let n = get(self);
+                (n > 0).then(|| format!("{label} {n}"))
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// Orders two breakdowns most-urgent band first: more Criticals wins, a tie
+    /// falls to Important, and so on down [`BANDS`](Self::BANDS).
+    pub fn cmp_urgency(&self, other: &Self) -> std::cmp::Ordering {
+        Self::BANDS
+            .iter()
+            .map(|(_, get)| get(self).cmp(&get(other)))
+            .find(|o| o.is_ne())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
 }
 
 impl std::ops::AddAssign<&SeverityCounts> for SeverityCounts {
@@ -279,17 +318,7 @@ pub fn build_severity_by_org(
             continue;
         };
         let org = maps.org_name_str(device.organization_id);
-        let counts = by_org.entry(org).or_default();
-        match p.severity_enum() {
-            Severity::Critical => counts.critical += 1,
-            Severity::Important => counts.important += 1,
-            Severity::Security => counts.security += 1,
-            Severity::Moderate => counts.moderate += 1,
-            Severity::Recommended => counts.recommended += 1,
-            Severity::Low => counts.low += 1,
-            Severity::Optional => counts.optional += 1,
-            Severity::Unknown => counts.unknown += 1,
-        }
+        by_org.entry(org).or_default().bump(p.severity_enum());
     }
     let mut out: Vec<OrgSeverity> = by_org
         .into_iter()

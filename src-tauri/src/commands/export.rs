@@ -5,7 +5,7 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::error::UiError;
-use crate::export::{WorkbookMeta, write_workbook};
+use crate::export::{BacklogSheets, WorkbookMeta, write_workbook};
 use crate::rows::QueryResult;
 use crate::state::AppState;
 
@@ -160,6 +160,11 @@ pub async fn export_patches_xlsx(
             &result.compliance_by_os,
             &reboot,
             &result.failures,
+            &BacklogSheets {
+                worst_devices: &result.worst_devices,
+                offline_backlog: &result.offline_backlog,
+                time_to_install: &result.time_to_install,
+            },
             &WorkbookMeta {
                 generated_at: &result.generated_at,
                 data_fetched_at: &result.data_fetched_at,
@@ -168,6 +173,8 @@ pub async fn export_patches_xlsx(
                 devices_unpatchable: result.devices_unpatchable,
                 scope: &result.scope,
                 scope_note: &scope_note,
+                instance: &result.instance,
+                sla_policy: &result.sla_policy,
             },
         )
     })
@@ -306,6 +313,11 @@ mod tests {
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
+            worst_devices: Default::default(),
+            offline_backlog: Default::default(),
+            time_to_install: Default::default(),
+            sla_policy: Default::default(),
+            instance: "https://app.ninjarmm.com".into(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,
