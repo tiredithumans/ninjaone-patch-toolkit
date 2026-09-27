@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-27
+
 ### Added
 
 **Patch actions**
