@@ -69,12 +69,7 @@ pub fn document_hidden() -> bool {
 /// with site data blocked throws on the accessor itself, and the correct response is
 /// the default view, never a panic.
 pub fn ui_pref(key: &str) -> Option<bool> {
-    let storage =
-        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("localStorage")).ok()?;
-    let get = js_sys::Reflect::get(&storage, &JsValue::from_str("getItem")).ok()?;
-    let f = get.dyn_ref::<js_sys::Function>()?;
-    let value = f.call1(&storage, &JsValue::from_str(key)).ok()?;
-    match value.as_string()?.as_str() {
+    match ui_pref_str(key)?.as_str() {
         "true" => Some(true),
         "false" => Some(false),
         _ => None,
@@ -84,6 +79,21 @@ pub fn ui_pref(key: &str) -> Option<bool> {
 /// Records a UI preference. Best-effort — a failure costs the operator a remembered
 /// panel state and nothing else.
 pub fn set_ui_pref(key: &str, value: bool) {
+    set_ui_pref_str(key, if value { "true" } else { "false" });
+}
+
+/// [`ui_pref`] for a string value (the theme, the hidden-column list). Same
+/// failure rule: anything that throws is "never set".
+pub fn ui_pref_str(key: &str) -> Option<String> {
+    let storage =
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("localStorage")).ok()?;
+    let get = js_sys::Reflect::get(&storage, &JsValue::from_str("getItem")).ok()?;
+    let f = get.dyn_ref::<js_sys::Function>()?;
+    f.call1(&storage, &JsValue::from_str(key)).ok()?.as_string()
+}
+
+/// [`set_ui_pref`] for a string value.
+pub fn set_ui_pref_str(key: &str, value: &str) {
     let Ok(storage) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("localStorage"))
     else {
         return;
@@ -92,16 +102,89 @@ pub fn set_ui_pref(key: &str, value: bool) {
         return;
     };
     if let Some(f) = set.dyn_ref::<js_sys::Function>() {
-        let _ = f.call2(
-            &storage,
-            &JsValue::from_str(key),
-            &JsValue::from_str(if value { "true" } else { "false" }),
-        );
+        let _ = f.call2(&storage, &JsValue::from_str(key), &JsValue::from_str(value));
     }
 }
 
 /// Storage key for the Filters panel's collapsed state.
 pub const PREF_FILTERS_COLLAPSED: &str = "npt.filtersCollapsed";
+/// Storage key for the colour theme (`system` / `light` / `dark`).
+pub const PREF_THEME: &str = "npt.theme";
+/// Storage key for the Patches table's hidden columns (a JSON list of column ids).
+pub const PREF_PATCH_COLUMNS: &str = "npt.columns.patches";
+
+/// Pins the colour theme on `<html data-theme="…">`, or removes the attribute so
+/// `prefers-color-scheme` decides.
+pub fn set_root_theme(attr: Option<&str>) {
+    let Some(root) = leptos::prelude::document().document_element() else {
+        return;
+    };
+    let _ = match attr {
+        Some(value) => root.set_attribute("data-theme", value),
+        None => root.remove_attribute("data-theme"),
+    };
+}
+
+/// Copies `text` through the async Clipboard API. `Err` when the API is missing or
+/// refuses (no user gesture, permission denied) — the caller keeps the text on
+/// screen in a selectable field either way, so a refusal costs one manual copy.
+///
+/// No Tauri capability is involved: this is the webview's own web API, and the CSP
+/// governs what the page loads and fetches, not the clipboard.
+pub async fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let refused = || "the clipboard is not available here".to_string();
+    let clipboard = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("navigator"))
+        .and_then(|nav| js_sys::Reflect::get(&nav, &JsValue::from_str("clipboard")))
+        .map_err(|_| refused())?;
+    let write = js_sys::Reflect::get(&clipboard, &JsValue::from_str("writeText"))
+        .ok()
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+        .ok_or_else(refused)?;
+    let promise = write
+        .call1(&clipboard, &JsValue::from_str(text))
+        .ok()
+        .and_then(|p| p.dyn_into::<js_sys::Promise>().ok())
+        .ok_or_else(refused)?;
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map(|_| ())
+        .map_err(|_| refused())
+}
+
+/// The page URL's fragment without the `#`; `""` when there is none.
+pub fn location_fragment() -> String {
+    leptos::prelude::location()
+        .hash()
+        .unwrap_or_default()
+        .trim_start_matches('#')
+        .to_string()
+}
+
+/// The page URL as the browser shows it.
+pub fn location_href() -> String {
+    leptos::prelude::location().href().unwrap_or_default()
+}
+
+/// Replaces the URL fragment without adding a history entry — a view that changes
+/// on every filter click must not turn Back into an undo stack of checkboxes.
+pub fn replace_fragment(fragment: &str) {
+    let global = js_sys::global();
+    let Ok(history) = js_sys::Reflect::get(&global, &JsValue::from_str("history")) else {
+        return;
+    };
+    let Some(replace) = js_sys::Reflect::get(&history, &JsValue::from_str("replaceState"))
+        .ok()
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+    else {
+        return;
+    };
+    let _ = replace.call3(
+        &history,
+        &JsValue::NULL,
+        &JsValue::from_str(""),
+        &JsValue::from_str(&format!("#{fragment}")),
+    );
+}
 
 #[derive(serde::Deserialize)]
 struct ErrShape {
@@ -252,7 +335,20 @@ pub fn on_query_progress(mut handler: impl FnMut(QueryProgressEvent) + 'static) 
     cb.forget();
 }
 
+ipc!(
+    /// One device's facts, per-device rollup and detail rows for the drill-down,
+    /// read from the backend's cached result. `None` when that result no longer
+    /// holds the device (a re-query or tenant switch since the click).
+    device_detail(device_id: i64) -> Option<DeviceDetail>
+);
+
 ipc!(export_patches as "export_patches_xlsx", () -> Option<String>);
+
+ipc!(
+    /// Writes the cached detail rows as a formula-guarded, UTF-8 CSV. Backend-only,
+    /// like the other two exports.
+    export_csv() -> Option<String>
+);
 
 ipc!(
     /// Writes the cached query result as a self-contained HTML executive report

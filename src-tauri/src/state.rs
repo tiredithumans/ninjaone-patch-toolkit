@@ -108,6 +108,19 @@ pub struct QueryToken {
     result_epoch: u64,
 }
 
+impl QueryToken {
+    /// The tenant this run started under, spelled for on-disk state keyed per tenant
+    /// (`changes` snapshots). From the token rather than the settings for the same
+    /// reason the cache stamp is: the tenant can change while a fetch is in flight.
+    pub fn tenant_label(&self) -> String {
+        format!(
+            "{}\n{}",
+            self.tenant.instance_base_url,
+            self.tenant.client_id.as_deref().unwrap_or_default()
+        )
+    }
+}
+
 /// The cached query result plus a memo of the grouping most recently asked for.
 ///
 /// `group_page` rebuilt the entire grouping — a HashMap accumulation plus a sort
@@ -758,6 +771,27 @@ impl AppState {
         // fetch about to store sees the bump and drops its write.
         self.fleet_current_os.invalidate();
         self.fleet_current_sw.invalidate();
+    }
+
+    /// One family of the whole-fleet current patches **if it is already cached** for
+    /// the current tenant, with its fetch time — never fetches. `None` on a miss, a
+    /// tenant change, or `PatchType::All` (there is no combined slot).
+    ///
+    /// Served past [`CURRENT_PATCHES_TTL`]: the TTL decides when a *query* refetches,
+    /// while this feeds the Apply-all preview, which states the fetch time rather
+    /// than hiding older data. A post-action invalidation still clears the slot, so
+    /// the preview never counts patches the last apply may already have installed.
+    pub fn cached_current_patches(
+        &self,
+        family: crate::model::PatchType,
+    ) -> Option<(Arc<Vec<Patch>>, DateTime<Utc>)> {
+        use crate::model::PatchType;
+        let slot = match family {
+            PatchType::Os => &self.fleet_current_os,
+            PatchType::Software => &self.fleet_current_sw,
+            PatchType::All => return None,
+        };
+        slot.peek(&self.tenant_key(), Duration::MAX)
     }
 
     /// Drops **only** the device inventory. A reboot flips `os.needsReboot`, and

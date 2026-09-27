@@ -30,6 +30,7 @@ pub(crate) fn RunControls() -> impl IntoView {
                     }}
                 </button>
                 <ExportButton kind=Export::Workbook exporting=exporting/>
+                <ExportButton kind=Export::Csv exporting=exporting/>
                 <ExportButton kind=Export::Report exporting=exporting/>
                 <Show when=move || state.run.refreshing.get()>
                     <span class="chips-label">"↻ refreshing…"</span>
@@ -37,7 +38,7 @@ pub(crate) fn RunControls() -> impl IntoView {
                 <label class="inline">
                     "Auto-refresh"
                     <select on:change=move |ev| {
-                        state.run.refresh_secs.set(event_target_value(&ev).parse().unwrap_or(0))
+                        state.set_refresh_cadence(event_target_value(&ev).parse().unwrap_or(0))
                     }>
                         // No sub-minute cadence: a tick re-pages the whole-fleet
                         // patch feeds, which on a large tenant takes longer than
@@ -57,6 +58,7 @@ pub(crate) fn RunControls() -> impl IntoView {
                             .collect_view()}
                     </select>
                 </label>
+                <AutoRefreshStatus/>
                 <button
                     class="btn"
                     prop:disabled=move || {
@@ -84,6 +86,7 @@ pub(crate) fn RunControls() -> impl IntoView {
                     <PresetRow/>
                 </Show>
             </div>
+            <ViewLinkRow/>
             <Show when=move || state.run.busy.get()>
                 <div class="query-progress">
                     <div class="progress">
@@ -140,12 +143,13 @@ pub(crate) fn RunControls() -> impl IntoView {
     }
 }
 
-/// The two exports of the cached result. Both write through a native Save dialog
-/// and need a live query in the desktop app; they differ only in the command and
-/// the wording.
+/// The exports of the cached result. All write through a native Save dialog and
+/// need a live query in the desktop app; they differ only in the command and the
+/// wording.
 #[derive(Clone, Copy)]
 enum Export {
     Workbook,
+    Csv,
     Report,
 }
 
@@ -153,6 +157,7 @@ impl Export {
     fn label(self) -> &'static str {
         match self {
             Self::Workbook => "Export to Excel",
+            Self::Csv => "Export CSV",
             Self::Report => "Export report",
         }
     }
@@ -161,13 +166,26 @@ impl Export {
     fn web_title(self) -> &'static str {
         match self {
             Self::Workbook => "Excel export needs a live query in the desktop app",
+            Self::Csv => "CSV export needs a live query in the desktop app",
             Self::Report => "The HTML report needs a live query in the desktop app",
+        }
+    }
+
+    /// Tooltip in the desktop app. Only the CSV needs one: it holds the detail rows
+    /// alone, and says where its provenance went.
+    fn title(self) -> &'static str {
+        match self {
+            Self::Csv => {
+                "The Patches rows as CSV. The file name records the device scope, \
+                 statuses and data times (UTC); use Excel export for the full filter list."
+            }
+            Self::Workbook | Self::Report => "",
         }
     }
 
     fn saved(self, path: &str) -> String {
         match self {
-            Self::Workbook => format!("Exported to {path}"),
+            Self::Workbook | Self::Csv => format!("Exported to {path}"),
             Self::Report => format!("Report saved to {path}"),
         }
     }
@@ -176,6 +194,7 @@ impl Export {
     async fn save(self) -> Result<Option<String>, String> {
         match self {
             Self::Workbook => api::export_patches().await,
+            Self::Csv => api::export_csv().await,
             Self::Report => api::export_report().await,
         }
     }
@@ -193,7 +212,7 @@ fn ExportButton(kind: Export, exporting: RwSignal<bool>) -> impl IntoView {
             prop:disabled=move || {
                 exporting.get() || state.query.result.with(|r| r.is_none()) || web_only()
             }
-            title=move || if web_only() { kind.web_title() } else { "" }
+            title=move || if web_only() { kind.web_title() } else { kind.title() }
             on:click=move |_| {
                 if exporting.get_untracked() {
                     return;
@@ -320,5 +339,139 @@ fn PresetRow() -> impl IntoView {
                 "Save preset"
             </button>
         </div>
+    }
+}
+
+/// The countdown to the next automatic refresh and its Pause / Resume button.
+/// Rendered only while a cadence is set and a refresh could actually run.
+#[component]
+fn AutoRefreshStatus() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let active = move || state.run.refresh_secs.get() > 0 && state.is_authed();
+    let paused = move || state.run.refresh_paused.get();
+    view! {
+        <Show when=active>
+            <span class="refresh-countdown">
+                {move || {
+                    let hold = state.refresh_hold();
+                    // A run in flight already has its own indicator.
+                    if hold == Some(util::RefreshHold::Running) {
+                        return String::new();
+                    }
+                    util::countdown_label(state.run.refresh_clock.get().remaining_ms, hold)
+                }}
+            </span>
+            <button
+                class="btn btn-ghost"
+                aria-pressed=move || paused().to_string()
+                title="Pause or resume auto-refresh (p)"
+                on:click=move |_| state.toggle_refresh_pause()
+            >
+                {move || if paused() { "Resume" } else { "Pause" }}
+            </button>
+        </Show>
+    }
+}
+
+/// Share the current view: filters, results tab, grouping and sort — never the
+/// selection or anything about the sign-in. The web demo shares its URL (whose
+/// fragment always carries the view); the desktop, which has no URL, shares a
+/// code, and applies one pasted into "Open view…".
+#[component]
+fn ViewLinkRow() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let opening = RwSignal::new(false);
+    let pasted = RwSignal::new(String::new());
+    let apply = move || {
+        let text = pasted.get_untracked();
+        state.open_view_link(&text);
+        if util::decode_view(&text).is_ok() {
+            pasted.set(String::new());
+            opening.set(false);
+        }
+    };
+    view! {
+        <div class="row view-link">
+            <button
+                class="btn btn-ghost"
+                title="Copy a link to these filters, tab, grouping and sort (no selection, no credentials)"
+                on:click=move |_| state.copy_view_link()
+            >
+                "Copy view link"
+            </button>
+            <button
+                class="btn btn-ghost"
+                aria-expanded=move || opening.get().to_string()
+                on:click=move |_| opening.update(|o| *o = !*o)
+            >
+                "Open view…"
+            </button>
+            <Show when=move || state.ui.view_code.with(Option::is_some)>
+                <input
+                    class="view-code"
+                    readonly
+                    aria-label="View link"
+                    prop:value=move || state.ui.view_code.get().unwrap_or_default()
+                    on:focus=move |ev| select_all(&ev)
+                />
+            </Show>
+            <Show when=move || opening.get()>
+                <input
+                    class="view-code"
+                    aria-label="Paste a view link or code"
+                    placeholder="Paste a view link or code"
+                    prop:value=move || pasted.get()
+                    on:input=move |ev| pasted.set(event_target_value(&ev))
+                    on:keydown=move |ev| {
+                        if ev.key() == "Enter" {
+                            apply();
+                        }
+                    }
+                />
+                <button class="btn" on:click=move |_| apply()>
+                    "Apply view"
+                </button>
+            </Show>
+        </div>
+        {move || {
+            state
+                .ui
+                .pending_view
+                .get()
+                .map(|pending| {
+                    let view = pending.view.clone();
+                    view! {
+                        <div class="stale-banner view-link-warning" role="alert">
+                            <span>{pending.warning}</span>
+                            <button
+                                class="link-btn"
+                                on:click=move |_| state.apply_view(view.clone())
+                            >
+                                "Apply anyway"
+                            </button>
+                            <button
+                                class="link-btn"
+                                on:click=move |_| state.ui.pending_view.set(None)
+                            >
+                                "Cancel"
+                            </button>
+                        </div>
+                    }
+                })
+        }}
+    }
+}
+
+/// Selects a read-only field's text on focus, so a refused clipboard costs one
+/// Ctrl/Cmd+C rather than a careful drag across a long code.
+fn select_all(ev: &leptos::ev::FocusEvent) {
+    let Some(target) = ev.target() else {
+        return;
+    };
+    let target: &wasm_bindgen::JsValue = target.as_ref();
+    if let Ok(select) = js_sys::Reflect::get(target, &wasm_bindgen::JsValue::from_str("select"))
+        && let Some(f) = wasm_bindgen::JsCast::dyn_ref::<js_sys::Function>(&select)
+    {
+        let _ = f.call0(target);
     }
 }

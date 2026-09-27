@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use tracing::warn;
 
 use super::{ActionProgressEvent, ActionRequest, emit_progress};
-use crate::actions::{ActionKind, JobReport, JobState, PlannedTarget, audit, fmt_ts};
+use crate::actions::{ActionKind, JobReport, JobRequest, JobState, PlannedTarget, audit, fmt_ts};
 use crate::api::actions::{ScriptDispatch, ScriptRef};
 use crate::api::{NinjaApiClient, is_outcome_unknown};
 use crate::model::{PatchType, RebootMode};
@@ -33,12 +33,18 @@ pub(super) struct DispatchContext {
     pub(super) reason: String,
     pub(super) reboot_mode: RebootMode,
     pub(super) dry_run: bool,
+    /// The plan's `window_overridden`: this batch goes out only because the operator
+    /// overrode a closed maintenance window. Audited on every opening record.
+    pub(super) window_overridden: bool,
     pub(super) detail: String,
     pub(super) instance: String,
     pub(super) client_id: Option<String>,
     pub(super) confirm_prefix: Option<String>,
     pub(super) batch_id: u64,
     pub(super) id_base: u64,
+    /// Device id → what its job records for a retry. Per device only because the
+    /// targets are.
+    pub(super) job_requests: BTreeMap<i64, JobRequest>,
 }
 
 /// Dispatches every eligible target concurrently (bounded by `permits`), emitting
@@ -123,6 +129,7 @@ async fn dispatch_one(
         activity_id: None,
         series_uid: None,
         exit_code: None,
+        request: ctx.job_requests.get(&target.device_id).cloned(),
     };
 
     // Written before the request goes out, so a crash mid-batch still leaves
@@ -146,6 +153,7 @@ async fn dispatch_one(
             .filter(|p| !p.is_empty())
             .map(|p| audit::redact_parameters(p)),
         dry_run: ctx.dry_run,
+        window_override: ctx.window_overridden,
         confirm_token_prefix: ctx.confirm_prefix.clone(),
         outcome: "dispatching".into(),
         activity_id: None,
@@ -262,12 +270,27 @@ async fn send_action(
                     ctx.kind.label()
                 ));
             }
+            // A dry run is only a dry run if the script is *told* so. `plan()` allows
+            // one only for composed parameters (which always carry the flag) and a
+            // script that declares it; this is the same fact checked where it matters.
+            if ctx.dry_run && !carries_dry_run_flag(params) {
+                return Err(anyhow::anyhow!(
+                    "refusing to dispatch \"{}\" as a dry run: its parameters do not set dryRun=true",
+                    ctx.kind.label()
+                ));
+            }
             ctx.api
                 .run_script(device_id, sref, params, &ctx.run_as)
                 .await
                 .map(Some)
         }
     }
+}
+
+/// Whether a parameter string tells the script to preview — the exact token
+/// `actions::build_parameters` composes, as NinjaOne splits it (on spaces).
+pub(super) fn carries_dry_run_flag(params: &str) -> bool {
+    params.split(' ').any(|t| t == "dryRun=true")
 }
 
 /// Drops the caches a completed action has invalidated.

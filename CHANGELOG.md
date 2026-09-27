@@ -11,6 +11,82 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+**Patch actions**
+
+- **Maintenance-window editor.** Settings → Patch actions now sets the window's days and open/close
+  times (this computer's local time; a window may wrap past midnight). When Settings allows
+  overrides, the action bar offers "Override the maintenance window for this dispatch". The
+  override applies to one dispatch only and the audit trail records it as "Live (window
+  override)". The outside-the-window blocker shows the window and the exact steps to override it.
+- **"Apply all" shows what it will install.** The confirm dialog lists, per device, how many
+  approved patches NinjaOne will install and how many still await approval, warns when a device
+  has nothing approved, and says "unknown" when patch data isn't loaded.
+- **Reboot or scan from the Needs Reboot tab.** Tick devices (or a page) and use the same action
+  bar as the Patches tab. Only Reboot and the scans are offered there.
+- **Retry failed jobs.** A failed job in the Jobs tab has a Retry button, and a batch with several
+  failures has "Retry N failed". A retry reopens the normal confirmation with the options the job
+  was sent. A job with an unknown outcome is never offered a retry: it may already have run.
+- **Reference remediation scripts** in `remediation/` for "Install only the selected patches".
+  `Install-SelectedWindowsUpdates.ps1` installs only the ticked KBs through Windows Update and
+  honours `dryRun` and `rebootBehavior`. `Install-SelectedSoftwarePatches.ps1` validates the
+  selected product list but installs nothing until you add an install mechanism; until then it
+  exits 10, so a run is never reported as a false success. `remediation/README.md` covers importing
+  them into NinjaOne, the script variables to declare, the parameter format and the exit codes.
+
+**Reporting**
+
+- **Per-severity SLA targets** in Settings (blank uses the default SLA). Each pending patch is aged
+  against its own severity's window.
+- **Changes since the last run.** The Patches tab opens with newly pending, resolved and newly
+  failed patches since the previous run with the same instance and filters; the workbook gets a
+  Changes sheet and the HTML report a matching section.
+- **Approval split.** Compliance now separates "Awaiting Approval" from "Approved, Not Installed"
+  (per organization and per OS), and a **Stuck approvals** list shows devices whose approved
+  patches are still not installed more than the default SLA window after NinjaOne first reported
+  them — usually a sign the agent isn't applying patches.
+- **Worst devices** (top 25 online devices by patches past SLA, then severity) and **offline
+  devices with a pending backlog**, on the Compliance tab, in the workbook and in the HTML report.
+- **First seen → installed** median and 90th percentile by organization and severity, from
+  Installed records. It is indicative only: NinjaOne's `timestamp` is when the record was
+  collected, not when the patch was released.
+- **Review a past patch cycle.** The install-history window offers a Custom range (From/To) that
+  replaces "last N days". It is saved in presets and view links and printed as absolute UTC bounds
+  in both exports.
+- **Group by product.** The Patches tab can fold every version of a third-party product (for
+  example all Google Chrome builds) into one group.
+- **Device drill-down.** Click a device name on the Patches or Needs Reboot tab to see its details,
+  pending patches by severity, SLA backlog, failed installs and its patch rows.
+- **Excel export:** dates are real Excel date-times (UTC, stated on the About sheet); a **Devices**
+  sheet lists every in-scope device with its per-severity backlog; the About sheet and the HTML
+  report state the NinjaOne instance, the app version and the SLA policy the numbers used.
+- **Export CSV** of the Patches rows, with protection against spreadsheet formula injection.
+- **Trend deltas per organization.** The Trend tab ranks organizations by regression since the
+  previous comparable run.
+
+**Operator experience**
+
+- Auto-refresh shows a countdown with Pause/Resume, and waits while a dialog or Settings is open.
+- Keyboard shortcuts: `r` run query, `1`–`6` tabs, `/` search, `[`/`]` page, `p` pause
+  auto-refresh, `?` help. None of them dispatches, exports or signs out.
+- A Columns menu hides and shows Patches-table columns (exports keep every column).
+- "Copy view link" / "Open view…" share filters, tab, grouping and sort; a link from another
+  instance warns before applying. The web demo keeps the view in its URL.
+- Light / Dark / System theme (System is the new default), and the OS "reduce motion" setting is
+  honoured.
+- The desktop window reopens at its last size, position and maximized state.
+
+### Changed
+
+- **Dry run is refused unless the script declares a `dryRun` variable**, because a script that
+  ignores it would run for real. Typed script parameters can't be dry-run.
+- Trend cards show the change since the previous comparable run; the whole-series change moves to
+  the card footer.
+- Dispatched jobs are resolved with one activity-feed request per device per poll instead of one
+  per job.
+- The export's install-history line now states its window, e.g. "(last 30 days)".
+
 ## [0.14.4] - 2026-09-26
 
 ### Install this version manually

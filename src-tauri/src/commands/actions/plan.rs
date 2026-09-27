@@ -7,9 +7,12 @@ use chrono::Local;
 
 use super::ActionRequest;
 use super::confirm::{canonical_parameters, request_hash};
-use crate::actions::{ActionKind, ActionPlan, PlanInput, PlannedTarget, plan};
+use crate::actions::{
+    ActionKind, ActionPlan, CachedFamily, DryRunSupport, PlanInput, PlannedTarget, plan,
+};
 use crate::api::actions::ScriptRef;
 use crate::error::UiError;
+use crate::model::{AutomationScript, PatchType};
 use crate::settings::ActionSettings;
 use crate::state::AppState;
 
@@ -54,7 +57,7 @@ pub(super) fn per_device_parameters(req: &ActionRequest) -> BTreeMap<i64, String
 /// never rewrites what the operator typed. Only `Script` honors one: the remediation
 /// kinds have no field to type it in, and honoring one there would silently discard
 /// the per-device targeting that is their entire purpose.
-fn typed_parameters(req: &ActionRequest) -> Option<&str> {
+pub(super) fn typed_parameters(req: &ActionRequest) -> Option<&str> {
     if req.kind != ActionKind::Script {
         return None;
     }
@@ -140,18 +143,8 @@ pub(super) fn untargeted_names<'a>(
         .collect()
 }
 
-/// A device-name list for a warning, capped so a 25-device batch stays one sentence.
-pub(super) fn summarize_names(names: &[&str]) -> String {
-    const SHOWN: usize = 5;
-    if names.len() <= SHOWN {
-        return names.join(", ");
-    }
-    format!(
-        "{}, and {} more",
-        names[..SHOWN].join(", "),
-        names.len() - SHOWN
-    )
-}
+/// Lives beside `plan()` now, which needs it for the Apply-all preview warning.
+pub(super) use crate::actions::summarize_names;
 
 /// The script a request will actually run. For a remediation kind it comes from
 /// Settings, never from the request — a stale frontend must not be able to name its
@@ -164,6 +157,54 @@ fn resolve_script(req: &ActionRequest, settings: &ActionSettings) -> Option<Scri
     match (req.script_id, req.script_uid.clone()) {
         (Some(id), _) => Some(ScriptRef::Script { id }),
         (None, Some(uid)) => Some(ScriptRef::Action { uid }),
+        _ => None,
+    }
+}
+
+/// Whether the script `req` resolves to can honor a dry run — see [`DryRunSupport`].
+///
+/// Pure over the library listing so it is testable; `library` is `Err` when the
+/// listing could not be read. Hand-typed parameters are refused before the library
+/// is consulted: they are sent verbatim, so even a script that reads `dryRun` would
+/// not be told to preview unless the operator happened to type it — and the toolkit
+/// never rewrites what was typed. Refusing is the safer of the two options (the
+/// other was appending `dryRun=true` when the string lacks it), because it keeps
+/// "what you typed is what is sent" and leaves no parsing of a free-form string
+/// between the operator and a live run.
+pub(super) fn dry_run_support(
+    req: &ActionRequest,
+    script: Option<&ScriptRef>,
+    library: Result<&[AutomationScript], &str>,
+) -> DryRunSupport {
+    if typed_parameters(req).is_some() {
+        return DryRunSupport::TypedParameters;
+    }
+    let id = match script {
+        Some(ScriptRef::Script { id }) => *id,
+        Some(ScriptRef::Action { .. }) => return DryRunSupport::BuiltInAction,
+        // No script at all is its own blocker ("No script selected", or the
+        // remediation kind's "No remediation script configured").
+        None => return DryRunSupport::NotChecked,
+    };
+    let library = match library {
+        Ok(list) => list,
+        Err(why) => return DryRunSupport::Unverified(format!("the script library: {why}")),
+    };
+    match library.iter().find(|s| s.id == id) {
+        Some(s) if s.accepts_dry_run() => DryRunSupport::Declared,
+        Some(s) => DryRunSupport::NotDeclared {
+            script: s.name.clone().unwrap_or_else(|| format!("Script #{id}")),
+        },
+        None => DryRunSupport::Unverified(format!("script #{id} is not in the library")),
+    }
+}
+
+/// The patch family a native apply installs, whose cached current patches feed the
+/// Apply-all preview. `None` for every other kind.
+fn applied_family(kind: ActionKind) -> Option<PatchType> {
+    match kind {
+        ActionKind::OsPatchApply => Some(PatchType::Os),
+        ActionKind::SoftwarePatchApply => Some(PatchType::Software),
         _ => None,
     }
 }
@@ -209,6 +250,20 @@ pub(super) async fn build_plan(
     let org_names = state.org_names().await.map_err(UiError::from)?;
 
     let targets = composed_targets(req);
+    let script = resolve_script(req, &settings);
+    // Only a dry run of a script needs the library, so nothing else pays for the
+    // round trip. It is re-read on confirm too (`run_action` re-plans), so a script
+    // edited to drop `dryRun` between review and confirm is refused rather than run.
+    let dry_run_support = if req.dry_run && req.kind.runs_a_script() {
+        match state.api.automation_scripts().await {
+            Ok(list) => dry_run_support(req, script.as_ref(), Ok(&list)),
+            Err(e) => dry_run_support(req, script.as_ref(), Err(&e.to_string())),
+        }
+    } else {
+        DryRunSupport::NotChecked
+    };
+    // Read-only peek at the whole-fleet cache: the preview never triggers a fetch.
+    let cached = applied_family(req.kind).and_then(|f| state.cached_current_patches(f));
     let mut p = plan(PlanInput {
         kind: req.kind,
         device_ids: &req.device_ids,
@@ -221,12 +276,16 @@ pub(super) async fn build_plan(
         reboot: req.reboot,
         dry_run: req.dry_run,
         targets: &targets,
+        dry_run_support,
+        current_patches: cached.as_ref().map(|(patches, fetched_at)| CachedFamily {
+            patches: patches.as_slice(),
+            fetched_at: *fetched_at,
+        }),
         now: Local::now(),
     });
 
     let parameters = per_device_parameters(req);
     p.parameters_preview = parameters_preview(&parameters, &p.eligible);
-    let script = resolve_script(req, &settings);
     let run_as = resolve_run_as(req, &settings);
 
     // Request-shape problems the pure planner can't see, since they depend on

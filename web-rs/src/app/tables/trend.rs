@@ -58,6 +58,7 @@ pub(super) fn TrendTab() -> impl IntoView {
                         .into_any();
                 }
                 let newest = runs[runs.len() - 1].clone();
+                let previous = runs[runs.len() - 2].clone();
                 let oldest = runs[0].clone();
                 view! {
                     <p class="chips-label">
@@ -94,9 +95,91 @@ pub(super) fn TrendTab() -> impl IntoView {
                         higher_is_better=false
                         values={runs.iter().map(|r| r.needs_reboot as f64).collect::<Vec<_>>()}
                     />
+                    <OrgDeltaTable newest=newest previous=previous/>
                 }
                     .into_any()
             }}
         </div>
+    }
+}
+
+/// Per-organization movement against the previous comparable run, the biggest
+/// regression first. The fleet cards above can hold still while one organization
+/// slides and another improves; this is where that shows.
+#[component]
+fn OrgDeltaTable(newest: RunRecord, previous: RunRecord) -> impl IntoView {
+    let note = util::org_delta_note(&newest, &previous);
+    let deltas = util::org_deltas(&newest, &previous);
+    let pct = |o: &Option<OrgRun>| {
+        o.as_ref()
+            .and_then(OrgRun::compliance_pct)
+            .map(util::format_pct_tenths)
+            .unwrap_or_else(|| "\u{2014}".to_string())
+    };
+    let count = |o: &Option<OrgRun>, get: fn(&OrgRun) -> usize| {
+        o.as_ref()
+            .map(|o| group_thousands(get(o)))
+            .unwrap_or_else(|| "\u{2014}".to_string())
+    };
+    let table = (!deltas.is_empty()).then(|| {
+        view! {
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            // Spelled as the Compliance tab spells them
+                            // (`rows::ComplianceBucket::COLUMNS`).
+                            <th scope="col">"Organization"</th>
+                            <th scope="col">"Compliance %"</th>
+                            <th scope="col">"Change"</th>
+                            <th scope="col">"Pending Patches"</th>
+                            <th scope="col">"Change"</th>
+                            <th scope="col">"Pending Critical/Important"</th>
+                            <th scope="col">"Change"</th>
+                            <th scope="col">"Aged (past SLA)"</th>
+                            <th scope="col">"Change"</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {deltas
+                            .into_iter()
+                            .map(|d| {
+                                let (now, before) = (d.now.is_some(), d.previous.is_some());
+                                let cell = move |delta, percent, higher_is_better| {
+                                    let (class, label) = util::org_delta_cell(
+                                        delta,
+                                        percent,
+                                        higher_is_better,
+                                        now,
+                                        before,
+                                    );
+                                    view! { <td class=class>{label}</td> }
+                                };
+                                view! {
+                                    <tr>
+                                        <td>{d.organization.clone()}</td>
+                                        <td>{pct(&d.now)}</td>
+                                        {cell(d.compliance_delta(), true, true)}
+                                        <td>{count(&d.now, |o| o.pending)}</td>
+                                        {cell(d.pending_delta(), false, false)}
+                                        <td>{count(&d.now, |o| o.pending_critical)}</td>
+                                        {cell(d.pending_critical_delta(), false, false)}
+                                        <td>{count(&d.now, |o| o.aged_critical)}</td>
+                                        {cell(d.aged_delta(), false, false)}
+                                    </tr>
+                                }
+                            })
+                            .collect_view()}
+                    </tbody>
+                </table>
+            </div>
+        }
+    });
+    view! {
+        <h3 class="trend-subhead">
+            {format!("By organization \u{2014} since {}", previous.at)}
+        </h3>
+        {note.map(|n| view! { <p class="chips-label">{n}</p> })}
+        {table}
     }
 }

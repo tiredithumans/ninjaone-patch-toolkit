@@ -11,16 +11,25 @@ use super::*;
 /// Reboot modes offered in the confirm dialog, as (value, label).
 const REBOOT_MODES: [(&str, &str); 2] = [("NORMAL", "Normal"), ("FORCED", "Forced")];
 
-/// Sticky bar above the Patches table. Always renders its running total, because
-/// a selection spanning several pages is otherwise invisible.
+/// Sticky bar above the Patches table — and above the Needs Reboot table, where it
+/// dispatches against a device-level selection. Always renders its running total,
+/// because a selection spanning several pages is otherwise invisible.
+///
+/// One component on both tabs rather than a second surface: the same buttons, the
+/// same run-option signals, the same plan → confirm path. `source` only decides
+/// which selection it reads and which kinds that selection can reach; from the
+/// device-level one, everything needing patch rows is disabled with the reason, and
+/// the script-only options (Run as, restart, Dry run, the script picker) are not
+/// rendered because nothing reachable from there reads them.
 #[component]
-pub(crate) fn ActionBar() -> impl IntoView {
+pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoView {
     let state = expect_context::<AppState>();
 
     let blocked = move || state.blocked_reason();
     let busy = move || state.actions.dispatching.get();
-    let counts = move || state.selection_counts();
+    let counts = move || state.selection_counts_for(source);
     let any = move || counts().0 > 0;
+    let rows_source = source == SelectionSource::PatchRows;
 
     // One disabled reason for every button, so the tooltip always explains itself.
     let disabled_reason = move || action_disabled_reason(blocked(), counts().0, busy());
@@ -30,10 +39,19 @@ pub(crate) fn ActionBar() -> impl IntoView {
             <div class="action-bar-summary">
                 {move || {
                     let (devices, rows, offline) = counts();
-                    let Some(text) = selection_summary(devices, rows, offline) else {
+                    let summary = if rows_source {
+                        selection_summary(devices, rows, offline)
+                    } else {
+                        util::device_selection_summary(devices, offline)
+                    };
+                    let Some(text) = summary else {
                         return view! {
                             <span class="action-bar-hint">
-                                "Select patch rows to act on their devices."
+                                {if rows_source {
+                                    "Select patch rows to act on their devices."
+                                } else {
+                                    "Select devices to reboot or scan them."
+                                }}
                             </span>
                         }
                             .into_any();
@@ -44,7 +62,7 @@ pub(crate) fn ActionBar() -> impl IntoView {
                                 <strong>{text}</strong>
                                 <button
                                     class="link-btn"
-                                    on:click=move |_| state.clear_selection()
+                                    on:click=move |_| state.clear_selection_for(source)
                                 >
                                     "Clear"
                                 </button>
@@ -65,12 +83,15 @@ pub(crate) fn ActionBar() -> impl IntoView {
                                     .iter()
                                     .map(|(kind, label)| {
                                         let kind = *kind;
-                                        // Two reasons stack: the ones that block every
-                                        // action, then the ones specific to this kind
-                                        // (no remediation script, nothing of its family
-                                        // ticked). The tooltip always says which.
+                                        // Three reasons stack: the ones that block every
+                                        // action, then whether this selection can reach
+                                        // the kind at all (a device-level one has no
+                                        // patch rows), then the ones specific to the
+                                        // kind (no remediation script, nothing of its
+                                        // family ticked). The tooltip always says which.
                                         let why = move || {
                                             disabled_reason()
+                                                .or_else(|| util::source_disabled_reason(source, kind))
                                                 .or_else(|| {
                                                     util::kind_disabled_reason(
                                                         kind,
@@ -78,6 +99,7 @@ pub(crate) fn ActionBar() -> impl IntoView {
                                                         state.remediation_targets(kind).len(),
                                                     )
                                                 })
+                                                .or_else(|| state.dry_run_reason(kind))
                                         };
                                         view! {
                                             <button
@@ -108,7 +130,7 @@ pub(crate) fn ActionBar() -> impl IntoView {
                                                     })
                                                 }
                                                 prop:disabled=move || why().is_some()
-                                                on:click=move |_| state.open_plan(kind)
+                                                on:click=move |_| state.open_plan(kind, source)
                                             >
                                                 {*label}
                                             </button>
@@ -124,7 +146,8 @@ pub(crate) fn ActionBar() -> impl IntoView {
             // Which patches "Install only the selected patches" would actually send,
             // per device. The distinction between the two Install rows is only
             // trustworthy if the operator can see the target list it derives from.
-            <Show when=any>
+            // A device-level selection has no targets to show.
+            <Show when=move || rows_source && any()>
                 <div class="action-bar-targets">
                     {move || {
                         [ActionKind::OsPatchRemediate, ActionKind::SoftwarePatchRemediate]
@@ -156,12 +179,42 @@ pub(crate) fn ActionBar() -> impl IntoView {
                         />
                         "Include offline devices"
                     </label>
+                    // Rendered only while the window is enforced and Settings permits
+                    // overriding it; the backend decides whether the window is actually
+                    // closed, and audits the dispatch only when it was. Cleared after
+                    // every dispatch, so it never outlives the one it was ticked for.
+                    <Show when=move || state.settings.f_actions.with(util::window_override_offered)>
+                        <label
+                            class="checkbox"
+                            title="Only needed outside the window. The backend checks the window at plan and again at confirm, and records an override on the audit trail."
+                        >
+                            <input
+                                type="checkbox"
+                                prop:checked=move || state.actions.override_window.get()
+                                on:change=move |ev| {
+                                    state.actions.override_window.set(event_target_checked(&ev))
+                                }
+                            />
+                            "Override the maintenance window for this dispatch"
+                            <span class="action-options-note">
+                                {move || {
+                                    format!(
+                                        "(window: {}, this computer's local time)",
+                                        state.settings.f_actions.with(util::window_summary),
+                                    )
+                                }}
+                            </span>
+                        </label>
+                    </Show>
                 </div>
 
                 // The native endpoints take no parameters, have no preview mode (a dry
                 // run of one is a `plan()` blocker) and run as NinjaOne's agent, so
                 // these three reach only the script-driven actions. Saying which is
                 // what stops "Dry run" from reading as protection it isn't giving.
+                // Not rendered for a device-level selection: none of the kinds it can
+                // reach reads them.
+                <Show when=move || rows_source>
                 <div class="action-bar-options">
                     <span class="action-options-label">
                         "Applies to installs of selected patches, and to scripts"
@@ -206,7 +259,20 @@ pub(crate) fn ActionBar() -> impl IntoView {
                         />
                         "Dry run (the script reports what it would install)"
                     </label>
+                    // A dry run is only real for a script that reads `dryRun`; say
+                    // which of the scripts this checkbox reaches cannot, rather than
+                    // leaving it to a blocker after the operator clicks.
+                    {move || {
+                        state
+                            .actions
+                            .dry_run
+                            .get()
+                            .then(|| util::dry_run_caveat(&state.dry_run_scripts()))
+                            .flatten()
+                            .map(|note| view! { <span class="action-options-note">{note}</span> })
+                    }}
                 </div>
+                </Show>
 
                 // Reboot needs its mode and reason chosen before planning: the reason
                 // is recorded in NinjaOne's own activity feed, and the backend refuses
@@ -250,10 +316,12 @@ pub(crate) fn ActionBar() -> impl IntoView {
                 // the common case, and this is the escape hatch for any other library
                 // script. It lives here rather than in the Jobs tab so that dispatch
                 // happens where the selection it targets is visible.
-                <details class="action-bar-script">
-                    <summary>"Run a library script…"</summary>
-                    <ScriptPicker/>
-                </details>
+                <Show when=move || rows_source>
+                    <details class="action-bar-script">
+                        <summary>"Run a library script…"</summary>
+                        <ScriptPicker/>
+                    </details>
+                </Show>
             </Show>
             <Show when=move || blocked().is_some()>
                 <p class="action-bar-blocked" role="note">
@@ -434,6 +502,17 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                         } else {
                             "confirm-radius"
                         }>{kind.blast_radius()}</p>
+                        // A bypassed window is as consequential as the reach, so it
+                        // gets the same treatment rather than a line among warnings.
+                        {plan
+                            .window_overridden
+                            .then(|| {
+                                view! {
+                                    <p class="confirm-radius confirm-radius-wide">
+                                        "Overrides the closed maintenance window for this dispatch — recorded on the audit trail."
+                                    </p>
+                                }
+                            })}
 
                         {(!plan.organizations.is_empty())
                             .then(|| {
@@ -496,6 +575,42 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                         </p>
                                         <pre class="modal-params">{params}</pre>
                                     </>
+                                }
+                            })}
+
+                        // What "Apply all" will actually install, per device. The native
+                        // endpoint takes no list, so this is the only place the operator
+                        // sees the backlog it is about to approve — and a device with
+                        // nothing approved (everything still MANUAL) is the surprise.
+                        {plan
+                            .apply_preview
+                            .clone()
+                            .map(|preview| {
+                                let summary = util::apply_preview_summary(&preview);
+                                let items = preview
+                                    .devices
+                                    .iter()
+                                    .map(|d| {
+                                        view! {
+                                            <li class:apply-preview-empty=d.approved == 0>
+                                                {util::apply_preview_line(d)}
+                                            </li>
+                                        }
+                                    })
+                                    .collect_view();
+                                // Unknown counts have no per-device list to expand, so
+                                // they are a plain note rather than an empty disclosure.
+                                if preview.known {
+                                    view! {
+                                        <details class="modal-apply-preview">
+                                            <summary>{summary}</summary>
+                                            <ul>{items}</ul>
+                                        </details>
+                                    }
+                                        .into_any()
+                                } else {
+                                    view! { <p class="modal-sub modal-apply-preview">{summary}</p> }
+                                        .into_any()
                                 }
                             })}
 
@@ -814,13 +929,20 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
                 ></textarea>
             </label>
 
+            <Show when=move || state.dry_run_reason(ActionKind::Script).is_some()>
+                <p class="script-picker-targets" role="note">
+                    {move || state.dry_run_reason(ActionKind::Script).unwrap_or_default()}
+                </p>
+            </Show>
             <button
                 class="btn btn-primary btn-sm"
+                title=move || state.dry_run_reason(ActionKind::Script).unwrap_or_default()
                 prop:disabled=move || {
                     state.actions.script_id.with(|s| s.is_none())
                         || state.actions.dispatching.get()
+                        || state.dry_run_reason(ActionKind::Script).is_some()
                 }
-                on:click=move |_| state.open_plan(ActionKind::Script)
+                on:click=move |_| state.open_plan(ActionKind::Script, SelectionSource::PatchRows)
             >
                 "Run script…"
             </button>
@@ -832,6 +954,9 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
 #[component]
 pub(crate) fn JobsTable() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // A retry plans like any dispatch, so it waits on the same things.
+    let retry_disabled =
+        move || state.blocked_reason().is_some() || state.actions.dispatching.get();
 
     view! {
         <div class="jobs">
@@ -842,9 +967,10 @@ pub(crate) fn JobsTable() -> impl IntoView {
                 </p>
             </Show>
 
-            // Dispatch lives in the action bar on the Patches tab, next to the
-            // selection it targets. This tab is history. Neither button has a job
-            // store to talk to in the browser demo, so they are not offered there.
+            // Dispatch lives in the action bar on the Patches and Needs Reboot tabs,
+            // next to the selection it targets. This tab is history; its Retry only
+            // re-opens that same confirm flow. None of these buttons has a job store
+            // to talk to in the browser demo, so they are not offered there.
             <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
             <div class="jobs-toolbar">
                 <button class="btn btn-sm" on:click=move |_| state.refresh_jobs()>
@@ -858,6 +984,35 @@ pub(crate) fn JobsTable() -> impl IntoView {
                 >
                     "Clear history"
                 </button>
+                // One button per batch with several definite failures. It re-opens
+                // the same plan → confirm dialog as any dispatch — never a direct
+                // re-send — and only definite failures are included.
+                {move || {
+                    state
+                        .actions
+                        .jobs
+                        .with(|jobs| util::retryable_batches(jobs))
+                        .into_iter()
+                        .map(|batch| {
+                            let label = format!(
+                                "Retry {} failed · {}",
+                                batch.job_ids.len(),
+                                batch.detail,
+                            );
+                            let ids = batch.job_ids;
+                            view! {
+                                <button
+                                    class="btn btn-sm"
+                                    title="Re-plan this batch's failed devices with the options they were sent. You confirm again before anything is dispatched."
+                                    prop:disabled=retry_disabled
+                                    on:click=move |_| state.retry_jobs(&ids)
+                                >
+                                    {label}
+                                </button>
+                            }
+                        })
+                        .collect_view()
+                }}
             </div>
             </Show>
 
@@ -868,7 +1023,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
                 if jobs.is_empty() {
                     return view! {
                         <p class="empty">
-                            "No actions dispatched yet. Select patch rows on the Patches tab, then choose an action from the bar above the table."
+                            "No actions dispatched yet. Select patch rows on the Patches tab (or devices on the Needs Reboot tab), then choose an action from the bar above the table."
                         </p>
                     }
                         .into_any();
@@ -886,6 +1041,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                     <th scope="col">"Exit"</th>
                                     <th scope="col">"Dispatched"</th>
                                     <th scope="col">"Duration"</th>
+                                    <th scope="col">"Retry"</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -893,6 +1049,29 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                     .into_iter()
                                     .rev()
                                     .map(|j| {
+                                        // Only a definite failure gets a Retry;
+                                        // an Unknown one may already have acted.
+                                        let retry = util::retry_blocked_reason(&j)
+                                            .is_none()
+                                            .then(|| {
+                                                let id = j.id;
+                                                let label = format!(
+                                                    "Retry {} on {}",
+                                                    j.detail,
+                                                    j.device_name,
+                                                );
+                                                view! {
+                                                    <button
+                                                        class="btn btn-sm"
+                                                        aria-label=label
+                                                        title="Re-plan this device with the options it was sent. You confirm again before anything is dispatched."
+                                                        prop:disabled=retry_disabled
+                                                        on:click=move |_| state.retry_jobs(&[id])
+                                                    >
+                                                        "Retry…"
+                                                    </button>
+                                                }
+                                            });
                                         view! {
                                             <tr>
                                                 <td>{j.device_name.clone()}</td>
@@ -919,6 +1098,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                                 </td>
                                                 <td>{j.dispatched_at.clone()}</td>
                                                 <td>{format_duration(j.duration_seconds)}</td>
+                                                <td>{retry}</td>
                                             </tr>
                                         }
                                     })
@@ -1022,7 +1202,7 @@ fn AuditTrail() -> impl IntoView {
                                             <td>{r.organization.clone()}</td>
                                             <td>{r.detail.clone()}</td>
                                             <td>
-                                                {if r.dry_run { "Dry run" } else { "Live" }}
+                                                {util::audit_mode_label(r.dry_run, r.window_override)}
                                             </td>
                                             <td>{r.outcome.clone()}</td>
                                             <td>

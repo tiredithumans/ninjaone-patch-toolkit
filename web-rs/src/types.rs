@@ -36,6 +36,13 @@ pub struct FilterParams {
     pub detected_after: Option<i64>,
     #[serde(default)]
     pub detected_before: Option<i64>,
+    /// Absolute install-history range (Unix seconds). When `installed_after` is set
+    /// it replaces the relative install lookback backend-side; both `None` = the
+    /// lookback applies. Mirrors `filter::FilterParams::installed_*`.
+    #[serde(default)]
+    pub installed_after: Option<i64>,
+    #[serde(default)]
+    pub installed_before: Option<i64>,
 }
 
 /// Mirror of the backend's `rows::PatchFamilies` — the honest scope of every
@@ -130,20 +137,71 @@ pub struct PatchRow {
     pub status: String,
     pub first_seen_date: Option<String>,
     pub installed_date: Option<String>,
+    /// `DeviceSoftwarePatch.productIdentifier`, shared by every version of one
+    /// third-party product; `None` on OS rows. Read by the demo's product grouping.
+    #[serde(default)]
+    pub product_identifier: Option<String>,
 }
 
-/// A device row for the Needs-Reboot view. The backend only sends the
-/// reboot-needing subset, so this mirror omits the `needsReboot` flag (always true
-/// here) — extra fields in the JSON are ignored on deserialize.
+/// A device's facts and per-device rollup: the Needs-Reboot view's rows (the
+/// backend sends only the reboot-needing subset there) and the drill-down's
+/// header. Mirrors `rows::DeviceSummary`; the rollup fields default so an older
+/// backend's payload still loads.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSummary {
+    /// What the Needs Reboot tab's device selection and the drill-down are keyed by.
+    /// Always sent by the backend; defaulted only so a hand-built sample without it
+    /// still deserializes.
+    #[serde(default)]
+    pub device_id: i64,
     pub device_name: String,
     pub organization: String,
     pub location: Option<String>,
     pub device_role: Option<String>,
     pub os_name: Option<String>,
+    /// Counted in the action bar's summary: an action against an offline device is
+    /// queued, not run.
+    #[serde(default)]
+    pub offline: bool,
     pub pending_count: usize,
+    #[serde(default)]
+    pub needs_reboot: bool,
+    #[serde(default)]
+    pub rollup_scope: RollupScope,
+    #[serde(default)]
+    pub pending_by_severity: SeverityCounts,
+    /// Pending Critical/Important past the SLA window (or undated).
+    #[serde(default)]
+    pub aged_critical: usize,
+    /// `None` when the query did not include the Failed status — unknown, not zero.
+    #[serde(default)]
+    pub failed_installs: Option<usize>,
+    #[serde(default)]
+    pub last_contact: Option<String>,
+}
+
+/// Whether a device is in the population the fleet-health rollups describe, and
+/// if not, why. Mirrors `rows::RollupScope`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RollupScope {
+    #[default]
+    Included,
+    Offline,
+    NonPatchable,
+}
+
+/// One device's drill-down, served from the backend's cached result by
+/// `device_detail`. Mirrors `rows::DeviceDetail`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDetail {
+    /// `None` only for rows with no device in the scoped inventory.
+    pub device: Option<DeviceSummary>,
+    /// The device's rows as the Patches tab filters them, capped by the backend.
+    pub rows: Vec<PatchRow>,
+    pub rows_total: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -155,6 +213,12 @@ pub struct ComplianceBucket {
     pub compliance_pct: f64,
     pub pending_critical: usize,
     pub aged_critical: usize,
+    /// Pending approval (vendor status `MANUAL`), any severity.
+    #[serde(default)]
+    pub awaiting_approval: usize,
+    /// `APPROVED` and still not installed, any severity.
+    #[serde(default)]
+    pub approved_not_installed: usize,
 }
 
 /// Per-OS compliance row for the Compliance tab's "Compliance by OS" section.
@@ -168,6 +232,35 @@ pub struct OsCompliance {
     pub compliance_pct: f64,
     pub pending_critical: usize,
     pub aged_critical: usize,
+    #[serde(default)]
+    pub awaiting_approval: usize,
+    #[serde(default)]
+    pub approved_not_installed: usize,
+}
+
+/// Mirror of the backend `rows::ApprovalBacklog`: fleet totals of the two approval
+/// columns and the devices whose approved patches are not installing. The
+/// `stuck_devices` list is capped on the wire; `stuck_devices_total` is not.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ApprovalBacklog {
+    pub awaiting_approval: usize,
+    pub approved_not_installed: usize,
+    pub stuck_after_days: i64,
+    pub stuck_patches: usize,
+    pub stuck_devices_total: usize,
+    pub stuck_devices: Vec<StuckDevice>,
+}
+
+/// Mirror of the backend `rows::StuckDevice` (its `deviceId` and
+/// `oldestFirstSeenTs` are not rendered, so not mirrored).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StuckDevice {
+    pub device_name: String,
+    pub organization: String,
+    pub patches: usize,
+    pub oldest_first_seen: Option<String>,
 }
 
 // Backend also sends severityRank and latestFailureTs; serde ignores undeclared
@@ -188,6 +281,36 @@ pub struct FailureGroup {
     pub latest_failure: Option<String>,
 }
 
+/// Mirror of the backend's `changes::RunChanges`: the diff against the previous run
+/// with the same tenant and facets. Counts are exact; the lists are capped.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunChanges {
+    /// When the run compared against ran. `None`: no previous comparable run.
+    pub previous_at: Option<String>,
+    pub tracks_pending: bool,
+    pub tracks_failed: bool,
+    pub too_large: bool,
+    pub new_pending: usize,
+    pub resolved: usize,
+    pub newly_failed: usize,
+    pub new_pending_items: Vec<ChangeItem>,
+    pub resolved_items: Vec<ChangeItem>,
+    pub newly_failed_items: Vec<ChangeItem>,
+}
+
+/// One patch on one device in a change list (backend `changes::ChangeItem`).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChangeItem {
+    pub device_id: i64,
+    pub device_name: String,
+    pub patch_type: String,
+    pub kb: Option<String>,
+    pub name: String,
+    pub severity: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SeverityCounts {
@@ -201,12 +324,118 @@ pub struct SeverityCounts {
     pub unknown: usize,
 }
 
+/// One device's pending backlog. Mirrors `rows::DeviceBacklog`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceBacklog {
+    pub device_id: i64,
+    pub device_name: String,
+    pub organization: String,
+    pub os_name: Option<String>,
+    pub pending: SeverityCounts,
+    pub pending_total: usize,
+    /// Pending records of any severity past their own band's SLA (undated counts).
+    pub past_sla: usize,
+    pub oldest_first_seen: Option<String>,
+    /// The newest `timestamp` on the device's pending records — a collection time,
+    /// not a last-contact time.
+    pub latest_collected: Option<String>,
+}
+
+/// A capped device list plus how many devices qualified. Mirrors
+/// `rows::DeviceBacklogList`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceBacklogList {
+    #[serde(default)]
+    pub devices: Vec<DeviceBacklog>,
+    #[serde(default)]
+    pub devices_total: usize,
+}
+
+/// One first-seen → installed distribution, in days. Mirrors `rows::InstallLatency`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallLatency {
+    pub label: String,
+    pub samples: usize,
+    pub median_days: f64,
+    pub p90_days: f64,
+}
+
+/// Mirrors `rows::TimeToInstall`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TimeToInstall {
+    pub installs_queried: bool,
+    pub overall: Option<InstallLatency>,
+    pub by_organization: Vec<InstallLatency>,
+    pub by_severity: Vec<InstallLatency>,
+    pub installed_records: usize,
+    pub excluded_records: usize,
+}
+
+/// Per-severity SLA overrides in days; `None` = use the default. Mirrors
+/// `settings::SlaBySeverity` and round-trips through the Settings panel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SlaBySeverity {
+    pub critical: Option<i64>,
+    pub important: Option<i64>,
+    pub security: Option<i64>,
+    pub moderate: Option<i64>,
+    pub recommended: Option<i64>,
+    pub low: Option<i64>,
+    pub optional: Option<i64>,
+}
+
+/// One overridable band: its label, and how to read and write its override.
+pub type SlaBand = (
+    &'static str,
+    fn(&SlaBySeverity) -> Option<i64>,
+    fn(&mut SlaBySeverity) -> &mut Option<i64>,
+);
+
+impl SlaBySeverity {
+    /// Every overridable band, most urgent first. `Unknown` has no override — it
+    /// always takes the default, as in the backend.
+    pub const BANDS: [SlaBand; 7] = [
+        ("Critical", |s| s.critical, |s| &mut s.critical),
+        ("Important", |s| s.important, |s| &mut s.important),
+        ("Security", |s| s.security, |s| &mut s.security),
+        ("Moderate", |s| s.moderate, |s| &mut s.moderate),
+        ("Recommended", |s| s.recommended, |s| &mut s.recommended),
+        ("Low", |s| s.low, |s| &mut s.low),
+        ("Optional", |s| s.optional, |s| &mut s.optional),
+    ];
+}
+
+/// The SLA policy a result was computed under. Mirrors `settings::SlaPolicy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SlaPolicy {
+    pub default_days: i64,
+    pub by_severity: SlaBySeverity,
+}
+
+impl Default for SlaPolicy {
+    fn default() -> Self {
+        Self {
+            default_days: 30,
+            by_severity: SlaBySeverity::default(),
+        }
+    }
+}
+
 /// Which key the Patches view groups its rows by. Mirrors `rows::GroupBy`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum GroupBy {
     Device,
     Patch,
+    /// Third-party rows by product identifier (every version in one group); every
+    /// other row by its patch key.
+    Product,
 }
 
 /// One collapsed group header. Mirrors `rows::PatchGroup`. Members are fetched
@@ -272,6 +501,22 @@ pub struct QueryResult {
     pub severity_by_org: Vec<OrgSeverity>,
     /// Pending-patch age histogram for the dashboard charts.
     pub age_buckets: Vec<AgeBucket>,
+    /// The worst online devices by pending backlog (capped).
+    #[serde(default)]
+    pub worst_devices: DeviceBacklogList,
+    /// Offline devices still listed with pending patches (capped).
+    #[serde(default)]
+    pub offline_backlog: DeviceBacklogList,
+    /// First seen → installed, by organization and severity.
+    #[serde(default)]
+    pub time_to_install: TimeToInstall,
+    /// The SLA policy this result's aging figures were computed under — may differ
+    /// from Settings if the policy changed since.
+    #[serde(default)]
+    pub sla_policy: SlaPolicy,
+    /// Approval workflow totals and the stuck-approval devices.
+    #[serde(default)]
+    pub approvals: ApprovalBacklog,
     pub devices_total: usize,
     /// How many of `devices_total` are offline. The compliance rollups exclude them
     /// from both the denominator and the pending counts, so the Devices column of the
@@ -287,6 +532,9 @@ pub struct QueryResult {
     /// Which patch families the fleet-health rollups actually cover.
     #[serde(default)]
     pub patch_families: PatchFamilies,
+    /// What changed since the previous comparable run (backend `changes::RunChanges`).
+    #[serde(default)]
+    pub changes: RunChanges,
     pub generated_at: String,
     /// When the underlying whole-fleet patch data was last fetched (vs. when this
     /// re-filter was computed). Drives the "patch data as of …" label.
@@ -319,6 +567,8 @@ pub struct SettingsView {
     pub callback_port: u16,
     pub install_window_days: i64,
     pub sla_days: i64,
+    #[serde(default)]
+    pub sla_by_severity: SlaBySeverity,
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
@@ -419,7 +669,9 @@ pub struct RowSort {
     pub desc: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+// `Deserialize` only so a shared view link can name a sort column by the same
+// spelling the backend uses; see `util::view_link`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RowSortKey {
     Organization,
@@ -455,6 +707,7 @@ pub struct SaveSettingsArgs {
     pub callback_port: u16,
     pub install_window_days: i64,
     pub sla_days: i64,
+    pub sla_by_severity: SlaBySeverity,
     pub client_secret: Option<String>,
     pub clear_secret: bool,
     pub auto_check_updates: bool,
@@ -591,14 +844,14 @@ impl ActionKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum RebootMode {
     Normal,
     Forced,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RebootChoice {
     #[default]
@@ -654,14 +907,18 @@ impl JobState {
     }
 }
 
-// The backend also sends batchId, deviceId, dispatchedTs and finishedAt; serde
-// ignores fields not declared here. The correlators (`activityId`/`seriesUid`) ARE
-// kept: NinjaOne v2 has no script-output endpoint, so they are how an operator
-// finds the run in the NinjaOne console.
+// The backend also sends dispatchedTs and finishedAt; serde ignores fields not
+// declared here. The correlators (`activityId`/`seriesUid`) ARE kept: NinjaOne v2
+// has no script-output endpoint, so they are how an operator finds the run in the
+// NinjaOne console.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobReport {
     pub id: u64,
+    /// Groups a batch's rows for "Retry failed".
+    pub batch_id: u64,
+    /// The device a retry is dispatched to.
+    pub device_id: i64,
     pub device_name: String,
     pub organization: String,
     pub kind: ActionKind,
@@ -673,6 +930,30 @@ pub struct JobReport {
     pub activity_id: Option<i64>,
     pub series_uid: Option<String>,
     pub exit_code: Option<i32>,
+    /// What a retry is rebuilt from. `None` when the backend recorded no request.
+    #[serde(default)]
+    pub request: Option<JobRequest>,
+}
+
+/// Mirror of the backend `actions::JobRequest`: the inputs of the dispatch that
+/// produced one job, for that one device. `kind` and `dry_run` live on the
+/// [`JobReport`]; the maintenance-window override is deliberately not recorded.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobRequest {
+    pub script_id: Option<i64>,
+    pub script_uid: Option<String>,
+    pub script_name: Option<String>,
+    pub parameters: Option<String>,
+    pub run_as: Option<String>,
+    #[serde(default)]
+    pub reboot: RebootChoice,
+    pub reboot_mode: Option<RebootMode>,
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub include_offline: bool,
+    #[serde(default)]
+    pub targets: Vec<String>,
 }
 
 impl JobReport {
@@ -714,8 +995,42 @@ pub struct ActionPlan {
     pub reboot_expected: bool,
     pub dry_run: bool,
     pub parameters_preview: Option<String>,
+    /// What a native "Apply all" will install, per device. Absent for every other
+    /// kind (and from a backend that predates it).
+    #[serde(default)]
+    pub apply_preview: Option<ApplyPreview>,
+    /// This dispatch goes out only because it overrides a closed maintenance window.
+    #[serde(default)]
+    pub window_overridden: bool,
     /// Absent when the plan is blocked — there is nothing to confirm.
     pub confirm_token: Option<String>,
+}
+
+/// Mirror of the backend `actions::ApplyPreview`: what NinjaOne's apply endpoint
+/// will install, counted from the cached whole-fleet current patches.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPreview {
+    /// `"OS"` or `"software"`.
+    pub family: String,
+    /// False when the patch data was not loaded: the counts are unknown, not zero.
+    pub known: bool,
+    pub devices: Vec<ApplyPreviewDevice>,
+    pub approved_total: usize,
+    pub pending_manual_total: usize,
+    pub data_fetched_at: Option<String>,
+}
+
+/// Mirror of the backend `actions::ApplyPreviewDevice`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPreviewDevice {
+    pub device_id: i64,
+    pub device_name: String,
+    /// `APPROVED` records — what the apply installs.
+    pub approved: usize,
+    /// `MANUAL` records — pending approval in NinjaOne, which the apply skips.
+    pub pending_manual: usize,
 }
 
 impl ActionPlan {
@@ -746,6 +1061,11 @@ pub struct ScriptSummary {
     /// script may be offered per-KB targeting — anything else installs whatever the
     /// device needs, and offering it would misrepresent what runs.
     pub accepts_kb_allow_list: bool,
+    /// Whether the library entry declares a `dryRun` variable. A dry run only
+    /// appends `dryRun=true`, so a script that doesn't read it would run for real;
+    /// the backend refuses such a dry run and the action bar says so up front.
+    #[serde(default)]
+    pub accepts_dry_run: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -825,6 +1145,8 @@ pub struct AuditRecord {
     pub detail: String,
     pub outcome: String,
     pub dry_run: bool,
+    /// The dispatch overrode a closed maintenance window.
+    pub window_override: bool,
     pub batch_id: Option<u64>,
     pub exit_code: Option<i32>,
     /// Written by a build that used the pre-`paths::app_dir` directory.
@@ -856,6 +1178,38 @@ pub struct RunRecord {
     /// keys (org A vs org B, or a severity-only run) are not one series. Empty on
     /// lines written before the key existed.
     pub scope_key: String,
+    /// Per-organization numbers, largest organizations first and capped backend-side
+    /// (`orgs_total` says how many there were). Empty on old lines, and on lines
+    /// the backend returns without detail (all but its newest few hundred).
+    pub orgs: Vec<OrgRun>,
+    pub orgs_total: usize,
+}
+
+/// One organization in one run (backend `history::OrgRun`). Short keys on the wire
+/// because the entry repeats per org on every history line.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OrgRun {
+    #[serde(rename = "o")]
+    pub organization: String,
+    #[serde(rename = "n")]
+    pub devices_in_scope: usize,
+    #[serde(rename = "c")]
+    pub devices_compliant: usize,
+    #[serde(rename = "p")]
+    pub pending: usize,
+    #[serde(rename = "pc")]
+    pub pending_critical: usize,
+    #[serde(rename = "ac")]
+    pub aged_critical: usize,
+}
+
+impl OrgRun {
+    /// Same rule as [`RunRecord::compliance_pct`]: an empty org has no percentage.
+    pub fn compliance_pct(&self) -> Option<f64> {
+        (self.devices_in_scope > 0)
+            .then(|| self.devices_compliant as f64 * 100.0 / self.devices_in_scope as f64)
+    }
 }
 
 impl RunRecord {

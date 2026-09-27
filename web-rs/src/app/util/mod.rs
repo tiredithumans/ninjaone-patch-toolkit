@@ -9,22 +9,40 @@
 //! `state.rs` lands in one of these files, never inline in a `#[component]`.
 
 mod changelog;
+mod changes;
+mod columns;
+mod device;
 mod filters;
 mod format;
+mod guardrails;
 mod jobs;
 mod pager;
 mod query;
+mod refresh;
 mod selection;
+mod shortcuts;
+mod sla;
 mod sort;
+mod theme;
+mod view_link;
 
 pub(crate) use changelog::*;
+pub(crate) use changes::*;
+pub(crate) use columns::*;
+pub(crate) use device::*;
 pub(crate) use filters::*;
 pub(crate) use format::*;
+pub(crate) use guardrails::*;
 pub(crate) use jobs::*;
 pub(crate) use pager::*;
 pub(crate) use query::*;
+pub(crate) use refresh::*;
 pub(crate) use selection::*;
+pub(crate) use shortcuts::*;
+pub(crate) use sla::*;
 pub(crate) use sort::*;
+pub(crate) use theme::*;
+pub(crate) use view_link::*;
 
 #[cfg(test)]
 mod tests;

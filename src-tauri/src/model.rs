@@ -53,9 +53,22 @@ pub struct Device {
     pub offline: Option<bool>,
     #[serde(default)]
     pub os: Option<OsInfo>,
+    /// `lastContact` on the `/v2/devices-detailed` records: when the agent last
+    /// checked in, as epoch seconds (a fractional number on the wire). Read only for
+    /// display — the device drill-down and the workbook's Devices sheet — and never
+    /// to decide anything, since `offline` is the vendor's own verdict on reachability.
+    /// Absent on a sparse record, which renders blank rather than as the epoch.
+    #[serde(default)]
+    pub last_contact: Option<f64>,
 }
 
 impl Device {
+    /// [`Device::last_contact`] as a UTC instant, normalised the same way the patch
+    /// timestamps are (a millisecond value is scaled down, not read as year 58000).
+    pub fn last_contact_at(&self) -> Option<DateTime<Utc>> {
+        self.last_contact.and_then(unix_to_datetime)
+    }
+
     pub fn label(&self) -> &str {
         self.display_name
             .as_deref()
@@ -281,6 +294,13 @@ pub struct Patch {
     pub collected_timestamp: Option<f64>,
     #[serde(default, alias = "installedAt")]
     pub installed_timestamp: Option<f64>,
+    /// `productIdentifier` on `DeviceSoftwarePatch` — the uuid of the third-party
+    /// *product*, shared by every version of it. `DeviceOSPatch` declares no such
+    /// field, so OS records always leave it `None`. It is what lets the Patches view
+    /// group "Google Chrome 141.0.7390.55" and "Google Chrome 141.0.7390.66" as one
+    /// product instead of one group per version string (`rows::GroupBy::Product`).
+    #[serde(default)]
+    pub product_identifier: Option<String>,
 }
 
 impl Patch {
@@ -483,6 +503,9 @@ pub struct PatchRow {
     pub installed_date: Option<String>,
     pub first_seen_ts: Option<i64>,
     pub installed_ts: Option<i64>,
+    /// [`Patch::product_identifier`], shared across the row set like the other
+    /// repeated strings. `None` on every OS row.
+    pub product_identifier: Option<Arc<str>>,
 }
 
 /// How `POST /v2/device/{id}/reboot/{mode}` is addressed. `Forced` skips the
@@ -676,6 +699,29 @@ impl AutomationScript {
             .any(matches)
             || self.script_parameters.iter().any(|p| matches(p))
     }
+
+    /// Whether this script can be told to preview — i.e. it declares a `dryRun`
+    /// script variable or parameter (case-insensitive).
+    ///
+    /// A toolkit dry run only appends `dryRun=true` to the parameters; NinjaOne has
+    /// no preview mode of its own. A script that never reads it runs for real, so
+    /// `plan()` allows a dry run only for a script that declares it.
+    ///
+    /// Stricter than [`accepts_kb_allow_list`](Self::accepts_kb_allow_list)'s
+    /// substring match: a variable must be *named* `dryRun`, and a parameter line
+    /// must contain `dryRun` as a whole token (`-DryRun`, `dryRun=$true`), so a
+    /// `NoDryRunSupport` flag cannot read as a declaration.
+    pub fn accepts_dry_run(&self) -> bool {
+        const DRY_RUN: &str = "dryrun";
+        self.script_variables
+            .iter()
+            .filter_map(|v| v.name.as_deref())
+            .any(|n| n.trim().eq_ignore_ascii_case(DRY_RUN))
+            || self.script_parameters.iter().any(|p| {
+                p.split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|token| token.eq_ignore_ascii_case(DRY_RUN))
+            })
+    }
 }
 
 /// Credential choices available for `runAs` on a given device.
@@ -713,6 +759,7 @@ mod tests {
             node_class: None,
             offline: None,
             os: None,
+            last_contact: None,
         }
     }
 
@@ -920,6 +967,34 @@ mod tests {
         assert!(!unrelated.accepts_kb_allow_list());
     }
 
+    /// A dry run is honest only for a script that reads `dryRun`; anything else
+    /// runs for real under a "Dry run" label, so the match must not over-accept.
+    #[test]
+    fn dry_run_support_is_detected_from_a_declared_variable_or_parameter_token() {
+        let var = |name: &str| AutomationScript {
+            script_variables: vec![ScriptVariable {
+                name: Some(name.into()),
+            }],
+            ..script()
+        };
+        let param = |line: &str| AutomationScript {
+            script_parameters: vec![line.into()],
+            ..script()
+        };
+        assert!(var("dryRun").accepts_dry_run());
+        assert!(var("  DRYRUN ").accepts_dry_run());
+        assert!(param("-DryRun").accepts_dry_run());
+        assert!(param("kbAllowList=$kbs dryRun=$true").accepts_dry_run());
+
+        assert!(!script().accepts_dry_run(), "declares nothing");
+        assert!(!var("dryRunMode").accepts_dry_run(), "a different variable");
+        assert!(
+            !param("-NoDryRunSupport").accepts_dry_run(),
+            "a substring is not a declaration"
+        );
+        assert!(!var("kbAllowList").accepts_dry_run());
+    }
+
     #[test]
     fn severity_from_raw_maps_ninjaones_own_classifications() {
         // Both vocabularies arrive on the same field, in both cases. `security` is
@@ -976,6 +1051,7 @@ mod tests {
             patch_type: None,
             collected_timestamp: Some(ts),
             installed_timestamp: None,
+            product_identifier: None,
         }
     }
 

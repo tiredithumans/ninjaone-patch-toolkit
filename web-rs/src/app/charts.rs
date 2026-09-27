@@ -24,9 +24,9 @@ use crate::types::{OrgSeverity, SeverityCounts};
 /// band's colour *and* again as Unknown, overflowing the track and overstating every
 /// visible width, with nothing failing. The backend hit exactly this and fixed it the
 /// same way (`rows::SeverityCounts::BANDS`); this is the frontend's copy of that fix.
-type SevBand = (&'static str, &'static str, fn(&SeverityCounts) -> usize);
+pub(crate) type SevBand = (&'static str, &'static str, fn(&SeverityCounts) -> usize);
 
-const SEV_BANDS: [SevBand; 8] = [
+pub(crate) const SEV_BANDS: [SevBand; 8] = [
     ("Critical", "seg-critical", |c| c.critical),
     ("Important", "seg-important", |c| c.important),
     ("Security", "seg-security", |c| c.security),
@@ -143,6 +143,17 @@ fn severity_segments(c: &SeverityCounts, track: f64) -> Vec<Segment> {
         x += width;
     }
     out
+}
+
+/// The non-zero bands of one breakdown as (label, swatch class, count), most urgent
+/// first — for a table cell that shows a device's pending backlog inline. Derived
+/// from [`SEV_BANDS`] like the chart, so the two cannot disagree about the bands.
+pub(crate) fn severity_breakdown(c: &SeverityCounts) -> Vec<(&'static str, &'static str, usize)> {
+    SEV_BANDS
+        .iter()
+        .map(|(label, class, read)| (*label, *class, read(c)))
+        .filter(|(_, _, n)| *n > 0)
+        .collect()
 }
 
 /// The compliance overview charts (compliance / severity / age) shown at the top of
@@ -536,6 +547,25 @@ mod tests {
     }
 
     #[test]
+    fn severity_breakdown_lists_non_zero_bands_most_urgent_first() {
+        let counts = SeverityCounts {
+            low: 2,
+            critical: 1,
+            unknown: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            severity_breakdown(&counts),
+            [
+                ("Critical", "seg-critical", 1),
+                ("Low", "seg-low", 2),
+                ("Unknown", "seg-unknown", 4)
+            ]
+        );
+        assert!(severity_breakdown(&SeverityCounts::default()).is_empty());
+    }
+
+    #[test]
     fn severity_segments_empty_when_no_pending() {
         assert!(severity_segments(&SeverityCounts::default(), 400.0).is_empty());
     }
@@ -571,7 +601,16 @@ pub(crate) fn TrendLine(
     let delta = last - first;
     let end = points.last().copied().unwrap_or((0.5, 0.5));
     let delta_class = util::trend_verdict(delta, percent, higher_is_better).css_class();
-    let delta_label = util::trend_delta_label(delta, percent);
+    let span_label = format!(
+        "{} over {} runs",
+        util::trend_delta_label(delta, percent),
+        values.len()
+    );
+    // The headline change is against the run just before, not the start of the
+    // line: "did last night's window land" is a question about one step.
+    let step = util::delta_vs_previous(&values).unwrap_or(0.0);
+    let step_class = util::trend_verdict(step, percent, higher_is_better).css_class();
+    let step_label = util::trend_delta_label(step, percent);
     // The capped formatter: a compliance of 99.96 must not print as "100.0%".
     let fmt = move |v: f64| {
         if percent {
@@ -585,7 +624,9 @@ pub(crate) fn TrendLine(
         <div class="trend-card">
             <div class="trend-head">
                 <span class="trend-title">{title}</span>
-                <span class=delta_class>{delta_label}</span>
+                <span class=step_class title="Change since the previous comparable run">
+                    {step_label}
+                </span>
             </div>
             <svg class="trend-spark" viewBox="0 0 300 60" role="img" aria-label=format!(
                 "{title}: {} then {}", fmt(first), fmt(last),
@@ -598,6 +639,7 @@ pub(crate) fn TrendLine(
             </svg>
             <div class="trend-foot">
                 <span>{fmt(first)}</span>
+                <span class=delta_class>{span_label}</span>
                 <span class="trend-now">{fmt(last)}</span>
             </div>
         </div>

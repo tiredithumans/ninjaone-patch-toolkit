@@ -49,6 +49,11 @@ pub fn audit_path() -> Result<PathBuf> {
     Ok(app_dir()?.join("action-audit.jsonl"))
 }
 
+/// The main window's remembered size and position (`window_state`).
+pub fn window_state_path() -> Result<PathBuf> {
+    Ok(app_dir()?.join("window-state.json"))
+}
+
 /// Where the audit trail was written before [`app_dir`] single-sourced the
 /// qualifier. Read-only: nothing appends here any more, but an install that
 /// dispatched actions on an older build still has its history in this file and it

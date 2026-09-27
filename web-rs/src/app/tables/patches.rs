@@ -21,6 +21,18 @@ const PATCH_COLUMNS: [(&str, RowSortKey); 12] = [
     ("Installed", RowSortKey::InstalledDate),
 ];
 
+/// Columns the chooser cannot hide (by `util::column_id`): without the device and
+/// the patch a row no longer says what it is. The selection checkbox sits outside
+/// `PATCH_COLUMNS` and is never hideable either.
+const REQUIRED_COLUMNS: [&str; 2] = ["device", "patch"];
+
+/// The class the column chooser's stylesheet targets.
+const PATCHES_TABLE_CLASS: &str = "patches-table";
+
+fn patch_column_labels() -> Vec<&'static str> {
+    PATCH_COLUMNS.iter().map(|(label, _)| *label).collect()
+}
+
 #[component]
 pub(super) fn PatchesTable() -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -59,14 +71,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
     };
     // Page navigation updates the index and fetches that page on demand — of
     // headers or of rows, matching what the view is actually showing.
-    let go_to = Callback::new(move |target: usize| {
-        state.query.patches_page.set(target);
-        if grouped() {
-            state.fetch_groups(target);
-        } else {
-            state.fetch_page(target);
-        }
-    });
+    let go_to = Callback::new(move |target: usize| state.go_to_patches_page(target));
 
     view! {
         <Show
@@ -79,6 +84,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
                 reflects="every patch matching your device scope and all patch filters."
                 filters="Device scope + Type, Status, Severity, Search, First-seen and Installed-within are all applied."
             />
+            <ChangesPanel/>
             <Show
                 when=move || { rows_total() > 0 }
                 fallback=|| {
@@ -98,13 +104,32 @@ pub(super) fn PatchesTable() -> impl IntoView {
                 <Show when=move || state.action_surface_visible()>
                     <ActionBar/>
                 </Show>
-                <ViewModeSwitch/>
+                <div class="row patches-toolbar">
+                    <ViewModeSwitch/>
+                    <Show when=move || state.query.group_by.get().is_none()>
+                        <ColumnMenu/>
+                    </Show>
+                </div>
                 <Show when=move || state.query.group_by.get().is_some()>
                     <GroupedPatches/>
                 </Show>
                 <Show when=move || state.query.group_by.get().is_none()>
                 <div class="table-wrap">
-                <table>
+                // Hides the chosen columns by position; see `util::columns`.
+                <style>
+                    {move || {
+                        state.ui.hidden_patch_columns.with(|hidden| {
+                            util::hidden_columns_css(
+                                PATCHES_TABLE_CLASS,
+                                &patch_column_labels(),
+                                1,
+                                &REQUIRED_COLUMNS,
+                                hidden,
+                            )
+                        })
+                    }}
+                </style>
+                <table class=PATCHES_TABLE_CLASS>
                     <thead>
                         <tr>
                             // Deliberately outside PATCH_COLUMNS: the select column
@@ -161,7 +186,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                             <td>{r.organization}</td>
                                             <td>{r.location.unwrap_or_default()}</td>
                                             <td>{r.device_role.unwrap_or_default()}</td>
-                                            <td>{r.device_name}</td>
+                                            <td><DeviceLink device_id=r.device_id name=r.device_name/></td>
                                             <td>{r.os_name.unwrap_or_default()}</td>
                                             <td>{r.patch_type}</td>
                                             <td>{r.kb.unwrap_or_default()}</td>
@@ -188,15 +213,69 @@ pub(super) fn PatchesTable() -> impl IntoView {
     }
 }
 
+/// Show/hide the Patches table's columns. A `<details>` disclosure, so it opens
+/// and closes from the keyboard with no focus management of its own.
+#[component]
+fn ColumnMenu() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let hidden = state.ui.hidden_patch_columns;
+    view! {
+        <details class="column-menu">
+            <summary class="btn btn-ghost">"Columns"</summary>
+            <div class="column-menu__panel" role="group" aria-label="Visible columns">
+                {PATCH_COLUMNS
+                    .iter()
+                    .map(|&(label, _)| {
+                        let id = util::column_id(label);
+                        let required = REQUIRED_COLUMNS.contains(&id.as_str());
+                        let id_checked = id.clone();
+                        view! {
+                            <label class="column-menu__item">
+                                <input
+                                    type="checkbox"
+                                    prop:disabled=required
+                                    prop:checked=move || {
+                                        hidden
+                                            .with(|h| {
+                                                util::column_visible(&id_checked, &REQUIRED_COLUMNS, h)
+                                            })
+                                    }
+                                    on:change=move |_| {
+                                        hidden.update(|h| util::toggle_column(h, &id, &REQUIRED_COLUMNS));
+                                        hidden.with_untracked(|h| {
+                                            api::set_ui_pref_str(
+                                                api::PREF_PATCH_COLUMNS,
+                                                &util::serialize_hidden_columns(h),
+                                            )
+                                        });
+                                    }
+                                />
+                                {label}
+                                {required.then_some(" (always shown)")}
+                            </label>
+                        }
+                    })
+                    .collect_view()}
+                <p class="column-menu__note">
+                    "Only this table on screen — the Excel export always writes every column."
+                </p>
+            </div>
+        </details>
+    }
+}
+
 /// Flat / By device / By patch switch for the Patches tab. Grouping is a backend
 /// re-query over the cached rows, not a client-side regroup of the visible page.
 #[component]
 fn ViewModeSwitch() -> impl IntoView {
     let state = expect_context::<AppState>();
-    const MODES: [(Option<GroupBy>, &str); 3] = [
+    // "By product" folds every version of a third-party product (NinjaOne's
+    // `productIdentifier`) into one group; OS patches group as they do by patch.
+    const MODES: [(Option<GroupBy>, &str); 4] = [
         (None, "Flat"),
         (Some(GroupBy::Device), "By device"),
         (Some(GroupBy::Patch), "By patch"),
+        (Some(GroupBy::Product), "By product"),
     ];
     view! {
         <div class="view-modes" role="group" aria-label="Patch view mode">

@@ -43,6 +43,11 @@ pub struct AuditEntry {
     /// Redacted copy of what was sent — see [`redact_parameters`].
     pub parameters: Option<String>,
     pub dry_run: bool,
+    /// True when this dispatch went out only because the operator overrode a closed
+    /// maintenance window. Omitted otherwise, so the log's shape is unchanged for
+    /// every ordinary dispatch and a bypass stands out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub window_override: bool,
     /// First 8 characters of the confirmation token, enough to tie a dispatch back
     /// to the plan the operator approved without storing the token itself.
     pub confirm_token_prefix: Option<String>,
@@ -75,6 +80,8 @@ impl AuditEntry {
             detail: job.detail.clone(),
             parameters: None,
             dry_run: job.dry_run,
+            // Already on the opening record, like the parameters.
+            window_override: false,
             confirm_token_prefix: None,
             outcome: Self::outcome_of(&job.state),
             activity_id: job.activity_id,
@@ -375,12 +382,27 @@ mod tests {
             detail: "Apply OS patches".into(),
             parameters: None,
             dry_run: false,
+            window_override: false,
             confirm_token_prefix: None,
             outcome: "dispatching".into(),
             activity_id: None,
             series_uid: None,
             exit_code: None,
         }
+    }
+
+    /// An override of a closed maintenance window is on the record; an ordinary
+    /// dispatch's record keeps the shape it always had.
+    #[test]
+    fn a_window_override_is_written_only_when_it_happened() {
+        let ordinary = serde_json::to_value(sample_entry(1)).expect("json");
+        assert!(ordinary.get("windowOverride").is_none(), "{ordinary}");
+        let overridden = serde_json::to_value(AuditEntry {
+            window_override: true,
+            ..sample_entry(2)
+        })
+        .expect("json");
+        assert_eq!(overridden["windowOverride"], serde_json::json!(true));
     }
 
     /// The log is append-only JSON lines and creates its own directory. None of that
@@ -630,6 +652,7 @@ mod tests {
             activity_id: Some(11),
             series_uid: None,
             exit_code: Some(1),
+            request: None,
         };
         let entry = AuditEntry::closing(&job, "https://x".into(), None);
         assert_eq!(entry.outcome, "Failed: 400 not applicable");

@@ -19,7 +19,9 @@
     "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
         "title": "NinjaOne Patch Toolkit",
+        "visible": false,
         "width": 1360,
         "height": 1000,
         "minWidth": 1024,

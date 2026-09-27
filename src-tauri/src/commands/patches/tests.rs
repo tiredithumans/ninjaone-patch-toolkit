@@ -15,6 +15,12 @@ fn empty_summary() -> QuerySummary {
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
+            worst_devices: Default::default(),
+            offline_backlog: Default::default(),
+            time_to_install: Default::default(),
+            sla_policy: Default::default(),
+            instance: "https://app.ninjarmm.com".into(),
+            approvals: Default::default(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,
@@ -23,6 +29,7 @@ fn empty_summary() -> QuerySummary {
                 software: true,
             },
             scope: Default::default(),
+            changes: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         },
@@ -117,7 +124,8 @@ fn install_results_route_to_history_and_the_rest_narrow_the_current_feed() {
         args_with(vec![PatchStatus::Failed], PatchType::All),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert!(history.want_installs);
     // The set carries FAILED too: it narrows only the *rows* built from the
     // current feed (the rollups take the unnarrowed feed), and a FAILED record
@@ -132,7 +140,8 @@ fn install_results_route_to_history_and_the_rest_narrow_the_current_feed() {
         args_with(vec![PatchStatus::Pending], PatchType::All),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert!(
         !pending.want_installs,
         "no history fetch for a pending query"
@@ -149,7 +158,8 @@ fn a_single_install_status_is_pushed_down_and_two_are_not() {
         args_with(vec![PatchStatus::Failed], PatchType::All),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(one.install_status, Some("FAILED"));
 
     let both = QueryPlan::build(
@@ -159,7 +169,8 @@ fn a_single_install_status_is_pushed_down_and_two_are_not() {
         ),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(both.install_status, None);
     assert_eq!(both.install_status_set.len(), 2);
 }
@@ -179,9 +190,10 @@ fn the_install_window_is_clamped_against_hand_edited_settings() {
             },
             30,
             now,
-        );
+        )
+        .expect("a valid plan");
         assert_eq!(
-            plan.installed_after,
+            plan.install_window.after,
             (now - Duration::days(expect_days)).timestamp(),
             "requested {requested:?} should clamp to {expect_days} day(s)"
         );
@@ -194,11 +206,86 @@ fn the_install_window_is_clamped_against_hand_edited_settings() {
         },
         30,
         now,
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(
-        huge.installed_after,
+        huge.install_window.after,
         (now - Duration::days(MAX_WINDOW_DAYS)).timestamp()
     );
+}
+
+/// A custom install range replaces the relative lookback outright — the per-query
+/// override and the configured default both — and a malformed one fails the plan
+/// instead of running under a window the export would misstate.
+#[test]
+fn an_absolute_install_range_replaces_the_relative_lookback() {
+    let now = fixed_now();
+    let after = (now - Duration::days(60)).timestamp();
+    let before = (now - Duration::days(31)).timestamp();
+    let plan = QueryPlan::build(
+        PatchQueryArgs {
+            filter: FilterParams {
+                installed_after: Some(after),
+                installed_before: Some(before),
+                ..FilterParams::default()
+            },
+            install_after_days: Some(7),
+            ..args_with(vec![PatchStatus::Installed], PatchType::All)
+        },
+        30,
+        now,
+    )
+    .expect("a valid range");
+    assert_eq!(
+        plan.install_window,
+        InstallWindow {
+            after,
+            before: Some(before),
+            relative_days: None,
+        }
+    );
+
+    let relative = QueryPlan::build(
+        args_with(vec![PatchStatus::Installed], PatchType::All),
+        30,
+        now,
+    )
+    .expect("a valid plan");
+    assert_eq!(relative.install_window.before, None);
+    assert_eq!(relative.install_window.relative_days, Some(30));
+
+    let inverted = QueryPlan::build(
+        PatchQueryArgs {
+            filter: FilterParams {
+                installed_after: Some(before),
+                installed_before: Some(after),
+                ..FilterParams::default()
+            },
+            ..args_with(vec![PatchStatus::Installed], PatchType::All)
+        },
+        30,
+        now,
+    );
+    assert!(
+        inverted.is_err(),
+        "an inverted range is refused, not swapped"
+    );
+
+    // The same stale range on a Pending-only query is never used (and its control
+    // is hidden), so it must not fail the query.
+    let pending = QueryPlan::build(
+        PatchQueryArgs {
+            filter: FilterParams {
+                installed_after: Some(before),
+                installed_before: Some(after),
+                ..FilterParams::default()
+            },
+            ..args_with(vec![PatchStatus::Pending], PatchType::All)
+        },
+        30,
+        now,
+    );
+    assert!(pending.is_ok(), "an unused range is not validated");
 }
 
 /// The relative first-seen window is resolved to an absolute bound here because
@@ -216,7 +303,8 @@ fn a_relative_detection_window_becomes_an_absolute_lower_bound() {
         },
         30,
         now,
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(
         plan.filter.detected_after,
         Some((now - Duration::days(7)).timestamp())
@@ -230,14 +318,16 @@ fn the_requested_patch_type_decides_which_families_are_fetched() {
         args_with(vec![PatchStatus::Pending], PatchType::Os),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert!(os.include_os && !os.include_sw);
 
     let all = QueryPlan::build(
         args_with(vec![PatchStatus::Pending], PatchType::All),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert!(all.include_os && all.include_sw);
 }
 
@@ -315,6 +405,7 @@ fn dev(id: i64, org: i64) -> Device {
         node_class: Some("WINDOWS_SERVER".into()),
         offline: Some(false),
         os: None,
+        last_contact: None,
     }
 }
 
@@ -330,6 +421,7 @@ fn cur(device_id: i64, kb: &str, status: &str, severity: &str) -> Patch {
         patch_type: None,
         collected_timestamp: Some(fixed_now().timestamp() as f64),
         installed_timestamp: None,
+        product_identifier: None,
     }
 }
 
@@ -377,7 +469,8 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Pending]),
         fixed_now(),
         &progress,
@@ -447,7 +540,7 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": [
                 { "deviceId": 10, "kbNumber": "KBOK", "status": "INSTALLED",
-                  "installedAt": installed },
+                  "installedAt": installed, "timestamp": installed - 3 * 86_400 },
                 { "deviceId": 10, "kbNumber": "KBBAD", "status": "FAILED" }
             ],
             "cursor": ""
@@ -462,7 +555,8 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Installed]),
         fixed_now(),
         &progress,
@@ -480,6 +574,21 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
 
     // No FAILED status was requested, so the failure rollup is empty.
     assert!(result.failures.is_empty());
+
+    // The installed record carries both times, three days apart.
+    let tti = &result.time_to_install;
+    assert!(tti.installs_queried);
+    assert_eq!(
+        tti.overall.as_ref().map(|o| (o.samples, o.median_days)),
+        Some((1, 3.0))
+    );
+    // The current feed still drives the device lists: the undated MANUAL record
+    // can't be proven inside its SLA.
+    assert_eq!(result.worst_devices.devices.len(), 1);
+    assert_eq!(result.worst_devices.devices[0].past_sla, 1);
+    // Stamped with what the numbers were computed under.
+    assert_eq!(result.instance, "https://app.ninjarmm.com");
+    assert_eq!(result.sla_policy, SlaPolicy::default());
 }
 
 /// The current feed's own endpoint titles promise "Pending, Failed and Rejected"
@@ -529,7 +638,8 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(
             PatchType::Os,
             vec![PatchStatus::Pending, PatchStatus::Failed],
@@ -614,7 +724,8 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
         &progress,
@@ -628,6 +739,106 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         kbs,
         vec!["KBRECENT", "KBUNDATED"],
         "a 45-day-old record is outside the 30-day window whatever the server sent"
+    );
+}
+
+/// Reviewing one patch window: both bounds reach the history endpoint as
+/// `installedAfter`/`installedBefore`, and both are re-applied client-side, since
+/// the spec types them only as `string` and the response cannot show they were
+/// honored. The mock deliberately ignores the bounds and returns records on
+/// either side of the range.
+#[tokio::test]
+async fn a_custom_install_range_is_pushed_down_and_reapplied_client_side() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [], "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+
+    let now = fixed_now().timestamp();
+    let after = now - 60 * 86_400;
+    let before = now - 30 * 86_400;
+    // Mounted with both query params required, so a request that dropped either
+    // bound finds no mock and the query fails.
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patch-installs"))
+        .and(query_param("installedAfter", after.to_string()))
+        .and(query_param("installedBefore", before.to_string()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "deviceId": 10, "kbNumber": "KBTOOOLD", "status": "INSTALLED",
+                  "installedAt": after - 86_400 },
+                { "deviceId": 10, "kbNumber": "KBFIRSTDAY", "status": "INSTALLED",
+                  "installedAt": after },
+                { "deviceId": 10, "kbNumber": "KBINSIDE", "status": "INSTALLED",
+                  "installedAt": after + 10 * 86_400 },
+                { "deviceId": 10, "kbNumber": "KBLASTSECOND", "status": "INSTALLED",
+                  "installedAt": before },
+                { "deviceId": 10, "kbNumber": "KBTOONEW", "status": "INSTALLED",
+                  "installedAt": now - 86_400 },
+                { "deviceId": 10, "kbNumber": "KBUNDATED", "status": "INSTALLED" }
+            ],
+            "cursor": ""
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut ranged = args(PatchType::Os, vec![PatchStatus::Installed]);
+    ranged.filter.installed_after = Some(after);
+    ranged.filter.installed_before = Some(before);
+    // Ignored: the absolute range replaces the relative lookback.
+    ranged.install_after_days = Some(7);
+
+    let progress = |_: &'static str, _: usize| {};
+    let result = run_query(
+        &client(&server),
+        async { Ok::<_, anyhow::Error>(lookups()) },
+        fleet_devices_via(&client(&server)),
+        fleet_current_via(&client(&server)),
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        ranged,
+        fixed_now(),
+        &progress,
+    )
+    .await
+    .expect("query");
+
+    let mut kbs: Vec<&str> = result.rows.iter().filter_map(|r| r.kb.as_deref()).collect();
+    kbs.sort();
+    assert_eq!(
+        kbs,
+        vec!["KBFIRSTDAY", "KBINSIDE", "KBLASTSECOND", "KBUNDATED"],
+        "both bounds are inclusive; records outside them are dropped whatever the \
+         server sent, and an undated one is kept as with the relative window"
+    );
+
+    let facets: Vec<(&str, &str)> = result
+        .scope
+        .patch_facets
+        .iter()
+        .map(|(l, v)| (*l, v.as_str()))
+        .collect();
+    assert!(
+        facets.contains(&("Install history since", "2023-09-15 22:13 UTC")),
+        "{facets:?}"
+    );
+    assert!(
+        facets.contains(&("Install history until", "2023-10-15 22:13 UTC")),
+        "{facets:?}"
     );
 }
 
@@ -678,7 +889,8 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
         &progress,
@@ -690,6 +902,142 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
     let top = &result.failures[0];
     assert_eq!(top.kb.as_deref(), Some("KBFAIL"));
     assert_eq!(top.affected_devices, 2, "KBFAIL failed on two devices");
+}
+
+/// The per-device rollup behind the workbook's Devices sheet and the drill-down,
+/// end to end: bands and SLA aging from the unnarrowed current feed, failed
+/// installs only when Failed was queried (unknown otherwise, not zero), the
+/// vendor's `lastContact`, the rollup verdict for an offline device, and the
+/// (organization, name, id) order.
+#[tokio::test]
+async fn devices_carry_their_own_health_in_a_stable_order() {
+    let server = MockServer::start().await;
+    let old = fixed_now().timestamp() - 90 * 86_400;
+    let contact = fixed_now().timestamp() - 3_600;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 30, "systemName": "zeta", "organizationId": 1, "offline": false,
+              "nodeClass": "WINDOWS_SERVER", "lastContact": contact as f64 + 0.25 },
+            { "id": 10, "systemName": "Alpha", "organizationId": 1, "offline": true,
+              "nodeClass": "WINDOWS_SERVER" },
+            { "id": 20, "systemName": "beta", "organizationId": 1, "offline": false,
+              "nodeClass": "WINDOWS_SERVER" }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "deviceId": 30, "kbNumber": "KB1", "status": "MANUAL",
+                  "severity": "CRITICAL", "timestamp": old },
+                { "deviceId": 30, "kbNumber": "KB2", "status": "APPROVED",
+                  "severity": "LOW", "timestamp": old },
+                { "deviceId": 30, "kbNumber": "KB3", "status": "REJECTED",
+                  "severity": "CRITICAL", "timestamp": old },
+                { "deviceId": 20, "kbNumber": "KB1", "status": "MANUAL",
+                  "severity": "IMPORTANT", "timestamp": fixed_now().timestamp() }
+            ],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patch-installs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "deviceId": 30, "kbNumber": "KB9", "status": "FAILED",
+                  "severity": "CRITICAL", "installedAt": fixed_now().timestamp() - 86_400 },
+                { "deviceId": 30, "kbNumber": "KB8", "status": "INSTALLED",
+                  "severity": "CRITICAL", "installedAt": fixed_now().timestamp() - 86_400 }
+            ],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+
+    let progress = |_: &'static str, _: usize| {};
+    let run = |statuses: Vec<PatchStatus>| {
+        let server = &server;
+        async move {
+            run_query(
+                &client(server),
+                async { Ok::<_, anyhow::Error>(lookups()) },
+                fleet_devices_via(&client(server)),
+                fleet_current_via(&client(server)),
+                30,
+                SlaPolicy::default(),
+                "https://app.ninjarmm.com".into(),
+                args(PatchType::Os, statuses),
+                fixed_now(),
+                &progress,
+            )
+            .await
+            .expect("query")
+        }
+    };
+
+    let result = run(vec![PatchStatus::Pending, PatchStatus::Failed]).await;
+    let names: Vec<&str> = result
+        .devices
+        .iter()
+        .map(|d| d.device_name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["Alpha", "beta", "zeta"],
+        "case-insensitive name order"
+    );
+
+    let zeta = &result.devices[2];
+    assert_eq!(zeta.pending_by_severity.critical, 1);
+    assert_eq!(zeta.pending_by_severity.low, 1);
+    assert_eq!(
+        zeta.pending_by_severity.total(),
+        zeta.pending_count,
+        "the bands sum to the pending count (REJECTED is in neither)"
+    );
+    assert_eq!(
+        zeta.aged_critical, 1,
+        "the 90-day-old CRITICAL, not the LOW"
+    );
+    assert_eq!(zeta.failed_installs, Some(1), "FAILED only, not INSTALLED");
+    assert_eq!(zeta.last_contact_ts, Some(contact));
+    assert_eq!(zeta.rollup_scope, crate::rows::RollupScope::Included);
+
+    let beta = &result.devices[1];
+    assert_eq!(beta.pending_by_severity.important, 1);
+    assert_eq!(beta.aged_critical, 0, "first seen today is within SLA");
+    assert_eq!(beta.failed_installs, Some(0), "queried, and none failed");
+
+    let alpha = &result.devices[0];
+    assert_eq!(alpha.rollup_scope, crate::rows::RollupScope::Offline);
+    assert_eq!(alpha.last_contact, None, "absent on the record, blank here");
+
+    // Without the Failed status the history was never asked about failures.
+    let pending_only = run(vec![PatchStatus::Pending]).await;
+    assert!(
+        pending_only
+            .devices
+            .iter()
+            .all(|d| d.failed_installs.is_none()),
+        "unknown, not zero"
+    );
+
+    // The drill-down reads the same summary and the device's own rows.
+    let detail = crate::rows::device_detail(&result, 30, 1).expect("in scope");
+    assert_eq!(detail.device.as_ref().map(|d| d.device_id), Some(30));
+    assert_eq!(
+        detail.rows_total, 2,
+        "the Patches rows: KB1 pending and KB9 failed (APPROVED was not selected)"
+    );
+    assert_eq!(
+        detail.rows.len(),
+        1,
+        "capped at the limit, total still stated"
+    );
+    assert!(crate::rows::device_detail(&result, 999, 10).is_none());
 }
 
 /// The provenance block must describe what the query *did*, so it is built from
@@ -728,7 +1076,8 @@ async fn a_query_records_the_facets_it_ran_under() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         scoped,
         fixed_now(),
         &progress,
@@ -810,7 +1159,8 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
         &progress,
@@ -866,7 +1216,8 @@ async fn installed_and_failed_query_omits_the_server_side_status_filter() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(
             PatchType::Os,
             vec![PatchStatus::Installed, PatchStatus::Failed],
@@ -931,7 +1282,8 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
             })
         },
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
         &progress,
@@ -965,7 +1317,8 @@ fn an_untyped_install_record_takes_the_pushed_down_status() {
         args(PatchType::All, vec![PatchStatus::Failed]),
         30,
         Utc::now(),
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(
         failed_only.install_status,
         Some("FAILED"),
@@ -976,7 +1329,8 @@ fn an_untyped_install_record_takes_the_pushed_down_status() {
         args(PatchType::All, vec![PatchStatus::Installed]),
         30,
         Utc::now(),
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(installed_only.install_status, Some("INSTALLED"));
 
     // With both requested nothing is narrowed, so the label falls back and the
@@ -988,7 +1342,8 @@ fn an_untyped_install_record_takes_the_pushed_down_status() {
         ),
         30,
         Utc::now(),
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(both.install_status, None);
     assert_eq!(
         both.install_status.unwrap_or("INSTALLED"),
@@ -1088,7 +1443,8 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
         fleet_devices_via(&client(&server)),
         fleet_current_both_via(&client(&server)),
         30,
-        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
         args(PatchType::All, vec![PatchStatus::Pending]),
         fixed_now(),
         &progress,

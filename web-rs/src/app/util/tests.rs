@@ -4,8 +4,9 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, AuthStatus, JobReport, JobState, Location, Organization, PatchFamilies, PatchRow,
-    RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
+    ActionKind, ActionSettings, AuthStatus, DeviceSummary, JobReport, JobRequest, JobState,
+    Location, Organization, PatchFamilies, PatchRow, RebootChoice, RebootMode, RowSort, RowSortKey,
+    RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -252,6 +253,7 @@ fn sortable(device: &str, sev: &str, installed: Option<&str>) -> PatchRow {
         status: "PENDING".into(),
         first_seen_date: None,
         installed_date: installed.map(Into::into),
+        product_identifier: None,
     }
 }
 
@@ -272,6 +274,7 @@ fn sel_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, ty: &str)
         status: "PENDING".into(),
         first_seen_date: None,
         installed_date: None,
+        product_identifier: None,
     }
 }
 
@@ -602,6 +605,86 @@ fn a_custom_window_tolerates_one_open_end() {
     let f = filter_params(inputs("custom", "", "2026-03-01"));
     assert_eq!(f.detected_after, None);
     assert!(f.detected_before.is_some());
+}
+
+fn install_inputs(custom: bool, after: &str, before: &str) -> FilterInputs {
+    FilterInputs {
+        install_custom: custom,
+        install_after: after.into(),
+        install_before: before.into(),
+        ..Default::default()
+    }
+}
+
+/// A custom install range reaches the backend as two absolute bounds, the "to"
+/// day included whole; in "Last N days" mode nothing is sent even though the
+/// hidden date inputs still hold the last range, or they would keep overriding the
+/// relative window backend-side.
+#[test]
+fn a_custom_install_range_is_sent_only_in_custom_mode() {
+    let f = filter_params(install_inputs(true, "2026-01-01", "2026-01-31"));
+    assert_eq!(f.installed_after, Some(1_767_225_600));
+    assert_eq!(f.installed_before, Some(1_769_903_999));
+
+    let open = filter_params(install_inputs(true, "2026-01-01", ""));
+    assert_eq!(
+        (open.installed_after, open.installed_before),
+        (Some(1_767_225_600), None)
+    );
+
+    let relative = filter_params(install_inputs(false, "2026-01-01", "2026-01-31"));
+    assert_eq!(
+        (relative.installed_after, relative.installed_before),
+        (None, None)
+    );
+}
+
+/// The chip says which control was in force, and a custom range with no dates —
+/// which sends nothing, so the backend uses the lookback — says the lookback.
+#[test]
+fn the_install_chip_names_the_range_or_the_lookback() {
+    assert_eq!(
+        install_window_label(false, 30, "2026-01-01", ""),
+        "last 30d"
+    );
+    assert_eq!(
+        install_window_label(true, 30, "2026-03-01", "2026-03-31"),
+        "2026-03-01 \u{2192} 2026-03-31"
+    );
+    assert_eq!(
+        install_window_label(true, 30, "2026-03-01", ""),
+        "since 2026-03-01"
+    );
+    assert_eq!(
+        install_window_label(true, 30, "", "2026-03-31"),
+        "until 2026-03-31"
+    );
+    assert_eq!(install_window_label(true, 14, " ", ""), "last 14d");
+}
+
+/// The inline hint flags exactly the shapes the backend refuses on input alone.
+#[test]
+fn the_install_range_hint_flags_what_the_backend_would_refuse() {
+    assert_eq!(install_range_problem("", ""), None);
+    assert_eq!(install_range_problem("2026-03-01", ""), None);
+    assert_eq!(install_range_problem("2026-03-01", "2026-03-01"), None);
+    assert!(install_range_problem("", "2026-03-31").is_some());
+    assert!(install_range_problem("2026-03-31", "2026-03-01").is_some());
+}
+
+/// Restoring a preset inverts `filter_params`: the saved end-of-day bound floors
+/// back to the day the operator picked, and no range means the relative control.
+#[test]
+fn install_window_fields_invert_the_saved_range() {
+    let f = filter_params(install_inputs(true, "2026-03-01", "2026-03-31"));
+    assert_eq!(
+        install_window_fields(f.installed_after, f.installed_before),
+        (true, "2026-03-01".to_string(), "2026-03-31".to_string())
+    );
+    assert_eq!(
+        install_window_fields(None, None),
+        (false, String::new(), String::new())
+    );
 }
 
 #[test]
@@ -991,6 +1074,8 @@ fn is_fleet_tab_flags_compliance_and_reboot() {
 fn job(kind: ActionKind, dry_run: bool) -> JobReport {
     JobReport {
         id: 1,
+        batch_id: 1,
+        device_id: 7,
         device_name: "srv-1".into(),
         organization: "Contoso".into(),
         kind,
@@ -1002,6 +1087,7 @@ fn job(kind: ActionKind, dry_run: bool) -> JobReport {
         activity_id: None,
         series_uid: None,
         exit_code: None,
+        request: None,
     }
 }
 
@@ -1311,7 +1397,7 @@ fn filter_chips_emits_only_non_default_facets() {
         detected_window: "7".to_string(),
         detected_after: String::new(),
         detected_before: String::new(),
-        install_days: Some(30),
+        install_window: Some("last 30d".to_string()),
     };
     let chips = filter_chips(&full);
     let labels: Vec<&str> = chips.iter().map(|c| c.label.as_str()).collect();
@@ -2076,4 +2162,810 @@ fn severity_rank_accepts_labels_raw_values_and_aliases() {
     for label in ["Critical", "Security", "Recommended", "Unknown"] {
         assert_eq!(sev_ordinal(label), 7 - severity_rank(label));
     }
+}
+// --- Dispatch guardrails: maintenance window, honest dry run, Apply-all preview ---
+
+#[test]
+fn window_times_round_trip_through_the_time_input() {
+    assert_eq!(minutes_to_hhmm(0), "00:00");
+    assert_eq!(minutes_to_hhmm(125), "02:05");
+    assert_eq!(minutes_to_hhmm(1439), "23:59");
+    assert_eq!(parse_hhmm("02:05"), Some(125));
+    assert_eq!(parse_hhmm("23:59:00"), Some(1439), "seconds are tolerated");
+    for m in [0u16, 1, 59, 60, 719, 1439] {
+        assert_eq!(parse_hhmm(&minutes_to_hhmm(m)), Some(m));
+    }
+    // A cleared or garbled field keeps the stored time instead of becoming 00:00.
+    for bad in ["", "24:00", "12:60", "noon", "12"] {
+        assert_eq!(parse_hhmm(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn toggling_a_window_day_keeps_the_list_canonical() {
+    assert_eq!(toggle_window_day(&[5, 1], 3, true), vec![1, 3, 5]);
+    assert_eq!(toggle_window_day(&[1, 3, 5], 3, false), vec![1, 5]);
+    // Idempotent both ways, and a duplicate in the input is folded.
+    assert_eq!(toggle_window_day(&[1, 1, 5], 1, true), vec![1, 5]);
+    assert_eq!(toggle_window_day(&[1, 5], 3, false), vec![1, 5]);
+}
+
+#[test]
+fn the_window_summary_matches_the_backend_blocker_and_flags_a_wrap() {
+    let a = ActionSettings::default();
+    assert_eq!(window_summary(&a), "Mon/Tue/Wed/Thu/Fri 02:00–05:00");
+    let wrapping = ActionSettings {
+        window_days: vec![6, 0],
+        window_start_minute: 22 * 60,
+        window_end_minute: 4 * 60,
+        ..ActionSettings::default()
+    };
+    assert_eq!(
+        window_summary(&wrapping),
+        "Sun/Sat 22:00–04:00 (wraps past midnight)"
+    );
+    let none = ActionSettings {
+        window_days: vec![],
+        ..ActionSettings::default()
+    };
+    assert!(window_summary(&none).starts_with("no days"));
+}
+
+#[test]
+fn a_window_the_backend_would_refuse_is_flagged_before_save() {
+    let ok = ActionSettings::default();
+    assert_eq!(window_settings_problem(&ok), None);
+    let zero = ActionSettings {
+        window_end_minute: ok.window_start_minute,
+        ..ok.clone()
+    };
+    assert!(window_settings_problem(&zero).is_some());
+    let no_days = ActionSettings {
+        require_maintenance_window: true,
+        window_days: vec![],
+        ..ok.clone()
+    };
+    assert!(window_settings_problem(&no_days).is_some());
+    // Empty days are fine while the window isn't enforced.
+    let unenforced = ActionSettings {
+        window_days: vec![],
+        ..ok
+    };
+    assert_eq!(window_settings_problem(&unenforced), None);
+}
+
+#[test]
+fn the_override_is_offered_only_when_the_window_is_enforced_and_overridable() {
+    let base = ActionSettings {
+        enabled: true,
+        require_maintenance_window: true,
+        allow_window_override: true,
+        ..ActionSettings::default()
+    };
+    assert!(window_override_offered(&base));
+    for off in [
+        ActionSettings {
+            enabled: false,
+            ..base.clone()
+        },
+        ActionSettings {
+            require_maintenance_window: false,
+            ..base.clone()
+        },
+        ActionSettings {
+            allow_window_override: false,
+            ..base.clone()
+        },
+    ] {
+        assert!(!window_override_offered(&off), "{off:?}");
+    }
+}
+
+/// A dry run only appends `dryRun=true`. A script that ignores it runs for real,
+/// so the button must say so — but only when the UI actually knows.
+#[test]
+fn a_dry_run_disables_only_the_scripts_known_not_to_preview() {
+    use ActionKind::*;
+    // Known not to preview: disabled with a reason, for both script paths.
+    for kind in [OsPatchRemediate, SoftwarePatchRemediate, Script] {
+        let why = dry_run_disabled_reason(kind, true, Some(false), false).unwrap();
+        assert!(why.contains("run for real"), "{kind:?}: {why}");
+    }
+    // Declared, unknown, or not a dry run: the backend decides, the button stays live.
+    assert_eq!(
+        dry_run_disabled_reason(OsPatchRemediate, true, Some(true), false),
+        None
+    );
+    assert_eq!(
+        dry_run_disabled_reason(OsPatchRemediate, true, None, false),
+        None
+    );
+    assert_eq!(
+        dry_run_disabled_reason(OsPatchRemediate, false, Some(false), false),
+        None
+    );
+    // The native kinds never receive the flag (the request omits it for them).
+    assert_eq!(
+        dry_run_disabled_reason(OsPatchApply, true, Some(false), false),
+        None
+    );
+    // A typed string cannot carry the toolkit's flag, whatever the script declares.
+    let why = dry_run_disabled_reason(Script, true, Some(true), true).unwrap();
+    assert!(why.contains("verbatim"), "{why}");
+    // ...but a remediation kind has no typed string, so that input is irrelevant.
+    assert_eq!(
+        dry_run_disabled_reason(OsPatchRemediate, true, Some(true), true),
+        None
+    );
+}
+
+#[test]
+fn the_dry_run_caveat_names_only_scripts_known_not_to_preview() {
+    assert_eq!(dry_run_caveat(&[]), None);
+    assert_eq!(
+        dry_run_caveat(&[("OS remediation".into(), Some(true)), ("x".into(), None)]),
+        None
+    );
+    let note = dry_run_caveat(&[
+        ("OS remediation \"Install-Kbs\"".into(), Some(true)),
+        ("software remediation \"Update-Apps\"".into(), Some(false)),
+    ])
+    .unwrap();
+    assert!(
+        note.contains("Update-Apps") && !note.contains("Install-Kbs"),
+        "{note}"
+    );
+}
+
+#[test]
+fn the_apply_preview_states_what_will_and_will_not_install() {
+    use crate::types::{ApplyPreview, ApplyPreviewDevice};
+    let devices = vec![
+        ApplyPreviewDevice {
+            device_id: 1,
+            device_name: "srv-a".into(),
+            approved: 3,
+            pending_manual: 0,
+        },
+        ApplyPreviewDevice {
+            device_id: 2,
+            device_name: "srv-b".into(),
+            approved: 0,
+            pending_manual: 2,
+        },
+    ];
+    let p = ApplyPreview {
+        family: "OS".into(),
+        known: true,
+        devices: devices.clone(),
+        approved_total: 3,
+        pending_manual_total: 2,
+        data_fetched_at: Some("2026-07-29 10:00:00 UTC".into()),
+    };
+    let summary = apply_preview_summary(&p);
+    assert!(
+        summary.contains("install 3 approved OS patch(es) across 2 device(s)"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("2 more pending approval will not install"),
+        "{summary}"
+    );
+    assert!(summary.contains("2026-07-29 10:00:00 UTC"), "{summary}");
+
+    assert_eq!(
+        apply_preview_line(&devices[0]),
+        "srv-a — 3 approved will install"
+    );
+    assert_eq!(
+        apply_preview_line(&devices[1]),
+        "srv-b — nothing approved — nothing will install; 2 pending approval"
+    );
+
+    // Cold cache: unknown, never "0 approved".
+    let unknown = ApplyPreview {
+        family: "software".into(),
+        known: false,
+        ..ApplyPreview::default()
+    };
+    let summary = apply_preview_summary(&unknown);
+    assert!(
+        summary.contains("unknown (patch data not loaded)"),
+        "{summary}"
+    );
+    assert!(!summary.contains(" 0 "), "{summary}");
+}
+
+#[test]
+fn the_audit_trail_marks_a_window_override() {
+    assert_eq!(audit_mode_label(false, false), "Live");
+    assert_eq!(audit_mode_label(false, true), "Live (window override)");
+    assert_eq!(audit_mode_label(true, false), "Dry run");
+}
+
+// --- Needs Reboot tab: device-level selection ----------------------------------
+
+fn reboot_device(id: i64, name: &str, offline: bool) -> DeviceSummary {
+    DeviceSummary {
+        device_id: id,
+        device_name: name.into(),
+        organization: "Contoso".into(),
+        location: None,
+        device_role: None,
+        os_name: Some("Windows Server 2022".into()),
+        offline,
+        pending_count: 2,
+        needs_reboot: true,
+        rollup_scope: crate::types::RollupScope::Included,
+        pending_by_severity: crate::types::SeverityCounts::default(),
+        aged_critical: 0,
+        failed_installs: None,
+        last_contact: None,
+    }
+}
+
+/// A device-level selection reaches only what acts on a device as a whole: reboot
+/// and the two scans. Everything needing patch rows says why it is unavailable,
+/// and the Patches tab's row selection keeps every kind.
+#[test]
+fn a_device_selection_reaches_only_reboot_and_the_scans() {
+    for kind in ActionKind::ALL {
+        let allowed = matches!(
+            kind,
+            ActionKind::Reboot | ActionKind::OsPatchScan | ActionKind::SoftwarePatchScan
+        );
+        assert_eq!(device_selection_allows(kind), allowed, "{kind:?}");
+        assert_eq!(
+            source_disabled_reason(SelectionSource::Devices, kind).is_none(),
+            allowed,
+            "{kind:?}"
+        );
+        assert_eq!(
+            source_disabled_reason(SelectionSource::PatchRows, kind),
+            None,
+            "{kind:?}"
+        );
+    }
+    let why = source_disabled_reason(SelectionSource::Devices, ActionKind::OsPatchRemediate)
+        .expect("remediation needs rows");
+    assert!(why.contains("Patches tab"), "{why}");
+}
+
+/// Ticking a device adds a device with no patch rows — nothing built from it can
+/// target a patch — and the sentinel id never enters.
+#[test]
+fn ticking_a_reboot_device_selects_the_device_and_no_patch_rows() {
+    let mut sel = BTreeMap::new();
+    apply_device_selection(&mut sel, &reboot_device(7, "srv-7", true), true);
+    apply_device_selection(&mut sel, &reboot_device(8, "srv-8", false), true);
+    assert_eq!(sel.keys().copied().collect::<Vec<_>>(), vec![7, 8]);
+    assert!(sel.values().all(|d| d.patches.is_empty()));
+    assert!(sel[&7].offline);
+
+    apply_device_selection(&mut sel, &reboot_device(7, "srv-7", true), false);
+    assert_eq!(sel.keys().copied().collect::<Vec<_>>(), vec![8]);
+
+    apply_device_selection(
+        &mut sel,
+        &reboot_device(ORPHAN_DEVICE_ID, "(no device)", false),
+        true,
+    );
+    assert!(!sel.contains_key(&ORPHAN_DEVICE_ID));
+}
+
+/// The request from a device-level selection carries device ids and the reboot
+/// options only — never a target list, never the script-only options, even when
+/// those are set on the shared controls.
+#[test]
+fn a_device_selection_builds_a_device_level_request() {
+    let mut sel = BTreeMap::new();
+    apply_device_selection(&mut sel, &reboot_device(7, "srv-7", false), true);
+    apply_device_selection(&mut sel, &reboot_device(9, "srv-9", true), true);
+    let opts = RunOptions {
+        use_kb_targeting: true,
+        include_offline: true,
+        dry_run: true,
+        run_as: "SYSTEM".into(),
+        script_reboot: RebootChoice::Auto,
+        reboot_mode_forced: true,
+        reason: "July cycle".into(),
+        script_id: Some(5),
+        script_params: "-Verbose".into(),
+        ..RunOptions::default()
+    };
+
+    let req = build_device_action_request(ActionKind::Reboot, &sel, &opts).expect("reboot");
+    assert_eq!(req.device_ids, vec![7, 9]);
+    assert!(req.device_targets.is_empty());
+    assert_eq!(req.reboot_mode, Some(RebootMode::Forced));
+    assert_eq!(req.reason.as_deref(), Some("July cycle"));
+    assert!(req.include_offline);
+    assert!(!req.dry_run, "the native endpoints have no preview mode");
+    assert_eq!(req.run_as, None);
+    assert_eq!((req.script_id, req.parameters), (None, None));
+
+    let scan =
+        build_device_action_request(ActionKind::SoftwarePatchScan, &sel, &opts).expect("scan");
+    assert_eq!(scan.device_ids, vec![7, 9]);
+    assert_eq!(scan.reboot_mode, None);
+
+    for kind in [
+        ActionKind::OsPatchRemediate,
+        ActionKind::SoftwarePatchRemediate,
+        ActionKind::OsPatchApply,
+        ActionKind::Script,
+    ] {
+        assert!(
+            build_device_action_request(kind, &sel, &opts).is_none(),
+            "{kind:?}"
+        );
+    }
+}
+
+/// An auto-refresh keeps the device selection minus the devices no longer flagged,
+/// and takes their offline state from the fresh list.
+#[test]
+fn a_refresh_prunes_devices_that_no_longer_need_a_reboot() {
+    let mut sel = BTreeMap::new();
+    for d in [
+        reboot_device(1, "a", false),
+        reboot_device(2, "b", false),
+        reboot_device(3, "c", false),
+    ] {
+        apply_device_selection(&mut sel, &d, true);
+    }
+    let fresh = [reboot_device(1, "a", true), reboot_device(3, "c", false)];
+    assert_eq!(prune_device_level_selection(&mut sel, &fresh), 1);
+    assert_eq!(sel.keys().copied().collect::<Vec<_>>(), vec![1, 3]);
+    assert!(sel[&1].offline, "the fresh offline flag is taken");
+    assert_eq!(prune_device_level_selection(&mut sel, &[]), 2);
+    assert!(sel.is_empty());
+}
+
+#[test]
+fn the_device_page_header_reads_all_some_or_none() {
+    let page = [reboot_device(1, "a", false), reboot_device(2, "b", false)];
+    let mut sel = BTreeMap::new();
+    assert_eq!(device_page_selection_state(&sel, &page), (false, false));
+    apply_device_selection(&mut sel, &page[0], true);
+    assert_eq!(device_page_selection_state(&sel, &page), (false, true));
+    apply_device_selection(&mut sel, &page[1], true);
+    assert_eq!(device_page_selection_state(&sel, &page), (true, false));
+    assert_eq!(device_page_selection_state(&sel, &[]), (false, false));
+}
+
+#[test]
+fn the_device_selection_summary_counts_devices_and_offline_only() {
+    assert_eq!(device_selection_summary(0, 0), None);
+    assert_eq!(
+        device_selection_summary(1_200, 0).as_deref(),
+        Some("1,200 device(s) selected")
+    );
+    assert_eq!(
+        device_selection_summary(3, 1).as_deref(),
+        Some("3 device(s) selected · 1 offline")
+    );
+}
+
+// --- Jobs tab: retry ---------------------------------------------------------------
+
+fn failed_job(id: u64, batch_id: u64, device_id: i64, targets: &[&str]) -> JobReport {
+    JobReport {
+        id,
+        batch_id,
+        device_id,
+        device_name: format!("srv-{device_id}"),
+        kind: ActionKind::OsPatchRemediate,
+        detail: "Apply selected OS patches".into(),
+        dry_run: true,
+        state: JobState::Failed("400 not applicable".into()),
+        request: Some(JobRequest {
+            run_as: Some("SYSTEM".into()),
+            reboot: RebootChoice::Auto,
+            include_offline: true,
+            targets: targets.iter().map(|t| t.to_string()).collect(),
+            ..JobRequest::default()
+        }),
+        ..job(ActionKind::OsPatchRemediate, true)
+    }
+}
+
+/// Only a definite failure is retryable. `Unknown` may already have acted — a
+/// replay is exactly what `ReplaySafety::ActOnce` refuses — and a job still in
+/// flight or finished has nothing to retry.
+#[test]
+fn only_a_definite_failure_with_a_recorded_request_is_retryable() {
+    assert_eq!(retry_blocked_reason(&failed_job(1, 1, 7, &["KB1"])), None);
+
+    let unrecorded = JobReport {
+        request: None,
+        ..failed_job(1, 1, 7, &["KB1"])
+    };
+    assert!(retry_blocked_reason(&unrecorded).is_some());
+
+    for state in [
+        JobState::Unknown("NinjaOne answered 502".into()),
+        JobState::Queued,
+        JobState::Running,
+        JobState::Completed,
+        JobState::TimedOut,
+        JobState::Skipped("offline".into()),
+    ] {
+        let job = JobReport {
+            state: state.clone(),
+            ..failed_job(1, 1, 7, &["KB1"])
+        };
+        assert!(retry_blocked_reason(&job).is_some(), "{state:?}");
+        assert!(retry_request(&[&job]).is_err(), "{state:?}");
+    }
+    let unknown = JobReport {
+        state: JobState::Unknown("timeout".into()),
+        ..failed_job(1, 1, 7, &["KB1"])
+    };
+    assert!(
+        retry_blocked_reason(&unknown)
+            .unwrap()
+            .contains("never replayed")
+    );
+}
+
+/// A retry is the original dispatch, rebuilt for the failed devices: each gets back
+/// only its own targets, the recorded run-as / reboot / offline / dry-run choices,
+/// no confirm token (so it must be planned and confirmed afresh) and never the
+/// maintenance-window override.
+#[test]
+fn a_retry_rebuilds_the_original_request_for_each_failed_device() {
+    let a = failed_job(1, 4, 7, &["KB500"]);
+    let b = failed_job(2, 4, 8, &["KB600", "KB601"]);
+    let req = retry_request(&[&a, &b]).expect("rebuilt");
+
+    assert_eq!(req.kind, ActionKind::OsPatchRemediate);
+    assert_eq!(req.device_ids, vec![7, 8]);
+    assert_eq!(req.device_targets[&7], vec!["KB500".to_string()]);
+    assert_eq!(
+        req.device_targets[&8],
+        vec!["KB600".to_string(), "KB601".to_string()]
+    );
+    assert_eq!(req.run_as.as_deref(), Some("SYSTEM"));
+    assert_eq!(req.reboot, RebootChoice::Auto);
+    assert!(req.include_offline && req.dry_run);
+    assert!(!req.override_window, "a window override is never inherited");
+    assert_eq!(
+        req.confirm_token, None,
+        "a retry is planned and confirmed afresh"
+    );
+
+    // A reboot keeps its mode and reason.
+    let reboot = JobReport {
+        kind: ActionKind::Reboot,
+        dry_run: false,
+        request: Some(JobRequest {
+            reboot_mode: Some(RebootMode::Forced),
+            reason: Some("July cycle".into()),
+            ..JobRequest::default()
+        }),
+        ..failed_job(3, 5, 9, &[])
+    };
+    let req = retry_request(&[&reboot]).expect("reboot");
+    assert_eq!(req.device_ids, vec![9]);
+    assert!(req.device_targets.is_empty());
+    assert_eq!(req.reboot_mode, Some(RebootMode::Forced));
+    assert_eq!(req.reason.as_deref(), Some("July cycle"));
+}
+
+/// Jobs dispatched with different actions or options are never merged into one
+/// request — one of them would silently run with the other's options.
+#[test]
+fn a_retry_refuses_to_merge_different_dispatches() {
+    let a = failed_job(1, 4, 7, &["KB500"]);
+    assert!(retry_request(&[]).is_err());
+
+    let other_kind = JobReport {
+        kind: ActionKind::OsPatchApply,
+        ..failed_job(2, 4, 8, &[])
+    };
+    assert!(retry_request(&[&a, &other_kind]).is_err());
+
+    let other_mode = JobReport {
+        dry_run: false,
+        ..failed_job(2, 4, 8, &["KB600"])
+    };
+    assert!(retry_request(&[&a, &other_mode]).is_err());
+
+    let mut other_opts = failed_job(2, 4, 8, &["KB600"]);
+    if let Some(r) = other_opts.request.as_mut() {
+        r.run_as = Some("domain-admin".into());
+    }
+    assert!(retry_request(&[&a, &other_opts]).is_err());
+}
+
+/// "Retry failed" is offered per batch with two or more retryable jobs, newest
+/// batch first; `Unknown` rows never count.
+#[test]
+fn retryable_batches_group_definite_failures_newest_first() {
+    let jobs = vec![
+        failed_job(1, 3, 7, &["KB1"]),
+        failed_job(2, 3, 8, &["KB2"]),
+        JobReport {
+            state: JobState::Unknown("timeout".into()),
+            ..failed_job(3, 3, 9, &["KB3"])
+        },
+        // A single failure is served by its own row's button.
+        failed_job(4, 5, 7, &["KB4"]),
+        failed_job(5, 6, 7, &["KB5"]),
+        failed_job(6, 6, 8, &["KB6"]),
+    ];
+    let batches = retryable_batches(&jobs);
+    assert_eq!(
+        batches
+            .iter()
+            .map(|b| (b.batch_id, b.job_ids.clone()))
+            .collect::<Vec<_>>(),
+        vec![(6, vec![5, 6]), (3, vec![1, 2])]
+    );
+    assert_eq!(batches[0].detail, "Apply selected OS patches");
+}
+
+// --- SLA policy, device lists, first seen → installed ---------------------------
+
+/// Blank clears a band back to the default; a number is clamped; junk keeps the
+/// previous value rather than silently clearing an override.
+#[test]
+fn per_band_sla_inputs_parse_blank_as_default() {
+    assert_eq!(parse_optional_days("", Some(7)), None);
+    assert_eq!(parse_optional_days("  ", Some(7)), None);
+    assert_eq!(parse_optional_days("14", None), Some(14));
+    assert_eq!(parse_optional_days("0", None), Some(1));
+    assert_eq!(parse_optional_days("99999", None), Some(MAX_SLA_DAYS));
+    assert_eq!(parse_optional_days("abc", Some(7)), Some(7));
+}
+
+/// Each band's getter and setter reach the same, distinct field, and the wire
+/// keys are the backend's.
+#[test]
+fn every_sla_band_reads_and_writes_its_own_field() {
+    use crate::types::SlaBySeverity;
+    let mut s = SlaBySeverity::default();
+    for (i, (_, _, set)) in SlaBySeverity::BANDS.iter().enumerate() {
+        *set(&mut s) = Some(i as i64 + 1);
+    }
+    for (i, (_, get, _)) in SlaBySeverity::BANDS.iter().enumerate() {
+        assert_eq!(get(&s), Some(i as i64 + 1));
+    }
+    let json = serde_json::to_value(s).unwrap();
+    for (i, key) in [
+        "critical",
+        "important",
+        "security",
+        "moderate",
+        "recommended",
+        "low",
+        "optional",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(json[key], i as i64 + 1, "{key}");
+    }
+}
+
+/// Mirrors `settings::SlaPolicy::describe`, which the exports print.
+#[test]
+fn the_sla_summary_matches_the_exports() {
+    use crate::types::{SlaBySeverity, SlaPolicy};
+    let mut p = SlaPolicy::default();
+    assert_eq!(sla_policy_summary(&p), "30 days (default)");
+    p.by_severity = SlaBySeverity {
+        important: Some(14),
+        critical: Some(1),
+        ..SlaBySeverity::default()
+    };
+    assert_eq!(
+        sla_policy_summary(&p),
+        "30 days (default); Critical 1 day, Important 14 days"
+    );
+    assert_eq!(sla_days_for(&p, "Critical"), 1);
+    assert_eq!(sla_days_for(&p, "important"), 14);
+    assert_eq!(sla_days_for(&p, "Moderate"), 30, "no override");
+    assert_eq!(sla_days_for(&p, "Unknown"), 30, "never overridable");
+}
+
+#[test]
+fn a_capped_device_list_says_so() {
+    use crate::types::DeviceBacklogList;
+    let complete = DeviceBacklogList::default();
+    assert_eq!(device_list_caption(&complete), None);
+    let capped = DeviceBacklogList {
+        devices: Vec::new(),
+        devices_total: 3,
+    };
+    assert_eq!(
+        device_list_caption(&capped).as_deref(),
+        Some("Showing the top 0 of 3 devices.")
+    );
+}
+
+#[test]
+fn install_time_median_percentile_and_labels() {
+    use crate::types::{InstallLatency, TimeToInstall};
+    assert_eq!(median(&[1, 3, 9]), 3.0);
+    assert_eq!(median(&[1, 3, 5, 9]), 4.0);
+    assert_eq!(median(&[]), 0.0);
+    assert_eq!(nearest_rank(&(1..=10).collect::<Vec<_>>(), 90), 9);
+    assert_eq!(nearest_rank(&[4], 90), 4);
+    assert_eq!(format_days(1.0), "1.0 day");
+    assert_eq!(format_days(2.25), "2.3 days");
+    assert_eq!(format_days(0.04), "0.0 days");
+
+    let mut t = TimeToInstall::default();
+    assert!(
+        time_to_install_empty_reason(&t)
+            .unwrap()
+            .contains("Installed status")
+    );
+    t.installs_queried = true;
+    assert!(time_to_install_empty_reason(&t).unwrap().contains("both"));
+    t.overall = Some(InstallLatency {
+        label: "All installs".into(),
+        samples: 3,
+        median_days: 1.0,
+        p90_days: 2.0,
+    });
+    t.installed_records = 4;
+    t.excluded_records = 1;
+    assert_eq!(time_to_install_empty_reason(&t), None);
+    assert_eq!(
+        time_to_install_sample_note(&t),
+        "3 installed records measured; 1 skipped (missing a time, or installed before first seen)."
+    );
+}
+
+fn drill_device() -> crate::types::DeviceSummary {
+    crate::types::DeviceSummary {
+        device_id: 7,
+        device_name: "srv07".into(),
+        organization: "Contoso".into(),
+        location: None,
+        device_role: Some("Web Server".into()),
+        os_name: Some("Windows Server 2022".into()),
+        pending_count: 0,
+        needs_reboot: true,
+        offline: false,
+        rollup_scope: crate::types::RollupScope::Included,
+        pending_by_severity: Default::default(),
+        aged_critical: 0,
+        failed_installs: None,
+        last_contact: Some("2026-06-26 14:31 UTC".into()),
+    }
+}
+
+/// The drill-down's fact list keeps its shape: an absent value is a dash, not a
+/// missing line, and the two flags read as words.
+#[test]
+fn device_facts_keep_their_shape_when_values_are_missing() {
+    let facts = device_facts(&drill_device());
+    let labels: Vec<&str> = facts.iter().map(|(l, _)| *l).collect();
+    assert_eq!(
+        labels,
+        [
+            "Organization",
+            "Location",
+            "Device Role",
+            "OS",
+            "Status",
+            "Last contact",
+            "Needs reboot"
+        ]
+    );
+    let value = |label: &str| {
+        facts
+            .iter()
+            .find(|(l, _)| *l == label)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(value("Location"), "—");
+    assert_eq!(value("Status"), "Online");
+    assert_eq!(value("Needs reboot"), "Yes");
+    assert_eq!(value("Last contact"), "2026-06-26 14:31 UTC");
+
+    let offline = crate::types::DeviceSummary {
+        offline: true,
+        last_contact: None,
+        ..drill_device()
+    };
+    let facts = device_facts(&offline);
+    assert!(facts.contains(&("Status", "Offline".into())));
+    assert!(facts.contains(&("Last contact", "—".into())));
+}
+
+/// An excluded device's counts are unknown, not zero — the drill-down says why
+/// instead of showing them.
+#[test]
+fn only_an_excluded_device_carries_a_rollup_note() {
+    use crate::types::RollupScope;
+    assert_eq!(rollup_scope_note(RollupScope::Included), None);
+    for scope in [RollupScope::Offline, RollupScope::NonPatchable] {
+        let note = rollup_scope_note(scope).expect("an exclusion explains itself");
+        assert!(note.starts_with("Excluded from compliance"), "{note}");
+    }
+    assert!(
+        rollup_scope_note(RollupScope::Offline)
+            .unwrap()
+            .contains("unknown rather than zero")
+    );
+}
+
+#[test]
+fn failed_installs_are_unknown_unless_failed_was_queried() {
+    assert_eq!(failed_installs_label(Some(0)), "0");
+    assert_eq!(failed_installs_label(Some(3)), "3");
+    assert!(failed_installs_label(None).contains("Failed status"));
+}
+
+/// A capped list says so; a complete one says nothing.
+#[test]
+fn a_capped_device_row_list_is_labelled_as_partial() {
+    assert_eq!(device_rows_note(12, 12), None);
+    assert_eq!(
+        device_rows_note(1_000, 1_250),
+        Some("Showing the first 1,000 of 1,250 rows — sorting applies to these.".into())
+    );
+}
+
+/// The fleet line reads the two approval totals with thousands separators.
+#[test]
+fn the_approval_totals_line_names_both_halves_of_the_workflow() {
+    assert_eq!(
+        approval_totals_line(1_204, 3),
+        "1,204 awaiting approval \u{00b7} 3 approved, not installed"
+    );
+}
+
+/// "Stuck" means nothing without the threshold, and a capped list must say it is
+/// capped — the wire copy carries only the oldest devices.
+#[test]
+fn the_stuck_approvals_caption_states_the_threshold_and_the_cap() {
+    assert_eq!(stuck_approvals_caption(0, 0, 0, 30), None);
+    let one = stuck_approvals_caption(1, 1, 1, 30).unwrap();
+    assert!(one.starts_with("1 approved patch on 1 device still not installed more than 30 days"));
+    assert!(!one.contains("Showing"), "nothing was capped: {one}");
+    let capped = stuck_approvals_caption(200, 1_523, 4_100, 14).unwrap();
+    assert!(
+        capped.contains("4,100 approved patches on 1,523 devices"),
+        "{capped}"
+    );
+    assert!(capped.contains("more than 14 days"), "{capped}");
+    assert!(
+        capped.contains("Showing the oldest 200 of 1,523"),
+        "{capped}"
+    );
+}
+
+/// The demo's product labels must agree with the backend's; these are the same
+/// cases `rows::tests` pins, so a drift fails on both sides.
+#[test]
+fn product_names_strip_one_trailing_version_like_the_backend() {
+    for (title, want) in [
+        ("Google Chrome 141.0.7390.55", "Google Chrome"),
+        ("OpenSSL 3.0.16-1ubuntu1", "OpenSSL"),
+        ("Zoom Workplace (64-bit) v6.4.3", "Zoom Workplace (64-bit)"),
+        ("OpenSSL 3.0.16 (libssl)", "OpenSSL 3.0.16 (libssl)"),
+        ("Microsoft Office 2016", "Microsoft Office 2016"),
+        ("1.2.3", "1.2.3"),
+    ] {
+        assert_eq!(strip_version_token(title), want, "{title:?}");
+    }
+    assert_eq!(
+        product_display_name([
+            ("Google Chrome 138", 5),
+            ("Google Chrome 141.0.7390.55", 3),
+            ("Google Chrome 141.0.7390.66", 4),
+        ]),
+        "Google Chrome"
+    );
+    assert_eq!(
+        product_display_name([("Beta Tool 1.0", 2), ("alpha tool 2.0", 2)]),
+        "alpha tool"
+    );
 }

@@ -52,6 +52,14 @@ hand-typed string (sent verbatim) and the native endpoints are not checked again
 never send. `build_parameters` also drops a malformed KB, in case a caller skips the planner.
 Software targets are free-form product titles and need no such check: they travel base64-encoded.
 
+The receiving end is [`remediation/`](../../remediation/README.md): reference scripts that parse
+exactly this string, strictly (an unknown key, a malformed KB or an empty list exits 1 rather
+than installing nothing and reporting success). `remediation/tests/fixtures/parameter-contract.json`
+is read by both `build_parameters_matches_the_reference_script_fixture` and the scripts' Pester
+suites, so changing the encoding here fails a test until the scripts follow. A library script is
+only offered per-KB targeting or dry run when it **declares** the `kbAllowList` / `dryRun` script
+variable (`AutomationScript`), so the import instructions there name the variables to declare.
+
 ## Selection is per patch row; dispatch is per device, with per-device targets
 
 `DeviceSelection.patches` maps each ticked row's `patch_key` → a `SelectedPatch { kb, name,
@@ -77,9 +85,44 @@ operator chose them and the script may not need a list), and `build_plan` warns,
 What the *native* Apply does on those devices is still all-or-nothing — that's the endpoint, not
 the selection model — so don't "fix" that gap by widening selection again.
 
+### "Apply all" shows what it will install before it is confirmed
+
+The native endpoint takes no list, so the confirm dialog is the only place the operator can see
+the backlog they are approving. `plan()` attaches an `ApplyPreview` to the two native applies
+(`actions::apply_preview`): per eligible device, the count of current-patch records with status
+`APPROVED` (what the endpoint installs) and `MANUAL` (NinjaOne's "pending approval", which it
+does **not** install — `PatchStatus::Pending.api_value()`), counted from the family's whole-fleet
+current-patch cache, with that cache's fetch time.
+
+- The planner **never fetches** for it. `AppState::cached_current_patches` peeks the
+  `TenantCache` slot (tenant-checked, TTL ignored — the dialog states the fetch time instead);
+  a cold family is `known: false` and the dialog says "unknown (patch data not loaded)", never
+  zero. Paging a six-figure feed to draw a dialog would make every plan wait on it.
+- A post-action `invalidate_current_patches()` clears the slot, so the preview never counts
+  patches the previous apply may already have installed.
+- A device with **zero** approved patches is a `plan()` *warning*, not a blocker: the apply
+  "succeeds" and installs nothing while the rows the operator was looking at sit in `MANUAL`.
+
 Third-party patches carry no KB (the software feed has no `kbNumber`), so they are targeted by
 **product title** instead; an OS remediation silently skips them and vice versa, mirroring the
 asymmetry of the two feeds.
+
+### The Needs Reboot tab selects devices, in a map of its own
+
+The Needs Reboot tab lists devices, not patches, so it selects **devices**
+(`ActionState.device_selected`, `util::SelectionSource::Devices`). It is a separate map from the
+row selection on purpose: a device ticked there has no patch rows, and folding it into
+`selected` would either tick the device's rows (the sweep this section exists to forbid) or put a
+row-less device where a remediation reads targets. From a device-level selection only
+`util::device_selection_allows` kinds are reachable — Reboot and the two scans. The remediation
+kinds need per-patch targets it cannot supply; the native "Apply all" needs none, but it installs a
+backlog that tab never shows, so it stays where the patches it reaches are listed; a script is
+chosen next to the selection it may target. Those buttons are disabled with
+`util::source_disabled_reason`, and the request goes through the same `build_action_request` so
+the run options reach exactly the kinds they reach from the Patches tab. The device selection is
+cleared with the row selection (`clear_selection`) and pruned on an auto-refresh against the fresh
+reboot list (`util::prune_device_level_selection`), since a device that just rebooted no longer
+belongs in it.
 
 ## `ReplaySafety::ActOnce` on every POST
 
@@ -132,22 +175,94 @@ dry_run — into a 5-minute token; `run_action` re-plans from scratch and re-che
 
 ## There is one dispatch surface, and the run options are shared
 
-Everything dispatches from the `ActionBar` on the Patches tab, next to the selection it targets;
-the `ScriptPicker` is folded into it behind a `<details>` and the Jobs tab is history only. `Run
+Everything dispatches from the `ActionBar`, next to the selection it targets — on the Patches tab
+(patch rows) and the Needs Reboot tab (devices, `source=SelectionSource::Devices`). It is one
+component on both, reading the same run-option signals, not a second surface; from the device
+source it simply omits the script-only options row and the script picker, which nothing it can
+reach reads. The `ScriptPicker` is folded into it behind a `<details>`, and the Jobs tab is history
+plus a Retry that re-opens the same plan → confirm dialog (below). `Run
 as`, `Restart the device after installing` and `Dry run` are rendered **once** and reach every
 `runs_a_script()` kind — they mean the same thing for a remediation install and a hand-picked
 script, and duplicating the controls across two tabs while they wrote the same signals meant
 ticking "Dry run" in the Jobs tab silently changed what an Apply button did. Each options row
 carries a label naming the actions it reaches: the native endpoints take no parameters, have no
 preview mode and run as NinjaOne's agent, so an unlabelled "Dry run" beside them reads as
-protection they cannot give.
+protection they cannot give. The maintenance-window override sits in the "Applies to every
+action" row for the same reason: it is one choice about the next dispatch, not a per-button one.
+
+## A retry is a re-plan, never a replay
+
+Every `JobReport` carries a `JobRequest` — what that one device was sent: the script ref, a
+`Script`'s typed parameters, the **resolved** run-as, reboot choice/mode/reason, `include_offline`
+and the device's own targets (`commands::actions::job_request`, which destructures
+`ActionRequest` exhaustively like `request_hash`). The Jobs tab rebuilds an `ActionRequest` from it
+(`util::retry_request`) and sends it through `plan_action`, so a retry gets a fresh payload-bound
+token and every `plan()` guardrail re-runs against current state. Nothing re-sends a POST.
+
+- Only `JobState::Failed` is retryable (`util::retry_blocked_reason`). `Unknown` means the
+  action may already have reached the device — replaying it is what `ReplaySafety::ActOnce`
+  refuses — and a running or finished job has nothing to retry.
+- `override_window` is **not** recorded: an override approved for the original dispatch says
+  nothing about the moment of the retry, so the maintenance window is re-evaluated.
+- The recorded run-as is the resolved one, so a changed Settings default does not change who a
+  retry runs as without the dialog saying so.
+- "Retry N failed" rebuilds one request from a batch's failed rows; jobs whose kind, dry-run flag
+  or options differ are refused rather than merged, since one would run with the other's options.
+- The typed parameters are held in memory only, as the request they came from was; the audit log
+  keeps its redacted copy.
 
 ## Guardrails live in `actions::plan`
 
 `plan()` is pure with an injected clock. Adding a guardrail means extending `blockers`/`warnings`
 there, not adding a dialog. The one exception is the `dry_run` check, which is *also* asserted at
-the dispatch site in `run_action` — defense in depth, so a new `ActionKind` whose
-`supports_dry_run()` is wrong can't send a real mutating POST while the UI says "Dry run".
+the dispatch site in `send_action` — defense in depth, so a new `ActionKind` whose
+`supports_dry_run()` is wrong can't send a real mutating POST while the UI says "Dry run", and a
+script dispatch whose parameter string lacks the `dryRun=true` token
+(`dispatch::carries_dry_run_flag`) is refused rather than run for real.
+
+## A dry run is allowed only for a script that declares `dryRun`
+
+NinjaOne has no preview mode. A toolkit "dry run" only appends `dryRun=true` to the composed
+parameter string, so a script that never reads it **runs for real** while the Jobs tab and the
+audit trail say "Dry run". `supports_dry_run()` (true for every script-running kind) is therefore
+necessary but not sufficient: `build_plan` resolves the script and classifies it as a
+`DryRunSupport`, and `plan()` blocks every value but `Declared`.
+
+- `Declared` means the library entry declares a `dryRun` script variable (name match,
+  case-insensitive) or a parameter line containing `dryRun` as a whole token
+  (`AutomationScript::accepts_dry_run`). Stricter than `accepts_kb_allow_list`'s substring match,
+  so `-NoDryRunSupport` does not count.
+- A built-in action (`ScriptRef::Action`) takes no `dryRun`: blocked.
+- **Hand-typed parameters with Dry run on are blocked**, whatever the script declares. They are
+  sent verbatim, so no flag is added; the alternative — appending `dryRun=true` when the string
+  lacks it — would rewrite what the operator typed and put a parse of free-form text between them
+  and a live run. Clearing the box composes the parameters instead, which always carry the flag.
+- The library is read only for a dry run of a script, on plan **and** on confirm (`run_action`
+  re-plans), so a script edited to drop `dryRun` between review and confirm is refused. A library
+  that cannot be read, or no longer lists the id, is `Unverified` — blocked, fail closed.
+- `ScriptSummary.accepts_dry_run` lets the action bar disable the affected buttons while Dry run is
+  on, and name the scripts that cannot preview; it is advisory, the planner decides.
+
+## The maintenance window
+
+`ActionSettings.window_days` (`0` = Sunday), `window_start_minute`, `window_end_minute` (an end
+before the start wraps past midnight; the day is the day the window *opened*). `window_is_open`
+reads `DateTime<Local>` — **this computer's clock**, not the devices' (NinjaOne exposes no device
+time zone on this path) — so the blocker, the Settings editor and the override checkbox all say
+"this computer's time", and the blocker prints the UTC offset. `save_settings` rejects times
+outside a day, days outside 0–6, a zero-length window and an enforced window with no days, and
+stores the days sorted and de-duplicated.
+
+The override is two switches, and the blocker names whichever is missing:
+`allow_window_override` in Settings *permits* it; the action bar's "Override the maintenance
+window for this dispatch" (`override_window` on the request) *requests* it. The checkbox is shown
+only while the window is enforced and overridable — not "only while it is closed", which would
+need a second copy of `window_is_open` against the webview's clock that could disagree at the
+boundary; an override requested inside an open window is inert. It is bound into the confirm
+token, sent only while the checkbox is shown, and **cleared after every dispatch** so it cannot
+silently carry over. When it actually bypasses a closed window, `ActionPlan.window_overridden` is
+set and every opening audit record carries `windowOverride: true` (omitted otherwise, so ordinary
+records keep their shape); the audit trail shows "Live (window override)".
 
 ## After a mutating action, invalidate the current-patch cache
 
@@ -183,6 +298,23 @@ prefers `statusCode` and falls back to `status`; `Activity::outcome()` takes the
 `activityResult` first, so a `COMPLETED` activity carrying `FAILURE` is a failed job. The exit code
 comes from `data` (the spec's untyped bag), with `result` kept as an alias — reading only `result`
 meant `exit_code()` always returned `None` and every job reported "Completed, no exit code".
+
+### One read per device per tick
+
+`poller::feed_reads` plans a tick's `/activities` reads **per device**, floored at the earliest
+pending dispatch on it (less the 5 s skew allowance), and `resolve_pending` hands every job on
+that device the same list. It used to be one read per *job*, so a device carrying a scan, an
+apply and a reboot was asked for the same feed three times a tick. Correlation still runs in
+`pending` order with `claimed` threaded through, so two jobs on one device never bind the same
+activity; `commands::actions::tests` pins both with wiremock.
+
+A read is narrowed with the documented `seriesUid` parameter only when the device has exactly one
+pending job **and** that job's series uid has already been seen on an activity in its feed
+(`confirmed_series`, held by the poller task). A dispatch response's uid alone is not proof:
+`parse_dispatch_response` takes a bare `uid` as a last resort, which may be an echoed script uid
+no activity carries, and a read narrowed to it would starve the job until its timeout. The device
+`df` is always sent too, so `seriesUid` only ever narrows — a tenant that ignored it must not widen
+the read to the fleet.
 
 ### `newerThan` is an activity ID, not a timestamp
 

@@ -5,7 +5,7 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::error::UiError;
-use crate::export::{WorkbookMeta, write_workbook};
+use crate::export::{BacklogSheets, DETAIL_COLUMNS, WorkbookMeta, write_workbook};
 use crate::rows::QueryResult;
 use crate::state::AppState;
 
@@ -91,14 +91,14 @@ async fn save_dialog(
     app: &tauri::AppHandle,
     filter_label: &'static str,
     ext: &'static str,
-    stem: &'static str,
+    file_name: String,
 ) -> Result<Option<std::path::PathBuf>, UiError> {
     let app = app.clone();
     let picked = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
             .file()
             .add_filter(filter_label, &[ext])
-            .set_file_name(default_name(stem, ext))
+            .set_file_name(file_name)
             .blocking_save_file()
     })
     .await
@@ -128,14 +128,14 @@ pub async fn export_patches_xlsx(
     // committed (a cancelled dialog copies nothing).
     require_cached_result(&state)?;
 
-    let Some(path) = save_dialog(&app, "Excel Workbook", "xlsx", "ninjaone-patches").await? else {
+    let name = default_name("ninjaone-patches", "xlsx");
+    let Some(path) = save_dialog(&app, "Excel Workbook", "xlsx", name).await? else {
         return Ok(None);
     };
     let path_str = path.to_string_lossy().to_string();
 
     // A handle on the cached result, not a copy of it. The whole thing moves into the
-    // blocking task and the sheets borrow out of it there, so the only allocation on
-    // this path is the reboot subset — which is a filtered projection either way.
+    // blocking task and the sheets borrow out of it there.
     let result = cached_result(&state)?;
     let scope_note = crate::rows::compliance_scope_note(
         result.devices_offline,
@@ -147,19 +147,19 @@ pub async fn export_patches_xlsx(
     // plus the file write — both of which would hold a tokio worker for the duration.
     let written = path_str.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let reboot: Vec<_> = result
-            .devices
-            .iter()
-            .filter(|d| d.needs_reboot)
-            .cloned()
-            .collect();
         write_workbook(
             &written,
             &result.rows,
             &result.compliance,
             &result.compliance_by_os,
-            &reboot,
+            &result.devices,
             &result.failures,
+            &BacklogSheets {
+                worst_devices: &result.worst_devices,
+                offline_backlog: &result.offline_backlog,
+                time_to_install: &result.time_to_install,
+            },
+            &result.approvals,
             &WorkbookMeta {
                 generated_at: &result.generated_at,
                 data_fetched_at: &result.data_fetched_at,
@@ -168,6 +168,9 @@ pub async fn export_patches_xlsx(
                 devices_unpatchable: result.devices_unpatchable,
                 scope: &result.scope,
                 scope_note: &scope_note,
+                changes: &result.changes,
+                instance: &result.instance,
+                sla_policy: &result.sla_policy,
             },
         )
     })
@@ -194,7 +197,8 @@ pub async fn export_report_html(
     // Same probe-then-clone-after-dialog flow as the Excel export above.
     require_cached_result(&state)?;
 
-    let Some(path) = save_dialog(&app, "HTML Report", "html", "ninjaone-report").await? else {
+    let name = default_name("ninjaone-report", "html");
+    let Some(path) = save_dialog(&app, "HTML Report", "html", name).await? else {
         return Ok(None);
     };
     let path_str = path.to_string_lossy().to_string();
@@ -210,6 +214,110 @@ pub async fn export_report_html(
     .map_err(|e| UiError::new(format!("write report: {e}")))?;
     restrict_to_owner(&path_str);
     Ok(Some(path_str))
+}
+
+/// Opens a save dialog and writes the cached detail rows — the Patches sheet's
+/// columns, every row, no row limit — as CSV (see [`crate::csv_export`]). Returns
+/// the saved path, or `None` if the operator cancelled.
+///
+/// Same probe → dialog → handle → blocking-write shape as the other two exports.
+/// A CSV cannot carry the About sheet's provenance, so the proposed file name
+/// states the device scope, the status selection and both clocks
+/// ([`csv_file_name`]).
+#[tauri::command]
+pub async fn export_csv(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, UiError> {
+    require_cached_result(&state)?;
+    // The name is read off the result the probe just found. A re-query landing
+    // between here and the write below is the same race the other exports accept:
+    // the file then holds the newer rows under a name stamped with the older clocks.
+    let name = state
+        .with_current_result(csv_file_name)
+        .map_err(UiError::from)?
+        .ok_or_else(|| UiError::new("Run a query before exporting."))?;
+
+    let Some(path) = save_dialog(&app, "CSV (comma-separated)", "csv", name).await? else {
+        return Ok(None);
+    };
+    let path_str = path.to_string_lossy().to_string();
+
+    let result = cached_result(&state)?;
+    tauri::async_runtime::spawn_blocking(move || -> std::io::Result<()> {
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        crate::csv_export::write_csv(&mut out, &DETAIL_COLUMNS, &result.rows)?;
+        std::io::Write::flush(&mut out)
+    })
+    .await
+    .map_err(|e| UiError::new(format!("CSV export task failed: {e}")))?
+    .map_err(|e| UiError::new(format!("write CSV: {e}")))?;
+    restrict_to_owner(&path_str);
+    Ok(Some(path_str))
+}
+
+/// The CSV's proposed file name, which is the only place a CSV can say what it
+/// holds: `ninjaone-patches_<device scope>_<statuses>_data-<fetched>_generated-<generated>.csv`,
+/// e.g. `ninjaone-patches_whole-fleet_pending_data-20260502T0840Z_generated-20260502T0915Z.csv`.
+///
+/// The device scope is `whole-fleet` or the selected device facets' values; the
+/// patch filters other than Status (severity, search, date windows) are not in it —
+/// a file name has no room for them, and the workbook's About sheet has. Both clocks
+/// are UTC, compacted to `YYYYMMDDTHHMMZ`.
+fn csv_file_name(result: &QueryResult) -> String {
+    let scope = if result.scope.device_scoped {
+        let values: Vec<&str> = result
+            .scope
+            .facets
+            .iter()
+            .filter(|(label, _)| !matches!(*label, "Scope" | "Patch type"))
+            .map(|(_, value)| value.as_str())
+            .collect();
+        Some(slug(&values.join(" "))).filter(|s| !s.is_empty())
+    } else {
+        Some("whole-fleet".to_string())
+    };
+    let statuses = result
+        .scope
+        .patch_facets
+        .iter()
+        .find(|(label, _)| *label == "Status")
+        .map(|(_, value)| slug(value))
+        .filter(|s| !s.is_empty());
+    let mut parts = vec!["ninjaone-patches".to_string()];
+    parts.push(scope.unwrap_or_else(|| "scoped".to_string()));
+    parts.extend(statuses);
+    parts.push(format!("data-{}", compact_clock(&result.data_fetched_at)));
+    parts.push(format!("generated-{}", compact_clock(&result.generated_at)));
+    format!("{}.csv", parts.join("_"))
+}
+
+/// Lowercase ASCII letters and digits, every other run of characters collapsed to
+/// one `-`, capped at [`SLUG_MAX`] — safe on every filesystem the app ships to. A
+/// name made only of characters outside ASCII slugs to empty; the caller falls back.
+fn slug(s: &str) -> String {
+    const SLUG_MAX: usize = 40;
+    let mut out = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.truncate(SLUG_MAX);
+    out.trim_end_matches('-').to_string()
+}
+
+/// `2026-05-02 08:40:00 UTC` → `20260502T0840Z`. A clock that does not parse keeps
+/// only its digits, so the name still sorts and never carries a path separator.
+fn compact_clock(clock: &str) -> String {
+    match crate::export::clock_timestamp(clock)
+        .and_then(|ts| chrono::DateTime::<Utc>::from_timestamp(ts, 0))
+    {
+        Some(when) => when.format("%Y%m%dT%H%MZ").to_string(),
+        None => clock.chars().filter(char::is_ascii_digit).collect(),
+    }
 }
 
 #[cfg(test)]
@@ -232,6 +340,53 @@ mod tests {
             "{html}"
         );
     }
+    /// A CSV has nowhere to state its provenance but its name: the device scope,
+    /// the status selection and both clocks, all filesystem-safe.
+    #[test]
+    fn the_csv_name_states_scope_statuses_and_both_clocks() {
+        let mut result = sample_result();
+        result.generated_at = "2026-05-02 09:15:00 UTC".into();
+        result.data_fetched_at = "2026-05-02 08:40:00 UTC".into();
+        result.scope = crate::rows::QueryScope {
+            facets: vec![
+                ("Scope", "Whole fleet — no device filters applied".into()),
+                ("Patch type", "OS patches only".into()),
+            ],
+            patch_facets: vec![("Status", "Pending, Failed".into())],
+            ..Default::default()
+        };
+        assert_eq!(
+            csv_file_name(&result),
+            "ninjaone-patches_whole-fleet_pending-failed_data-20260502T0840Z_generated-20260502T0915Z.csv"
+        );
+
+        result.scope = crate::rows::QueryScope {
+            facets: vec![
+                ("Organizations", "Contoso Ltd, Zürich AG".into()),
+                ("OS type", "WINDOWS_SERVER".into()),
+                ("Patch type", "OS patches only".into()),
+            ],
+            patch_facets: vec![("Status", "Pending".into())],
+            device_scoped: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            csv_file_name(&result),
+            "ninjaone-patches_contoso-ltd-z-rich-ag-windows-server_pending_data-20260502T0840Z_generated-20260502T0915Z.csv"
+        );
+    }
+
+    #[test]
+    fn slugs_are_short_ascii_and_never_empty_by_accident() {
+        assert_eq!(slug("  Contoso / HQ — Seattle  "), "contoso-hq-seattle");
+        assert_eq!(slug("../../etc"), "etc");
+        assert_eq!(slug("日本"), "", "the caller falls back to a fixed word");
+        let long = slug(&"a b ".repeat(40));
+        assert!(long.len() <= 40 && !long.ends_with('-'), "{long}");
+        // A clock that does not parse keeps its digits and loses any separator.
+        assert_eq!(compact_clock("2026/05/02 08:40"), "202605020840");
+    }
+
     /// An export carries a whole fleet's device names, organizations and compliance
     /// posture — the same category the audit log sets 0600 for, with a comment about
     /// roaming profiles. These were written at the default umask.
@@ -306,6 +461,12 @@ mod tests {
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
+            worst_devices: Default::default(),
+            offline_backlog: Default::default(),
+            time_to_install: Default::default(),
+            sla_policy: Default::default(),
+            instance: "https://app.ninjarmm.com".into(),
+            approvals: Default::default(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,
@@ -314,6 +475,7 @@ mod tests {
                 software: true,
             },
             scope: Default::default(),
+            changes: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }

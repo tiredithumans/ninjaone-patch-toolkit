@@ -9,6 +9,12 @@ pub enum TableCell {
     Text(String),
     Count(usize),
     Number(f64),
+    /// An instant as Unix seconds, UTC; `None` renders blank. Carried as a number
+    /// rather than pre-formatted text so the workbook can write a real Excel
+    /// date-time — a text date sorts and filters as a string there, and every
+    /// "older than" question an operator asks of a patch export is a date question.
+    /// The text renderers (report, CSV) print it through [`utc_text`].
+    DateTime(Option<i64>),
 }
 
 impl TableCell {
@@ -24,6 +30,14 @@ impl TableCell {
     pub fn opt_text(value: Option<impl AsRef<str>>) -> Self {
         Self::Text(value.map(|v| v.as_ref().to_string()).unwrap_or_default())
     }
+}
+
+/// The one text spelling of an instant every renderer shares: `2026-05-01 09:15 UTC`.
+/// Fixed-width and most-significant-first, so even as plain text (the CSV) it sorts
+/// chronologically. `None` for a value outside chrono's range.
+pub fn utc_text(ts: i64) -> Option<String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
 }
 
 /// One table column: its header and how to read that cell off a row.

@@ -12,8 +12,14 @@ impl AppState {
         let statuses = self.filters.statuses.get_untracked();
         // An operator reading "12 failures" must be able to see it meant "12 in 30
         // days" — see `util::needs_install_window`.
-        let install_days = util::needs_install_window(&statuses)
-            .then(|| self.filters.install_days.get_untracked());
+        let install_window = util::needs_install_window(&statuses).then(|| {
+            util::install_window_label(
+                self.filters.install_custom.get_untracked(),
+                self.filters.install_days.get_untracked(),
+                &self.filters.install_after_date.get_untracked(),
+                &self.filters.install_before_date.get_untracked(),
+            )
+        });
 
         let organizations = util::names_for(
             &self.filters.org_ids.get_untracked(),
@@ -56,7 +62,7 @@ impl AppState {
             detected_window: self.filters.detected_window.get_untracked(),
             detected_after: self.filters.detected_after_date.get_untracked(),
             detected_before: self.filters.detected_before_date.get_untracked(),
-            install_days,
+            install_window,
         }
     }
 
@@ -174,8 +180,9 @@ impl AppState {
                             util::page_count(total, PATCHES_PAGE_SIZE),
                         )
                     } else {
-                        // A manual run returns to page 1 in the canonical order.
-                        self.query.patches_sort.set(None);
+                        // A manual run returns to page 1 in the canonical order —
+                        // or in the order a just-applied view link asked for.
+                        self.query.patches_sort.set(self.take_sort_on_next_run());
                         0
                     };
                     self.query.patches_page.set(page);
@@ -221,12 +228,14 @@ impl AppState {
                         // Same scope, fresher data: keep what the operator ticked,
                         // minus anything this refresh no longer lists.
                         self.prune_selection_after_refresh(seq);
+                        self.prune_device_selection_after_refresh();
                     } else {
                         // A new scope: a selection made against the previous result
                         // no longer describes what is on screen.
                         self.clear_selection();
                     }
                     self.actions.results_stale.set(false);
+                    self.reload_device_detail();
                 }
                 // The toast announces the failure (aria-live); the banner keeps it
                 // visible after the toast auto-dismisses.
@@ -390,7 +399,7 @@ impl AppState {
         self.query.patches_page.set(0);
         // A run returns to the canonical order, as on the live path; leaving the
         // sort in place drew a ▲ on a header over rows that were not sorted by it.
-        self.query.patches_sort.set(None);
+        self.query.patches_sort.set(self.take_sort_on_next_run());
         self.query.result.set(Some(r));
         // Same reason as the live path: a grouped view's headers and members don't
         // ride along with the result, so they'd otherwise describe the last query.
@@ -406,6 +415,7 @@ impl AppState {
             .applied_filters
             .set(Some(self.snapshot_filters()));
         self.query.query_error.set(None);
+        self.reload_device_detail();
     }
 
     /// Everything the backend drops on sign-out, sign-in, re-authorization and a
@@ -424,6 +434,75 @@ impl AppState {
         // A run queued behind one from the old session would fire into the new
         // one (or, signed out, just to say "Sign in first").
         self.run.queued.set(None);
+        self.query.sort_on_next_run.set(None);
+    }
+
+    fn take_sort_on_next_run(self) -> Option<RowSort> {
+        let sort = self.query.sort_on_next_run.get_untracked();
+        self.query.sort_on_next_run.set(None);
+        sort
+    }
+
+    /// Why auto-refresh is holding right now, if it is — see `util::refresh_hold`
+    /// for the order. The signals make the label react at once; the DOM check
+    /// covers any modal not listed here, and — like `hidden`, which is not a
+    /// signal either — is picked up by the next one-second tick.
+    pub(in crate::app) fn refresh_hold(self) -> Option<util::RefreshHold> {
+        let dialog_open = self.actions.pending.with(Option::is_some)
+            || self.updates.update.with(Option::is_some)
+            || self.ui.shortcuts_open.get()
+            || self.ui.pending_view.with(Option::is_some)
+            || self.ui.show_settings.get()
+            || modal::any_modal_open();
+        util::refresh_hold(
+            self.run.refresh_paused.get(),
+            dialog_open,
+            api::document_hidden(),
+            self.run.busy.get() || self.run.refreshing.get(),
+        )
+    }
+
+    /// One tick of the auto-refresh ticker: advance the countdown and fire when it
+    /// runs out. Off, or signed out, keeps the clock parked at a full cadence.
+    pub(in crate::app) fn tick_auto_refresh(self) {
+        let secs = self.run.refresh_secs.get_untracked();
+        let now = js_sys::Date::now();
+        if secs == 0 || !self.is_authed() {
+            self.run
+                .refresh_clock
+                .set(util::RefreshClock::start(secs, now));
+            return;
+        }
+        let (clock, fire) = util::advance_refresh(
+            self.run.refresh_clock.get_untracked(),
+            secs,
+            now,
+            self.refresh_hold(),
+        );
+        self.run.refresh_clock.set(clock);
+        if fire {
+            self.run_query_auto();
+        }
+    }
+
+    /// Picks a cadence (0 = Off). Restarts the countdown from the full cadence and
+    /// lifts a pause: choosing a cadence is asking for it to run.
+    pub(in crate::app) fn set_refresh_cadence(self, secs: u32) {
+        self.run.refresh_secs.set(secs);
+        self.run.refresh_paused.set(false);
+        self.run
+            .refresh_clock
+            .set(util::RefreshClock::start(secs, js_sys::Date::now()));
+    }
+
+    /// Pause / Resume without losing the cadence. Says so when there is nothing to
+    /// pause, since a shortcut gives no other feedback.
+    pub(in crate::app) fn toggle_refresh_pause(self) {
+        if self.run.refresh_secs.get_untracked() == 0 {
+            self.notify(Toast::ok("Auto-refresh is off — pick a cadence to use it"));
+            return;
+        }
+        self.run.refresh_paused.update(|p| *p = !*p);
     }
 
     /// Drops everything derived from the last query: the summary, the current page,
@@ -442,5 +521,6 @@ impl AppState {
         self.query.query_error.set(None);
         self.clear_selection();
         self.actions.results_stale.set(false);
+        self.close_device();
     }
 }

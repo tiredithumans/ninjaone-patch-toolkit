@@ -1,4 +1,5 @@
-//! The Needs Reboot tab: the needs-reboot device subset, paged client-side.
+//! The Needs Reboot tab: the needs-reboot device subset, paged client-side, with a
+//! device-level selection the shared `ActionBar` can reboot or scan.
 
 use super::*;
 
@@ -29,6 +30,7 @@ pub(super) fn RebootTable() -> impl IntoView {
         })
     };
     let has_devices = move || total() > 0;
+    let page_state = move || state.device_page_selection_state(&devices());
 
     view! {
         <Show
@@ -49,10 +51,30 @@ pub(super) fn RebootTable() -> impl IntoView {
                 })
                 on_page=Callback::new(move |target| page.set(target))
             />
+            // The same action bar as the Patches tab, reading this tab's device
+            // selection: a reboot or a scan straight from the list that says which
+            // devices need one.
+            <Show when=move || state.action_surface_visible()>
+                <ActionBar source=SelectionSource::Devices/>
+            </Show>
             <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
+                            // Not a `DeviceSummary::COLUMNS` column: the workbook and
+                            // the HTML report have nothing to select.
+                            <th scope="col" class="col-select">
+                                <input
+                                    type="checkbox"
+                                    aria-label="Select every device on this page"
+                                    prop:checked=move || page_state().0
+                                    prop:indeterminate=move || page_state().1
+                                    on:change=move |ev| {
+                                        state
+                                            .toggle_device_page(&devices(), event_target_checked(&ev))
+                                    }
+                                />
+                            </th>
                             // Spelled as `rows::DeviceSummary::COLUMNS` spells them,
                             // so the app, the workbook and the HTML report name the
                             // same column the same way.
@@ -69,12 +91,29 @@ pub(super) fn RebootTable() -> impl IntoView {
                             devices()
                                 .into_iter()
                                 .map(|d| {
+                                    let id = d.device_id;
+                                    let label = format!("Select {} to reboot or scan", d.device_name);
+                                    let row = d.clone();
                                     view! {
                                         <tr>
+                                            <td class="col-select">
+                                                <input
+                                                    type="checkbox"
+                                                    aria-label=label
+                                                    prop:checked=move || state.is_device_selected(id)
+                                                    on:change=move |ev| {
+                                                        state
+                                                            .toggle_device_selection(
+                                                                &row,
+                                                                event_target_checked(&ev),
+                                                            )
+                                                    }
+                                                />
+                                            </td>
                                             <td>{d.organization}</td>
                                             <td>{d.location.unwrap_or_default()}</td>
                                             <td>{d.device_role.unwrap_or_default()}</td>
-                                            <td>{d.device_name}</td>
+                                            <td><DeviceLink device_id=d.device_id name=d.device_name/></td>
                                             <td>{d.os_name.unwrap_or_default()}</td>
                                             <td>{d.pending_count}</td>
                                         </tr>

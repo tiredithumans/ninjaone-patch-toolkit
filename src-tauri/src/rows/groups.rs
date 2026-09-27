@@ -47,6 +47,23 @@ pub struct RowSort {
 pub enum GroupBy {
     Device,
     Patch,
+    /// Third-party rows by `productIdentifier` — every version of one product in
+    /// one group — and every other row by its [`GroupBy::Patch`] key, so OS
+    /// patches (which carry no product) group exactly as they do by patch.
+    Product,
+}
+
+/// The first field of a product group's key. A product key has two fields and a
+/// patch key three, so [`GroupKeyMatcher`] tells them apart by shape and a product
+/// key cannot be mistaken for a patch key (or the reverse).
+const PRODUCT_KEY_TAG: &str = "SOFTWARE";
+
+/// The product a row groups under in [`GroupBy::Product`]: its product identifier,
+/// when it is a third-party row carrying a non-blank one.
+fn product_of(row: &PatchRow) -> Option<&str> {
+    row.product_identifier
+        .as_deref()
+        .filter(|p| row.patch_type == "SOFTWARE" && !p.trim().is_empty())
 }
 
 /// Separator joining the fields of a composite group key. A unit separator can't
@@ -78,7 +95,14 @@ fn write_group_key(row: &PatchRow, group_by: GroupBy, buf: &mut String) {
         GroupBy::Device => {
             let _ = write!(buf, "{}", row.device_id);
         }
-        GroupBy::Patch => {
+        GroupBy::Product if product_of(row).is_some() => {
+            let _ = write!(
+                buf,
+                "{PRODUCT_KEY_TAG}{GROUP_KEY_SEP}{}",
+                product_of(row).unwrap_or_default()
+            );
+        }
+        GroupBy::Patch | GroupBy::Product => {
             let _ = write!(
                 buf,
                 "{}{GROUP_KEY_SEP}{}{GROUP_KEY_SEP}{}",
@@ -87,6 +111,55 @@ fn write_group_key(row: &PatchRow, group_by: GroupBy, buf: &mut String) {
                 row.name
             );
         }
+    }
+}
+
+/// A stable, version-free display name for a product group, from its members'
+/// titles as `(title, row count)`.
+///
+/// NinjaOne's third-party feed folds the version into the title ("Google Chrome
+/// 141.0.7390.55") and declares no product-name field, so the name has to be
+/// derived: each title loses one trailing version token (see
+/// [`strip_version_token`]), and the most common result wins, ties broken
+/// case-insensitively then bytewise so the label does not depend on row order.
+/// Mirrored in `web-rs/src/app/util/` (`product_display_name`) for the demo; the
+/// grouping fixture pins the two together.
+pub fn product_display_name<'a>(titles: impl IntoIterator<Item = (&'a str, usize)>) -> String {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for (title, n) in titles {
+        *counts.entry(strip_version_token(title)).or_default() += n;
+    }
+    counts
+        .into_iter()
+        .max_by(|(a, na), (b, nb)| na.cmp(nb).then_with(|| cmp_ci(b, a)).then_with(|| b.cmp(a)))
+        .map(|(name, _)| name.to_string())
+        .unwrap_or_default()
+}
+
+/// `title` without one trailing version token, trimmed: "Google Chrome
+/// 141.0.7390.55" → "Google Chrome", "OpenSSL 3.0.16-1ubuntu1" → "OpenSSL".
+///
+/// A version token starts with a digit (after an optional `v`), contains a `.`, and
+/// holds nothing but ASCII alphanumerics and `.-_+`. The dot is what keeps
+/// "Microsoft Office 2016" and "Java 8 Update 451" whole — a bare number is as
+/// likely to be part of the product's name as its version. A title that is nothing
+/// but a version is returned as-is rather than emptied.
+pub fn strip_version_token(title: &str) -> &str {
+    let title = title.trim();
+    let Some((head, last)) = title.rsplit_once(char::is_whitespace) else {
+        return title;
+    };
+    let body = last.strip_prefix(['v', 'V']).unwrap_or(last);
+    let is_version = body.starts_with(|c: char| c.is_ascii_digit())
+        && body.contains('.')
+        && body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'));
+    let head = head.trim_end();
+    if is_version && !head.is_empty() {
+        head
+    } else {
+        title
     }
 }
 
@@ -136,6 +209,10 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
         device_id: Option<i64>,
         offline: bool,
         needs_reboot: bool,
+        /// Product groups only: each member title and how many rows carry it, for
+        /// [`product_display_name`]. Keyed by the rows' shared `Arc`s, so this is
+        /// one entry per distinct version, not per row.
+        titles: HashMap<Arc<str>, usize>,
     }
     let mut groups: HashMap<String, Acc> = HashMap::new();
     // One reusable key buffer for the whole pass — see `write_group_key`. Grouping
@@ -166,8 +243,12 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                         device_id: (r.device_id != ORPHAN_DEVICE_ID).then_some(r.device_id),
                         offline: r.offline,
                         needs_reboot: r.needs_reboot,
+                        titles: HashMap::new(),
                     },
-                    GroupBy::Patch => Acc {
+                    // A product group's label and sublabel are settled once every
+                    // member has been seen, below; a fallback (non-product) group is
+                    // a patch group in every respect.
+                    GroupBy::Patch | GroupBy::Product => Acc {
                         seq,
                         label: r.name.clone(),
                         sublabel: r.kb.clone().filter(|k| !k.is_empty()),
@@ -178,10 +259,14 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                         device_id: None,
                         offline: false,
                         needs_reboot: false,
+                        titles: HashMap::new(),
                     },
                 }),
         };
         acc.rows += 1;
+        if group_by == GroupBy::Product && product_of(r).is_some() {
+            *acc.titles.entry(Arc::clone(&r.name)).or_default() += 1;
+        }
         // Id-less records are not one shared device; counting the sentinel would add
         // a phantom machine to every patch group they appear in.
         if r.device_id != ORPHAN_DEVICE_ID {
@@ -198,17 +283,33 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
     accumulated.sort_unstable_by_key(|(_, a)| a.seq);
     let mut out: Vec<PatchGroup> = accumulated
         .into_iter()
-        .map(|(key, a)| PatchGroup {
-            key,
-            label: a.label,
-            sublabel: a.sublabel,
-            rows: a.rows,
-            devices: a.devices.len(),
-            severity: a.severity,
-            severity_rank: a.severity_rank,
-            device_id: a.device_id,
-            offline: a.offline,
-            needs_reboot: a.needs_reboot,
+        .map(|(key, a)| {
+            // A product group names the product, not whichever version it happened
+            // to meet first, and says how many versions it spans instead of a KB
+            // (third-party records carry none).
+            let (label, sublabel) = if a.titles.is_empty() {
+                (a.label, a.sublabel)
+            } else {
+                let versions = a.titles.len();
+                (
+                    Arc::from(product_display_name(
+                        a.titles.iter().map(|(t, n)| (&**t, *n)),
+                    )),
+                    (versions > 1).then(|| Arc::from(format!("{versions} versions"))),
+                )
+            };
+            PatchGroup {
+                key,
+                label,
+                sublabel,
+                rows: a.rows,
+                devices: a.devices.len(),
+                severity: a.severity,
+                severity_rank: a.severity_rank,
+                device_id: a.device_id,
+                offline: a.offline,
+                needs_reboot: a.needs_reboot,
+            }
         })
         .collect();
 
@@ -220,7 +321,7 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 g.label.to_lowercase(),
             )
         }),
-        GroupBy::Patch => {
+        GroupBy::Patch | GroupBy::Product => {
             out.sort_by_cached_key(|g| (Reverse(g.devices), Reverse(g.severity_rank)))
         }
     }
@@ -247,6 +348,56 @@ pub fn slice_groups(all: &[PatchGroup], offset: usize, limit: usize) -> GroupPag
         total: all.len(),
         groups: all.iter().skip(offset).take(limit).cloned().collect(),
     }
+}
+
+/// One device as the drill-down shows it: its facts and per-device rollup, plus
+/// its detail rows. Built from the cached result on request; never cached itself.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDetail {
+    /// `None` for a device that has rows but is not in the scoped inventory — only
+    /// possible for an orphan patch, which has no device facts to show.
+    pub device: Option<super::DeviceSummary>,
+    /// The device's detail rows — the Patches tab's rows, so every patch filter
+    /// applies — in the cache's canonical order, at most `limit` of them.
+    pub rows: Vec<PatchRow>,
+    /// How many detail rows the device has in all, so a capped list says so.
+    pub rows_total: usize,
+}
+
+/// Builds the drill-down for `device_id` from the cached result, or `None` when the
+/// result has neither a summary nor a row for it (a stale click after a re-query,
+/// or an id that was never in scope). A scan of every row, so the command runs it
+/// off the async runtime.
+pub fn device_detail(
+    result: &super::QueryResult,
+    device_id: i64,
+    limit: usize,
+) -> Option<DeviceDetail> {
+    if device_id == ORPHAN_DEVICE_ID {
+        return None;
+    }
+    let device = result
+        .devices
+        .iter()
+        .find(|d| d.device_id == device_id)
+        .cloned();
+    let mut rows_total = 0;
+    let mut rows = Vec::new();
+    for r in result.rows.iter().filter(|r| r.device_id == device_id) {
+        rows_total += 1;
+        if rows.len() < limit {
+            rows.push(r.clone());
+        }
+    }
+    if device.is_none() && rows_total == 0 {
+        return None;
+    }
+    Some(DeviceDetail {
+        device,
+        rows,
+        rows_total,
+    })
 }
 
 /// One page of a single group's member rows, in the cache's canonical order.
@@ -281,7 +432,12 @@ pub(super) enum GroupKeyMatcher<'a> {
         patch_type: &'a str,
         kb: &'a str,
         name: &'a str,
+        /// Parsed under `GroupBy::Product`, where this key is the fallback for rows
+        /// with no product — so a row that *has* one never matches it.
+        product_mode: bool,
     },
+    /// `GroupBy::Product`'s two-field key.
+    Product(&'a str),
     /// A key that does not parse matches nothing, exactly as a non-equal string did.
     None,
 }
@@ -290,14 +446,22 @@ impl<'a> GroupKeyMatcher<'a> {
     pub(super) fn new(group_by: GroupBy, key: &'a str) -> Self {
         match group_by {
             GroupBy::Device => Self::Device(key.parse().ok()),
-            GroupBy::Patch => {
+            GroupBy::Patch | GroupBy::Product => {
                 let mut parts = key.split(GROUP_KEY_SEP);
                 match (parts.next(), parts.next(), parts.next(), parts.next()) {
                     (Some(patch_type), Some(kb), Some(name), None) => Self::Patch {
                         patch_type,
                         kb,
                         name,
+                        product_mode: group_by == GroupBy::Product,
                     },
+                    // Only product mode issues two-field keys; under Patch the same
+                    // shape is simply unparseable.
+                    (Some(PRODUCT_KEY_TAG), Some(product), None, None)
+                        if group_by == GroupBy::Product =>
+                    {
+                        Self::Product(product)
+                    }
                     _ => Self::None,
                 }
             }
@@ -312,11 +476,17 @@ impl<'a> GroupKeyMatcher<'a> {
                 patch_type,
                 kb,
                 name,
+                product_mode,
             } => {
-                row.patch_type == *patch_type
+                // In product mode a row with a product is in its product group,
+                // never in a patch-keyed one, even if its fields would match — the
+                // same partition `write_group_key` draws.
+                !(*product_mode && product_of(row).is_some())
+                    && row.patch_type == *patch_type
                     && row.kb.as_deref().unwrap_or("") == *kb
                     && &*row.name == *name
             }
+            Self::Product(product) => product_of(row) == Some(*product),
         }
     }
 }

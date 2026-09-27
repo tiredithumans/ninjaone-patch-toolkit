@@ -38,7 +38,14 @@ lists individual patches per server, and exports to Excel.
   - Install‑history export (what actually installed / failed) over a date window.
   - Reboot & failure views (devices pending reboot; `FAILED` patches).
   - Compliance & SLA aging — per‑org compliance % and aged Critical/Important backlog.
-  - Saved filter presets and optional auto‑refresh.
+  - Saved filter presets and optional auto‑refresh with a visible countdown and Pause (it
+    also waits while a dialog or Settings is open, or the window is hidden).
+- **Operator comforts** — keyboard shortcuts (below); a **Columns** menu to hide Patches‑table
+  columns (remembered per machine; the Excel export still writes every column); **Copy view
+  link** / **Open view…** to hand a colleague the same filters, tab, grouping and sort (never
+  the selection or any credential — a link from another instance warns before applying; the web
+  demo keeps it in the URL); Light / Dark / System theme; reduced motion honoured; the window
+  reopens where you left it.
 - **Patch actions** *(opt‑in — see [Patch actions](#patch-actions))* — select patch rows and
   scan, apply, reboot, or run any script from the tenant's automation library, then watch
   each dispatch to a terminal state in the **Jobs** tab.
@@ -112,6 +119,22 @@ flow.
 Sign-in hanging, a 404, an empty export, or blank fields? See
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
+### Keyboard shortcuts
+
+Press <kbd>?</kbd> in the app for this list. Shortcuts are ignored while you type in a field,
+while a dialog is open, and with Ctrl/Alt/⌘ held. None of them dispatches an action, exports,
+or changes a device.
+
+| Key | Does |
+|---|---|
+| <kbd>r</kbd> | Run the query |
+| <kbd>1</kbd> – <kbd>6</kbd> | Switch results tab: Patches, Failures, Compliance, Needs Reboot, Trend, Jobs |
+| <kbd>/</kbd> | Jump to the Search filter |
+| <kbd>[</kbd> <kbd>]</kbd> | Previous / next page of the Patches table |
+| <kbd>p</kbd> | Pause or resume auto-refresh |
+| <kbd>?</kbd> | Show the shortcuts |
+| <kbd>Esc</kbd> | Close a dialog |
+
 ## Build & verify
 
 ```sh
@@ -174,7 +197,9 @@ actions under separate headings in the action bar, and the toolkit warns when yo
 untargeted one while holding a partial selection:
 
 - **Install all approved patches** — native endpoint, whole approved backlog, no preview, runs
-  as NinjaOne's agent (the shared *Run as* / *Dry run* options do not reach it).
+  as NinjaOne's agent (the shared *Run as* / *Dry run* options do not reach it). The confirm
+  dialog shows, per device, how many approved patches it will install and how many are still
+  pending approval (from the patch data already loaded; "unknown" if none is).
 - **Install only the selected patches** — remediation script, only the ticked patches, and each
   device receives only *its own* ticked patches rather than the union of the selection.
 
@@ -182,6 +207,12 @@ A device with nothing ticked of that patch family is dropped from a targeted app
 being sent an empty list.
 
 ### Setting up the remediation scripts
+
+Reference scripts that implement this contract ship in [`remediation/`](./remediation/README.md):
+`Install-SelectedWindowsUpdates.ps1` installs only the listed KBs through the Windows Update
+Agent. `Install-SelectedSoftwarePatches.ps1` decodes and validates the product list, but it
+installs nothing until you supply an install mechanism, and until then it exits `10`. That
+README covers how to import them, the exact parameter format and the exit codes.
 
 NinjaOne has **no script‑upload API**, so add the scripts by hand under **Administration →
 Library → Automation**, then paste each numeric ID (from the script's URL) into **Settings →
@@ -206,14 +237,18 @@ IDs are resolved from Settings in the backend — never taken from the request.
 
 **Guardrails**, all enforced in the Rust backend rather than the UI:
 
-- Dry run is the default for scripts. The native endpoints have no preview mode, so a
-  "dry run" of them is refused outright instead of pretending.
+- Dry run is the default for scripts, and is allowed only for a script that declares a
+  `dryRun` variable — one that ignores it would run for real. Hand‑typed parameters can't be
+  dry‑run (they are sent verbatim), and the native endpoints have no preview mode, so a "dry
+  run" of either is refused outright instead of pretending.
 - Every mutating action needs a confirmation token bound to that exact device set and
   parameter string, single‑use and valid for five minutes.
 - Blast‑radius cap (default 25 devices) and org‑span cap (default 1) are hard blockers.
 - Offline devices are skipped by default — NinjaOne *queues* work for them, so an action
   sent now can restart a machine hours later.
-- An optional maintenance window gates every change.
+- An optional maintenance window (days and hours in this computer's local time, set in
+  Settings) gates every change. If Settings allows it, a per‑dispatch override in the action bar
+  bypasses it for that one dispatch, and the audit trail records it.
 - A dispatch whose POST times out is recorded as **Unknown** and never retried: it may
   already be running on the device.
 

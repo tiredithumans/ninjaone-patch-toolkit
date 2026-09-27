@@ -132,6 +132,12 @@ mod tests {
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
+            worst_devices: Default::default(),
+            offline_backlog: Default::default(),
+            time_to_install: Default::default(),
+            sla_policy: Default::default(),
+            instance: "https://app.ninjarmm.com".into(),
+            approvals: Default::default(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,
@@ -140,6 +146,7 @@ mod tests {
                 software: true,
             },
             scope: Default::default(),
+            changes: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }
@@ -163,6 +170,7 @@ mod tests {
             activity_id: None,
             series_uid: None,
             exit_code: None,
+            request: None,
         }
     }
 

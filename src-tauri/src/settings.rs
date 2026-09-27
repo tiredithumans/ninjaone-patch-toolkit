@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::filter::FilterParams;
+use crate::model::Severity;
 
 /// Default NinjaOne instance. Operators change this to their region in Settings.
 pub const DEFAULT_BASE_URL: &str = "https://us2.ninjarmm.com";
@@ -116,6 +117,106 @@ impl Default for ActionSettings {
     }
 }
 
+/// Per-severity SLA overrides, in days. `None` falls back to [`Settings::sla_days`].
+///
+/// A field per band rather than a map so a severity added to the model fails to
+/// compile in [`get`](Self::get) until someone decides its SLA. `Unknown` has no
+/// field: an unmapped value carries no urgency to set a target for, so it always
+/// takes the default. Every field is `#[serde(default)]`, so a settings file
+/// written before this existed — or one that names only some bands — loads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SlaBySeverity {
+    pub critical: Option<i64>,
+    pub important: Option<i64>,
+    pub security: Option<i64>,
+    pub moderate: Option<i64>,
+    pub recommended: Option<i64>,
+    pub low: Option<i64>,
+    pub optional: Option<i64>,
+}
+
+impl SlaBySeverity {
+    /// The bands that take an override, most urgent first (`Severity::rank` order).
+    pub const BANDS: [Severity; 7] = [
+        Severity::Critical,
+        Severity::Important,
+        Severity::Security,
+        Severity::Moderate,
+        Severity::Recommended,
+        Severity::Low,
+        Severity::Optional,
+    ];
+
+    pub fn get(&self, severity: Severity) -> Option<i64> {
+        match severity {
+            Severity::Critical => self.critical,
+            Severity::Important => self.important,
+            Severity::Security => self.security,
+            Severity::Moderate => self.moderate,
+            Severity::Recommended => self.recommended,
+            Severity::Low => self.low,
+            Severity::Optional => self.optional,
+            Severity::Unknown => None,
+        }
+    }
+
+    /// The first override outside `1..=MAX_WINDOW_DAYS`, for the save-time check.
+    pub fn first_out_of_range(&self) -> Option<Severity> {
+        Self::BANDS.into_iter().find(|s| {
+            self.get(*s)
+                .is_some_and(|d| !(1..=MAX_WINDOW_DAYS).contains(&d))
+        })
+    }
+}
+
+/// The SLA a query's aging rollups were computed under: the default window plus
+/// any per-band overrides. Carried on the result so an export states the policy
+/// its numbers were computed with, not whatever Settings holds when it is saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlaPolicy {
+    pub default_days: i64,
+    pub by_severity: SlaBySeverity,
+}
+
+impl Default for SlaPolicy {
+    fn default() -> Self {
+        Self {
+            default_days: DEFAULT_SLA_DAYS,
+            by_severity: SlaBySeverity::default(),
+        }
+    }
+}
+
+impl SlaPolicy {
+    /// The SLA window for one band: its override, else the default.
+    pub fn days_for(&self, severity: Severity) -> i64 {
+        self.by_severity.get(severity).unwrap_or(self.default_days)
+    }
+
+    /// One line for the exports, e.g. `30 days (default); Critical 7 days, Important
+    /// 14 days`. Overrides in severity order; bands without one are not listed.
+    pub fn describe(&self) -> String {
+        let days = |n: i64| if n == 1 { "day" } else { "days" };
+        let d = self.default_days;
+        let mut out = format!("{d} {} (default)", days(d));
+        let overrides: Vec<String> = SlaBySeverity::BANDS
+            .into_iter()
+            .filter_map(|s| {
+                self.by_severity
+                    .get(s)
+                    .map(|n| format!("{} {n} {}", s.label(), days(n)))
+            })
+            .collect();
+        if !overrides.is_empty() {
+            out.push_str("; ");
+            out.push_str(&overrides.join(", "));
+        }
+        out
+    }
+}
+
 /// Non-secret app configuration persisted to `settings.json`. The client secret and
 /// refresh token live in the OS keyring, never here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +228,9 @@ pub struct Settings {
     pub callback_port: u16,
     pub install_window_days: i64,
     pub sla_days: i64,
+    /// Per-band overrides of `sla_days`. Absent from files written before it existed.
+    #[serde(default)]
+    pub sla_by_severity: SlaBySeverity,
     #[serde(default)]
     pub presets: Vec<Preset>,
     /// Whether to check GitHub for a newer release on launch. Defaults on; older
@@ -147,6 +251,7 @@ impl Default for Settings {
             callback_port: DEFAULT_CALLBACK_PORT,
             install_window_days: DEFAULT_INSTALL_WINDOW_DAYS,
             sla_days: DEFAULT_SLA_DAYS,
+            sla_by_severity: SlaBySeverity::default(),
             presets: Vec::new(),
             auto_check_updates: true,
             actions: ActionSettings::default(),
@@ -155,6 +260,27 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// The SLA policy a query is assembled under, every window clamped into
+    /// `1..=MAX_WINDOW_DAYS`. Save-time validation rejects out-of-range values, but
+    /// a hand-edited or pre-validation `settings.json` can still hold anything, and
+    /// these reach `chrono::Duration::days`, which panics on overflow.
+    pub fn sla_policy(&self) -> SlaPolicy {
+        let clamp = |d: i64| d.clamp(1, MAX_WINDOW_DAYS);
+        let o = self.sla_by_severity;
+        SlaPolicy {
+            default_days: clamp(self.sla_days),
+            by_severity: SlaBySeverity {
+                critical: o.critical.map(clamp),
+                important: o.important.map(clamp),
+                security: o.security.map(clamp),
+                moderate: o.moderate.map(clamp),
+                recommended: o.recommended.map(clamp),
+                low: o.low.map(clamp),
+                optional: o.optional.map(clamp),
+            },
+        }
+    }
+
     /// Loads `settings.json`, falling back to the defaults — loudly — when it cannot.
     ///
     /// This used to be `load().unwrap_or_default()` with nothing logged, so a corrupt
@@ -337,6 +463,10 @@ mod tests {
             callback_port: 12000,
             install_window_days: 14,
             sla_days: 7,
+            sla_by_severity: SlaBySeverity {
+                critical: Some(3),
+                ..SlaBySeverity::default()
+            },
             presets: vec![Preset {
                 name: "Servers".into(),
                 filter: FilterParams::default(),
@@ -361,6 +491,8 @@ mod tests {
         assert_eq!(loaded.callback_port, 12000);
         assert_eq!(loaded.install_window_days, 14);
         assert_eq!(loaded.sla_days, 7);
+        assert_eq!(loaded.sla_by_severity.critical, Some(3));
+        assert_eq!(loaded.sla_by_severity.important, None);
         assert!(!loaded.auto_check_updates);
         assert!(loaded.actions.enabled);
         assert_eq!(loaded.actions.os_patch_script_id, Some(123));
@@ -415,6 +547,10 @@ mod tests {
             loaded.auto_check_updates,
             "a missing autoCheckUpdates defaults to enabled"
         );
+        // A file from before per-severity SLAs has no overrides: every band ages
+        // against the single window it was configured with.
+        assert_eq!(loaded.sla_by_severity, SlaBySeverity::default());
+        assert_eq!(loaded.sla_policy().days_for(Severity::Critical), 30);
         // The load-bearing migration guarantee: an install that predates patch
         // actions stays read-only. If this ever flips, every existing deployment
         // would start requesting the `management` scope without being asked.
@@ -454,6 +590,78 @@ mod tests {
         assert!(!loaded.actions.allow_offline_targets);
         let _ = fs::remove_file(&path);
     }
+    /// A file naming only some bands loads, and the rest fall back to the default.
+    #[test]
+    fn a_partial_sla_block_loads_and_falls_back_per_band() {
+        let cfg = Settings::parse(
+            r#"{
+                "instanceBaseUrl": "https://us2.ninjarmm.com",
+                "callbackPort": 11434,
+                "installWindowDays": 30,
+                "slaDays": 45,
+                "slaBySeverity": { "critical": 7 }
+            }"#,
+        )
+        .expect("parse");
+        let policy = cfg.sla_policy();
+        assert_eq!(policy.days_for(Severity::Critical), 7);
+        assert_eq!(policy.days_for(Severity::Important), 45);
+        assert_eq!(
+            policy.days_for(Severity::Unknown),
+            45,
+            "an unmapped severity has no override of its own"
+        );
+    }
+
+    /// Save-time validation rejects these, but a hand-edited file can hold anything
+    /// and the windows reach `Duration::days`, which panics on overflow.
+    #[test]
+    fn the_sla_policy_clamps_every_window() {
+        let cfg = Settings {
+            sla_days: i64::MAX,
+            sla_by_severity: SlaBySeverity {
+                critical: Some(0),
+                low: Some(-5),
+                optional: Some(i64::MAX),
+                ..SlaBySeverity::default()
+            },
+            ..Settings::default()
+        };
+        let policy = cfg.sla_policy();
+        assert_eq!(policy.default_days, MAX_WINDOW_DAYS);
+        assert_eq!(policy.days_for(Severity::Critical), 1);
+        assert_eq!(policy.days_for(Severity::Low), 1);
+        assert_eq!(policy.days_for(Severity::Optional), MAX_WINDOW_DAYS);
+        assert_eq!(policy.days_for(Severity::Moderate), MAX_WINDOW_DAYS);
+    }
+
+    #[test]
+    fn the_sla_policy_describes_its_overrides_in_severity_order() {
+        let mut policy = SlaPolicy::default();
+        assert_eq!(policy.describe(), "30 days (default)");
+        policy.by_severity.important = Some(14);
+        policy.by_severity.critical = Some(1);
+        assert_eq!(
+            policy.describe(),
+            "30 days (default); Critical 1 day, Important 14 days"
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_override_is_found() {
+        let ok = SlaBySeverity {
+            critical: Some(1),
+            optional: Some(MAX_WINDOW_DAYS),
+            ..SlaBySeverity::default()
+        };
+        assert_eq!(ok.first_out_of_range(), None);
+        let bad = SlaBySeverity {
+            moderate: Some(0),
+            ..ok
+        };
+        assert_eq!(bad.first_out_of_range(), Some(Severity::Moderate));
+    }
+
     /// `save_settings` refuses plaintext at the IPC boundary, but settings.json is a
     /// plain file in the config directory: a hand-edited `http://` host used to
     /// survive a restart, and then every token request, refresh grant and API call

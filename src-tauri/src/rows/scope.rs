@@ -72,17 +72,32 @@ fn id_facet(ids: &[i64], names: &HashMap<i64, String>) -> Option<String> {
     Some(out.join(", "))
 }
 
+/// The install-history window a query actually pulled, as the plan resolved it.
+///
+/// `relative_days` is `Some` when the operator used the relative lookback control
+/// ("last N days"), and `None` for an absolute custom range — which is also the
+/// only case with a `before` bound. Carried as one value so the scope block, the
+/// fingerprint and the fetch cannot disagree about which control was in force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallWindow {
+    /// Inclusive lower bound, Unix seconds.
+    pub after: i64,
+    /// Inclusive upper bound, Unix seconds; `None` = up to the query time.
+    pub before: Option<i64>,
+    pub relative_days: Option<i64>,
+}
+
 /// Builds the provenance block from the plan a query ran under.
 ///
-/// `install_history_after` is `Some` only when the status selection actually reached
-/// the `*-patch-installs` endpoints; printing a lookback window on a Pending-only
+/// `install_history` is `Some` only when the status selection actually reached the
+/// `*-patch-installs` endpoints; printing a lookback window on a Pending-only
 /// query would describe a fetch that never happened.
 pub fn build_query_scope(
     filter: &FilterParams,
     maps: &LookupMaps,
     families: PatchFamilies,
     statuses: &[PatchStatus],
-    install_history_after: Option<i64>,
+    install_history: Option<InstallWindow>,
 ) -> QueryScope {
     let mut facets: Vec<(&'static str, String)> = Vec::new();
 
@@ -179,7 +194,16 @@ pub fn build_query_scope(
         ("First seen before", detected_before),
         (
             "Install history since",
-            install_history_after.and_then(stamp),
+            install_history.and_then(|w| {
+                stamp(w.after).map(|when| match w.relative_days {
+                    Some(days) => format!("{when} (last {days} days)"),
+                    None => when,
+                })
+            }),
+        ),
+        (
+            "Install history until",
+            install_history.and_then(|w| w.before).and_then(stamp),
         ),
     ] {
         if let Some(value) = value {
@@ -191,7 +215,7 @@ pub fn build_query_scope(
         facets,
         patch_facets,
         device_scoped,
-        fingerprint: fingerprint(filter, &classes, os_name, search, statuses),
+        fingerprint: fingerprint(filter, &classes, os_name, search, statuses, install_history),
     }
 }
 
@@ -204,6 +228,7 @@ fn fingerprint(
     os_name: Option<String>,
     search: Option<String>,
     statuses: &[PatchStatus],
+    install_history: Option<InstallWindow>,
 ) -> String {
     let join = |v: &mut Vec<String>| {
         v.sort_unstable();
@@ -250,6 +275,15 @@ fn fingerprint(
                 .unwrap_or_default(),
         ),
     ];
+    let mut parts: Vec<(&str, String)> = parts.into();
+    // Only an *absolute* install range is a different question: the relative
+    // lookback moves with every run, exactly like the first-seen window above, and
+    // was never part of the key. Appended only when present so every fingerprint
+    // recorded before the range existed still matches its own trend line.
+    if let Some(w) = install_history.filter(|w| w.relative_days.is_none()) {
+        let before = w.before.map(|b| b.to_string()).unwrap_or_default();
+        parts.push(("installed", format!("{}..{before}", w.after)));
+    }
     // JSON rather than a hand-joined string: the needles are free text, and an
     // escaped encoding cannot let one facet's value forge another's boundary.
     serde_json::to_string(&parts).unwrap_or_default()

@@ -18,6 +18,70 @@ impl AppState {
         })
     }
 
+    /// The library script `kind` would run: the configured remediation script for
+    /// its family, or the one picked in the script picker. Tracked.
+    fn dispatched_script_id(self, kind: ActionKind) -> Option<i64> {
+        if kind.is_remediation() {
+            self.settings.f_actions.with(|a| {
+                if kind.is_os_family() {
+                    a.os_patch_script_id
+                } else {
+                    a.software_patch_script_id
+                }
+            })
+        } else if kind == ActionKind::Script {
+            self.actions.script_id.get()
+        } else {
+            None
+        }
+    }
+
+    /// Whether the script `kind` would run declares `dryRun`: `None` when unknown
+    /// (no script, library not loaded, or the id is not in it). Tracked.
+    pub(in crate::app) fn script_declares_dry_run(self, kind: ActionKind) -> Option<bool> {
+        let id = self.dispatched_script_id(kind)?;
+        self.actions
+            .scripts
+            .with(|list| list.iter().find(|s| s.id == id).map(|s| s.accepts_dry_run))
+    }
+
+    /// Why Dry run makes `kind` unavailable right now, if the UI can tell. Tracked.
+    pub(in crate::app) fn dry_run_reason(self, kind: ActionKind) -> Option<String> {
+        util::dry_run_disabled_reason(
+            kind,
+            self.actions.dry_run.get(),
+            self.script_declares_dry_run(kind),
+            self.actions.script_params.with(|p| !p.trim().is_empty()),
+        )
+    }
+
+    /// (what it is, whether it declares `dryRun`) for every script the Dry run
+    /// checkbox currently reaches, for its caveat line. Tracked.
+    pub(in crate::app) fn dry_run_scripts(self) -> Vec<(String, Option<bool>)> {
+        let name = |id: i64| {
+            self.actions.scripts.with(|list| {
+                list.iter()
+                    .find(|s| s.id == id)
+                    .map(|s| format!("\"{}\"", s.name))
+                    .unwrap_or_else(|| format!("script #{id}"))
+            })
+        };
+        [
+            (ActionKind::OsPatchRemediate, "OS remediation"),
+            (ActionKind::SoftwarePatchRemediate, "software remediation"),
+            (ActionKind::Script, "picked"),
+        ]
+        .into_iter()
+        .filter_map(|(kind, what)| {
+            let id = self.dispatched_script_id(kind)?;
+            Some((
+                format!("{what} script {}", name(id)),
+                self.script_declares_dry_run(kind),
+            ))
+        })
+        .collect()
+    }
+
     pub(in crate::app) fn load_scripts(self) {
         if !self.can_act() {
             return;
@@ -90,11 +154,24 @@ impl AppState {
     /// one an empty allow list produces a job that reports success having installed
     /// nothing. That belongs somewhere a test can reach it; this file has no test
     /// module, and the crate's only gates are a compile check and clippy.
-    pub(in crate::app) fn build_request(self, kind: ActionKind) -> ActionRequest {
+    ///
+    /// `None` when `kind` is not available from `source` — a device-level selection
+    /// has no patch rows to target (`util::build_device_action_request`).
+    pub(in crate::app) fn build_request(
+        self,
+        kind: ActionKind,
+        source: SelectionSource,
+    ) -> Option<ActionRequest> {
         let opts = util::RunOptions {
             use_kb_targeting: self.actions.use_kb_targeting.get_untracked(),
             include_offline: self.actions.include_offline.get_untracked(),
-            override_window: self.actions.override_window.get_untracked(),
+            // Only while the checkbox is on screen: a tick left behind after the
+            // window stopped being enforced (or overridable) must not ride along.
+            override_window: self.actions.override_window.get_untracked()
+                && self
+                    .settings
+                    .f_actions
+                    .with_untracked(util::window_override_offered),
             dry_run: self.actions.dry_run.get_untracked(),
             script_reboot: self.actions.script_reboot.get_untracked(),
             run_as: self.actions.run_as.get_untracked(),
@@ -109,24 +186,67 @@ impl AppState {
             },
             script_params: self.actions.script_params.get_untracked(),
         };
-        self.actions
-            .selected
-            .with_untracked(|sel| util::build_action_request(kind, sel, &opts))
+        match source {
+            SelectionSource::PatchRows => Some(
+                self.actions
+                    .selected
+                    .with_untracked(|sel| util::build_action_request(kind, sel, &opts)),
+            ),
+            SelectionSource::Devices => self
+                .actions
+                .device_selected
+                .with_untracked(|sel| util::build_device_action_request(kind, sel, &opts)),
+        }
     }
 
-    /// Asks the backend what `kind` would do and opens the confirmation modal.
-    pub(in crate::app) fn open_plan(self, kind: ActionKind) {
+    /// Asks the backend what `kind` would do against `source`'s selection and opens
+    /// the confirmation modal.
+    pub(in crate::app) fn open_plan(self, kind: ActionKind, source: SelectionSource) {
         if !self.can_act() {
             if let Some(reason) = self.blocked_reason_untracked() {
                 self.notify(Toast::err(reason));
             }
             return;
         }
-        let request = self.build_request(kind);
+        let Some(request) = self.build_request(kind, source) else {
+            if let Some(why) = util::source_disabled_reason(source, kind) {
+                self.notify(Toast::err(why));
+            }
+            return;
+        };
         if request.device_ids.is_empty() {
             self.notify(Toast::err("Select at least one device first"));
             return;
         }
+        self.plan_request(request);
+    }
+
+    /// Re-opens the plan → confirm flow for failed jobs, rebuilt from what each job
+    /// recorded (`util::retry_request`). Never dispatches: the rebuilt request has no
+    /// confirm token, so the backend re-plans it, re-runs every guardrail and binds a
+    /// fresh approval to it exactly as for a first dispatch.
+    pub(in crate::app) fn retry_jobs(self, job_ids: &[u64]) {
+        if !self.can_act() {
+            if let Some(reason) = self.blocked_reason_untracked() {
+                self.notify(Toast::err(reason));
+            }
+            return;
+        }
+        let rebuilt = self.actions.jobs.with_untracked(|jobs| {
+            let picked: Vec<&JobReport> = job_ids
+                .iter()
+                .filter_map(|id| jobs.iter().find(|j| j.id == *id))
+                .collect();
+            util::retry_request(&picked)
+        });
+        match rebuilt {
+            Ok(request) => self.plan_request(request),
+            Err(e) => self.notify(Toast::err(e)),
+        }
+    }
+
+    /// Plans `request` and holds it in the confirmation modal.
+    fn plan_request(self, request: ActionRequest) {
         self.actions.confirm_input.set(String::new());
         self.actions.dispatch_error.set(None);
         self.actions.dispatching.set(true);
@@ -198,6 +318,9 @@ impl AppState {
                 Ok(batch) => {
                     self.actions.pending.set(None);
                     self.actions.confirm_input.set(String::new());
+                    // An override is for *this* dispatch. Left ticked, it would
+                    // silently bypass the window for every later one too.
+                    self.actions.override_window.set(false);
                     // Seed from the response rather than re-fetching; the backend
                     // poller advances these rows over `action:progress`, which may
                     // already have delivered them — hence merge, not append.

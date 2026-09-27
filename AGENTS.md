@@ -22,7 +22,7 @@ enforces it. The **rationale** behind each rule lives in [`docs/design/`](./docs
 | **Verify** | `just verify` — the Rust gates CI runs (fmt, clippy, tests, both crates); the justfile is the list. CI adds the Trunk build and the gates in `docs/design/ci.md`. |
 | **Crates** | `src-tauri` (backend) + `web-rs` (frontend WASM). No cargo workspace. |
 | **IPC** | Global `window.__TAURI__.core.invoke` (`withGlobalTauri`), wrapped in `web-rs/src/api.rs`. |
-| **NinjaOne spec** | `docs/api/ninjaone-surface.md` is the committed digest of the surface we consume; the weekly `ninjaone-contract` CI job fails when the vendor's spec moves. Verify shapes/params/enums there or in <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> — never infer them. A fixture must emit the vendor's keys, not the ones the code hopes for: `DeviceSoftwarePatch` is `title`/`impact`/`productIdentifier` and **no** `kbNumber` — build it with `model::software_patch_json`. |
+| **NinjaOne spec** | `docs/api/ninjaone-surface.md` is the committed digest of the surface we consume; the weekly `ninjaone-contract` CI job fails when the vendor's spec moves. Verify shapes/params/enums there or in <https://app.ninjarmm.com/apidocs-beta/NinjaRMM-API-v2.yaml> — never infer them. A fixture must emit the vendor's keys, not the ones the code hopes for: build a `DeviceSoftwarePatch` with `model::software_patch_json` (it has **no** `kbNumber`). |
 
 ## Skills
 
@@ -34,14 +34,11 @@ Skills live in `.claude/skills/` and Claude Code loads their descriptions automa
 ```
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
-├── src/main.rs                  # binary entry → lib::run()
-├── src/paths.rs                 # app_dir(): the one on-disk location for settings, logs, audit + history files
+├── src/paths.rs                 # app_dir(): the one on-disk location for settings, logs, audit + history, window-state files
 ├── src/state.rs                 # AppState: auth, api client, settings, result cache + memos, fleet/lookup accessors, invalidation
 ├── src/state/cache.rs           # TenantCache<T>: tenant-stamped, TTL'd, epoch-gated, single-flight slot
 ├── src/state/jobs.rs            # job store, single-claim poller slot, confirm-token slot
-├── src/state/tests.rs
 ├── src/auth.rs                  # OAuth2 PKCE (S256, loopback), keyring, single-flight refresh, conditional scope + management grant
-├── src/auth/tests.rs
 ├── src/actions.rs               # device-action domain: ActionKind/JobState/JobReport, pure plan() guardrails, build_parameters
 ├── src/actions/audit.rs         # append-only action-audit.jsonl (parameters redacted)
 ├── src/api/                     # NinjaOne Public API client
@@ -58,51 +55,53 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/rows/                    # join → PatchRow and every rollup off the cached result
 │   ├── mod.rs                   # QueryResult / QuerySummary + re-exports of every submodule
 │   ├── join.rs                  # device↔patch join, Interner, DeviceLabels, build_rows
-│   ├── compliance.rs            # compliance / by-OS / reboot rollups, rollup_device, compliance_scope_note
+│   ├── compliance.rs            # compliance / by-OS / per-device rollups (apply_device_health), rollup_device, scope note, SlaCutoffs
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
-│   ├── groups.rs                # grouping, sorting, paging over the cache
+│   ├── backlog.rs · install_time.rs  # worst devices / offline backlog; first seen → installed median
+│   ├── groups.rs                # grouping, sorting, paging, device_detail over the cache
 │   ├── scope.rs                 # QueryScope export provenance
 │   ├── table.rs                 # TableCell / TableColumn / format_pct / clamp_cell / join_capped — the shared column definition
 │   └── tests.rs
-├── src/history.rs               # append-only run-history.jsonl (one rollup line per query) + RunRecord
-├── src/export.rs                # rust_xlsxwriter workbook (Patches [+ Patches (n) past the row limit] / Compliance / by OS / Needs-Reboot / Failures / About)
+├── src/history.rs               # append-only run-history.jsonl (one rollup + per-org line per query) + RunRecord
+├── src/changes.rs               # per-scope run-snapshots/ → RunChanges (changes since the previous comparable run)
+├── src/export.rs                # rust_xlsxwriter workbook: detail, rollup, Devices, device-list, Stuck Approvals, Changes, About; UTC date cells
+├── src/csv_export.rs            # detail-row CSV: BOM, CRLF, RFC 4180 quoting, formula-injection guard
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
-├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets); atomic save, corrupt file quarantined
+├── src/window_state.rs          # window geometry: debounced save, clamped restore before first show
+├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, SLA policy, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
 ├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
 ├── src/commands/actions/        # mod.rs handlers · confirm.rs request_hash · plan.rs build_plan · dispatch.rs send_action · poller.rs poll_tick · tests.rs
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
-├── src/commands/patches/tests.rs
-├── build.rs                     # tauri_build::build()
-├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint)
+├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint); main window starts hidden
 ├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
 └── capabilities/default.json    # webview capabilities: `core:default` only (the save dialog runs in Rust)
 
 web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 crate
-├── src/main.rs                  # entry: panic hook + mount App
 ├── src/app.rs                   # module decls, shared consts (SEVERITY_OPTIONS), App root + startup wiring
 ├── src/app/
 │   ├── state.rs                 # AppState wrapper + Copy sub-structs by concern; no test module — logic goes to util
 │   ├── state/                   # impl AppState, one file per concern (no test modules)
-│   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs
+│   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs · view_link.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
 │   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
-│   ├── tables/                  # one file per results tab: patches · compliance · failures · reboot · trend
+│   ├── tables/                  # one file per results tab (+ changes panel, backlog, device drill-down dialog)
 │   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · toaster.rs · update.rs
+│   ├── shortcuts.rs             # key handler + help dialog (map: util::shortcut_for)
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
-│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · tests.rs
+│       └── one file per concern (query, selection, sla, guardrails, changes, shortcuts, view_link, theme, …) + tests.rs
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
-├── index.html                   # Trunk entry (wasm + CSS links)
 ├── tests/backend-grouping.json  # backend-generated fixture the demo's grouping is asserted against
-├── styles.css                   # plain global CSS (BEM-ish names); --sev-* band tokens on :root
+├── styles.css                   # plain global CSS (BEM-ish names); every colour a :root token, light palette via data-theme
 └── Trunk.toml                   # WASM build/serve (127.0.0.1:8080); never set public_url here
 
 docs/design/                     # rationale behind the rules below, one note per domain
 docs/api/ninjaone-surface.md     # generated digest of the NinjaOne API surface we consume (ninjaone-contract job)
 docs/RELEASING.md · docs/TROUBLESHOOTING.md
+remediation/                     # reference "Apply selected" PowerShell scripts; tests/fixtures pins build_parameters
 scripts/                         # screenshot tooling (Playwright; not shipped), changelog-notes.sh, check-license-lists.sh, ninjaone-spec-digest.py
 about.toml · about.hbs · about-web.hbs  # cargo-about config + templates → THIRD-PARTY-LICENSES.md (`just licenses`)
 .githooks/                       # commit-msg (conventional commits) + pre-push (just verify); installed by `just setup`
@@ -142,10 +141,8 @@ in **Settings** (persisted via the `directories` crate; secrets go to the keyrin
 
 Backend — commands, cache, concurrency:
 
-- **Tauri commands:** `State<'_, AppState>` first, `Result<T, UiError>` out, registered in
-  `generate_handler![]` **and** wrapped by `ipc!`. `async` only when the handler awaits. A mutating
-  handler calls `require_actions_enabled` — enforced by
-  `every_mutating_command_checks_that_actions_are_enabled`. → `docs/design/frontend.md#tauri-commands`
+- **Tauri commands** follow the 3 steps above; a mutating handler calls `require_actions_enabled` —
+  enforced by `every_mutating_command_checks_that_actions_are_enabled`. → `docs/design/frontend.md#tauri-commands`
 - **IPC arg keys equal the handler's parameter names, camelCase.** Renaming a parameter is a
   wire-format change; update both sides. → `docs/design/frontend.md#ipc-arg-shape--keys-match-rust-fn-parameter-names-camelcase`
 - **`AppState.last_result` is the single source of truth for paging, export and the HTML report.**
@@ -157,14 +154,13 @@ Backend — commands, cache, concurrency:
   summary; `TenantChanged`/`Poisoned` are errors (`commands::patches::summary_for`). → `docs/design/query-cache.md#the-write-is-generation--and-tenant-gated`
 - **Tenant switch, sign-out, sign-in and re-authorize all call `clear_session()`** on the frontend
   and `clear_session_state` on the backend. → `docs/design/query-cache.md#a-tenant-switch-a-sign-out-a-sign-in-and-a-re-authorization-all-clear-the-frontend`
-- **Paging/grouping/sorting commands return empty on a cache miss, never an error.** Sorted and
-  grouped views are memoized inside `CachedResult`, built on `spawn_blocking` and stored only if
-  `Arc::ptr_eq` still holds; the cached rows are never reordered. Group
-  headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
-- **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`) ride on both `QueryResult` and
-  `QuerySummary`.** Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
-  demo's `assemble`, and `serialized_shapes_carry_every_frontend_required_key`. `QueryScope` is the
-  one `QueryResult`-only exception. → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
+- **Paging/grouping/sorting commands (and `device_detail`) return empty on a cache miss, never an error.** Sort/group
+  memos live in `CachedResult` (built on `spawn_blocking`, stored only if `Arc::ptr_eq` holds); the
+  cached rows are never reordered. Group headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`, pinned by `web-rs/tests/backend-grouping.json`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
+- **Compact aggregates (`failures`, `approvals`, `changes`, `worst_devices`, …) ride on both `QueryResult` and
+  `QuerySummary`** (`approvals.stuck_devices` capped there). Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
+  demo's `assemble`, and `serialized_shapes_carry_every_frontend_required_key`. `QueryScope` and
+  `instance` are the `QueryResult`-only exceptions. → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
 - **Every TTL'd cache slot is a `TenantCache<T>`** — it owns the tenant stamp, TTL,
   single-flight gate, and the epoch sampled before the fetch and re-checked at the store.
   Never open-code that protocol for a new slot; `last_result` is the one exception and is
@@ -212,7 +208,8 @@ Write path (device actions) — violating these silently widens the blast radius
   from Settings, never the request; an unset id or an empty target list is a `plan()` blocker. → `docs/design/actions.md#there-is-no-per-kb-apply-endpoint-so-there-are-two-apply-paths-and-the-ui-names-both`
 - **Selection is per patch row; dispatch is per device with per-device targets**
   (`util::targets_by_device` → `ActionRequest.device_targets` → `per_device_parameters`). Ticking a
-  row must not tick the device's other rows. No batch-wide `targets` field. → `docs/design/actions.md#selection-is-per-patch-row-dispatch-is-per-device-with-per-device-targets`
+  row must not tick the device's other rows. No batch-wide `targets` field. Needs Reboot has its own
+  device selection (`util::device_selection_allows`). → `docs/design/actions.md#selection-is-per-patch-row-dispatch-is-per-device-with-per-device-targets`
 - **`build_parameters` encodes by kind:** `kbAllowList=` for OS, `productAllowListB64=` for
   software (NinjaOne splits on spaces). OS targets must pass `kb_number` or `plan()` blocks. → `docs/design/actions.md#the-parameter-encoding-is-chosen-by-kind`
 - **Confirm tokens are payload-bound and single-use.** `request_hash` destructures `ActionRequest`
@@ -220,15 +217,18 @@ Write path (device actions) — violating these silently widens the blast radius
   de-duplicated (a repeated id is a `plan()` blocker); `run_action` re-plans and re-checks. → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
 - **Guardrails go in `actions::plan` (`blockers`/`warnings`), not in a dialog.** The `dry_run`
   check is also asserted at the dispatch site. → `docs/design/actions.md#guardrails-live-in-actionsplan`
-- **One dispatch surface (`ActionBar`); `Run as` / reboot / `Dry run` are rendered once** and
-  labelled with the kinds they reach. → `docs/design/actions.md#there-is-one-dispatch-surface-and-the-run-options-are-shared`
+- **Dry run requires a script declaring `dryRun`** (`DryRunSupport::Declared`); the window override is
+  per dispatch and audited; the "Apply all" preview reads only cached patches (cold = "unknown"). → `docs/design/actions.md`
+- **One dispatch surface (`ActionBar`, on Patches and Needs Reboot); run options render once.** A
+  retry is `Failed`-only (never `Unknown`) and re-plans from `JobReport.request`. → `docs/design/actions.md#there-is-one-dispatch-surface-and-the-run-options-are-shared`
 - **After a non-dry-run mutating action call `invalidate_current_patches()`** (and
   `invalidate_fleet_devices()` after a reboot); never `clear_lookups_cache()`; never drop
   `last_result`. A dry run invalidates nothing and raises no stale banner. → `docs/design/actions.md#after-a-mutating-action-invalidate-the-current-patch-cache`
 - **Jobs are tenant-stamped; the poller is single-claim** (`try_claim_job_poller` /
   `release_job_poller_if_idle`). Dispatch appends jobs before claiming. → `docs/design/actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim`
-- **A job resolves from `/activities` only:** `statusCode` is lifecycle, `activityResult` is the
-  verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is applied
+- **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`):
+  `statusCode` is lifecycle, `activityResult` is the verdict,
+  exit code from `data`; `newerThan` is an activity **id**, so the time floor is applied
   client-side; `is_action_activity(kind, type)` accepts only the types that kind emits. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 
 NinjaOne API client:
@@ -236,16 +236,14 @@ NinjaOne API client:
 - **Every call goes through `NinjaApiClient`** (`get_paginated` / `request_raw`); retry is the pure
   `retry_for`; paginated bodies parse once via `parse_page` + `PagedRow`. → `docs/design/api-client.md`
 - **Both pagination branches require forward progress, measured against the *whole* cursor** —
-  NinjaOne's `name` is a stable handle and the position rides in `offset`, so comparing the name
-  alone truncated every feed at 2 pages. **A stall is an error, not a short read; an unreadable
+  (`name` is a stable handle; the position rides in `offset`). **A stall is an error, not a short read; an unreadable
   cursor is an error, not end-of-pages; 5xx/connect retries are `Idempotent`-only.** → `docs/design/api-client.md#both-pagination-branches-require-forward-progress--and-neither-may-stop-quietly`
 - **reqwest has `default-features = false`; keep `gzip`, `http2`, `system-proxy`, `charset`.** → `docs/design/api-client.md#reqwests-default-features-are-off-so-every-one-it-drops-must-be-re-added-explicitly`
 
 Filter:
 
-- **A device facet extends `PreparedFilter::device_allowed`; a patch facet is a client-side
-  `*_allowed()`.** `prepare()` once per query; `build_rows` re-checks every row against the scope
-  — the install `df` is bandwidth, not the boundary. → `docs/design/filter.md`
+- **`prepare()` once per query; `build_rows` re-checks every row against the scope** — the install
+  `df` is bandwidth, not the boundary. → `docs/design/filter.md`
 - **`organization_ids`/`location_ids`/`role_ids` are multi-select** (empty = all; OR within, AND
   across; `filter::ids` accepts bare or list). `df` grammar: `org=1`, `org in (1, 2)`, token `loc`,
   no `class`. → `docs/design/filter.md#the-three-identity-facets-are-multi-select`
@@ -258,16 +256,23 @@ Compliance and rollups — violating these silently misreports a fleet:
 - **Every surface prints `rows::compliance_scope_note`** (offline + non-patchable counts;
   `devices_total − devices_offline − devices_unpatchable` is the denominator). The frontend `util`
   mirrors it. → `docs/design/compliance.md#devices_offline-devices_unpatchable-and-patch_families-ride-on-queryresultquerysummary`
-- **Both exports print both clocks (`generated_at`, `data_fetched_at`) and the `QueryScope`
-  facets in two tiers** (`facets` narrow every sheet; `patch_facets` only the detail rows), built
-  from the `QueryPlan`, never the request. Date bounds are absolute UTC via
-  `DateTime::from_timestamp`. → `docs/design/compliance.md#both-exports-state-the-facets-from-rowsqueryscope`
+- **Both exports print both clocks, the instance, app version, the result's `sla_policy`, and the
+  `QueryScope` facets in two tiers** (`facets` narrow every sheet; `patch_facets` only the detail
+  rows), built from the `QueryPlan`, never the request. Date bounds are absolute UTC. The CSV states scope + clocks in its file name only. → `docs/design/compliance.md#both-exports-state-the-facets-from-rowsqueryscope`
+- **Dates are `TableCell::DateTime` (Unix seconds)**: real Excel date-times in UTC; CSV text cells
+  are formula-guarded, numbers never. → `docs/design/compliance.md#the-workbook-writes-real-date-times-in-utc`
+- **The Devices sheet and the drill-down read one per-device rollup** (`apply_device_health`); an
+  excluded device's counts are blank, not zero. → `docs/design/compliance.md#one-per-device-rollup-for-the-devices-sheet-and-the-drill-down`
 - **`Type` is a device-tier chip** — rollups cover only the fetched families. → `docs/design/compliance.md#the-fleet-health-rollups-do-depend-on-the-patch-type-facet`
 - **`is_pending` is an exclude list** (not `REJECTED`/`INSTALLED`); current sources get
-  `status_override = MANUAL`; `current_status_set` carries every selected status. → `docs/design/compliance.md#rowsis_pending-is-an-exclude-list`
+  `status_override = MANUAL`; `current_status_set` carries every selected status. The approval
+  split (`approval_state`) reads the vendor status, never that override. → `docs/design/compliance.md#rowsis_pending-is-an-exclude-list`
 - **`Installed` and `Failed` route to the install-history endpoints; current patches are always
-  fetched.** One requested install status is pushed down server-side; the lookback is re-applied
-  client-side. → `docs/design/compliance.md#installedfailed-vs-current-patches-status-routing`
+  fetched.** One install status and the window (lookback, or an absolute
+  `install_range` that replaces it) are pushed down and re-applied client-side. → `docs/design/compliance.md#installedfailed-vs-current-patches-status-routing`
+- **Changes since last run:** identity is `changes::patch_key`, scope is tenant + `changes::scope_key`,
+  snapshot saved only on `StoreOutcome::Stored`. → `docs/design/compliance.md#changes-since-the-previous-comparable-run`
+- **SLA aging is per band** (`SlaCutoffs` from the result's `SlaPolicy`). → `docs/design/compliance.md#the-sla-is-per-severity-band`
 - **`format_pct` never rounds up to 100** (caps at 99%; `pct_cell` at one decimal). → `docs/design/compliance.md#a-percentage-never-rounds-up-to-100`
 - **There is no patch release date in the API.** `first_seen_at()` is detection time; keep "First
   seen" / "since first seen" naming; fixtures must emit `timestamp`. → `docs/design/compliance.md#there-is-no-patch-release-date-in-the-ninjaone-api`
@@ -279,7 +284,7 @@ Compliance and rollups — violating these silently misreports a fleet:
 Severity:
 
 - **Two vocabularies on one field; `Security`/`Recommended` are their own variants ranked below
-  `Important`; unmapped → `Unknown`.** Adding a value touches nine sites — follow the checklist.
+  `Important`; unmapped → `Unknown`.** Adding a value touches ten sites — follow the checklist.
   Enumerate bands via `SeverityCounts::BANDS` / `charts::SEV_BANDS`, never a label match —
   `total_severity_is_the_sum_of_its_bands`, `severity_css_defines_every_band`. → `docs/design/severity.md`
 
@@ -291,6 +296,8 @@ Frontend:
 - **Non-trivial logic does not belong in a `#[component]` body or in `state.rs`** — put it in the
   `util` module as a free function and test it there. → `docs/design/frontend.md#non-trivial-logic-does-not-belong-in-a-component-body`
 - **A dialog calls `modal::focus_trap()` in the closure that creates it**, per instance. → `docs/design/frontend.md#frontend-reactivity-is-closure-based-leptos-csr`
+- **View prefs live in `localStorage` (`api::ui_pref_str`; may throw); no shortcut reaches a mutating
+  action; a view link carries no selection or credential.** → `docs/design/frontend.md#operator-ux`
 - **`api::is_tauri()` gates every backend touch; `demo.rs` is the only sample-data source and
   demo mode is web-only.** Never set `public_url` in `Trunk.toml`. → `docs/design/frontend.md#demo-mode--browserpages-guard`
 
@@ -310,15 +317,12 @@ Frontend:
 
 ## Verification playbook
 
-`just verify` runs the Rust gates of CI's backend and frontend jobs in their order; run it before
-declaring a change done. The individual recipes (`fmt-check`, `clippy`, `test`, `web-clippy`,
-`web-test`, …) are callable on their own — see `just --list`. For behavior a unit test can't
-prove, run `just dev` and exercise the view. Hook or shell-script changes: `.claude/hooks/test.sh`
+`just verify` runs CI's Rust gates for both crates; run it before declaring a change done (each
+recipe also runs alone — `just --list`). For behavior a unit test can't prove, run `just dev`. Hook or shell-script changes: `.claude/hooks/test.sh`
 + `shellcheck`. A dependency bump: `just licenses` and commit `THIRD-PARTY-LICENSES.md`.
 
-Gates `verify` does not run (Trunk `web-build`, coverage, audit/deny, licenses, the NinjaOne
-contract, shellcheck + hook tests, actionlint, conventional commits, CodeQL, manifest versions,
-screenshot tooling, the release verify job) → `docs/design/ci.md`. `cargo-audit` is a required
+Gates `verify` does not run (Trunk build, coverage, audit/deny, licenses, the NinjaOne contract,
+hook tests, actionlint, CodeQL, …) → `docs/design/ci.md`. `cargo-audit` is a required
 check on `main`, so a green local `verify` can still fail CI on a new advisory.
 
 ## Keeping this file up to date

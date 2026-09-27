@@ -1,0 +1,63 @@
+{
+  "_comment": "The parameter string contract between src-tauri/src/actions.rs::build_parameters and the reference scripts in remediation/. The Rust test build_parameters_matches_the_reference_script_fixture asserts that build_parameters(kind, targets, reboot, dryRun) produces exactly `parameters`; remediation/tests/*.Tests.ps1 assert that the scripts parse `parameters` into `expect`. Change both sides together.",
+  "cases": [
+    {
+      "name": "OS, dry run, never reboot, mixed KB spellings",
+      "kind": "OS_PATCH_REMEDIATE",
+      "targets": ["KB5040434", "5041580"],
+      "reboot": "NEVER",
+      "dryRun": true,
+      "parameters": "kbAllowList=5040434,5041580 rebootBehavior=Never dryRun=true",
+      "expect": { "kbNumbers": ["5040434", "5041580"], "rebootBehavior": "Never", "dryRun": true }
+    },
+    {
+      "name": "OS, install, auto reboot, lowercase kb prefix",
+      "kind": "OS_PATCH_REMEDIATE",
+      "targets": ["kb5041585"],
+      "reboot": "AUTO",
+      "dryRun": false,
+      "parameters": "kbAllowList=5041585 rebootBehavior=Auto dryRun=false",
+      "expect": { "kbNumbers": ["5041585"], "rebootBehavior": "Auto", "dryRun": false }
+    },
+    {
+      "name": "OS, empty selection is refused by the script too",
+      "kind": "OS_PATCH_REMEDIATE",
+      "targets": [],
+      "reboot": "NEVER",
+      "dryRun": true,
+      "parameters": "kbAllowList= rebootBehavior=Never dryRun=true",
+      "expect": { "error": true }
+    },
+    {
+      "name": "Software, install, auto reboot, spaces, parentheses, plus signs and non-ASCII",
+      "kind": "SOFTWARE_PATCH_REMEDIATE",
+      "targets": ["Google Chrome 141.0.7390.55", "7-Zip 24.08 (x64)", "Notepad++ 8.6.9", "Café Tool 1.0"],
+      "reboot": "AUTO",
+      "dryRun": false,
+      "parameters": "productAllowListB64=R29vZ2xlIENocm9tZSAxNDEuMC43MzkwLjU1fDctWmlwIDI0LjA4ICh4NjQpfE5vdGVwYWQrKyA4LjYuOXxDYWbDqSBUb29sIDEuMA== rebootBehavior=Auto dryRun=false",
+      "expect": {
+        "products": ["Google Chrome 141.0.7390.55", "7-Zip 24.08 (x64)", "Notepad++ 8.6.9", "Café Tool 1.0"],
+        "rebootBehavior": "Auto",
+        "dryRun": false
+      }
+    },
+    {
+      "name": "Software, dry run, a title whose encoding uses + and / (standard alphabet, not URL-safe)",
+      "kind": "SOFTWARE_PATCH_REMEDIATE",
+      "targets": ["Paint.NET 5.0.13 ~ beta?"],
+      "reboot": "NEVER",
+      "dryRun": true,
+      "parameters": "productAllowListB64=UGFpbnQuTkVUIDUuMC4xMyB+IGJldGE/ rebootBehavior=Never dryRun=true",
+      "expect": { "products": ["Paint.NET 5.0.13 ~ beta?"], "rebootBehavior": "Never", "dryRun": true }
+    },
+    {
+      "name": "Software, empty selection is refused by the script too",
+      "kind": "SOFTWARE_PATCH_REMEDIATE",
+      "targets": [],
+      "reboot": "NEVER",
+      "dryRun": true,
+      "parameters": "productAllowListB64= rebootBehavior=Never dryRun=true",
+      "expect": { "error": true }
+    }
+  ]
+}

@@ -82,6 +82,13 @@ the opener in `on_cleanup` — which is why it must be created *per dialog insta
 `pending.map(...)` / `info.map(...)` closure), not once per component. `web-sys` is listed in
 `web-rs/Cargo.toml` only to enable the DOM features this needs.
 
+The corollary: the closure that creates the dialog must re-run only when a *new* dialog opens.
+The device drill-down (`tables/device.rs`) keys that closure on a `Memo` of the open device id, and
+renders its loading/loaded body in a nested closure — if the loaded detail arriving (or a refresh
+reloading it) re-ran the outer closure, the new trap would record the outgoing dialog as its
+opener and return focus to a detached node on close. Escape closes it; it has no action buttons
+(dispatch stays on the one `ActionBar`).
+
 **An async response applies only if its request is still current.** Every page, group-header and
 group-member fetch is stamped (`QueryState.view_seq`, `members_gen`) and dropped on arrival if a
 newer request, a regroup, or a re-query has moved the stamp. Without it a slow sort overwrote a
@@ -102,7 +109,8 @@ from the sample and flags `demo`, but leaves the results **empty** ("Run a query
 patches") until the user presses **Run query** — exactly like the real app. **Run query** routes
 to `run_demo_query` → `demo::filtered_result(...)`, which mirrors the backend's *display*
 filtering (identity/class/text facets + date windows) over the sample rows so the demo's controls
-actually filter — Compliance/Reboot stay representative (narrowed only by org). Demo mode is
+actually filter — Compliance/Reboot stay representative (narrowed only by org; the reboot list and
+the device drill-down share `demo::sample_device_summary`, so their counts agree). Demo mode is
 **web-only**: there is no "load sample data" affordance and the desktop release never enters it
 (no auto-load → `demo` stays false and the normal auth path runs). `web_mode` also disables the
 backend-only actions (sign-in, **export**).
@@ -132,6 +140,9 @@ staying unreachable. What lives in
 - `parse_clamped` / `parse_optional_id` (the settings number fields — `<input type="number">`
   treats `min`/`max` as advisory, so the clamp is the real guard).
 - `action_disabled_reason` / `selection_summary`.
+- The dispatch guardrails in `util/guardrails.rs`: the maintenance-window editor's time/day
+  helpers and `window_summary`, `window_override_offered`, `dry_run_disabled_reason` /
+  `dry_run_caveat`, and the Apply-all preview lines.
 - The pieces of `state.rs` that decide *what happens*: `run_decision` (the Run guard chain, whose
   **order** is load-bearing — demo before auth, busy before both), `next_query_seq`/`is_superseded`
   (the overlapping-run stamp), and `apply_row_selection` (the selection model — a device enters
@@ -139,7 +150,67 @@ staying unreachable. What lives in
   device's others).
 - `date_to_epoch` / `epoch_to_date` — plain civil-date arithmetic rather than `js_sys::Date`, so
   they host-test, and `demo.rs` shares them instead of keeping a second copy.
+- The Needs Reboot tab's device selection (`apply_device_selection`,
+  `prune_device_level_selection`, `build_device_action_request`, `source_disabled_reason`) and
+  the Jobs tab's retry (`retry_blocked_reason`, `retry_request`, `retryable_batches`).
 - The pager (`page_count`/`clamp_page`/`page_bounds`/`pager_summary`/`prev_page`/`next_page`),
   the group-header count and the confirm-dialog gate
   (`needs_typed_confirmation`/`can_confirm_action`). The pager arithmetic once caused a "98% of
   groups unreachable" bug while sitting inline in `tables.rs`.
+- The operator-UX rules below: `refresh_hold`/`advance_refresh`/`countdown_label`,
+  `shortcut_for`/`is_text_entry`, the `columns` helpers, `encode_view`/`decode_view`, `Theme`.
+  These newer files carry their own `#[cfg(test)] mod tests` rather than growing `tests.rs`.
+
+## Operator UX
+
+Per-machine view conveniences — none of them configuration, so none go through
+`settings.json` (see `api::ui_pref`) — and the rules each one keeps.
+
+**Auto-refresh countdown.** A one-second ticker (`AppState::tick_auto_refresh`) advances a
+wall-clock countdown (`util::advance_refresh`; ticks are throttled in the background, so counting
+them drifts). `util::refresh_hold` decides, in this order, why it waits: the operator's **Pause**,
+an open dialog (any `aria-modal` element, plus the Settings panel), a hidden window, a run in
+flight. A run restarts the full cadence, so a manual Run also pushes the next automatic one out.
+**A selection is deliberately not a hold**: a refresh already prunes the selection to rows still
+listed, and after a dispatch the selection is still there exactly while the operator watches the
+patches land — pausing on it would switch the cadence off when it is most wanted. Picking a
+cadence lifts a pause.
+
+**Keyboard shortcuts.** `util::shortcut_for` is the whole key map and `SHORTCUT_HELP` the help
+dialog/README table (`every_documented_key_is_bound`). It stands down while typing
+(`util::is_text_entry` — a focused checkbox is *not* typing, since focus stays on it after ticking
+a row), under any modal, on auto-repeat and with Ctrl/Alt/Meta (Shift is allowed: `?` is
+Shift+/). **No key reaches a mutating action, an export or sign-out**; `r` runs the (read-only)
+query, and `[`/`]` page the Patches table through the same `go_to_patches_page` as the pager.
+
+**Column chooser.** Stored as the set of *hidden* column ids (`util::column_id`, a slug of the
+header label), so a column another build adds is visible by default and an id this build does not
+know is kept and ignored. Hiding is positional CSS generated per table
+(`util::hidden_columns_css`), not a filtered cell list, so adding a column touches only
+`PATCH_COLUMNS` and the row markup. Device and Patch are required. Exports ignore it.
+
+**Shareable view links.** `v1.` + base64url of a short JSON object: the preset shape
+(`FilterParams`, type, statuses, install window) plus tab, grouping, sort and the instance
+**host**. Never the selection, a credential or a client id
+(`the_code_carries_no_selection_or_credentials`). The version sits outside the payload so a
+future format is refused before parsing; decoding drops unknown statuses/severities/tabs/sort keys,
+clamps numbers to what the controls accept, caps text, and `apply_view` prunes org/role/class ids
+against the loaded lookups. A code from another host is held behind an **Apply anyway** banner —
+its organization ids mean something else there. The web demo keeps the code in the URL fragment
+(`history.replaceState`, so Back is not an undo stack of checkboxes) and applies it on load; the
+desktop copies a bare code via `navigator.clipboard` — a web API, not a Tauri capability, and not
+governed by the CSP — and always leaves it in a read-only field in case the clipboard refuses.
+
+**Themes and motion.** Every colour in `styles.css` is a `:root` token (the dark palette, and the
+fallback). A light palette restates *every* token twice — under
+`@media (prefers-color-scheme: light)` for System, and under `:root[data-theme="light"]` for an
+explicit choice — which `the_light_palette_overrides_every_root_token` enforces; a missed token
+leaks a dark pastel onto white. Charts read the same tokens through classes, so they follow.
+`prefers-reduced-motion` stops transitions and the indeterminate progress slide.
+
+**Window geometry** (backend, `src-tauri/src/window_state.rs`). Its own `window-state.json`, not a
+`Settings` field, so a drag never goes through `replace_settings`. Saved debounced on
+move/resize (on a blocking thread) and synchronously on close; restored in `setup` before the
+hidden-at-launch window is shown. `window_state::placement` keeps a saved position only when a
+grab-able strip of the title bar lands on a current monitor's work area, otherwise lets the OS
+place the window, and always fits the size to the monitor.

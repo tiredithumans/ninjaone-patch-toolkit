@@ -18,8 +18,9 @@ mod presets;
 mod query;
 mod selection;
 mod view;
+mod view_link;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tab {
     Patches,
     Compliance,
@@ -49,7 +50,9 @@ pub(crate) struct AppliedFilters {
     pub detected_window: String,
     pub detected_after: String,
     pub detected_before: String,
-    pub install_days: Option<i64>,
+    /// The install-history chip's value (`util::install_window_label`), or `None`
+    /// when no install status was selected and the window did not apply.
+    pub install_window: Option<String>,
 }
 
 #[derive(Clone)]
@@ -182,6 +185,11 @@ pub(crate) struct FilterState {
     pub(super) patch_type: RwSignal<String>,
     pub(super) statuses: RwSignal<Vec<String>>,
     pub(super) install_days: RwSignal<i64>,
+    /// The install-history control is on "Custom range" (the two date inputs)
+    /// rather than "Last N days".
+    pub(super) install_custom: RwSignal<bool>,
+    pub(super) install_after_date: RwSignal<String>,
+    pub(super) install_before_date: RwSignal<String>,
 }
 
 impl FilterState {
@@ -200,6 +208,9 @@ impl FilterState {
             patch_type: RwSignal::new("ALL".to_string()),
             statuses: RwSignal::new(vec!["PENDING".to_string()]),
             install_days: RwSignal::new(30),
+            install_custom: RwSignal::new(false),
+            install_after_date: RwSignal::new(String::new()),
+            install_before_date: RwSignal::new(String::new()),
         }
     }
 
@@ -243,6 +254,9 @@ impl FilterState {
             detected_window: self.detected_window.get_untracked(),
             detected_after: self.detected_after_date.get_untracked(),
             detected_before: self.detected_before_date.get_untracked(),
+            install_custom: self.install_custom.get_untracked(),
+            install_after: self.install_after_date.get_untracked(),
+            install_before: self.install_before_date.get_untracked(),
         })
     }
 }
@@ -290,6 +304,34 @@ pub(crate) struct QueryState {
     /// member fetch started before that is from a result no longer on screen, so
     /// it must neither fill the cache nor tick anything into the selection.
     pub(super) members_gen: RwSignal<u64>,
+    /// The sort the next manual run lands on instead of the canonical order —
+    /// set by applying a shared view link, consumed (and cleared) by that run.
+    pub(super) sort_on_next_run: RwSignal<Option<RowSort>>,
+    /// The open device drill-down, if any. A view over `result`, so a new result
+    /// reloads it and clearing the result closes it.
+    pub(super) drill: RwSignal<Option<DeviceDrill>>,
+    /// Stamp of the newest drill-down load; an older response is dropped, the same
+    /// rule as `view_seq` (two quick clicks must not land the first device's rows
+    /// under the second device's name).
+    pub(super) drill_seq: RwSignal<u64>,
+}
+
+/// The device drill-down dialog's state.
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceDrill {
+    pub device_id: i64,
+    /// The name it was opened from, shown while loading and if the load fails.
+    pub name: String,
+    pub load: DrillLoad,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum DrillLoad {
+    Loading,
+    Ready(Box<DeviceDetail>),
+    /// The cached result no longer holds the device (re-queried, tenant switch).
+    Gone,
+    Failed(String),
 }
 
 impl QueryState {
@@ -323,6 +365,9 @@ impl QueryState {
             members: RwSignal::new(BTreeMap::new()),
             view_seq: RwSignal::new(0),
             members_gen: RwSignal::new(0),
+            sort_on_next_run: RwSignal::new(None),
+            drill: RwSignal::new(None),
+            drill_seq: RwSignal::new(0),
         }
     }
 }
@@ -346,6 +391,11 @@ pub(crate) struct RunState {
     /// A manual run requested while another was in flight, waiting for it to
     /// settle. Holds the queued run's `force` flag; see `util::queue_run`.
     pub(super) queued: RwSignal<Option<bool>>,
+    /// The operator paused auto-refresh without switching it off, so the chosen
+    /// cadence survives. Cleared by picking a cadence.
+    pub(super) refresh_paused: RwSignal<bool>,
+    /// Time left until the next automatic refresh; see `util::advance_refresh`.
+    pub(super) refresh_clock: RwSignal<util::RefreshClock>,
 }
 
 impl RunState {
@@ -360,6 +410,8 @@ impl RunState {
             query_seq: RwSignal::new(0),
             refresh_secs: RwSignal::new(0),
             queued: RwSignal::new(None),
+            refresh_paused: RwSignal::new(false),
+            refresh_clock: RwSignal::new(util::RefreshClock::start(0, 0.0)),
         }
     }
 
@@ -397,6 +449,8 @@ pub(crate) struct SettingsState {
     pub(super) f_port: RwSignal<u16>,
     pub(super) f_install_days: RwSignal<i64>,
     pub(super) f_sla: RwSignal<i64>,
+    /// Per-band SLA overrides; a blank band uses `f_sla`.
+    pub(super) f_sla_by_severity: RwSignal<SlaBySeverity>,
     pub(super) has_secret: RwSignal<bool>,
     pub(super) f_auto_update: RwSignal<bool>,
     /// Whole write-path block, held as one value so a field the panel doesn't
@@ -415,6 +469,7 @@ impl SettingsState {
             f_port: RwSignal::new(11434),
             f_install_days: RwSignal::new(30),
             f_sla: RwSignal::new(30),
+            f_sla_by_severity: RwSignal::new(SlaBySeverity::default()),
             has_secret: RwSignal::new(false),
             f_auto_update: RwSignal::new(true),
             f_actions: RwSignal::new(ActionSettings::default()),
@@ -451,6 +506,25 @@ pub(crate) struct UiState {
     /// (false) by default.
     pub(super) filters_collapsed: RwSignal<bool>,
     pub(super) active_tab: RwSignal<Tab>,
+    /// The keyboard-shortcuts help dialog.
+    pub(super) shortcuts_open: RwSignal<bool>,
+    /// Light / Dark / System, remembered per machine.
+    pub(super) theme: RwSignal<util::Theme>,
+    /// Column ids hidden in the Patches table, remembered per machine; see
+    /// `util::columns`.
+    pub(super) hidden_patch_columns: RwSignal<BTreeSet<String>>,
+    /// The last view code the operator copied, kept on screen in a read-only field
+    /// so it can be selected by hand when the clipboard refuses.
+    pub(super) view_code: RwSignal<Option<String>>,
+    /// A view link held back because it was shared from another instance.
+    pub(super) pending_view: RwSignal<Option<PendingView>>,
+}
+
+/// A decoded view link waiting for the operator to confirm it.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingView {
+    pub view: util::SharedView,
+    pub warning: String,
 }
 
 impl UiState {
@@ -468,6 +542,15 @@ impl UiState {
                 api::ui_pref(api::PREF_FILTERS_COLLAPSED).unwrap_or(false),
             ),
             active_tab: RwSignal::new(Tab::Patches),
+            shortcuts_open: RwSignal::new(false),
+            theme: RwSignal::new(util::Theme::from_pref(
+                api::ui_pref_str(api::PREF_THEME).as_deref(),
+            )),
+            hidden_patch_columns: RwSignal::new(util::parse_hidden_columns(
+                api::ui_pref_str(api::PREF_PATCH_COLUMNS).as_deref(),
+            )),
+            view_code: RwSignal::new(None),
+            pending_view: RwSignal::new(None),
         }
     }
 
@@ -532,6 +615,11 @@ pub(crate) struct ActionState {
     /// device id → what was checked. Survives page changes; cleared by every
     /// successful query, because the underlying rows changed.
     pub(super) selected: RwSignal<BTreeMap<i64, DeviceSelection>>,
+    /// The Needs Reboot tab's **device-level** selection (`util::SelectionSource`).
+    /// Its entries carry no patch rows, and it is a separate map from `selected` so
+    /// ticking a device there can never tick any of its patch rows. Cleared and
+    /// pruned alongside `selected`.
+    pub(super) device_selected: RwSignal<BTreeMap<i64, DeviceSelection>>,
     pub(super) scripts: RwSignal<Vec<ScriptSummary>>,
     pub(super) scripts_loading: RwSignal<bool>,
     pub(super) script_id: RwSignal<Option<i64>>,
@@ -575,6 +663,7 @@ impl ActionState {
     pub(super) fn new() -> Self {
         Self {
             selected: RwSignal::new(BTreeMap::new()),
+            device_selected: RwSignal::new(BTreeMap::new()),
             scripts: RwSignal::new(Vec::new()),
             scripts_loading: RwSignal::new(false),
             script_id: RwSignal::new(None),

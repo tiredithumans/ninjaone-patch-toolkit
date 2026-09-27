@@ -13,6 +13,12 @@ fn sample_result() -> QueryResult {
         failures: Vec::new(),
         severity_by_org: Vec::new(),
         age_buckets: Vec::new(),
+        worst_devices: Default::default(),
+        offline_backlog: Default::default(),
+        time_to_install: Default::default(),
+        sla_policy: Default::default(),
+        instance: "https://app.ninjarmm.com".into(),
+        approvals: Default::default(),
         devices_total: 0,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -21,6 +27,7 @@ fn sample_result() -> QueryResult {
             software: true,
         },
         scope: Default::default(),
+        changes: Default::default(),
         generated_at: "2026-01-01 00:00:00 UTC".into(),
         data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
     }
@@ -66,6 +73,7 @@ fn result_with_devices(names: &[&str]) -> QueryResult {
                 installed_date: None,
                 first_seen_ts: None,
                 installed_ts: None,
+                product_identifier: None,
             })
             .collect(),
         ..sample_result()
@@ -726,6 +734,7 @@ fn sample_job(id: u64, state: JobState) -> JobReport {
         activity_id: None,
         series_uid: None,
         exit_code: None,
+        request: None,
     }
 }
 
@@ -928,4 +937,36 @@ fn the_result_handle_is_empty_with_nothing_cached() {
             .expect("not poisoned")
             .is_none()
     );
+}
+
+/// The Apply-all preview reads the current-patch cache without ever filling it:
+/// a cold family is `None` (the dialog says "unknown"), a warm one is served
+/// without a request, and a post-action invalidation takes it away again so the
+/// preview never counts patches the last apply may have installed.
+#[tokio::test]
+async fn the_apply_preview_peek_never_fetches() {
+    use crate::model::PatchType;
+    let server = patch_feed_server().await;
+    let state = AppState::seeded(server.uri());
+
+    assert!(state.cached_current_patches(PatchType::Os).is_none());
+    assert_eq!(hits(&server, "/api/v2/queries/os-patches").await, 0);
+
+    state
+        .fleet_current_patches(false, true, false, None, None)
+        .await
+        .expect("os fetch");
+    let (os, _) = state
+        .cached_current_patches(PatchType::Os)
+        .expect("warm after a query");
+    assert_eq!(os.len(), 1);
+    assert!(
+        state.cached_current_patches(PatchType::Software).is_none(),
+        "the family that was not queried stays cold"
+    );
+    assert!(state.cached_current_patches(PatchType::All).is_none());
+    assert_eq!(hits(&server, "/api/v2/queries/os-patches").await, 1);
+
+    state.invalidate_current_patches();
+    assert!(state.cached_current_patches(PatchType::Os).is_none());
 }
