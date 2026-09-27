@@ -1266,6 +1266,13 @@ tbody tr:hover {
   flex: 1 1 240px;
 }
 
+/* The caveat beside a run option: the window an override bypasses, or which
+   scripts cannot honor Dry run. */
+.action-options-note {
+  font-size: 11px;
+  color: var(--warn);
+}
+
 .action-bar-runas {
   flex: 0 1 180px;
 }
@@ -1389,6 +1396,25 @@ tbody tr:hover {
   padding-left: 18px;
   max-height: 180px;
   overflow-y: auto;
+}
+
+/* What a native "Apply all" will install. The summary line carries the totals, so
+   it reads without expanding; the per-device list is one click away. */
+.modal-apply-preview {
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+.modal-apply-preview ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  max-height: 180px;
+  overflow-y: auto;
+  color: var(--muted);
+}
+
+.modal-apply-preview .apply-preview-empty {
+  color: var(--warn);
 }
 
 .modal-typed {
@@ -1528,6 +1554,28 @@ tbody tr:hover {
 
 .settings-disabled {
   opacity: 0.5;
+}
+
+.settings-window {
+  margin: 4px 0 10px 24px;
+}
+
+.settings-window-days {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.settings-window-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-problem {
+  color: var(--warn);
 }
 
 /* --- Patches view modes + grouped view ---------------------------------- */

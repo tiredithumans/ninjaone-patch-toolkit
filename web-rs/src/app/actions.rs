@@ -78,6 +78,7 @@ pub(crate) fn ActionBar() -> impl IntoView {
                                                         state.remediation_targets(kind).len(),
                                                     )
                                                 })
+                                                .or_else(|| state.dry_run_reason(kind))
                                         };
                                         view! {
                                             <button
@@ -156,6 +157,33 @@ pub(crate) fn ActionBar() -> impl IntoView {
                         />
                         "Include offline devices"
                     </label>
+                    // Rendered only while the window is enforced and Settings permits
+                    // overriding it; the backend decides whether the window is actually
+                    // closed, and audits the dispatch only when it was. Cleared after
+                    // every dispatch, so it never outlives the one it was ticked for.
+                    <Show when=move || state.settings.f_actions.with(util::window_override_offered)>
+                        <label
+                            class="checkbox"
+                            title="Only needed outside the window. The backend checks the window at plan and again at confirm, and records an override on the audit trail."
+                        >
+                            <input
+                                type="checkbox"
+                                prop:checked=move || state.actions.override_window.get()
+                                on:change=move |ev| {
+                                    state.actions.override_window.set(event_target_checked(&ev))
+                                }
+                            />
+                            "Override the maintenance window for this dispatch"
+                            <span class="action-options-note">
+                                {move || {
+                                    format!(
+                                        "(window: {}, this computer's local time)",
+                                        state.settings.f_actions.with(util::window_summary),
+                                    )
+                                }}
+                            </span>
+                        </label>
+                    </Show>
                 </div>
 
                 // The native endpoints take no parameters, have no preview mode (a dry
@@ -206,6 +234,18 @@ pub(crate) fn ActionBar() -> impl IntoView {
                         />
                         "Dry run (the script reports what it would install)"
                     </label>
+                    // A dry run is only real for a script that reads `dryRun`; say
+                    // which of the scripts this checkbox reaches cannot, rather than
+                    // leaving it to a blocker after the operator clicks.
+                    {move || {
+                        state
+                            .actions
+                            .dry_run
+                            .get()
+                            .then(|| util::dry_run_caveat(&state.dry_run_scripts()))
+                            .flatten()
+                            .map(|note| view! { <span class="action-options-note">{note}</span> })
+                    }}
                 </div>
 
                 // Reboot needs its mode and reason chosen before planning: the reason
@@ -434,6 +474,17 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                         } else {
                             "confirm-radius"
                         }>{kind.blast_radius()}</p>
+                        // A bypassed window is as consequential as the reach, so it
+                        // gets the same treatment rather than a line among warnings.
+                        {plan
+                            .window_overridden
+                            .then(|| {
+                                view! {
+                                    <p class="confirm-radius confirm-radius-wide">
+                                        "Overrides the closed maintenance window for this dispatch — recorded on the audit trail."
+                                    </p>
+                                }
+                            })}
 
                         {(!plan.organizations.is_empty())
                             .then(|| {
@@ -496,6 +547,42 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                         </p>
                                         <pre class="modal-params">{params}</pre>
                                     </>
+                                }
+                            })}
+
+                        // What "Apply all" will actually install, per device. The native
+                        // endpoint takes no list, so this is the only place the operator
+                        // sees the backlog it is about to approve — and a device with
+                        // nothing approved (everything still MANUAL) is the surprise.
+                        {plan
+                            .apply_preview
+                            .clone()
+                            .map(|preview| {
+                                let summary = util::apply_preview_summary(&preview);
+                                let items = preview
+                                    .devices
+                                    .iter()
+                                    .map(|d| {
+                                        view! {
+                                            <li class:apply-preview-empty=d.approved == 0>
+                                                {util::apply_preview_line(d)}
+                                            </li>
+                                        }
+                                    })
+                                    .collect_view();
+                                // Unknown counts have no per-device list to expand, so
+                                // they are a plain note rather than an empty disclosure.
+                                if preview.known {
+                                    view! {
+                                        <details class="modal-apply-preview">
+                                            <summary>{summary}</summary>
+                                            <ul>{items}</ul>
+                                        </details>
+                                    }
+                                        .into_any()
+                                } else {
+                                    view! { <p class="modal-sub modal-apply-preview">{summary}</p> }
+                                        .into_any()
                                 }
                             })}
 
@@ -814,11 +901,18 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
                 ></textarea>
             </label>
 
+            <Show when=move || state.dry_run_reason(ActionKind::Script).is_some()>
+                <p class="script-picker-targets" role="note">
+                    {move || state.dry_run_reason(ActionKind::Script).unwrap_or_default()}
+                </p>
+            </Show>
             <button
                 class="btn btn-primary btn-sm"
+                title=move || state.dry_run_reason(ActionKind::Script).unwrap_or_default()
                 prop:disabled=move || {
                     state.actions.script_id.with(|s| s.is_none())
                         || state.actions.dispatching.get()
+                        || state.dry_run_reason(ActionKind::Script).is_some()
                 }
                 on:click=move |_| state.open_plan(ActionKind::Script)
             >
@@ -1022,7 +1116,7 @@ fn AuditTrail() -> impl IntoView {
                                             <td>{r.organization.clone()}</td>
                                             <td>{r.detail.clone()}</td>
                                             <td>
-                                                {if r.dry_run { "Dry run" } else { "Live" }}
+                                                {util::audit_mode_label(r.dry_run, r.window_override)}
                                             </td>
                                             <td>{r.outcome.clone()}</td>
                                             <td>

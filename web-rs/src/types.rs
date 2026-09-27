@@ -714,8 +714,42 @@ pub struct ActionPlan {
     pub reboot_expected: bool,
     pub dry_run: bool,
     pub parameters_preview: Option<String>,
+    /// What a native "Apply all" will install, per device. Absent for every other
+    /// kind (and from a backend that predates it).
+    #[serde(default)]
+    pub apply_preview: Option<ApplyPreview>,
+    /// This dispatch goes out only because it overrides a closed maintenance window.
+    #[serde(default)]
+    pub window_overridden: bool,
     /// Absent when the plan is blocked — there is nothing to confirm.
     pub confirm_token: Option<String>,
+}
+
+/// Mirror of the backend `actions::ApplyPreview`: what NinjaOne's apply endpoint
+/// will install, counted from the cached whole-fleet current patches.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPreview {
+    /// `"OS"` or `"software"`.
+    pub family: String,
+    /// False when the patch data was not loaded: the counts are unknown, not zero.
+    pub known: bool,
+    pub devices: Vec<ApplyPreviewDevice>,
+    pub approved_total: usize,
+    pub pending_manual_total: usize,
+    pub data_fetched_at: Option<String>,
+}
+
+/// Mirror of the backend `actions::ApplyPreviewDevice`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPreviewDevice {
+    pub device_id: i64,
+    pub device_name: String,
+    /// `APPROVED` records — what the apply installs.
+    pub approved: usize,
+    /// `MANUAL` records — pending approval in NinjaOne, which the apply skips.
+    pub pending_manual: usize,
 }
 
 impl ActionPlan {
@@ -746,6 +780,11 @@ pub struct ScriptSummary {
     /// script may be offered per-KB targeting — anything else installs whatever the
     /// device needs, and offering it would misrepresent what runs.
     pub accepts_kb_allow_list: bool,
+    /// Whether the library entry declares a `dryRun` variable. A dry run only
+    /// appends `dryRun=true`, so a script that doesn't read it would run for real;
+    /// the backend refuses such a dry run and the action bar says so up front.
+    #[serde(default)]
+    pub accepts_dry_run: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -825,6 +864,8 @@ pub struct AuditRecord {
     pub detail: String,
     pub outcome: String,
     pub dry_run: bool,
+    /// The dispatch overrode a closed maintenance window.
+    pub window_override: bool,
     pub batch_id: Option<u64>,
     pub exit_code: Option<i32>,
     /// Written by a build that used the pre-`paths::app_dir` directory.
