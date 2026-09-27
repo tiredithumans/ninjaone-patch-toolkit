@@ -1717,6 +1717,8 @@ fn scope_filter() -> FilterParams {
         detected_within_days: None,
         detected_after: None,
         detected_before: None,
+        installed_after: None,
+        installed_before: None,
     }
 }
 
@@ -1903,7 +1905,11 @@ fn the_scope_block_names_every_active_facet() {
             software: false,
         },
         &[PatchStatus::Pending, PatchStatus::Failed],
-        Some(1_776_000_000),
+        Some(InstallWindow {
+            after: 1_776_000_000,
+            before: None,
+            relative_days: Some(30),
+        }),
     );
 
     assert_eq!(facet(&scope, "Scope"), None, "something was narrowed");
@@ -1926,9 +1932,16 @@ fn the_scope_block_names_every_active_facet() {
         facet(&scope, "First seen before"),
         Some("2026-05-17 06:40 UTC")
     );
+    // The relative lookback reads like the first-seen window: absolute bound,
+    // with the control the operator used in parentheses.
     assert_eq!(
         facet(&scope, "Install history since"),
-        Some("2026-04-12 13:20 UTC")
+        Some("2026-04-12 13:20 UTC (last 30 days)")
+    );
+    assert_eq!(
+        facet(&scope, "Install history until"),
+        None,
+        "a relative lookback runs up to the query time"
     );
 
     // The two tiers, so the exports can say which facets reach the fleet sheets.
@@ -1954,6 +1967,66 @@ fn the_scope_block_names_every_active_facet() {
             "First seen before",
             "Install history since",
         ]
+    );
+}
+
+/// A custom install range is printed as the two absolute bounds it ran under, with
+/// no "(last N days)" tail, and — unlike the relative lookback, which moves every
+/// run — it is a different question, so it separates the fingerprint too.
+#[test]
+fn an_absolute_install_range_prints_both_bounds_and_keys_the_fingerprint() {
+    let filter = scope_filter();
+    let range = InstallWindow {
+        after: 1_776_000_000,
+        before: Some(1_777_000_000),
+        relative_days: None,
+    };
+    let scope = build_query_scope(
+        &filter,
+        &maps(),
+        BOTH_FAMILIES,
+        &[PatchStatus::Installed],
+        Some(range),
+    );
+    assert_eq!(
+        facet(&scope, "Install history since"),
+        Some("2026-04-12 13:20 UTC")
+    );
+    assert_eq!(
+        facet(&scope, "Install history until"),
+        Some("2026-04-24 03:06 UTC")
+    );
+    // Both in the patch tier: the install history narrows only the detail rows.
+    assert!(labels(&scope.patch_facets).contains(&"Install history until"));
+    assert!(!labels(&scope.facets).contains(&"Install history until"));
+
+    let key = |w: Option<InstallWindow>| {
+        build_query_scope(
+            &filter,
+            &maps(),
+            BOTH_FAMILIES,
+            &[PatchStatus::Installed],
+            w,
+        )
+        .fingerprint
+    };
+    let relative = |days| InstallWindow {
+        after: 1_776_000_000 - days,
+        before: None,
+        relative_days: Some(days),
+    };
+    assert_eq!(
+        key(None),
+        key(Some(relative(30))),
+        "the relative lookback was never part of the key, so old history still matches"
+    );
+    assert_ne!(key(None), key(Some(range)));
+    assert_ne!(
+        key(Some(range)),
+        key(Some(InstallWindow {
+            before: None,
+            ..range
+        }))
     );
 }
 
