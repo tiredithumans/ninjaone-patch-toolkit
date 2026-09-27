@@ -44,6 +44,10 @@ pub struct QueryResult {
     pub severity_by_org: Vec<OrgSeverity>,
     /// Pending-patch age histogram for the dashboard.
     pub age_buckets: Vec<AgeBucket>,
+    /// Approval workflow totals and the devices whose approved patches are not
+    /// installing. Uncapped here (the workbook lists every stuck device); the
+    /// summary carries a capped copy.
+    pub approvals: ApprovalBacklog,
     pub devices_total: usize,
     /// How many of `devices_total` are offline.
     ///
@@ -108,6 +112,9 @@ pub struct QuerySummary {
     pub severity_by_org: Vec<OrgSeverity>,
     /// Pending-patch age histogram for the dashboard charts.
     pub age_buckets: Vec<AgeBucket>,
+    /// Approval workflow totals and the oldest [`STUCK_DEVICES_SUMMARY_CAP`] stuck
+    /// devices (the totals still count every one).
+    pub approvals: ApprovalBacklog,
     pub devices_total: usize,
     /// How many of `devices_total` are offline.
     ///
@@ -160,6 +167,7 @@ impl QuerySummary {
             failures: result.failures.clone(),
             severity_by_org: result.severity_by_org.clone(),
             age_buckets: result.age_buckets.clone(),
+            approvals: result.approvals.capped(STUCK_DEVICES_SUMMARY_CAP),
             devices_total: result.devices_total,
             devices_offline: result.devices_offline,
             devices_unpatchable: result.devices_unpatchable,

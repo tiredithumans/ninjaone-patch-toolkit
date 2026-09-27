@@ -3,8 +3,8 @@ use rust_xlsxwriter::{Color, Format, Workbook};
 
 use crate::model::PatchRow;
 use crate::rows::{
-    ComplianceBucket, DeviceSummary, FailureGroup, OsCompliance, QueryScope, TableCell,
-    TableColumn, clamp_cell,
+    ApprovalBacklog, ComplianceBucket, DeviceSummary, FailureGroup, OsCompliance, QueryScope,
+    StuckDevice, TableCell, TableColumn, clamp_cell,
 };
 
 /// Data rows one worksheet can hold: Excel's 1,048,576-row limit less the header.
@@ -55,8 +55,11 @@ const DETAIL_COLUMNS: [TableColumn<PatchRow>; 15] = [
 const DETAIL_WIDTHS: [f64; DETAIL_COLUMNS.len()] = [
     24.0, 18.0, 18.0, 22.0, 26.0, 18.0, 11.0, 12.0, 40.0, 11.0, 11.0, 13.0, 9.0, 20.0, 20.0,
 ];
-const SUMMARY_WIDTHS: [f64; ComplianceBucket::COLUMNS.len()] = [28.0, 10.0, 11.0, 14.0, 24.0, 16.0];
-const OS_SUMMARY_WIDTHS: [f64; OsCompliance::COLUMNS.len()] = [28.0, 10.0, 11.0, 14.0, 24.0, 16.0];
+const SUMMARY_WIDTHS: [f64; ComplianceBucket::COLUMNS.len()] =
+    [28.0, 10.0, 11.0, 14.0, 24.0, 16.0, 18.0, 22.0];
+const OS_SUMMARY_WIDTHS: [f64; OsCompliance::COLUMNS.len()] =
+    [28.0, 10.0, 11.0, 14.0, 24.0, 16.0, 18.0, 22.0];
+const STUCK_WIDTHS: [f64; StuckDevice::COLUMNS.len()] = [26.0, 24.0, 22.0, 20.0];
 const REBOOT_WIDTHS: [f64; DeviceSummary::COLUMNS.len()] = [24.0, 18.0, 18.0, 22.0, 26.0, 14.0];
 const FAILURE_WIDTHS: [f64; FailureGroup::COLUMNS.len()] =
     [11.0, 11.0, 12.0, 40.0, 16.0, 20.0, 60.0];
@@ -98,9 +101,11 @@ fn header_format() -> Format {
 /// Writes a workbook with a Patches detail sheet (one row per device×patch), a
 /// Compliance summary sheet, a Compliance by OS sheet, a Needs Reboot sheet for
 /// devices flagged for reboot, a Patch Failures sheet rolling up FAILED installs,
-/// and an About sheet carrying the provenance in [`WorkbookMeta`]. Data sheets with
-/// no rows are omitted; Patches and About are always written. Detail rows past one
+/// a Stuck Approvals sheet (devices whose approved patches are not installing), and
+/// an About sheet carrying the provenance in [`WorkbookMeta`]. Data sheets with no
+/// rows are omitted; Patches and About are always written. Detail rows past one
 /// sheet's capacity continue on `Patches (2)`, `Patches (3)`, …
+#[allow(clippy::too_many_arguments)]
 pub fn write_workbook(
     path: &str,
     rows: &[PatchRow],
@@ -108,6 +113,7 @@ pub fn write_workbook(
     compliance_by_os: &[OsCompliance],
     reboot_devices: &[DeviceSummary],
     failures: &[FailureGroup],
+    approvals: &ApprovalBacklog,
     meta: &WorkbookMeta<'_>,
 ) -> Result<()> {
     write_workbook_split(
@@ -117,6 +123,7 @@ pub fn write_workbook(
         compliance_by_os,
         reboot_devices,
         failures,
+        approvals,
         meta,
         MAX_SHEET_DATA_ROWS,
     )
@@ -132,6 +139,7 @@ fn write_workbook_split(
     compliance_by_os: &[OsCompliance],
     reboot_devices: &[DeviceSummary],
     failures: &[FailureGroup],
+    approvals: &ApprovalBacklog,
     meta: &WorkbookMeta<'_>,
     rows_per_sheet: usize,
 ) -> Result<()> {
@@ -213,6 +221,35 @@ fn write_workbook_split(
             &FAILURE_WIDTHS,
             failures,
             false,
+        )?;
+    }
+    if !approvals.stuck_devices.is_empty() {
+        write_sheet(
+            &mut workbook,
+            &header,
+            "Stuck Approvals",
+            &StuckDevice::COLUMNS,
+            &STUCK_WIDTHS,
+            &approvals.stuck_devices,
+            false,
+        )?;
+        // The threshold is not recoverable from the rows, and "stuck" means nothing
+        // without it.
+        write_footnote(
+            &mut workbook,
+            approvals.stuck_devices.len(),
+            &format!(
+                "Approved patches still not installed more than {} days after NinjaOne \
+                 first reported them ({} patches on {} devices; {} approved and {} \
+                 awaiting approval fleet-wide). Usually a sign the agent is not applying \
+                 patches. {}",
+                approvals.stuck_after_days,
+                approvals.stuck_patches,
+                approvals.stuck_devices_total,
+                approvals.approved_not_installed,
+                approvals.awaiting_approval,
+                meta.scope_note,
+            ),
         )?;
     }
 
@@ -438,6 +475,8 @@ mod tests {
             compliance_pct: 50.0,
             pending_critical: 3,
             aged_critical: 1,
+            awaiting_approval: 2,
+            approved_not_installed: 1,
         }];
         let compliance_by_os = vec![OsCompliance {
             os: "Windows Server 2022".into(),
@@ -446,6 +485,8 @@ mod tests {
             compliance_pct: 50.0,
             pending_critical: 3,
             aged_critical: 1,
+            awaiting_approval: 2,
+            approved_not_installed: 1,
         }];
         write_workbook(
             &path_str,
@@ -454,6 +495,7 @@ mod tests {
             &compliance_by_os,
             &[],
             &[],
+            &ApprovalBacklog::default(),
             &meta(),
         )
         .unwrap();
@@ -497,6 +539,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &ApprovalBacklog::default(),
             &meta(),
         )
         .unwrap();
@@ -572,7 +615,17 @@ mod tests {
                 ..sample_row()
             },
         ];
-        write_workbook(&path.to_string_lossy(), &rows, &[], &[], &[], &[], &meta()).unwrap();
+        write_workbook(
+            &path.to_string_lossy(),
+            &rows,
+            &[],
+            &[],
+            &[],
+            &[],
+            &ApprovalBacklog::default(),
+            &meta(),
+        )
+        .unwrap();
 
         let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
         let range = wb.worksheet_range("Patches").unwrap();
@@ -612,6 +665,7 @@ mod tests {
             &[],
             &reboot,
             &[],
+            &ApprovalBacklog::default(),
             &meta(),
         )
         .unwrap();
@@ -651,6 +705,94 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The approval split rides the shared compliance columns onto both compliance
+    /// sheets, and the stuck devices get a sheet of their own with the threshold
+    /// stated beneath — "stuck" means nothing without it.
+    #[test]
+    fn writes_the_approval_columns_and_the_stuck_approvals_sheet() {
+        use crate::rows::StuckDevice;
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = std::env::temp_dir().join("npt-export-approvals.xlsx");
+        let compliance = vec![ComplianceBucket {
+            organization: "Contoso".into(),
+            devices_total: 2,
+            devices_compliant: 1,
+            compliance_pct: 50.0,
+            pending_critical: 3,
+            aged_critical: 1,
+            awaiting_approval: 4,
+            approved_not_installed: 2,
+        }];
+        let approvals = ApprovalBacklog {
+            awaiting_approval: 4,
+            approved_not_installed: 2,
+            stuck_after_days: 30,
+            stuck_patches: 2,
+            stuck_devices_total: 1,
+            stuck_devices: vec![StuckDevice {
+                device_id: 7,
+                device_name: "srv07".into(),
+                organization: "Contoso".into(),
+                patches: 2,
+                oldest_first_seen: Some("2026-01-02 00:00 UTC".into()),
+                oldest_first_seen_ts: Some(1_767_312_000),
+            }],
+        };
+        write_workbook(
+            &path.to_string_lossy(),
+            &[],
+            &compliance,
+            &[],
+            &[],
+            &[],
+            &approvals,
+            &meta(),
+        )
+        .unwrap();
+
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let summary = wb.worksheet_range("Compliance").unwrap();
+        assert_eq!(
+            summary.get_value((0, 6)).unwrap().to_string(),
+            "Awaiting Approval"
+        );
+        assert_eq!(summary.get_value((1, 6)).unwrap().to_string(), "4");
+        assert_eq!(
+            summary.get_value((0, 7)).unwrap().to_string(),
+            "Approved, Not Installed"
+        );
+        assert_eq!(summary.get_value((1, 7)).unwrap().to_string(), "2");
+
+        let stuck = wb.worksheet_range("Stuck Approvals").unwrap();
+        assert_eq!(stuck.get_value((0, 0)).unwrap().to_string(), "Device");
+        assert_eq!(stuck.get_value((1, 0)).unwrap().to_string(), "srv07");
+        assert_eq!(stuck.get_value((1, 2)).unwrap().to_string(), "2");
+        assert_eq!(
+            stuck.get_value((1, 3)).unwrap().to_string(),
+            "2026-01-02 00:00 UTC"
+        );
+        let note = stuck.get_value((3, 0)).unwrap().to_string();
+        assert!(note.contains("more than 30 days"), "{note}");
+        let _ = std::fs::remove_file(&path);
+
+        // No stuck device, no sheet.
+        let path = std::env::temp_dir().join("npt-export-no-stuck.xlsx");
+        write_workbook(
+            &path.to_string_lossy(),
+            &[],
+            &compliance,
+            &[],
+            &[],
+            &[],
+            &ApprovalBacklog::default(),
+            &meta(),
+        )
+        .unwrap();
+        let wb: Xlsx<_> = open_workbook(&path).unwrap();
+        assert!(!wb.sheet_names().contains(&"Stuck Approvals".to_string()));
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn writes_the_patch_failures_sheet_when_present() {
         use calamine::{Reader, Xlsx, open_workbook};
@@ -674,6 +816,7 @@ mod tests {
             &[],
             &[],
             &failures,
+            &ApprovalBacklog::default(),
             &meta(),
         )
         .unwrap();
@@ -736,6 +879,7 @@ mod tests {
             &[],
             &[],
             &failures,
+            &ApprovalBacklog::default(),
             &meta,
         )
         .expect("the export no longer fails on a long cell");
@@ -777,6 +921,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &ApprovalBacklog::default(),
             &meta(),
             2,
         )

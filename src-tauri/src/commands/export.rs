@@ -160,6 +160,7 @@ pub async fn export_patches_xlsx(
             &result.compliance_by_os,
             &reboot,
             &result.failures,
+            &result.approvals,
             &WorkbookMeta {
                 generated_at: &result.generated_at,
                 data_fetched_at: &result.data_fetched_at,
@@ -306,6 +307,7 @@ mod tests {
             failures: Vec::new(),
             severity_by_org: Vec::new(),
             age_buckets: Vec::new(),
+            approvals: Default::default(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,

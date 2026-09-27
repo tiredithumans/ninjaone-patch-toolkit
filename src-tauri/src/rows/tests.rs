@@ -648,6 +648,7 @@ fn query_result_serializes_camel_case_for_the_frontend() {
         failures: Vec::new(),
         severity_by_org: Vec::new(),
         age_buckets: Vec::new(),
+        approvals: Default::default(),
         devices_total: 1,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -711,6 +712,7 @@ fn query_summary_trims_to_first_page_and_reboot_subset() {
         failures: Vec::new(),
         severity_by_org: Vec::new(),
         age_buckets: Vec::new(),
+        approvals: Default::default(),
         devices_total: 2,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -955,6 +957,8 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "compliancePct",
             "pendingCritical",
             "agedCritical",
+            "awaitingApproval",
+            "approvedNotInstalled",
         ],
         "ComplianceBucket",
     );
@@ -969,8 +973,37 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "compliancePct",
             "pendingCritical",
             "agedCritical",
+            "awaitingApproval",
+            "approvedNotInstalled",
         ],
         "OsCompliance",
+    );
+
+    let stuck_patches = vec![patch(1, "APPROVED", "CRITICAL", Some(90))];
+    let approvals = build_approval_backlog(&refs(&stuck_patches), &by_id, &maps, 30, Utc::now());
+    let approvals_json = serde_json::to_value(&approvals).unwrap();
+    assert_keys_present(
+        &approvals_json,
+        &[
+            "awaitingApproval",
+            "approvedNotInstalled",
+            "stuckAfterDays",
+            "stuckPatches",
+            "stuckDevicesTotal",
+            "stuckDevices",
+        ],
+        "ApprovalBacklog",
+    );
+    assert_keys_present(
+        &approvals_json["stuckDevices"][0],
+        &[
+            "deviceId",
+            "deviceName",
+            "organization",
+            "patches",
+            "oldestFirstSeen",
+        ],
+        "StuckDevice",
     );
 
     // The nested aggregates. The fixture used to leave every one of them empty,
@@ -1060,6 +1093,7 @@ fn serialized_shapes_carry_every_frontend_required_key() {
         failures,
         severity_by_org,
         age_buckets,
+        approvals: Default::default(),
         devices_total: 1,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -1082,6 +1116,7 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "failures",
             "severityByOrg",
             "ageBuckets",
+            "approvals",
             "devicesTotal",
             "devicesOffline",
             "devicesUnpatchable",
@@ -2110,6 +2145,117 @@ fn severity_and_age_rollups_cover_the_same_devices_compliance_does() {
         age_total, compliance[0].pending_critical,
         "the age histogram counted them too"
     );
+}
+
+/// The approval split reads the **vendor** status on the cached record. `MANUAL`
+/// is awaiting approval, `APPROVED` is approved-not-installed, and an untyped or
+/// FAILED record is pending (it still breaks compliance) but in neither column —
+/// the `status_override = MANUAL` that labels an untyped row PENDING is a display
+/// decision and never reaches the rollups. Both columns count every severity,
+/// unlike the Critical/Important SLA columns beside them.
+#[test]
+fn the_approval_split_uses_the_vendor_status_across_every_severity() {
+    let d1 = device(1, 10, "Windows Server 2022");
+    let by_id = HashMap::from([(1, &d1)]);
+    let maps = maps();
+    let mut untyped = patch(1, "MANUAL", "CRITICAL", Some(5));
+    untyped.status = None;
+    let current = vec![
+        patch(1, "MANUAL", "CRITICAL", Some(5)),
+        patch(1, "MANUAL", "LOW", Some(5)),
+        patch(1, "APPROVED", "OPTIONAL", Some(5)),
+        patch(1, "FAILED", "CRITICAL", Some(5)),
+        patch(1, "REJECTED", "CRITICAL", Some(5)),
+        untyped,
+    ];
+    let current = refs(&current);
+    let counts = pending_counts(&current);
+    let summaries = build_device_summaries(&[&d1], &counts, &maps);
+
+    let org = &build_compliance(&summaries, &current, &by_id, &maps, 30, Utc::now())[0];
+    assert_eq!(org.awaiting_approval, 2, "MANUAL of any severity");
+    assert_eq!(org.approved_not_installed, 1, "APPROVED of any severity");
+    assert_eq!(
+        counts.get(&1).copied(),
+        Some(5),
+        "FAILED and untyped are still pending — just not in either approval column"
+    );
+    let os = &build_compliance_by_os(&summaries, &current, &by_id, 30, Utc::now())[0];
+    assert_eq!(
+        (os.awaiting_approval, os.approved_not_installed),
+        (2, 1),
+        "the by-OS rollup shares the accumulator"
+    );
+}
+
+/// Stuck = APPROVED and first seen past the threshold (undated counts, as in the
+/// SLA-aged column). Grouped per device, oldest first, over the same population
+/// as compliance — so the fleet totals equal the compliance columns' sums, and an
+/// offline device's approvals appear in neither.
+#[test]
+fn stuck_approvals_group_per_device_oldest_first_over_the_rollup_population() {
+    let d1 = device(1, 10, "Windows Server 2022");
+    let d2 = device(2, 10, "Windows Server 2022");
+    let d3 = device(3, 10, "Windows Server 2022");
+    let mut offline = device(4, 10, "Windows Server 2022");
+    offline.offline = Some(true);
+    let devices = [d1, d2, d3, offline];
+    let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+    let maps = maps();
+    let mut undated = patch(3, "APPROVED", "LOW", None);
+    undated.collected_timestamp = None;
+    let current = vec![
+        patch(1, "APPROVED", "CRITICAL", Some(40)),
+        patch(1, "APPROVED", "LOW", Some(90)),
+        patch(1, "APPROVED", "LOW", Some(2)), // approved, but recent: not stuck
+        patch(2, "APPROVED", "CRITICAL", Some(200)),
+        undated,
+        patch(2, "MANUAL", "CRITICAL", Some(300)), // awaiting a person, not stuck
+        patch(4, "APPROVED", "CRITICAL", Some(400)), // offline: outside the population
+    ];
+    let current = refs(&current);
+    let now = Utc::now();
+    let backlog = build_approval_backlog(&current, &by_id, &maps, 30, now);
+
+    assert_eq!(backlog.stuck_after_days, 30);
+    assert_eq!(backlog.approved_not_installed, 5);
+    assert_eq!(backlog.awaiting_approval, 1);
+    assert_eq!(backlog.stuck_patches, 4);
+    assert_eq!(backlog.stuck_devices_total, 3);
+    let order: Vec<(i64, usize)> = backlog
+        .stuck_devices
+        .iter()
+        .map(|d| (d.device_id, d.patches))
+        .collect();
+    assert_eq!(
+        order,
+        vec![(2, 1), (1, 2), (3, 1)],
+        "oldest first seen first, the undated device last"
+    );
+    assert_eq!(&backlog.stuck_devices[1].organization, "Contoso");
+    assert_eq!(
+        backlog.stuck_devices[1].oldest_first_seen_ts,
+        Some((now - Duration::days(90)).timestamp()),
+        "the device's oldest stuck patch, not its newest"
+    );
+    assert_eq!(backlog.stuck_devices[2].oldest_first_seen, None);
+
+    // The fleet totals are the compliance columns summed: one population.
+    let counts = pending_counts(&current);
+    let summaries = build_device_summaries(&devices.iter().collect::<Vec<_>>(), &counts, &maps);
+    let compliance = build_compliance(&summaries, &current, &by_id, &maps, 30, now);
+    let sum = |f: fn(&ComplianceBucket) -> usize| compliance.iter().map(f).sum::<usize>();
+    assert_eq!(sum(|b| b.awaiting_approval), backlog.awaiting_approval);
+    assert_eq!(
+        sum(|b| b.approved_not_installed),
+        backlog.approved_not_installed
+    );
+
+    // The summary copy is capped, and keeps every total.
+    let capped = backlog.capped(1);
+    assert_eq!(capped.stuck_devices.len(), 1);
+    assert_eq!(capped.stuck_devices_total, 3);
+    assert_eq!(capped.stuck_patches, 4);
 }
 
 #[test]

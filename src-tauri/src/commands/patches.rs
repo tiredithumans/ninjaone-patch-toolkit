@@ -12,9 +12,10 @@ use crate::filter::FilterParams;
 use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
     GroupBy, GroupPage, InstallWindow, LookupMaps, PatchFamilies, PatchSource, QueryResult,
-    QuerySummary, RowSort, build_age_buckets, build_compliance, build_compliance_by_os,
-    build_device_summaries, build_failures, build_groups, build_query_scope, build_rows,
-    build_severity_by_org, group_member_page, page_rows, pending_counts, slice_groups, sort_order,
+    QuerySummary, RowSort, build_age_buckets, build_approval_backlog, build_compliance,
+    build_compliance_by_os, build_device_summaries, build_failures, build_groups,
+    build_query_scope, build_rows, build_severity_by_org, group_member_page, page_rows,
+    pending_counts, slice_groups, sort_order,
 };
 use crate::settings::MAX_WINDOW_DAYS;
 use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
@@ -651,6 +652,10 @@ fn assemble_result(
     let failures = build_failures(&rows);
     let severity_by_org = build_severity_by_org(&all_current, &devices_by_id, &maps);
     let age_buckets = build_age_buckets(&all_current, &devices_by_id, now);
+    // "Stuck" reuses the SLA window: an approved patch still not installed past the
+    // point the SLA calls overdue is the agent-trouble signal, and a second knob for
+    // the same idea of "too long" would only let the two disagree.
+    let approvals = build_approval_backlog(&all_current, &devices_by_id, &maps, sla_days, now);
 
     let families = PatchFamilies {
         os: plan.include_os,
@@ -665,6 +670,7 @@ fn assemble_result(
         failures,
         severity_by_org,
         age_buckets,
+        approvals,
         devices_total: scoped_devices.len(),
         // Counted over the same scoped set the compliance rollups draw from, so the
         // two device numbers on screen are reconcilable: `devices_total` is every

@@ -12,8 +12,8 @@ use serde::Serialize;
 
 use crate::model::{Device, Patch, PatchRow, Severity};
 
-use super::compliance::rollup_device;
-use super::join::ORPHAN_DEVICE_ID;
+use super::compliance::{ApprovalState, approval_state, rollup_device};
+use super::join::{ORPHAN_DEVICE_ID, fmt_dt};
 use super::*;
 
 /// A fleet-wide rollup of FAILED install records grouped by patch, so the operator
@@ -363,4 +363,152 @@ pub fn build_age_buckets(
             count,
         })
         .collect()
+}
+
+/// How many stuck-approval devices ride on the IPC summary. The cached result keeps
+/// every one of them for the workbook; the in-app card shows the oldest this many
+/// and says how many more there are.
+pub const STUCK_DEVICES_SUMMARY_CAP: usize = 200;
+
+/// The approval workflow across the rollup population: the fleet totals of the two
+/// [`ComplianceBucket`] approval columns, and the devices whose **approved** patches
+/// have sat uninstalled for longer than `stuck_after_days`.
+///
+/// Approved-and-not-installed past the SLA is the one backlog no operator decision
+/// is holding up — the approval has been given and the agent has not acted on it —
+/// so it points at agent trouble (offline windows, a broken patch engine, a
+/// maintenance policy that never opens) rather than at a patching backlog.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalBacklog {
+    /// Fleet total of [`ComplianceBucket::awaiting_approval`].
+    pub awaiting_approval: usize,
+    /// Fleet total of [`ComplianceBucket::approved_not_installed`].
+    pub approved_not_installed: usize,
+    /// The age threshold (days since first seen) `stuck_devices` was built with —
+    /// the SLA window, which is the existing "this has taken too long" knob.
+    pub stuck_after_days: i64,
+    /// Every stuck approved patch, across all stuck devices (not only the listed ones).
+    pub stuck_patches: usize,
+    /// How many devices have at least one stuck approved patch. Can exceed
+    /// `stuck_devices.len()` on the IPC summary, which is capped.
+    pub stuck_devices_total: usize,
+    /// Per device, oldest first seen first; undated patches sort their device last.
+    pub stuck_devices: Vec<StuckDevice>,
+}
+
+/// One device whose approved patches are not installing. See [`ApprovalBacklog`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StuckDevice {
+    pub device_id: i64,
+    pub device_name: String,
+    pub organization: String,
+    /// Approved, uninstalled patches on this device first seen past the threshold.
+    pub patches: usize,
+    /// When NinjaOne first reported the oldest of them (detection time, not a
+    /// release date). `None` when every one is undated.
+    pub oldest_first_seen: Option<String>,
+    pub oldest_first_seen_ts: Option<i64>,
+}
+
+impl StuckDevice {
+    /// The stuck-approvals table columns, shared by the workbook and the report.
+    pub const COLUMNS: [TableColumn<StuckDevice>; 4] = [
+        ("Device", |d| TableCell::text(&d.device_name)),
+        ("Organization", |d| TableCell::text(&d.organization)),
+        ("Approved, Not Installed", |d| TableCell::Count(d.patches)),
+        ("Oldest First Seen", |d| {
+            TableCell::opt_text(d.oldest_first_seen.as_deref())
+        }),
+    ];
+}
+
+impl ApprovalBacklog {
+    /// A copy carrying at most `cap` stuck devices, for the IPC summary. Every
+    /// total is kept, so the frontend can say how many it is not showing.
+    pub fn capped(&self, cap: usize) -> Self {
+        Self {
+            stuck_devices: self.stuck_devices.iter().take(cap).cloned().collect(),
+            ..self.clone()
+        }
+    }
+}
+
+/// Builds the [`ApprovalBacklog`] from the unnarrowed current feed, over the same
+/// [`rollup_device`] population as the compliance rollups — so its totals equal the
+/// sums of the compliance table's two approval columns.
+///
+/// Stuck means `APPROVED` (the vendor status — see `approval_state`) and first seen
+/// more than `stuck_after_days` ago. An undated approved patch counts as stuck, the
+/// same rule the SLA-aged column applies: it cannot be shown to be recent.
+pub fn build_approval_backlog(
+    current_patches: &[&Patch],
+    devices_by_id: &HashMap<i64, &Device>,
+    maps: &LookupMaps,
+    stuck_after_days: i64,
+    now: DateTime<Utc>,
+) -> ApprovalBacklog {
+    struct Acc<'a> {
+        device: &'a Device,
+        patches: usize,
+        oldest: Option<DateTime<Utc>>,
+    }
+    let cutoff = now - chrono::Duration::days(stuck_after_days);
+    let mut out = ApprovalBacklog {
+        stuck_after_days,
+        ..ApprovalBacklog::default()
+    };
+    let mut stuck: HashMap<i64, Acc<'_>> = HashMap::new();
+    for p in current_patches {
+        let Some(device) = rollup_device(devices_by_id, p.device_id) else {
+            continue;
+        };
+        match approval_state(p.status.as_deref()) {
+            Some(ApprovalState::Awaiting) => out.awaiting_approval += 1,
+            Some(ApprovalState::Approved) => {
+                out.approved_not_installed += 1;
+                let seen = p.first_seen_at();
+                if seen.is_none_or(|t| t < cutoff) {
+                    out.stuck_patches += 1;
+                    let acc = stuck.entry(device.id).or_insert(Acc {
+                        device,
+                        patches: 0,
+                        oldest: None,
+                    });
+                    acc.patches += 1;
+                    if let Some(t) = seen
+                        && acc.oldest.is_none_or(|o| t < o)
+                    {
+                        acc.oldest = Some(t);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    let mut devices: Vec<StuckDevice> = stuck
+        .into_values()
+        .map(|a| StuckDevice {
+            device_id: a.device.id,
+            device_name: a.device.label().to_string(),
+            organization: maps.org_name(a.device.organization_id),
+            patches: a.patches,
+            oldest_first_seen: fmt_dt(a.oldest),
+            oldest_first_seen_ts: a.oldest.map(|t| t.timestamp()),
+        })
+        .collect();
+    // Oldest first — the longest-stuck agent is the one to look at — with undated
+    // devices after every dated one, then the most stuck patches, then the name so
+    // two identical runs list identically (the map's order is random per process).
+    devices.sort_by(|a, b| {
+        (a.oldest_first_seen_ts.is_none(), a.oldest_first_seen_ts)
+            .cmp(&(b.oldest_first_seen_ts.is_none(), b.oldest_first_seen_ts))
+            .then_with(|| b.patches.cmp(&a.patches))
+            .then_with(|| cmp_ci(&a.device_name, &b.device_name))
+            .then_with(|| a.device_id.cmp(&b.device_id))
+    });
+    out.stuck_devices_total = devices.len();
+    out.stuck_devices = devices;
+    out
 }
