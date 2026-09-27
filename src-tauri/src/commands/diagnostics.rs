@@ -47,6 +47,9 @@ pub struct AuditRecord {
     pub detail: String,
     pub outcome: String,
     pub dry_run: bool,
+    /// The dispatch overrode a closed maintenance window. Absent (false) on every
+    /// record written before the field existed and on every ordinary dispatch.
+    pub window_override: bool,
     pub batch_id: Option<u64>,
     pub exit_code: Option<i32>,
     /// True when this record came from the pre-`paths::app_dir` location. Surfaced
@@ -122,6 +125,10 @@ fn parse_line(line: &str, legacy: bool) -> Option<AuditRecord> {
         outcome: get("outcome"),
         dry_run: value
             .get("dryRun")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        window_override: value
+            .get("windowOverride")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         batch_id: value.get("batchId").and_then(|v| v.as_u64()),
@@ -200,7 +207,17 @@ mod tests {
         assert_eq!(record.organization, "", "a missing field reads as empty");
         assert_eq!(record.exit_code, None);
         assert!(!record.dry_run, "a missing dryRun is not a live dispatch");
+        assert!(
+            !record.window_override,
+            "nor is a missing windowOverride an override"
+        );
         assert!(record.legacy, "legacy provenance is carried to the view");
+    }
+
+    #[test]
+    fn a_maintenance_window_override_is_read_back() {
+        let line = r#"{"timestamp":"2026-09-02T23:00:00Z","kind":"OS_PATCH_APPLY","deviceName":"srv-01","windowOverride":true}"#;
+        assert!(parse_line(line, false).expect("parses").window_override);
     }
 
     #[test]

@@ -760,6 +760,27 @@ impl AppState {
         self.fleet_current_sw.invalidate();
     }
 
+    /// One family of the whole-fleet current patches **if it is already cached** for
+    /// the current tenant, with its fetch time — never fetches. `None` on a miss, a
+    /// tenant change, or `PatchType::All` (there is no combined slot).
+    ///
+    /// Served past [`CURRENT_PATCHES_TTL`]: the TTL decides when a *query* refetches,
+    /// while this feeds the Apply-all preview, which states the fetch time rather
+    /// than hiding older data. A post-action invalidation still clears the slot, so
+    /// the preview never counts patches the last apply may already have installed.
+    pub fn cached_current_patches(
+        &self,
+        family: crate::model::PatchType,
+    ) -> Option<(Arc<Vec<Patch>>, DateTime<Utc>)> {
+        use crate::model::PatchType;
+        let slot = match family {
+            PatchType::Os => &self.fleet_current_os,
+            PatchType::Software => &self.fleet_current_sw,
+            PatchType::All => return None,
+        };
+        slot.peek(&self.tenant_key(), Duration::MAX)
+    }
+
     /// Drops **only** the device inventory. A reboot flips `os.needsReboot`, and
     /// [`DEVICE_TTL`] is 15 minutes — long enough to render the reboot invisible.
     pub fn invalidate_fleet_devices(&self) {

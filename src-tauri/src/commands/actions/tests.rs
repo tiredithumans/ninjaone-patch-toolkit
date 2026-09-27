@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::Utc;
 
 use super::confirm::{canonical_parameters, request_hash};
-use super::dispatch::{action_detail, invalidate_after, record_dispatch};
+use super::dispatch::{action_detail, carries_dry_run_flag, invalidate_after, record_dispatch};
 use super::plan::{
-    composed_targets, parameters_preview, per_device_parameters, resolve_run_as, summarize_names,
-    untargeted_names,
+    composed_targets, dry_run_support, parameters_preview, per_device_parameters, resolve_run_as,
+    summarize_names, untargeted_names,
 };
 use super::*;
 use crate::actions::{PlannedTarget, RebootChoice, fmt_ts};
@@ -685,4 +685,103 @@ fn a_remediation_detail_names_the_script_it_ran() {
     // inventing one.
     req.script_name = None;
     assert_eq!(action_detail(&req), ActionKind::OsPatchRemediate.label());
+}
+
+fn library_script(id: i64, name: &str, variables: &[&str]) -> crate::model::AutomationScript {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "name": name,
+        "scriptVariables": variables
+            .iter()
+            .map(|v| serde_json::json!({ "name": v }))
+            .collect::<Vec<_>>(),
+    }))
+    .expect("script")
+}
+
+/// The dry-run gate reads the *resolved* script: a remediation kind's comes from
+/// Settings, a built-in action has no `dryRun` at all, and a typed string is
+/// refused before the library is even consulted — it is sent verbatim, so the
+/// toolkit cannot add the flag to it.
+#[test]
+fn dry_run_support_follows_the_resolved_script() {
+    use crate::actions::DryRunSupport;
+    let library = vec![
+        library_script(42, "Install-Kbs", &["kbAllowList", "dryRun"]),
+        library_script(43, "Repair-WindowsUpdate", &[]),
+    ];
+    let lib = Ok(library.as_slice());
+    let req = request(ActionKind::Script, vec![1]);
+
+    assert_eq!(
+        dry_run_support(&req, Some(&ScriptRef::Script { id: 42 }), lib),
+        DryRunSupport::Declared
+    );
+    assert_eq!(
+        dry_run_support(&req, Some(&ScriptRef::Script { id: 43 }), lib),
+        DryRunSupport::NotDeclared {
+            script: "Repair-WindowsUpdate".into()
+        }
+    );
+    assert!(matches!(
+        dry_run_support(&req, Some(&ScriptRef::Script { id: 99 }), lib),
+        DryRunSupport::Unverified(why) if why.contains("#99")
+    ));
+    assert!(matches!(
+        dry_run_support(&req, Some(&ScriptRef::Script { id: 42 }), Err("HTTP 503")),
+        DryRunSupport::Unverified(why) if why.contains("HTTP 503")
+    ));
+    assert_eq!(
+        dry_run_support(
+            &req,
+            Some(&ScriptRef::Action {
+                uid: "built-in".into()
+            }),
+            lib
+        ),
+        DryRunSupport::BuiltInAction
+    );
+
+    // Even a script that declares dryRun is refused with a typed string.
+    let typed = ActionRequest {
+        parameters: Some("-Force".into()),
+        ..req.clone()
+    };
+    assert_eq!(
+        dry_run_support(&typed, Some(&ScriptRef::Script { id: 42 }), lib),
+        DryRunSupport::TypedParameters
+    );
+    // A remediation kind has no typed string (it is ignored), so it goes by its
+    // configured script.
+    let remediation = ActionRequest {
+        parameters: Some("-Force".into()),
+        ..request(ActionKind::OsPatchRemediate, vec![1])
+    };
+    assert_eq!(
+        dry_run_support(&remediation, Some(&ScriptRef::Script { id: 42 }), lib),
+        DryRunSupport::Declared
+    );
+}
+
+/// The dispatch-site half of the dry-run gate: a parameter string counts as a
+/// preview only when it carries the exact token `build_parameters` composes.
+#[test]
+fn only_a_composed_dry_run_flag_counts_at_the_dispatch_site() {
+    let composed = crate::actions::build_parameters(
+        ActionKind::OsPatchRemediate,
+        &["KB1".to_string()],
+        RebootChoice::Never,
+        true,
+    );
+    assert!(carries_dry_run_flag(&composed), "{composed}");
+    let live = crate::actions::build_parameters(
+        ActionKind::OsPatchRemediate,
+        &["KB1".to_string()],
+        RebootChoice::Never,
+        false,
+    );
+    assert!(!carries_dry_run_flag(&live));
+    assert!(!carries_dry_run_flag("-DryRun"));
+    assert!(!carries_dry_run_flag("xdryRun=true"));
+    assert!(!carries_dry_run_flag(""));
 }

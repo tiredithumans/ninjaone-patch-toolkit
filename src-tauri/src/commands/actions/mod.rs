@@ -103,6 +103,9 @@ pub struct ScriptSummary {
     /// See [`AutomationScript::accepts_kb_allow_list`] — gates whether the UI may
     /// offer per-KB targeting for this script.
     pub accepts_kb_allow_list: bool,
+    /// See [`AutomationScript::accepts_dry_run`] — whether a dry run of this script
+    /// is honest. `plan()` refuses one otherwise; this lets the UI say so up front.
+    pub accepts_dry_run: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -257,6 +260,7 @@ pub async fn run_action(
         reason: request.reason.clone().unwrap_or_default(),
         reboot_mode: request.reboot_mode.unwrap_or(RebootMode::Normal),
         dry_run: request.dry_run,
+        window_overridden: p.window_overridden,
         detail: detail.clone(),
         instance: settings.instance_base_url.clone(),
         client_id: settings.client_id.clone(),
@@ -357,6 +361,7 @@ fn summarize(s: &AutomationScript) -> ScriptSummary {
         language: s.language.clone(),
         operating_systems: s.operating_systems.clone(),
         accepts_kb_allow_list: s.accepts_kb_allow_list(),
+        accepts_dry_run: s.accepts_dry_run(),
     }
 }
 
