@@ -1794,6 +1794,52 @@ tbody tr:hover {
   font-variant-numeric: tabular-nums;
 }
 .trend-now { color: var(--text); font-weight: 600; }
+/* Per-organization deltas under the trend cards. */
+.trend-subhead {
+  margin: 18px 0 6px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+/* --- Patches tab: changes since the previous comparable run ---------------- */
+.changes {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.changes-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+.changes-lists {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.changes-group > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+}
+.changes-count {
+  display: inline-block;
+  min-width: 3ch;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* Direction by meaning, as on the trend cards: new and failed are worse. */
+.changes-new .changes-count { color: var(--warn); }
+.changes-resolved .changes-count { color: var(--accent-2); }
+.changes-failed .changes-count { color: var(--danger); }
+.changes-table { margin-top: 6px; }
+.changes-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
 /* Desktop build with no reachable Tauri backend. Replaces the whole UI rather than
    sitting above it: the point is that no fleet numbers are on screen at all, so
    there is nothing for this to annotate. See app.rs's `backend_missing` branch. */

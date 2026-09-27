@@ -9,6 +9,7 @@
 //! `state.rs` lands in one of these files, never inline in a `#[component]`.
 
 mod changelog;
+mod changes;
 mod filters;
 mod format;
 mod jobs;
@@ -18,6 +19,7 @@ mod selection;
 mod sort;
 
 pub(crate) use changelog::*;
+pub(crate) use changes::*;
 pub(crate) use filters::*;
 pub(crate) use format::*;
 pub(crate) use jobs::*;

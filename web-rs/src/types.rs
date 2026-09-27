@@ -188,6 +188,36 @@ pub struct FailureGroup {
     pub latest_failure: Option<String>,
 }
 
+/// Mirror of the backend's `changes::RunChanges`: the diff against the previous run
+/// with the same tenant and facets. Counts are exact; the lists are capped.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunChanges {
+    /// When the run compared against ran. `None`: no previous comparable run.
+    pub previous_at: Option<String>,
+    pub tracks_pending: bool,
+    pub tracks_failed: bool,
+    pub too_large: bool,
+    pub new_pending: usize,
+    pub resolved: usize,
+    pub newly_failed: usize,
+    pub new_pending_items: Vec<ChangeItem>,
+    pub resolved_items: Vec<ChangeItem>,
+    pub newly_failed_items: Vec<ChangeItem>,
+}
+
+/// One patch on one device in a change list (backend `changes::ChangeItem`).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChangeItem {
+    pub device_id: i64,
+    pub device_name: String,
+    pub patch_type: String,
+    pub kb: Option<String>,
+    pub name: String,
+    pub severity: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SeverityCounts {
@@ -287,6 +317,9 @@ pub struct QueryResult {
     /// Which patch families the fleet-health rollups actually cover.
     #[serde(default)]
     pub patch_families: PatchFamilies,
+    /// What changed since the previous comparable run (backend `changes::RunChanges`).
+    #[serde(default)]
+    pub changes: RunChanges,
     pub generated_at: String,
     /// When the underlying whole-fleet patch data was last fetched (vs. when this
     /// re-filter was computed). Drives the "patch data as of …" label.
@@ -856,6 +889,38 @@ pub struct RunRecord {
     /// keys (org A vs org B, or a severity-only run) are not one series. Empty on
     /// lines written before the key existed.
     pub scope_key: String,
+    /// Per-organization numbers, largest organizations first and capped backend-side
+    /// (`orgs_total` says how many there were). Empty on old lines, and on lines
+    /// the backend returns without detail (all but its newest few hundred).
+    pub orgs: Vec<OrgRun>,
+    pub orgs_total: usize,
+}
+
+/// One organization in one run (backend `history::OrgRun`). Short keys on the wire
+/// because the entry repeats per org on every history line.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OrgRun {
+    #[serde(rename = "o")]
+    pub organization: String,
+    #[serde(rename = "n")]
+    pub devices_in_scope: usize,
+    #[serde(rename = "c")]
+    pub devices_compliant: usize,
+    #[serde(rename = "p")]
+    pub pending: usize,
+    #[serde(rename = "pc")]
+    pub pending_critical: usize,
+    #[serde(rename = "ac")]
+    pub aged_critical: usize,
+}
+
+impl OrgRun {
+    /// Same rule as [`RunRecord::compliance_pct`]: an empty org has no percentage.
+    pub fn compliance_pct(&self) -> Option<f64> {
+        (self.devices_in_scope > 0)
+            .then(|| self.devices_compliant as f64 * 100.0 / self.devices_in_scope as f64)
+    }
 }
 
 impl RunRecord {

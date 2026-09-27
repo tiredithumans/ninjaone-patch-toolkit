@@ -26,6 +26,7 @@ use crate::types::{
     NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role,
     SeverityCounts,
 };
+use crate::types::{ChangeItem, RunChanges};
 
 /// Wall-clock label shown in the results summary. Fixed (not "now") so the build
 /// stays deterministic and host-testable — it reads as a representative snapshot.
@@ -521,7 +522,71 @@ pub fn filtered_result(
         .filter(|d| patch_matches(&d.row, filter, patch_type, statuses, install_after_days))
         .map(|d| d.row)
         .collect();
-    assemble(rows, &filter.organization_ids)
+    let mut result = assemble(rows, &filter.organization_ids);
+    result.changes = demo_changes(&result.rows, statuses);
+    result
+}
+
+/// When the sample's "previous run" happened — a day before [`GENERATED_AT`].
+const PREVIOUS_RUN_AT: &str = "2026-06-25 14:30:02 UTC";
+
+/// A representative "changes since the previous run" drawn from the filtered rows,
+/// so it narrows with every facet the way the real diff does. The backend diffs
+/// against a stored snapshot; the demo has no history, so it picks a stable few
+/// rows as "new", its failures as "newly failed", and invents two resolved patches
+/// on devices in scope (resolved patches are by definition absent from the rows).
+fn demo_changes(rows: &[PatchRow], statuses: &[String]) -> RunChanges {
+    let selected = |s: &str| statuses.iter().any(|x| x.eq_ignore_ascii_case(s));
+    let item = |r: &PatchRow| ChangeItem {
+        device_id: r.device_id,
+        device_name: r.device_name.clone(),
+        patch_type: r.patch_type.clone(),
+        kb: r.kb.clone(),
+        name: r.name.clone(),
+        severity: r.severity.clone(),
+    };
+    let pending: Vec<&PatchRow> = rows
+        .iter()
+        .filter(|r| r.status == "PENDING" || r.status == "APPROVED")
+        .collect();
+    let new_pending_items: Vec<ChangeItem> =
+        pending.iter().step_by(5).take(4).map(|r| item(r)).collect();
+    let newly_failed_items: Vec<ChangeItem> = rows
+        .iter()
+        .filter(|r| r.status == "FAILED")
+        .take(1)
+        .map(item)
+        .collect();
+    let resolved_items: Vec<ChangeItem> = pending
+        .iter()
+        .take(2)
+        .zip([
+            (
+                "KB5039212",
+                "2024-06 Cumulative Update for Windows Server 2022",
+            ),
+            ("KB5039894", "2024-06 Servicing Stack Update"),
+        ])
+        .map(|(r, (kb, name))| ChangeItem {
+            kb: Some(kb.to_string()),
+            name: name.to_string(),
+            severity: "Important".to_string(),
+            patch_type: "OS".to_string(),
+            ..item(r)
+        })
+        .collect();
+    RunChanges {
+        previous_at: Some(PREVIOUS_RUN_AT.to_string()),
+        tracks_pending: selected("PENDING") || selected("APPROVED"),
+        tracks_failed: selected("FAILED"),
+        too_large: false,
+        new_pending: new_pending_items.len(),
+        resolved: resolved_items.len(),
+        newly_failed: newly_failed_items.len(),
+        new_pending_items,
+        resolved_items,
+        newly_failed_items,
+    }
 }
 
 /// Builds a `QueryResult` from already-filtered display rows, narrowing the rollups
@@ -570,6 +635,8 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64]) -> QueryResult {
             os: true,
             software: true,
         },
+        // Filled by `filtered_result`, which knows the status selection.
+        changes: RunChanges::default(),
         generated_at: GENERATED_AT.to_string(),
         data_fetched_at: GENERATED_AT.to_string(),
     }
@@ -857,6 +924,27 @@ mod tests {
         assert_eq!(date_to_epoch("2026-06-26"), Some(1_782_432_000));
         assert_eq!(date_to_epoch("nonsense"), None);
         assert_eq!(date_to_epoch("2026-13-01"), None);
+    }
+
+    #[test]
+    fn the_demo_reports_changes_that_narrow_with_the_filters() {
+        let all = filtered_result(&filter(), "ALL", &all_statuses(), Some(3650));
+        let c = &all.changes;
+        assert!(c.previous_at.is_some());
+        assert!(c.new_pending > 0 && c.resolved > 0 && c.newly_failed > 0);
+        assert_eq!(c.new_pending, c.new_pending_items.len());
+        assert!(c.tracks_pending && c.tracks_failed);
+
+        let failed_only = filtered_result(&filter(), "ALL", &["FAILED".to_string()], Some(3650));
+        assert!(!failed_only.changes.tracks_pending);
+        assert_eq!(failed_only.changes.new_pending, 0);
+        let devices: BTreeSet<&str> = all.rows.iter().map(|r| r.device_name.as_str()).collect();
+        assert!(
+            c.resolved_items
+                .iter()
+                .all(|i| devices.contains(i.device_name.as_str())),
+            "resolved patches sit on devices in scope"
+        );
     }
 
     #[test]

@@ -571,7 +571,16 @@ pub(crate) fn TrendLine(
     let delta = last - first;
     let end = points.last().copied().unwrap_or((0.5, 0.5));
     let delta_class = util::trend_verdict(delta, percent, higher_is_better).css_class();
-    let delta_label = util::trend_delta_label(delta, percent);
+    let span_label = format!(
+        "{} over {} runs",
+        util::trend_delta_label(delta, percent),
+        values.len()
+    );
+    // The headline change is against the run just before, not the start of the
+    // line: "did last night's window land" is a question about one step.
+    let step = util::delta_vs_previous(&values).unwrap_or(0.0);
+    let step_class = util::trend_verdict(step, percent, higher_is_better).css_class();
+    let step_label = util::trend_delta_label(step, percent);
     // The capped formatter: a compliance of 99.96 must not print as "100.0%".
     let fmt = move |v: f64| {
         if percent {
@@ -585,7 +594,9 @@ pub(crate) fn TrendLine(
         <div class="trend-card">
             <div class="trend-head">
                 <span class="trend-title">{title}</span>
-                <span class=delta_class>{delta_label}</span>
+                <span class=step_class title="Change since the previous comparable run">
+                    {step_label}
+                </span>
             </div>
             <svg class="trend-spark" viewBox="0 0 300 60" role="img" aria-label=format!(
                 "{title}: {} then {}", fmt(first), fmt(last),
@@ -598,6 +609,7 @@ pub(crate) fn TrendLine(
             </svg>
             <div class="trend-foot">
                 <span>{fmt(first)}</span>
+                <span class=delta_class>{span_label}</span>
                 <span class="trend-now">{fmt(last)}</span>
             </div>
         </div>
