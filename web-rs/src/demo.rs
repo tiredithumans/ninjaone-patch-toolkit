@@ -418,9 +418,6 @@ fn sample_reboot() -> Vec<DeviceSummary> {
 /// sample fleet is all online.
 const SAMPLE_LAST_CONTACT: &str = "2026-06-26 14:31 UTC";
 
-/// The SLA window the demo grades "Aged (past SLA)" against, the backend's default.
-const SAMPLE_SLA_DAYS: i64 = 30;
-
 /// One device's facts and per-device rollup over the **whole** sample — the demo
 /// counterpart of `rows::apply_device_health`, which reads the unnarrowed current
 /// feed: the patch facets (status, severity, search, dates) do not narrow it.
@@ -440,20 +437,22 @@ fn sample_device_summary(device_id: i64, failed_queried: bool) -> Option<DeviceS
     let mut aged = 0;
     let mut failed = 0;
     let mut pending = 0;
-    let sla_cutoff = SAMPLE_NOW_EPOCH - SAMPLE_SLA_DAYS * 86_400;
     for r in &rows {
         match r.status.as_str() {
             "INSTALLED" | "REJECTED" => {}
             "FAILED" => failed += 1,
             _ => {
                 pending += 1;
-                add_band(&mut counts, &r.severity);
+                bump(&mut counts, &r.severity);
                 let backlog = severity_rank(&r.severity) >= severity_rank("Important");
                 let old = r
                     .first_seen_date
                     .as_deref()
                     .and_then(date_to_epoch)
-                    .is_none_or(|seen| seen < sla_cutoff);
+                    // Per band, like `SlaCutoffs` and the demo's worst devices.
+                    .is_none_or(|seen| {
+                        seen < SAMPLE_NOW_EPOCH - sla_days_for(&DEMO_SLA, &r.severity) * 86_400
+                    });
                 if backlog && old {
                     aged += 1;
                 }
@@ -477,21 +476,6 @@ fn sample_device_summary(device_id: i64, failed_queried: bool) -> Option<DeviceS
         failed_installs: failed_queried.then_some(failed),
         last_contact: Some(SAMPLE_LAST_CONTACT.to_string()),
     })
-}
-
-/// Files one pending patch under its band by display label.
-fn add_band(c: &mut SeverityCounts, severity: &str) {
-    let band = match severity {
-        "Critical" => &mut c.critical,
-        "Important" => &mut c.important,
-        "Security" => &mut c.security,
-        "Moderate" => &mut c.moderate,
-        "Recommended" => &mut c.recommended,
-        "Low" => &mut c.low,
-        "Optional" => &mut c.optional,
-        _ => &mut c.unknown,
-    };
-    *band += 1;
 }
 
 /// The demo's `device_detail`: the device's rollup over the whole sample, plus its
