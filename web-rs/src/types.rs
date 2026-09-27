@@ -137,6 +137,10 @@ pub struct PatchRow {
     pub status: String,
     pub first_seen_date: Option<String>,
     pub installed_date: Option<String>,
+    /// `DeviceSoftwarePatch.productIdentifier`, shared by every version of one
+    /// third-party product; `None` on OS rows. Read by the demo's product grouping.
+    #[serde(default)]
+    pub product_identifier: Option<String>,
 }
 
 /// A device row for the Needs-Reboot view. The backend only sends the
@@ -249,6 +253,9 @@ pub struct SeverityCounts {
 pub enum GroupBy {
     Device,
     Patch,
+    /// Third-party rows by product identifier (every version in one group); every
+    /// other row by its patch key.
+    Product,
 }
 
 /// One collapsed group header. Mirrors `rows::PatchGroup`. Members are fetched

@@ -86,6 +86,57 @@ pub(crate) fn group_count_label(by_device: bool, rows: usize, devices: usize) ->
     }
 }
 
+/// A stable, version-free name for a product group from its members' titles as
+/// `(title, row count)`: each title loses one trailing version token and the most
+/// common result wins, ties broken case-insensitively then bytewise.
+///
+/// A hand mirror of the backend's `rows::product_display_name`, for the browser
+/// demo's grouping; `grouping_matches_the_backend_byte_for_byte` pins the two
+/// against the backend's own output.
+pub(crate) fn product_display_name<'a>(
+    titles: impl IntoIterator<Item = (&'a str, usize)>,
+) -> String {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (title, n) in titles {
+        *counts.entry(strip_version_token(title)).or_default() += n;
+    }
+    counts
+        .into_iter()
+        .max_by(|(a, na), (b, nb)| na.cmp(nb).then_with(|| cmp_ci(b, a)).then_with(|| b.cmp(a)))
+        .map(|(name, _)| name.to_string())
+        .unwrap_or_default()
+}
+
+/// `title` without one trailing version token ("Google Chrome 141.0.7390.55" →
+/// "Google Chrome"). A version token starts with a digit (after an optional `v`),
+/// contains a `.`, and holds only ASCII alphanumerics and `.-_+`; a title that is
+/// only a version is kept whole. Mirrors `rows::strip_version_token`.
+pub(crate) fn strip_version_token(title: &str) -> &str {
+    let title = title.trim();
+    let Some((head, last)) = title.rsplit_once(char::is_whitespace) else {
+        return title;
+    };
+    let body = last.strip_prefix(['v', 'V']).unwrap_or(last);
+    let is_version = body.starts_with(|c: char| c.is_ascii_digit())
+        && body.contains('.')
+        && body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'));
+    let head = head.trim_end();
+    if is_version && !head.is_empty() {
+        head
+    } else {
+        title
+    }
+}
+
+/// ASCII case-insensitive ordering, as the backend's `rows::cmp_ci`.
+fn cmp_ci(a: &str, b: &str) -> std::cmp::Ordering {
+    a.bytes()
+        .map(|c| c.to_ascii_lowercase())
+        .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+}
+
 /// The fleet line above the stuck-approvals table: where the approval workflow
 /// stands across the rollup population.
 pub(crate) fn approval_totals_line(awaiting: usize, approved: usize) -> String {

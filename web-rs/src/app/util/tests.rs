@@ -252,6 +252,7 @@ fn sortable(device: &str, sev: &str, installed: Option<&str>) -> PatchRow {
         status: "PENDING".into(),
         first_seen_date: None,
         installed_date: installed.map(Into::into),
+        product_identifier: None,
     }
 }
 
@@ -272,6 +273,7 @@ fn sel_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, ty: &str)
         status: "PENDING".into(),
         first_seen_date: None,
         installed_date: None,
+        product_identifier: None,
     }
 }
 
@@ -2184,5 +2186,33 @@ fn the_stuck_approvals_caption_states_the_threshold_and_the_cap() {
     assert!(
         capped.contains("Showing the oldest 200 of 1,523"),
         "{capped}"
+    );
+}
+
+/// The demo's product labels must agree with the backend's; these are the same
+/// cases `rows::tests` pins, so a drift fails on both sides.
+#[test]
+fn product_names_strip_one_trailing_version_like_the_backend() {
+    for (title, want) in [
+        ("Google Chrome 141.0.7390.55", "Google Chrome"),
+        ("OpenSSL 3.0.16-1ubuntu1", "OpenSSL"),
+        ("Zoom Workplace (64-bit) v6.4.3", "Zoom Workplace (64-bit)"),
+        ("OpenSSL 3.0.16 (libssl)", "OpenSSL 3.0.16 (libssl)"),
+        ("Microsoft Office 2016", "Microsoft Office 2016"),
+        ("1.2.3", "1.2.3"),
+    ] {
+        assert_eq!(strip_version_token(title), want, "{title:?}");
+    }
+    assert_eq!(
+        product_display_name([
+            ("Google Chrome 138", 5),
+            ("Google Chrome 141.0.7390.55", 3),
+            ("Google Chrome 141.0.7390.66", 4),
+        ]),
+        "Google Chrome"
+    );
+    assert_eq!(
+        product_display_name([("Beta Tool 1.0", 2), ("alpha tool 2.0", 2)]),
+        "alpha tool"
     );
 }
