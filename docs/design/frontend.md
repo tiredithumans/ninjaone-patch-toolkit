@@ -132,6 +132,9 @@ staying unreachable. What lives in
 - `parse_clamped` / `parse_optional_id` (the settings number fields — `<input type="number">`
   treats `min`/`max` as advisory, so the clamp is the real guard).
 - `action_disabled_reason` / `selection_summary`.
+- The dispatch guardrails in `util/guardrails.rs`: the maintenance-window editor's time/day
+  helpers and `window_summary`, `window_override_offered`, `dry_run_disabled_reason` /
+  `dry_run_caveat`, and the Apply-all preview lines.
 - The pieces of `state.rs` that decide *what happens*: `run_decision` (the Run guard chain, whose
   **order** is load-bearing — demo before auth, busy before both), `next_query_seq`/`is_superseded`
   (the overlapping-run stamp), and `apply_row_selection` (the selection model — a device enters

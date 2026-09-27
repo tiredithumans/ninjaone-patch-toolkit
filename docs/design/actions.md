@@ -77,6 +77,24 @@ operator chose them and the script may not need a list), and `build_plan` warns,
 What the *native* Apply does on those devices is still all-or-nothing — that's the endpoint, not
 the selection model — so don't "fix" that gap by widening selection again.
 
+### "Apply all" shows what it will install before it is confirmed
+
+The native endpoint takes no list, so the confirm dialog is the only place the operator can see
+the backlog they are approving. `plan()` attaches an `ApplyPreview` to the two native applies
+(`actions::apply_preview`): per eligible device, the count of current-patch records with status
+`APPROVED` (what the endpoint installs) and `MANUAL` (NinjaOne's "pending approval", which it
+does **not** install — `PatchStatus::Pending.api_value()`), counted from the family's whole-fleet
+current-patch cache, with that cache's fetch time.
+
+- The planner **never fetches** for it. `AppState::cached_current_patches` peeks the
+  `TenantCache` slot (tenant-checked, TTL ignored — the dialog states the fetch time instead);
+  a cold family is `known: false` and the dialog says "unknown (patch data not loaded)", never
+  zero. Paging a six-figure feed to draw a dialog would make every plan wait on it.
+- A post-action `invalidate_current_patches()` clears the slot, so the preview never counts
+  patches the previous apply may already have installed.
+- A device with **zero** approved patches is a `plan()` *warning*, not a blocker: the apply
+  "succeeds" and installs nothing while the rows the operator was looking at sit in `MANUAL`.
+
 Third-party patches carry no KB (the software feed has no `kbNumber`), so they are targeted by
 **product title** instead; an OS remediation silently skips them and vice versa, mirroring the
 asymmetry of the two feeds.
@@ -140,14 +158,61 @@ script, and duplicating the controls across two tabs while they wrote the same s
 ticking "Dry run" in the Jobs tab silently changed what an Apply button did. Each options row
 carries a label naming the actions it reaches: the native endpoints take no parameters, have no
 preview mode and run as NinjaOne's agent, so an unlabelled "Dry run" beside them reads as
-protection they cannot give.
+protection they cannot give. The maintenance-window override sits in the "Applies to every
+action" row for the same reason: it is one choice about the next dispatch, not a per-button one.
 
 ## Guardrails live in `actions::plan`
 
 `plan()` is pure with an injected clock. Adding a guardrail means extending `blockers`/`warnings`
 there, not adding a dialog. The one exception is the `dry_run` check, which is *also* asserted at
-the dispatch site in `run_action` — defense in depth, so a new `ActionKind` whose
-`supports_dry_run()` is wrong can't send a real mutating POST while the UI says "Dry run".
+the dispatch site in `send_action` — defense in depth, so a new `ActionKind` whose
+`supports_dry_run()` is wrong can't send a real mutating POST while the UI says "Dry run", and a
+script dispatch whose parameter string lacks the `dryRun=true` token
+(`dispatch::carries_dry_run_flag`) is refused rather than run for real.
+
+## A dry run is allowed only for a script that declares `dryRun`
+
+NinjaOne has no preview mode. A toolkit "dry run" only appends `dryRun=true` to the composed
+parameter string, so a script that never reads it **runs for real** while the Jobs tab and the
+audit trail say "Dry run". `supports_dry_run()` (true for every script-running kind) is therefore
+necessary but not sufficient: `build_plan` resolves the script and classifies it as a
+`DryRunSupport`, and `plan()` blocks every value but `Declared`.
+
+- `Declared` means the library entry declares a `dryRun` script variable (name match,
+  case-insensitive) or a parameter line containing `dryRun` as a whole token
+  (`AutomationScript::accepts_dry_run`). Stricter than `accepts_kb_allow_list`'s substring match,
+  so `-NoDryRunSupport` does not count.
+- A built-in action (`ScriptRef::Action`) takes no `dryRun`: blocked.
+- **Hand-typed parameters with Dry run on are blocked**, whatever the script declares. They are
+  sent verbatim, so no flag is added; the alternative — appending `dryRun=true` when the string
+  lacks it — would rewrite what the operator typed and put a parse of free-form text between them
+  and a live run. Clearing the box composes the parameters instead, which always carry the flag.
+- The library is read only for a dry run of a script, on plan **and** on confirm (`run_action`
+  re-plans), so a script edited to drop `dryRun` between review and confirm is refused. A library
+  that cannot be read, or no longer lists the id, is `Unverified` — blocked, fail closed.
+- `ScriptSummary.accepts_dry_run` lets the action bar disable the affected buttons while Dry run is
+  on, and name the scripts that cannot preview; it is advisory, the planner decides.
+
+## The maintenance window
+
+`ActionSettings.window_days` (`0` = Sunday), `window_start_minute`, `window_end_minute` (an end
+before the start wraps past midnight; the day is the day the window *opened*). `window_is_open`
+reads `DateTime<Local>` — **this computer's clock**, not the devices' (NinjaOne exposes no device
+time zone on this path) — so the blocker, the Settings editor and the override checkbox all say
+"this computer's time", and the blocker prints the UTC offset. `save_settings` rejects times
+outside a day, days outside 0–6, a zero-length window and an enforced window with no days, and
+stores the days sorted and de-duplicated.
+
+The override is two switches, and the blocker names whichever is missing:
+`allow_window_override` in Settings *permits* it; the action bar's "Override the maintenance
+window for this dispatch" (`override_window` on the request) *requests* it. The checkbox is shown
+only while the window is enforced and overridable — not "only while it is closed", which would
+need a second copy of `window_is_open` against the webview's clock that could disagree at the
+boundary; an override requested inside an open window is inert. It is bound into the confirm
+token, sent only while the checkbox is shown, and **cleared after every dispatch** so it cannot
+silently carry over. When it actually bypasses a closed window, `ActionPlan.window_overridden` is
+set and every opening audit record carries `windowOverride: true` (omitted otherwise, so ordinary
+records keep their shape); the audit trail shows "Live (window override)".
 
 ## After a mutating action, invalidate the current-patch cache
 
