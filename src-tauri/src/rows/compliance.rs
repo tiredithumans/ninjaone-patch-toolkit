@@ -28,6 +28,9 @@ pub struct DeviceSummary {
     pub os_name: Option<String>,
     pub node_class: Option<String>,
     pub needs_reboot: bool,
+    /// Carried so the Needs Reboot tab's device selection can count offline targets
+    /// before planning — an action against an offline device is queued, not run.
+    pub offline: bool,
     pub pending_count: usize,
 }
 
@@ -47,6 +50,7 @@ pub fn build_device_summaries(
             os_name: d.os_name(),
             node_class: d.node_class.clone(),
             needs_reboot: d.needs_reboot(),
+            offline: d.is_offline(),
             pending_count: pending_counts.get(&d.id).copied().unwrap_or(0),
         })
         .collect()

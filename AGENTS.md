@@ -213,7 +213,8 @@ Write path (device actions) — violating these silently widens the blast radius
   from Settings, never the request; an unset id or an empty target list is a `plan()` blocker. → `docs/design/actions.md#there-is-no-per-kb-apply-endpoint-so-there-are-two-apply-paths-and-the-ui-names-both`
 - **Selection is per patch row; dispatch is per device with per-device targets**
   (`util::targets_by_device` → `ActionRequest.device_targets` → `per_device_parameters`). Ticking a
-  row must not tick the device's other rows. No batch-wide `targets` field. → `docs/design/actions.md#selection-is-per-patch-row-dispatch-is-per-device-with-per-device-targets`
+  row must not tick the device's other rows. No batch-wide `targets` field. The Needs Reboot tab's
+  device selection is a separate map reaching only Reboot/scans (`util::device_selection_allows`). → `docs/design/actions.md#selection-is-per-patch-row-dispatch-is-per-device-with-per-device-targets`
 - **`build_parameters` encodes by kind:** `kbAllowList=` for OS, `productAllowListB64=` for
   software (NinjaOne splits on spaces). OS targets must pass `kb_number` or `plan()` blocks. → `docs/design/actions.md#the-parameter-encoding-is-chosen-by-kind`
 - **Confirm tokens are payload-bound and single-use.** `request_hash` destructures `ActionRequest`
@@ -227,15 +228,17 @@ Write path (device actions) — violating these silently widens the blast radius
   dispatch, audited as `windowOverride`); the window is this computer's clock. → `docs/design/actions.md#the-maintenance-window`
 - **"Apply all" previews APPROVED/MANUAL counts from the *cached* current patches only** — `plan()`
   never fetches; a cold cache is "unknown", not zero. → `docs/design/actions.md#apply-all-shows-what-it-will-install-before-it-is-confirmed`
-- **One dispatch surface (`ActionBar`); `Run as` / reboot / `Dry run` are rendered once** and
-  labelled with the kinds they reach. → `docs/design/actions.md#there-is-one-dispatch-surface-and-the-run-options-are-shared`
+- **One dispatch surface (`ActionBar`, mounted on Patches and Needs Reboot); `Run as` / reboot /
+  `Dry run` are rendered once** and labelled with the kinds they reach. A Jobs-tab retry
+  (`Failed` only, never `Unknown`) rebuilds the request from `JobReport.request` and re-plans. → `docs/design/actions.md#there-is-one-dispatch-surface-and-the-run-options-are-shared`, `#a-retry-is-a-re-plan-never-a-replay`
 - **After a non-dry-run mutating action call `invalidate_current_patches()`** (and
   `invalidate_fleet_devices()` after a reboot); never `clear_lookups_cache()`; never drop
   `last_result`. A dry run invalidates nothing and raises no stale banner. → `docs/design/actions.md#after-a-mutating-action-invalidate-the-current-patch-cache`
 - **Jobs are tenant-stamped; the poller is single-claim** (`try_claim_job_poller` /
   `release_job_poller_if_idle`). Dispatch appends jobs before claiming. → `docs/design/actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim`
-- **A job resolves from `/activities` only:** `statusCode` is lifecycle, `activityResult` is the
-  verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is applied
+- **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`;
+  `seriesUid` only once confirmed): `statusCode` is lifecycle, `activityResult` is the verdict,
+  exit code from `data`; `newerThan` is an activity **id**, so the time floor is applied
   client-side; `is_action_activity(kind, type)` accepts only the types that kind emits. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 
 NinjaOne API client:

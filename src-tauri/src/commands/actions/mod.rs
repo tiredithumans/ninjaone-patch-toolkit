@@ -11,7 +11,7 @@
 //! modified frontend must not be able to talk the backend into a wider blast
 //! radius than Settings allows.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tracing::info;
 
-use crate::actions::{ActionKind, ActionPlan, JobReport, JobState, RebootChoice, fmt_ts};
+use crate::actions::{
+    ActionKind, ActionPlan, JobReport, JobRequest, JobState, RebootChoice, fmt_ts,
+};
 use crate::error::UiError;
 use crate::model::{AutomationScript, RebootMode};
 use crate::state::AppState;
@@ -31,7 +33,7 @@ mod poller;
 
 use confirm::random_token;
 use dispatch::{DispatchContext, action_detail, dispatch_batch, invalidate_after};
-use plan::{PlannedAction, build_plan};
+use plan::{PlannedAction, build_plan, typed_parameters};
 use poller::spawn_job_poller;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -205,6 +207,15 @@ pub async fn run_action(
     } = planned;
 
     let settings = state.settings_snapshot();
+    // What each job records for a later retry, built before `run_as` is flattened:
+    // a native endpoint's `None` must stay `None` there, not become `""`.
+    let job_requests: BTreeMap<i64, JobRequest> = p
+        .eligible
+        .iter()
+        .map(|t| t.device_id)
+        .chain(p.skipped.iter().map(|s| s.device_id))
+        .map(|id| (id, job_request(&request, run_as.as_deref(), id)))
+        .collect();
     // The identity the approval was bound to — never re-read from Settings here. The
     // native endpoints take none.
     let run_as = run_as.unwrap_or_default();
@@ -234,6 +245,7 @@ pub async fn run_action(
             activity_id: None,
             series_uid: None,
             exit_code: None,
+            request: job_requests.get(&s.device_id).cloned(),
         });
     }
 
@@ -270,6 +282,7 @@ pub async fn run_action(
             .map(|t| t.chars().take(8).collect::<String>()),
         batch_id,
         id_base,
+        job_requests,
     });
 
     let dispatched = dispatch_batch(
@@ -318,6 +331,49 @@ pub async fn run_action(
         skipped: p.skipped.len(),
         jobs,
     })
+}
+
+/// The slice of `req` one device's job keeps so the Jobs tab can rebuild it for a
+/// retry (see [`JobRequest`]). `run_as` is the *resolved* identity the approval bound.
+///
+/// Destructures the request exhaustively, like `request_hash`, so a new
+/// `ActionRequest` field is a compile error here until someone decides whether a
+/// retry carries it.
+fn job_request(req: &ActionRequest, run_as: Option<&str>, device_id: i64) -> JobRequest {
+    let ActionRequest {
+        kind: _,
+        device_ids: _,
+        device_targets,
+        script_id,
+        script_uid,
+        script_name,
+        // Only the verbatim string a `Script` actually sends; a composed one is
+        // rebuilt from `targets` by the re-plan.
+        parameters: _,
+        // The resolved value is passed in instead.
+        run_as: _,
+        reboot,
+        reboot_mode,
+        reason,
+        include_offline,
+        // Re-evaluated at retry time, never inherited — see `JobRequest`.
+        override_window: _,
+        // On the `JobReport` itself.
+        dry_run: _,
+        confirm_token: _,
+    } = req;
+    JobRequest {
+        script_id: *script_id,
+        script_uid: script_uid.clone(),
+        script_name: script_name.clone(),
+        parameters: typed_parameters(req).map(str::to_string),
+        run_as: run_as.map(str::to_string),
+        reboot: *reboot,
+        reboot_mode: *reboot_mode,
+        reason: reason.clone(),
+        include_offline: *include_offline,
+        targets: device_targets.get(&device_id).cloned().unwrap_or_default(),
+    }
 }
 
 #[tauri::command]

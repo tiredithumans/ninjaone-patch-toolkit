@@ -1,6 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::Utc;
+use serde_json::json;
+use wiremock::matchers::{method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::confirm::{canonical_parameters, request_hash};
 use super::dispatch::{action_detail, carries_dry_run_flag, invalidate_after, record_dispatch};
@@ -107,6 +110,7 @@ fn a_dispatch_outcome_is_classified_by_the_error_type() {
         activity_id: None,
         series_uid: None,
         exit_code: None,
+        request: None,
     };
 
     let mut unknown = job();
@@ -784,4 +788,249 @@ fn only_a_composed_dry_run_flag_counts_at_the_dispatch_site() {
     assert!(!carries_dry_run_flag("-DryRun"));
     assert!(!carries_dry_run_flag("xdryRun=true"));
     assert!(!carries_dry_run_flag(""));
+}
+
+fn pending_job(id: u64, device_id: i64, kind: ActionKind, dispatched_ts: i64) -> JobReport {
+    JobReport {
+        id,
+        batch_id: 1,
+        device_id,
+        device_name: format!("srv-{device_id}"),
+        organization: "Contoso".into(),
+        kind,
+        detail: kind.label().into(),
+        dry_run: false,
+        state: JobState::Running,
+        dispatched_at: String::new(),
+        dispatched_ts,
+        finished_at: None,
+        duration_seconds: None,
+        activity_id: None,
+        series_uid: None,
+        exit_code: None,
+        request: None,
+    }
+}
+
+fn mock_api(server: &MockServer) -> crate::api::NinjaApiClient {
+    let http = reqwest::Client::new();
+    let auth = crate::auth::AuthState::seeded(http.clone(), server.uri(), "test-token");
+    crate::api::NinjaApiClient::new(http, auth)
+}
+
+/// The feed is per device, so a tick reads it once per device no matter how many
+/// of that device's jobs are pending — and each job still resolves to the activity
+/// its own kind emits. It used to cost one `/activities` request per *job*.
+#[tokio::test]
+async fn a_tick_reads_each_devices_feed_once_and_resolves_every_job_on_it() {
+    let server = MockServer::start().await;
+    let now = Utc::now();
+    let ts = now.timestamp();
+    Mock::given(method("GET"))
+        .and(path("/api/v2/activities"))
+        .and(query_param("df", "id=7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 902, "activityType": "SYSTEM", "activityTime": (ts - 1) as f64,
+              "statusCode": "COMPLETED", "activityResult": "FAILURE" },
+            { "id": 901, "activityType": "PATCH_MANAGEMENT", "activityTime": (ts - 2) as f64,
+              "statusCode": "COMPLETED", "activityResult": "SUCCESS" },
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/activities"))
+        .and(query_param("df", "id=8"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let pending = vec![
+        pending_job(1, 7, ActionKind::OsPatchApply, ts - 30),
+        pending_job(2, 7, ActionKind::Reboot, ts - 20),
+        pending_job(3, 8, ActionKind::OsPatchScan, ts - 10),
+    ];
+    let mut claimed = HashSet::new();
+    let mut confirmed = HashSet::new();
+    let updates = poller::resolve_pending(
+        &mock_api(&server),
+        pending,
+        &mut claimed,
+        &mut confirmed,
+        now,
+    )
+    .await;
+
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 2, "one read per device, not per job");
+
+    let by_id = |id: u64| updates.iter().find(|j| j.id == id).expect("job");
+    assert_eq!(by_id(1).state, JobState::Completed);
+    assert_eq!(by_id(1).activity_id, Some(901));
+    assert!(
+        matches!(by_id(2).state, JobState::Failed(_)),
+        "{:?}",
+        by_id(2).state
+    );
+    assert_eq!(by_id(2).activity_id, Some(902));
+    // An empty feed is lag, not failure.
+    assert_eq!(by_id(3).state, JobState::Running);
+    assert_eq!(claimed, HashSet::from([901, 902]));
+}
+
+/// Two jobs of the *same* kind on one device share one read, and the claimed-id
+/// exclusion still hands each its own activity rather than both the newest.
+#[tokio::test]
+async fn two_same_kind_jobs_on_one_device_share_a_read_but_not_an_activity() {
+    let server = MockServer::start().await;
+    let now = Utc::now();
+    let ts = now.timestamp();
+    Mock::given(method("GET"))
+        .and(path("/api/v2/activities"))
+        .and(query_param("df", "id=7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 12, "activityType": "PATCH_MANAGEMENT", "activityTime": (ts - 1) as f64,
+              "statusCode": "COMPLETED", "activityResult": "FAILURE" },
+            { "id": 11, "activityType": "PATCH_MANAGEMENT", "activityTime": (ts - 5) as f64,
+              "statusCode": "COMPLETED", "activityResult": "SUCCESS" },
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let pending = vec![
+        pending_job(1, 7, ActionKind::OsPatchScan, ts - 30),
+        pending_job(2, 7, ActionKind::OsPatchApply, ts - 20),
+    ];
+    let updates = poller::resolve_pending(
+        &mock_api(&server),
+        pending,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+        now,
+    )
+    .await;
+
+    assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+    assert_ne!(
+        updates[0].activity_id, updates[1].activity_id,
+        "two jobs must never bind the same activity"
+    );
+    assert!(updates.iter().all(|j| j.state.is_terminal()));
+}
+
+/// The shared read is floored at the device's *earliest* dispatch, so no job on
+/// it loses an activity it could have matched, and it narrows to `seriesUid` only
+/// once that uid has been seen on an activity — a dispatch response's bare `uid`
+/// may be one no activity carries, and a read narrowed to it would starve the job.
+#[test]
+fn feed_reads_group_by_device_and_narrow_only_to_a_confirmed_series() {
+    let mut a = pending_job(1, 7, ActionKind::Script, 1_000);
+    a.series_uid = Some("uid-a".into());
+    let b = pending_job(2, 7, ActionKind::Reboot, 900);
+    let mut c = pending_job(3, 8, ActionKind::Script, 2_000);
+    c.series_uid = Some("uid-c".into());
+
+    let unconfirmed = poller::feed_reads(&[a.clone(), b.clone(), c.clone()], &HashSet::new());
+    assert_eq!(
+        unconfirmed,
+        vec![
+            poller::FeedRead {
+                device_id: 7,
+                series_uid: None,
+                since_ts: 895,
+            },
+            poller::FeedRead {
+                device_id: 8,
+                series_uid: None,
+                since_ts: 1_995,
+            },
+        ]
+    );
+
+    let confirmed = HashSet::from(["uid-a".to_string(), "uid-c".to_string()]);
+    let reads = poller::feed_reads(&[a, b, c], &confirmed);
+    // Device 7 has two pending jobs, so it stays device-wide.
+    assert_eq!(reads[0].series_uid, None);
+    assert_eq!(reads[1].series_uid.as_deref(), Some("uid-c"));
+}
+
+/// A series uid is confirmed by the device-wide feed and then used on the next
+/// tick — with the device `df` still sent, so it only ever narrows.
+#[tokio::test]
+async fn a_confirmed_series_narrows_the_next_read() {
+    let server = MockServer::start().await;
+    let now = Utc::now();
+    let ts = now.timestamp();
+    Mock::given(method("GET"))
+        .and(path("/api/v2/activities"))
+        .and(query_param("df", "id=7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 950, "activityType": "SCRIPTING", "activityTime": ts as f64,
+              "seriesUid": "uid-9", "statusCode": "IN_PROCESS" },
+        ])))
+        .mount(&server)
+        .await;
+
+    let mut job = pending_job(1, 7, ActionKind::Script, ts - 10);
+    job.series_uid = Some("uid-9".into());
+    let api = mock_api(&server);
+    let mut claimed = HashSet::new();
+    let mut confirmed = HashSet::new();
+
+    let first = poller::resolve_pending(&api, vec![job], &mut claimed, &mut confirmed, now).await;
+    assert_eq!(first[0].state, JobState::Running);
+    assert!(confirmed.contains("uid-9"));
+    poller::resolve_pending(&api, first, &mut claimed, &mut confirmed, now).await;
+
+    let requests = server.received_requests().await.expect("requests");
+    let urls: Vec<String> = requests.iter().map(|r| r.url.to_string()).collect();
+    assert!(!urls[0].contains("seriesUid"), "{}", urls[0]);
+    assert!(urls[1].contains("seriesUid=uid-9"), "{}", urls[1]);
+    assert!(urls[1].contains("df=id%3D7"), "{}", urls[1]);
+}
+
+/// A retry is rebuilt from what the job recorded, so the job must record this
+/// device's own targets (never the batch union), the *resolved* run-as, and
+/// everything else the re-plan reads — except the maintenance-window override,
+/// which is re-decided at retry time.
+#[test]
+fn a_job_records_what_a_retry_needs_for_its_own_device() {
+    let mut req = request(ActionKind::OsPatchRemediate, vec![1, 2]);
+    req.device_targets = HashMap::from([
+        (1, vec!["KB500".to_string()]),
+        (2, vec!["KB600".to_string(), "KB601".to_string()]),
+    ]);
+    req.reboot = RebootChoice::Auto;
+    req.include_offline = true;
+    req.override_window = true;
+    req.dry_run = true;
+    req.parameters = Some("ignored for a remediation".into());
+
+    let one = job_request(&req, Some("system"), 1);
+    assert_eq!(one.targets, vec!["KB500".to_string()]);
+    assert_eq!(one.run_as.as_deref(), Some("system"));
+    assert_eq!(one.reboot, RebootChoice::Auto);
+    assert!(one.include_offline);
+    assert_eq!(
+        one.parameters, None,
+        "only a Script's typed string is carried"
+    );
+    assert_eq!(job_request(&req, Some("system"), 2).targets.len(), 2);
+
+    let mut script = request(ActionKind::Script, vec![1]);
+    script.script_id = Some(42);
+    script.parameters = Some("  -Verbose ".into());
+    let rec = job_request(&script, Some("local-admin"), 1);
+    assert_eq!(rec.script_id, Some(42));
+    assert_eq!(rec.parameters.as_deref(), Some("-Verbose"));
+
+    let mut reboot = request(ActionKind::Reboot, vec![1]);
+    reboot.reboot_mode = Some(RebootMode::Forced);
+    reboot.reason = Some("July cycle".into());
+    let rec = job_request(&reboot, None, 1);
+    assert_eq!(rec.reboot_mode, Some(RebootMode::Forced));
+    assert_eq!(rec.reason.as_deref(), Some("July cycle"));
+    assert_eq!(rec.run_as, None, "the native endpoints run as the agent");
 }

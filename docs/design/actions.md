@@ -107,6 +107,23 @@ Third-party patches carry no KB (the software feed has no `kbNumber`), so they a
 **product title** instead; an OS remediation silently skips them and vice versa, mirroring the
 asymmetry of the two feeds.
 
+### The Needs Reboot tab selects devices, in a map of its own
+
+The Needs Reboot tab lists devices, not patches, so it selects **devices**
+(`ActionState.device_selected`, `util::SelectionSource::Devices`). It is a separate map from the
+row selection on purpose: a device ticked there has no patch rows, and folding it into
+`selected` would either tick the device's rows (the sweep this section exists to forbid) or put a
+row-less device where a remediation reads targets. From a device-level selection only
+`util::device_selection_allows` kinds are reachable — Reboot and the two scans. The remediation
+kinds need per-patch targets it cannot supply; the native "Apply all" needs none, but it installs a
+backlog that tab never shows, so it stays where the patches it reaches are listed; a script is
+chosen next to the selection it may target. Those buttons are disabled with
+`util::source_disabled_reason`, and the request goes through the same `build_action_request` so
+the run options reach exactly the kinds they reach from the Patches tab. The device selection is
+cleared with the row selection (`clear_selection`) and pruned on an auto-refresh against the fresh
+reboot list (`util::prune_device_level_selection`), since a device that just rebooted no longer
+belongs in it.
+
 ## `ReplaySafety::ActOnce` on every POST
 
 `request_raw`'s timeout arm would otherwise replay the body and re-run the action; 429/401 still
@@ -158,8 +175,12 @@ dry_run — into a 5-minute token; `run_action` re-plans from scratch and re-che
 
 ## There is one dispatch surface, and the run options are shared
 
-Everything dispatches from the `ActionBar` on the Patches tab, next to the selection it targets;
-the `ScriptPicker` is folded into it behind a `<details>` and the Jobs tab is history only. `Run
+Everything dispatches from the `ActionBar`, next to the selection it targets — on the Patches tab
+(patch rows) and the Needs Reboot tab (devices, `source=SelectionSource::Devices`). It is one
+component on both, reading the same run-option signals, not a second surface; from the device
+source it simply omits the script-only options row and the script picker, which nothing it can
+reach reads. The `ScriptPicker` is folded into it behind a `<details>`, and the Jobs tab is history
+plus a Retry that re-opens the same plan → confirm dialog (below). `Run
 as`, `Restart the device after installing` and `Dry run` are rendered **once** and reach every
 `runs_a_script()` kind — they mean the same thing for a remediation install and a hand-picked
 script, and duplicating the controls across two tabs while they wrote the same signals meant
@@ -168,6 +189,27 @@ carries a label naming the actions it reaches: the native endpoints take no para
 preview mode and run as NinjaOne's agent, so an unlabelled "Dry run" beside them reads as
 protection they cannot give. The maintenance-window override sits in the "Applies to every
 action" row for the same reason: it is one choice about the next dispatch, not a per-button one.
+
+## A retry is a re-plan, never a replay
+
+Every `JobReport` carries a `JobRequest` — what that one device was sent: the script ref, a
+`Script`'s typed parameters, the **resolved** run-as, reboot choice/mode/reason, `include_offline`
+and the device's own targets (`commands::actions::job_request`, which destructures
+`ActionRequest` exhaustively like `request_hash`). The Jobs tab rebuilds an `ActionRequest` from it
+(`util::retry_request`) and sends it through `plan_action`, so a retry gets a fresh payload-bound
+token and every `plan()` guardrail re-runs against current state. Nothing re-sends a POST.
+
+- Only `JobState::Failed` is retryable (`util::retry_blocked_reason`). `Unknown` means the
+  action may already have reached the device — replaying it is what `ReplaySafety::ActOnce`
+  refuses — and a running or finished job has nothing to retry.
+- `override_window` is **not** recorded: an override approved for the original dispatch says
+  nothing about the moment of the retry, so the maintenance window is re-evaluated.
+- The recorded run-as is the resolved one, so a changed Settings default does not change who a
+  retry runs as without the dialog saying so.
+- "Retry N failed" rebuilds one request from a batch's failed rows; jobs whose kind, dry-run flag
+  or options differ are refused rather than merged, since one would run with the other's options.
+- The typed parameters are held in memory only, as the request they came from was; the audit log
+  keeps its redacted copy.
 
 ## Guardrails live in `actions::plan`
 
@@ -256,6 +298,23 @@ prefers `statusCode` and falls back to `status`; `Activity::outcome()` takes the
 `activityResult` first, so a `COMPLETED` activity carrying `FAILURE` is a failed job. The exit code
 comes from `data` (the spec's untyped bag), with `result` kept as an alias — reading only `result`
 meant `exit_code()` always returned `None` and every job reported "Completed, no exit code".
+
+### One read per device per tick
+
+`poller::feed_reads` plans a tick's `/activities` reads **per device**, floored at the earliest
+pending dispatch on it (less the 5 s skew allowance), and `resolve_pending` hands every job on
+that device the same list. It used to be one read per *job*, so a device carrying a scan, an
+apply and a reboot was asked for the same feed three times a tick. Correlation still runs in
+`pending` order with `claimed` threaded through, so two jobs on one device never bind the same
+activity; `commands::actions::tests` pins both with wiremock.
+
+A read is narrowed with the documented `seriesUid` parameter only when the device has exactly one
+pending job **and** that job's series uid has already been seen on an activity in its feed
+(`confirmed_series`, held by the poller task). A dispatch response's uid alone is not proof:
+`parse_dispatch_response` takes a bare `uid` as a last resort, which may be an echoed script uid
+no activity carries, and a read narrowed to it would starve the job until its timeout. The device
+`df` is always sent too, so `seriesUid` only ever narrows — a tenant that ignored it must not widen
+the read to the fleet.
 
 ### `newerThan` is an activity ID, not a timestamp
 

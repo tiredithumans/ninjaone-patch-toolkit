@@ -941,6 +941,9 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "deviceRole",
             "osName",
             "pendingCount",
+            // The Needs Reboot tab selects devices by these two.
+            "deviceId",
+            "offline",
         ],
         "DeviceSummary",
     );

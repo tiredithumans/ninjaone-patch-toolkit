@@ -249,6 +249,43 @@ pub struct JobReport {
     pub activity_id: Option<i64>,
     pub series_uid: Option<String>,
     pub exit_code: Option<i32>,
+    /// What this device was sent, so the Jobs tab can offer a *Retry* that goes back
+    /// through `plan_action` → confirm. `None` on a row built without a request.
+    pub request: Option<JobRequest>,
+}
+
+/// The inputs of the dispatch that produced one job, for this one device — enough to
+/// rebuild its `ActionRequest` for a retry. `kind` and `dry_run` are on the
+/// [`JobReport`] itself.
+///
+/// A retry is *not* a replay: the frontend rebuilds the request from this and sends
+/// it through `plan_action`, so it gets a fresh payload-bound confirm token and every
+/// `plan()` guardrail runs again against current state. Only a definite `Failed` is
+/// offered one — an `Unknown` job may already have acted, which is exactly what
+/// `ReplaySafety::ActOnce` exists to refuse.
+///
+/// `override_window` is deliberately **not** carried: an override approved for the
+/// original dispatch says nothing about the moment of the retry, so the maintenance
+/// window is re-evaluated from scratch.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobRequest {
+    pub script_id: Option<i64>,
+    pub script_uid: Option<String>,
+    pub script_name: Option<String>,
+    /// The hand-typed string of a `Script` dispatch, verbatim. In memory only, like
+    /// the request it came from — the audit log records the redacted form.
+    pub parameters: Option<String>,
+    /// The identity it actually ran as (the *resolved* value, so a changed Settings
+    /// default does not silently change who a retry runs as). `None` for the native
+    /// endpoints, which run as NinjaOne's agent.
+    pub run_as: Option<String>,
+    pub reboot: RebootChoice,
+    pub reboot_mode: Option<RebootMode>,
+    pub reason: Option<String>,
+    pub include_offline: bool,
+    /// This device's own targets (KBs or product titles) — never the batch's union.
+    pub targets: Vec<String>,
 }
 
 impl JobReport {
@@ -2099,6 +2136,7 @@ mod tests {
             activity_id,
             series_uid: series_uid.map(str::to_string),
             exit_code: None,
+            request: None,
         }
     }
 
@@ -2464,6 +2502,8 @@ mod tests {
             "activityId",
             "seriesUid",
             "exitCode",
+            // What a Jobs-tab retry is rebuilt from.
+            "request",
         ] {
             assert!(value.get(key).is_some(), "JobReport is missing `{key}`");
         }

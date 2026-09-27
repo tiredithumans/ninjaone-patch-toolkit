@@ -57,7 +57,7 @@ pub(super) fn per_device_parameters(req: &ActionRequest) -> BTreeMap<i64, String
 /// never rewrites what the operator typed. Only `Script` honors one: the remediation
 /// kinds have no field to type it in, and honoring one there would silently discard
 /// the per-device targeting that is their entire purpose.
-fn typed_parameters(req: &ActionRequest) -> Option<&str> {
+pub(super) fn typed_parameters(req: &ActionRequest) -> Option<&str> {
     if req.kind != ActionKind::Script {
         return None;
     }

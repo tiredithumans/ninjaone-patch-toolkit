@@ -728,6 +728,7 @@ mod tests {
                 os_name: Some("Windows Server 2022".into()),
                 node_class: None,
                 needs_reboot: true,
+                offline: false,
                 pending_count: 3,
             }],
             compliance: vec![ComplianceBucket {

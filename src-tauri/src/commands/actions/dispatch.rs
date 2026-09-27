@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use tracing::warn;
 
 use super::{ActionProgressEvent, ActionRequest, emit_progress};
-use crate::actions::{ActionKind, JobReport, JobState, PlannedTarget, audit, fmt_ts};
+use crate::actions::{ActionKind, JobReport, JobRequest, JobState, PlannedTarget, audit, fmt_ts};
 use crate::api::actions::{ScriptDispatch, ScriptRef};
 use crate::api::{NinjaApiClient, is_outcome_unknown};
 use crate::model::{PatchType, RebootMode};
@@ -42,6 +42,9 @@ pub(super) struct DispatchContext {
     pub(super) confirm_prefix: Option<String>,
     pub(super) batch_id: u64,
     pub(super) id_base: u64,
+    /// Device id → what its job records for a retry. Per device only because the
+    /// targets are.
+    pub(super) job_requests: BTreeMap<i64, JobRequest>,
 }
 
 /// Dispatches every eligible target concurrently (bounded by `permits`), emitting
@@ -126,6 +129,7 @@ async fn dispatch_one(
         activity_id: None,
         series_uid: None,
         exit_code: None,
+        request: ctx.job_requests.get(&target.device_id).cloned(),
     };
 
     // Written before the request goes out, so a crash mid-batch still leaves

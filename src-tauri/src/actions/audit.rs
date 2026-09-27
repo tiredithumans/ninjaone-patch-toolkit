@@ -652,6 +652,7 @@ mod tests {
             activity_id: Some(11),
             series_uid: None,
             exit_code: Some(1),
+            request: None,
         };
         let entry = AuditEntry::closing(&job, "https://x".into(), None);
         assert_eq!(entry.outcome, "Failed: 400 not applicable");

@@ -142,6 +142,9 @@ staying unreachable. What lives in
   device's others).
 - `date_to_epoch` / `epoch_to_date` — plain civil-date arithmetic rather than `js_sys::Date`, so
   they host-test, and `demo.rs` shares them instead of keeping a second copy.
+- The Needs Reboot tab's device selection (`apply_device_selection`,
+  `prune_device_level_selection`, `build_device_action_request`, `source_disabled_reason`) and
+  the Jobs tab's retry (`retry_blocked_reason`, `retry_request`, `retryable_batches`).
 - The pager (`page_count`/`clamp_page`/`page_bounds`/`pager_summary`/`prev_page`/`next_page`),
   the group-header count and the confirm-dialog gate
   (`needs_typed_confirmation`/`can_confirm_action`). The pager arithmetic once caused a "98% of

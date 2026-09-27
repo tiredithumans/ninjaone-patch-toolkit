@@ -154,7 +154,14 @@ impl AppState {
     /// one an empty allow list produces a job that reports success having installed
     /// nothing. That belongs somewhere a test can reach it; this file has no test
     /// module, and the crate's only gates are a compile check and clippy.
-    pub(in crate::app) fn build_request(self, kind: ActionKind) -> ActionRequest {
+    ///
+    /// `None` when `kind` is not available from `source` — a device-level selection
+    /// has no patch rows to target (`util::build_device_action_request`).
+    pub(in crate::app) fn build_request(
+        self,
+        kind: ActionKind,
+        source: SelectionSource,
+    ) -> Option<ActionRequest> {
         let opts = util::RunOptions {
             use_kb_targeting: self.actions.use_kb_targeting.get_untracked(),
             include_offline: self.actions.include_offline.get_untracked(),
@@ -179,24 +186,67 @@ impl AppState {
             },
             script_params: self.actions.script_params.get_untracked(),
         };
-        self.actions
-            .selected
-            .with_untracked(|sel| util::build_action_request(kind, sel, &opts))
+        match source {
+            SelectionSource::PatchRows => Some(
+                self.actions
+                    .selected
+                    .with_untracked(|sel| util::build_action_request(kind, sel, &opts)),
+            ),
+            SelectionSource::Devices => self
+                .actions
+                .device_selected
+                .with_untracked(|sel| util::build_device_action_request(kind, sel, &opts)),
+        }
     }
 
-    /// Asks the backend what `kind` would do and opens the confirmation modal.
-    pub(in crate::app) fn open_plan(self, kind: ActionKind) {
+    /// Asks the backend what `kind` would do against `source`'s selection and opens
+    /// the confirmation modal.
+    pub(in crate::app) fn open_plan(self, kind: ActionKind, source: SelectionSource) {
         if !self.can_act() {
             if let Some(reason) = self.blocked_reason_untracked() {
                 self.notify(Toast::err(reason));
             }
             return;
         }
-        let request = self.build_request(kind);
+        let Some(request) = self.build_request(kind, source) else {
+            if let Some(why) = util::source_disabled_reason(source, kind) {
+                self.notify(Toast::err(why));
+            }
+            return;
+        };
         if request.device_ids.is_empty() {
             self.notify(Toast::err("Select at least one device first"));
             return;
         }
+        self.plan_request(request);
+    }
+
+    /// Re-opens the plan → confirm flow for failed jobs, rebuilt from what each job
+    /// recorded (`util::retry_request`). Never dispatches: the rebuilt request has no
+    /// confirm token, so the backend re-plans it, re-runs every guardrail and binds a
+    /// fresh approval to it exactly as for a first dispatch.
+    pub(in crate::app) fn retry_jobs(self, job_ids: &[u64]) {
+        if !self.can_act() {
+            if let Some(reason) = self.blocked_reason_untracked() {
+                self.notify(Toast::err(reason));
+            }
+            return;
+        }
+        let rebuilt = self.actions.jobs.with_untracked(|jobs| {
+            let picked: Vec<&JobReport> = job_ids
+                .iter()
+                .filter_map(|id| jobs.iter().find(|j| j.id == *id))
+                .collect();
+            util::retry_request(&picked)
+        });
+        match rebuilt {
+            Ok(request) => self.plan_request(request),
+            Err(e) => self.notify(Toast::err(e)),
+        }
+    }
+
+    /// Plans `request` and holds it in the confirmation modal.
+    fn plan_request(self, request: ActionRequest) {
         self.actions.confirm_input.set(String::new());
         self.actions.dispatch_error.set(None);
         self.actions.dispatching.set(true);

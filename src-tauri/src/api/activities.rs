@@ -26,6 +26,12 @@ impl NinjaApiClient {
     /// Activity log, newest first. `since_ts` is a Unix timestamp in **seconds** and
     /// is applied **client-side** — see below.
     ///
+    /// `series_uid` narrows the read to one activity series via the documented
+    /// `seriesUid` parameter, for a job whose dispatch returned that correlator. It
+    /// is sent *alongside* the device `df`, never instead of it: the device scope is
+    /// the boundary the third-tier correlation heuristic relies on, and a tenant that
+    /// ignored an unrecognized parameter must not widen the read to the whole fleet.
+    ///
     /// The response is a bare array on most tenants but an `{ "activities": [...] }`
     /// envelope on others, so both are accepted.
     ///
@@ -50,6 +56,7 @@ impl NinjaApiClient {
     pub async fn activities(
         &self,
         device_id: Option<i64>,
+        series_uid: Option<&str>,
         since_ts: Option<i64>,
     ) -> Result<Vec<Activity>> {
         let mut query: Vec<(&str, String)> = Vec::new();
@@ -57,6 +64,9 @@ impl NinjaApiClient {
             // No spaces around `=`: the documented grammar is `id=<DeviceID>`, and
             // its worked example is `df=class%3DWINDOWS_SERVER%20AND%20offline`.
             query.push(("df", format!("id={id}")));
+        }
+        if let Some(uid) = series_uid {
+            query.push(("seriesUid", uid.to_string()));
         }
         query.push(("pageSize", ACTIVITY_PAGE_SIZE.to_string()));
 
@@ -127,7 +137,7 @@ mod tests {
             .await;
 
         let list = client(&server)
-            .activities(Some(42), Some(1700))
+            .activities(Some(42), None, Some(1700))
             .await
             .expect("activities");
         assert_eq!(list.len(), 1);
@@ -152,7 +162,7 @@ mod tests {
             .await;
 
         let list = client(&server)
-            .activities(Some(42), Some(1_500))
+            .activities(Some(42), None, Some(1_500))
             .await
             .expect("activities");
         assert_eq!(
@@ -168,6 +178,29 @@ mod tests {
         );
     }
 
+    /// A series-scoped read keeps the device `df`: the device is the boundary the
+    /// correlation heuristic relies on, so `seriesUid` only ever narrows it.
+    #[tokio::test]
+    async fn a_series_scoped_read_sends_series_uid_and_keeps_the_device_scope() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/activities"))
+            .and(query_param("df", "id=42"))
+            .and(query_param("seriesUid", "uid-7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 9, "seriesUid": "uid-7", "statusCode": "COMPLETED" },
+            ])))
+            .mount(&server)
+            .await;
+
+        let list = client(&server)
+            .activities(Some(42), Some("uid-7"), None)
+            .await
+            .expect("activities");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].series_uid.as_deref(), Some("uid-7"));
+    }
+
     #[tokio::test]
     async fn activities_accept_the_enveloped_shape() {
         let server = MockServer::start().await;
@@ -179,7 +212,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let list = client(&server).activities(None, None).await.expect("list");
+        let list = client(&server)
+            .activities(None, None, None)
+            .await
+            .expect("list");
         assert_eq!(list.len(), 1);
         assert!(!list[0].is_terminal());
     }
@@ -196,7 +232,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let list = client(&server).activities(None, None).await.expect("list");
+        let list = client(&server)
+            .activities(None, None, None)
+            .await
+            .expect("list");
         assert_eq!(list.len(), 1, "the good row must still come through");
         assert_eq!(list[0].id, Some(3));
     }
@@ -213,7 +252,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let list = client(&server).activities(None, None).await.expect("list");
+        let list = client(&server)
+            .activities(None, None, None)
+            .await
+            .expect("list");
         assert_eq!(list[0].exit_code(), Some(2));
     }
 }

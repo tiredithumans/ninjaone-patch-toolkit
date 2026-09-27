@@ -163,6 +163,7 @@ mod tests {
             activity_id: None,
             series_uid: None,
             exit_code: None,
+            request: None,
         }
     }
 
