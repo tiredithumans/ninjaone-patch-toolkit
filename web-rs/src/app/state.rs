@@ -50,7 +50,9 @@ pub(crate) struct AppliedFilters {
     pub detected_window: String,
     pub detected_after: String,
     pub detected_before: String,
-    pub install_days: Option<i64>,
+    /// The install-history chip's value (`util::install_window_label`), or `None`
+    /// when no install status was selected and the window did not apply.
+    pub install_window: Option<String>,
 }
 
 #[derive(Clone)]
@@ -183,6 +185,11 @@ pub(crate) struct FilterState {
     pub(super) patch_type: RwSignal<String>,
     pub(super) statuses: RwSignal<Vec<String>>,
     pub(super) install_days: RwSignal<i64>,
+    /// The install-history control is on "Custom range" (the two date inputs)
+    /// rather than "Last N days".
+    pub(super) install_custom: RwSignal<bool>,
+    pub(super) install_after_date: RwSignal<String>,
+    pub(super) install_before_date: RwSignal<String>,
 }
 
 impl FilterState {
@@ -201,6 +208,9 @@ impl FilterState {
             patch_type: RwSignal::new("ALL".to_string()),
             statuses: RwSignal::new(vec!["PENDING".to_string()]),
             install_days: RwSignal::new(30),
+            install_custom: RwSignal::new(false),
+            install_after_date: RwSignal::new(String::new()),
+            install_before_date: RwSignal::new(String::new()),
         }
     }
 
@@ -244,6 +254,9 @@ impl FilterState {
             detected_window: self.detected_window.get_untracked(),
             detected_after: self.detected_after_date.get_untracked(),
             detected_before: self.detected_before_date.get_untracked(),
+            install_custom: self.install_custom.get_untracked(),
+            install_after: self.install_after_date.get_untracked(),
+            install_before: self.install_before_date.get_untracked(),
         })
     }
 }

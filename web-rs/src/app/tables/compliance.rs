@@ -71,6 +71,7 @@ pub(super) fn ComplianceTab() -> impl IntoView {
             <SlaPolicyNote/>
             <ComplianceCharts/>
             <ComplianceRollupTable first_col="Organization" rows=org_rows drill=RollupDrill::Organization/>
+            <StuckApprovals/>
             <section class="compliance-os">
                 <h3 class="chart-title">"Compliance by OS"</h3>
                 <div class="chart-card">
@@ -95,6 +96,8 @@ struct ComplianceRow {
     compliance_pct: f64,
     pending_critical: usize,
     aged_critical: usize,
+    awaiting_approval: usize,
+    approved_not_installed: usize,
 }
 
 impl From<&ComplianceBucket> for ComplianceRow {
@@ -106,6 +109,8 @@ impl From<&ComplianceBucket> for ComplianceRow {
             compliance_pct: b.compliance_pct,
             pending_critical: b.pending_critical,
             aged_critical: b.aged_critical,
+            awaiting_approval: b.awaiting_approval,
+            approved_not_installed: b.approved_not_installed,
         }
     }
 }
@@ -119,6 +124,8 @@ impl From<&OsCompliance> for ComplianceRow {
             compliance_pct: b.compliance_pct,
             pending_critical: b.pending_critical,
             aged_critical: b.aged_critical,
+            awaiting_approval: b.awaiting_approval,
+            approved_not_installed: b.approved_not_installed,
         }
     }
 }
@@ -160,6 +167,11 @@ fn ComplianceRollupTable(
                             <th scope="col">"Compliance %"</th>
                             <th scope="col">"Pending Critical/Important"</th>
                             <th scope="col">"Aged (past SLA)"</th>
+                            // Vendor status MANUAL vs APPROVED, any severity — see
+                            // `rows::approval_state` for why untyped records are in
+                            // neither.
+                            <th scope="col">"Awaiting Approval"</th>
+                            <th scope="col">"Approved, Not Installed"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -207,6 +219,8 @@ fn ComplianceRollupTable(
                                                     {aged_label}
                                                 </span>
                                             </td>
+                                            <td>{b.awaiting_approval}</td>
+                                            <td>{b.approved_not_installed}</td>
                                         </tr>
                                     }
                                 })
@@ -216,5 +230,94 @@ fn ComplianceRollupTable(
                 </table>
             </div>
         </Show>
+    }
+}
+
+/// The approval workflow card: fleet totals of the two approval columns, then the
+/// devices whose *approved* patches have not installed past the SLA window. No
+/// operator decision is holding those up, so the list points at agents rather than
+/// at a backlog. Like the rest of the tab it reads the unnarrowed current feed.
+#[component]
+fn StuckApprovals() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let approvals = move || {
+        state
+            .query
+            .result
+            .with(|r| r.as_ref().map(|r| r.approvals.clone()).unwrap_or_default())
+    };
+    view! {
+        <section class="compliance-approvals">
+            <h3 class="chart-title">"Approvals"</h3>
+            {move || {
+                let a = approvals();
+                let totals = util::approval_totals_line(
+                    a.awaiting_approval,
+                    a.approved_not_installed,
+                );
+                let caption = util::stuck_approvals_caption(
+                    a.stuck_devices.len(),
+                    a.stuck_devices_total,
+                    a.stuck_patches,
+                    a.stuck_after_days,
+                );
+                let body = match caption {
+                    None => {
+                        view! {
+                            <p class="empty">
+                                {format!(
+                                    "No approved patch has gone uninstalled for more than {} days since first seen.",
+                                    a.stuck_after_days,
+                                )}
+                            </p>
+                        }
+                            .into_any()
+                    }
+                    Some(caption) => {
+                        view! {
+                            <p class="scope-note">{caption}</p>
+                            <div class="table-wrap">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            // Spelled as `rows::StuckDevice::COLUMNS`.
+                                            <th scope="col">"Device"</th>
+                                            <th scope="col">"Organization"</th>
+                                            <th scope="col">"Approved, Not Installed"</th>
+                                            <th scope="col">"Oldest First Seen"</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {a
+                                            .stuck_devices
+                                            .into_iter()
+                                            .map(|d| {
+                                                view! {
+                                                    <tr>
+                                                        <td>{d.device_name}</td>
+                                                        <td>{d.organization}</td>
+                                                        <td>{d.patches}</td>
+                                                        <td>
+                                                            {d
+                                                                .oldest_first_seen
+                                                                .unwrap_or_else(|| "(undated)".to_string())}
+                                                        </td>
+                                                    </tr>
+                                                }
+                                            })
+                                            .collect_view()}
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+                            .into_any()
+                    }
+                };
+                view! {
+                    <p class="scope-note">{totals}</p>
+                    {body}
+                }
+            }}
+        </section>
     }
 }

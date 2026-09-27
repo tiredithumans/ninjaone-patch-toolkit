@@ -202,6 +202,7 @@ fn patch(device_id: i64, status: &str, sev: &str, first_seen_days_ago: Option<i6
         collected_timestamp: first_seen_days_ago
             .map(|d| (Utc::now() - Duration::days(d)).timestamp() as f64),
         installed_timestamp: None,
+        product_identifier: None,
     }
 }
 
@@ -708,6 +709,7 @@ fn query_result_serializes_camel_case_for_the_frontend() {
         time_to_install: Default::default(),
         sla_policy: Default::default(),
         instance: "https://app.ninjarmm.com".into(),
+        approvals: Default::default(),
         devices_total: 1,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -777,6 +779,7 @@ fn query_summary_trims_to_first_page_and_reboot_subset() {
         time_to_install: Default::default(),
         sla_policy: Default::default(),
         instance: "https://app.ninjarmm.com".into(),
+        approvals: Default::default(),
         devices_total: 2,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -962,6 +965,8 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "status",
             "firstSeenDate",
             "installedDate",
+            // The demo's product grouping reads it off the row.
+            "productIdentifier",
         ],
         "PatchRow",
     );
@@ -1049,6 +1054,7 @@ fn serialized_shapes_carry_every_frontend_required_key() {
         },
         scope: QueryScope::default(),
         changes: Default::default(),
+        approvals: Default::default(),
         generated_at: String::new(),
         data_fetched_at: String::new(),
     };
@@ -1068,6 +1074,8 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "compliancePct",
             "pendingCritical",
             "agedCritical",
+            "awaitingApproval",
+            "approvedNotInstalled",
         ],
         "ComplianceBucket",
     );
@@ -1082,8 +1090,37 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "compliancePct",
             "pendingCritical",
             "agedCritical",
+            "awaitingApproval",
+            "approvedNotInstalled",
         ],
         "OsCompliance",
+    );
+
+    let stuck_patches = vec![patch(1, "APPROVED", "CRITICAL", Some(90))];
+    let approvals = build_approval_backlog(&refs(&stuck_patches), &by_id, &maps, 30, Utc::now());
+    let approvals_json = serde_json::to_value(&approvals).unwrap();
+    assert_keys_present(
+        &approvals_json,
+        &[
+            "awaitingApproval",
+            "approvedNotInstalled",
+            "stuckAfterDays",
+            "stuckPatches",
+            "stuckDevicesTotal",
+            "stuckDevices",
+        ],
+        "ApprovalBacklog",
+    );
+    assert_keys_present(
+        &approvals_json["stuckDevices"][0],
+        &[
+            "deviceId",
+            "deviceName",
+            "organization",
+            "patches",
+            "oldestFirstSeen",
+        ],
+        "StuckDevice",
     );
 
     // The nested aggregates. The fixture used to leave every one of them empty,
@@ -1246,6 +1283,7 @@ fn serialized_shapes_carry_every_frontend_required_key() {
         time_to_install,
         sla_policy,
         instance: "https://app.ninjarmm.com".into(),
+        approvals: Default::default(),
         devices_total: 1,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -1269,6 +1307,7 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "failures",
             "severityByOrg",
             "ageBuckets",
+            "approvals",
             "devicesTotal",
             "devicesOffline",
             "devicesUnpatchable",
@@ -1428,6 +1467,222 @@ fn group_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, rank: u
     }
 }
 
+/// A third-party row on `device` carrying `product` as its `productIdentifier`.
+fn product_row(
+    device_id: i64,
+    device: &str,
+    title: &str,
+    product: Option<&str>,
+    rank: u8,
+) -> PatchRow {
+    PatchRow {
+        product_identifier: product.map(Into::into),
+        ..group_row(device_id, device, None, title, rank)
+    }
+}
+
+/// The trailing version is what makes every Chrome build its own title; it goes,
+/// and only it. A bare number stays — "Office 2016" and "Java 8 Update 451" are
+/// names, not versions — and a title that is only a version is not emptied.
+#[test]
+fn a_trailing_version_token_is_stripped_and_nothing_else() {
+    for (title, want) in [
+        ("Google Chrome 141.0.7390.55", "Google Chrome"),
+        ("Mozilla Firefox 140.0", "Mozilla Firefox"),
+        ("7-Zip 24.09", "7-Zip"),
+        ("Notepad++ 8.7.6", "Notepad++"),
+        ("OpenSSL 3.0.16-1ubuntu1", "OpenSSL"),
+        ("Zoom Workplace (64-bit) v6.4.3", "Zoom Workplace (64-bit)"),
+        ("OpenSSL 3.0.16 (libssl)", "OpenSSL 3.0.16 (libssl)"),
+        ("Microsoft Office 2016", "Microsoft Office 2016"),
+        ("Java 8 Update 451", "Java 8 Update 451"),
+        ("1.2.3", "1.2.3"),
+        ("  Slack  4.41.105 ", "Slack"),
+        ("", ""),
+    ] {
+        assert_eq!(strip_version_token(title), want, "{title:?}");
+    }
+}
+
+/// The label is the most common version-free title, and ties resolve the same
+/// way whatever order the rows arrived in.
+#[test]
+fn a_product_label_is_the_most_common_version_free_title() {
+    assert_eq!(
+        product_display_name([
+            ("Google Chrome 138", 5),
+            ("Google Chrome 141.0.7390.55", 3),
+            ("Google Chrome 141.0.7390.66", 4),
+        ]),
+        "Google Chrome",
+        "3 + 4 rows strip to one name and outvote the 5 that do not strip"
+    );
+    let forward = product_display_name([("Beta Tool 1.0", 2), ("alpha tool 2.0", 2)]);
+    let reverse = product_display_name([("alpha tool 2.0", 2), ("Beta Tool 1.0", 2)]);
+    assert_eq!(forward, reverse);
+    assert_eq!(
+        forward, "alpha tool",
+        "a tie goes to the case-insensitive first"
+    );
+    assert_eq!(product_display_name([]), "");
+}
+
+/// Grouping by product folds every version of a third-party product into one
+/// group labelled with the product's name, and leaves everything without a
+/// product — OS patches, and a software record missing its identifier — keyed
+/// exactly as grouping by patch keys it.
+#[test]
+fn build_groups_by_product_folds_versions_and_falls_back_to_the_patch_key() {
+    let rows = vec![
+        product_row(
+            1,
+            "web-01",
+            "Google Chrome 141.0.7390.55",
+            Some("chrome"),
+            3,
+        ),
+        product_row(
+            2,
+            "web-02",
+            "Google Chrome 141.0.7390.66",
+            Some("chrome"),
+            5,
+        ),
+        product_row(
+            3,
+            "web-03",
+            "Google Chrome 141.0.7390.66",
+            Some("chrome"),
+            3,
+        ),
+        product_row(1, "web-01", "7-Zip 24.09", Some("7zip"), 2),
+        product_row(2, "web-02", "Legacy Tool 1.0", None, 2),
+        group_row(1, "web-01", Some("KB1"), "Cumulative Update", 7),
+    ];
+    let groups = build_groups(&rows, GroupBy::Product);
+    assert_eq!(
+        groups.len(),
+        4,
+        "chrome, 7-Zip, the id-less tool and the KB"
+    );
+
+    let chrome = &groups[0];
+    assert_eq!(&*chrome.label, "Google Chrome");
+    assert_eq!(chrome.sublabel.as_deref(), Some("2 versions"));
+    assert_eq!((chrome.rows, chrome.devices), (3, 3));
+    assert_eq!(chrome.severity_rank, 5, "the worst member's severity");
+
+    let zip = groups.iter().find(|g| &*g.label == "7-Zip").expect("7-Zip");
+    assert_eq!(zip.sublabel, None, "one version needs no count");
+
+    // The fallbacks are indistinguishable from their by-patch groups.
+    let by_patch = build_groups(&rows, GroupBy::Patch);
+    for fallback in [&rows[4], &rows[5]] {
+        let key = group_key(fallback, GroupBy::Product);
+        assert_eq!(key, group_key(fallback, GroupBy::Patch));
+        let a = groups
+            .iter()
+            .find(|g| g.key == key)
+            .expect("product-mode group");
+        let b = by_patch
+            .iter()
+            .find(|g| g.key == key)
+            .expect("patch-mode group");
+        assert_eq!(
+            (&a.label, &a.sublabel, a.rows),
+            (&b.label, &b.sublabel, b.rows)
+        );
+    }
+}
+
+/// A product key is two fields and a patch key three, so neither can pass for
+/// the other; and in product mode a row that has a product belongs only to its
+/// product group, even beside an id-less row with identical fields.
+#[test]
+fn product_members_partition_the_rows_and_keys_cannot_cross_modes() {
+    let rows = vec![
+        product_row(1, "web-01", "Tool 1.0", Some("tool"), 2),
+        product_row(2, "web-02", "Tool 1.0", None, 2),
+        product_row(3, "web-03", "Tool 1.1", Some("tool"), 2),
+        group_row(1, "web-01", Some("KB1"), "Cumulative Update", 7),
+    ];
+    let groups = build_groups(&rows, GroupBy::Product);
+    let mut seen = 0;
+    for g in &groups {
+        let members = group_member_page(&rows, GroupBy::Product, &g.key, 0, 100);
+        assert_eq!(members.len(), g.rows, "{:?}", g.key);
+        seen += members.len();
+    }
+    assert_eq!(
+        seen,
+        rows.len(),
+        "every row in exactly one product-mode group"
+    );
+
+    let product_key = group_key(&rows[0], GroupBy::Product);
+    assert!(
+        group_member_page(&rows, GroupBy::Patch, &product_key, 0, 100).is_empty(),
+        "a product key means nothing to the by-patch view"
+    );
+    let tool = group_member_page(&rows, GroupBy::Product, &product_key, 0, 100);
+    assert_eq!(
+        tool.iter().map(|r| r.device_id).collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+}
+
+/// The join carries the vendor's `productIdentifier` onto the row, from a record
+/// shaped exactly as `DeviceSoftwarePatch` is — and shares it like the other
+/// repeated strings.
+#[test]
+fn a_software_rows_product_identifier_survives_the_join() {
+    let d = device(1, 10, "Windows Server 2022");
+    let by_id = HashMap::from([(1, &d)]);
+    let patches: Vec<Patch> = [
+        crate::model::software_patch_json(
+            1,
+            "uuid-chrome",
+            "Google Chrome 141.0.7390.55",
+            "high",
+            "MANUAL",
+        ),
+        crate::model::software_patch_json(
+            1,
+            "uuid-chrome",
+            "Google Chrome 141.0.7390.66",
+            "high",
+            "MANUAL",
+        ),
+    ]
+    .into_iter()
+    .map(|v| serde_json::from_value(v).expect("a DeviceSoftwarePatch deserializes"))
+    .collect();
+    let rows = build_rows(
+        &by_id,
+        &maps(),
+        &[PatchSource {
+            patches: &refs(&patches),
+            type_label: "SOFTWARE",
+            status_override: None,
+            status_filter: None,
+        }],
+        &FilterParams::default().prepare(),
+    );
+    assert_eq!(rows.len(), 2);
+    let ids: Vec<Option<&str>> = rows
+        .iter()
+        .map(|r| r.product_identifier.as_deref())
+        .collect();
+    assert_eq!(ids, vec![Some("uuid-chrome"), Some("uuid-chrome")]);
+    assert!(Arc::ptr_eq(
+        rows[0].product_identifier.as_ref().unwrap(),
+        rows[1].product_identifier.as_ref().unwrap()
+    ));
+    let groups = build_groups(&rows, GroupBy::Product);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(&*groups[0].label, "Google Chrome");
+}
+
 #[test]
 fn build_groups_by_device_rolls_up_rows_and_worst_severity() {
     let rows = vec![
@@ -1484,7 +1739,27 @@ fn group_key_and_matcher_agree() {
         group_row(1, "web-01", None, "Google Chrome 138", 3),
         group_row(3, "db-01", Some("KB2"), "Security Update", 7),
     ];
-    for group_by in [GroupBy::Device, GroupBy::Patch] {
+    let rows: Vec<PatchRow> = rows
+        .into_iter()
+        .chain([
+            product_row(
+                1,
+                "web-01",
+                "Google Chrome 141.0.7390.55",
+                Some("chrome"),
+                3,
+            ),
+            product_row(
+                2,
+                "web-02",
+                "Google Chrome 141.0.7390.66",
+                Some("chrome"),
+                3,
+            ),
+            product_row(2, "web-02", "Google Chrome 138", None, 3),
+        ])
+        .collect();
+    for group_by in [GroupBy::Device, GroupBy::Patch, GroupBy::Product] {
         for row in &rows {
             let key = group_key(row, group_by);
             let matcher = GroupKeyMatcher::new(group_by, &key);
@@ -1801,6 +2076,7 @@ fn failed_row(device_id: i64, device: &str, kb: &str, installed_ts: Option<i64>)
         installed_date: installed_ts.map(|_| "2026-01-01 00:00 UTC".into()),
         first_seen_ts: None,
         installed_ts,
+        product_identifier: None,
     }
 }
 
@@ -1944,6 +2220,8 @@ fn scope_filter() -> FilterParams {
         detected_within_days: None,
         detected_after: None,
         detected_before: None,
+        installed_after: None,
+        installed_before: None,
     }
 }
 
@@ -2130,7 +2408,11 @@ fn the_scope_block_names_every_active_facet() {
             software: false,
         },
         &[PatchStatus::Pending, PatchStatus::Failed],
-        Some(1_776_000_000),
+        Some(InstallWindow {
+            after: 1_776_000_000,
+            before: None,
+            relative_days: Some(30),
+        }),
     );
 
     assert_eq!(facet(&scope, "Scope"), None, "something was narrowed");
@@ -2153,9 +2435,16 @@ fn the_scope_block_names_every_active_facet() {
         facet(&scope, "First seen before"),
         Some("2026-05-17 06:40 UTC")
     );
+    // The relative lookback reads like the first-seen window: absolute bound,
+    // with the control the operator used in parentheses.
     assert_eq!(
         facet(&scope, "Install history since"),
-        Some("2026-04-12 13:20 UTC")
+        Some("2026-04-12 13:20 UTC (last 30 days)")
+    );
+    assert_eq!(
+        facet(&scope, "Install history until"),
+        None,
+        "a relative lookback runs up to the query time"
     );
 
     // The two tiers, so the exports can say which facets reach the fleet sheets.
@@ -2181,6 +2470,66 @@ fn the_scope_block_names_every_active_facet() {
             "First seen before",
             "Install history since",
         ]
+    );
+}
+
+/// A custom install range is printed as the two absolute bounds it ran under, with
+/// no "(last N days)" tail, and — unlike the relative lookback, which moves every
+/// run — it is a different question, so it separates the fingerprint too.
+#[test]
+fn an_absolute_install_range_prints_both_bounds_and_keys_the_fingerprint() {
+    let filter = scope_filter();
+    let range = InstallWindow {
+        after: 1_776_000_000,
+        before: Some(1_777_000_000),
+        relative_days: None,
+    };
+    let scope = build_query_scope(
+        &filter,
+        &maps(),
+        BOTH_FAMILIES,
+        &[PatchStatus::Installed],
+        Some(range),
+    );
+    assert_eq!(
+        facet(&scope, "Install history since"),
+        Some("2026-04-12 13:20 UTC")
+    );
+    assert_eq!(
+        facet(&scope, "Install history until"),
+        Some("2026-04-24 03:06 UTC")
+    );
+    // Both in the patch tier: the install history narrows only the detail rows.
+    assert!(labels(&scope.patch_facets).contains(&"Install history until"));
+    assert!(!labels(&scope.facets).contains(&"Install history until"));
+
+    let key = |w: Option<InstallWindow>| {
+        build_query_scope(
+            &filter,
+            &maps(),
+            BOTH_FAMILIES,
+            &[PatchStatus::Installed],
+            w,
+        )
+        .fingerprint
+    };
+    let relative = |days| InstallWindow {
+        after: 1_776_000_000 - days,
+        before: None,
+        relative_days: Some(days),
+    };
+    assert_eq!(
+        key(None),
+        key(Some(relative(30))),
+        "the relative lookback was never part of the key, so old history still matches"
+    );
+    assert_ne!(key(None), key(Some(range)));
+    assert_ne!(
+        key(Some(range)),
+        key(Some(InstallWindow {
+            before: None,
+            ..range
+        }))
     );
 }
 
@@ -2274,6 +2623,123 @@ fn severity_and_age_rollups_cover_the_same_devices_compliance_does() {
     );
     assert_eq!(offline_list.devices.len(), 1);
     assert_eq!(offline_list.devices[0].pending_total, 3);
+}
+
+/// The approval split reads the **vendor** status on the cached record. `MANUAL`
+/// is awaiting approval, `APPROVED` is approved-not-installed, and an untyped or
+/// FAILED record is pending (it still breaks compliance) but in neither column —
+/// the `status_override = MANUAL` that labels an untyped row PENDING is a display
+/// decision and never reaches the rollups. Both columns count every severity,
+/// unlike the Critical/Important SLA columns beside them.
+#[test]
+fn the_approval_split_uses_the_vendor_status_across_every_severity() {
+    let d1 = device(1, 10, "Windows Server 2022");
+    let by_id = HashMap::from([(1, &d1)]);
+    let maps = maps();
+    let mut untyped = patch(1, "MANUAL", "CRITICAL", Some(5));
+    untyped.status = None;
+    let current = vec![
+        patch(1, "MANUAL", "CRITICAL", Some(5)),
+        patch(1, "MANUAL", "LOW", Some(5)),
+        patch(1, "APPROVED", "OPTIONAL", Some(5)),
+        patch(1, "FAILED", "CRITICAL", Some(5)),
+        patch(1, "REJECTED", "CRITICAL", Some(5)),
+        untyped,
+    ];
+    let current = refs(&current);
+    let counts = pending_counts(&current);
+    let summaries = build_device_summaries(&[&d1], &counts, &maps);
+
+    let org = &build_compliance(&summaries, &current, &by_id, &maps, &sla30())[0];
+    assert_eq!(org.awaiting_approval, 2, "MANUAL of any severity");
+    assert_eq!(org.approved_not_installed, 1, "APPROVED of any severity");
+    assert_eq!(
+        counts.get(&1).copied(),
+        Some(5),
+        "FAILED and untyped are still pending — just not in either approval column"
+    );
+    let os = &build_compliance_by_os(&summaries, &current, &by_id, &sla30())[0];
+    assert_eq!(
+        (os.awaiting_approval, os.approved_not_installed),
+        (2, 1),
+        "the by-OS rollup shares the accumulator"
+    );
+}
+
+/// Stuck = APPROVED and first seen past the threshold (undated counts, as in the
+/// SLA-aged column). Grouped per device, oldest first, over the same population
+/// as compliance — so the fleet totals equal the compliance columns' sums, and an
+/// offline device's approvals appear in neither.
+#[test]
+fn stuck_approvals_group_per_device_oldest_first_over_the_rollup_population() {
+    let d1 = device(1, 10, "Windows Server 2022");
+    let d2 = device(2, 10, "Windows Server 2022");
+    let d3 = device(3, 10, "Windows Server 2022");
+    let mut offline = device(4, 10, "Windows Server 2022");
+    offline.offline = Some(true);
+    let devices = [d1, d2, d3, offline];
+    let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+    let maps = maps();
+    let mut undated = patch(3, "APPROVED", "LOW", None);
+    undated.collected_timestamp = None;
+    let current = vec![
+        patch(1, "APPROVED", "CRITICAL", Some(40)),
+        patch(1, "APPROVED", "LOW", Some(90)),
+        patch(1, "APPROVED", "LOW", Some(2)), // approved, but recent: not stuck
+        patch(2, "APPROVED", "CRITICAL", Some(200)),
+        undated,
+        patch(2, "MANUAL", "CRITICAL", Some(300)), // awaiting a person, not stuck
+        patch(4, "APPROVED", "CRITICAL", Some(400)), // offline: outside the population
+    ];
+    let current = refs(&current);
+    let now = Utc::now();
+    let backlog = build_approval_backlog(&current, &by_id, &maps, 30, now);
+
+    assert_eq!(backlog.stuck_after_days, 30);
+    assert_eq!(backlog.approved_not_installed, 5);
+    assert_eq!(backlog.awaiting_approval, 1);
+    assert_eq!(backlog.stuck_patches, 4);
+    assert_eq!(backlog.stuck_devices_total, 3);
+    let order: Vec<(i64, usize)> = backlog
+        .stuck_devices
+        .iter()
+        .map(|d| (d.device_id, d.patches))
+        .collect();
+    assert_eq!(
+        order,
+        vec![(2, 1), (1, 2), (3, 1)],
+        "oldest first seen first, the undated device last"
+    );
+    assert_eq!(&backlog.stuck_devices[1].organization, "Contoso");
+    assert_eq!(
+        backlog.stuck_devices[1].oldest_first_seen_ts,
+        Some((now - Duration::days(90)).timestamp()),
+        "the device's oldest stuck patch, not its newest"
+    );
+    assert_eq!(backlog.stuck_devices[2].oldest_first_seen, None);
+
+    // The fleet totals are the compliance columns summed: one population.
+    let counts = pending_counts(&current);
+    let summaries = build_device_summaries(&devices.iter().collect::<Vec<_>>(), &counts, &maps);
+    let compliance = build_compliance(
+        &summaries,
+        &current,
+        &by_id,
+        &maps,
+        &SlaCutoffs::new(&SlaPolicy::default(), now),
+    );
+    let sum = |f: fn(&ComplianceBucket) -> usize| compliance.iter().map(f).sum::<usize>();
+    assert_eq!(sum(|b| b.awaiting_approval), backlog.awaiting_approval);
+    assert_eq!(
+        sum(|b| b.approved_not_installed),
+        backlog.approved_not_installed
+    );
+
+    // The summary copy is capped, and keeps every total.
+    let capped = backlog.capped(1);
+    assert_eq!(capped.stuck_devices.len(), 1);
+    assert_eq!(capped.stuck_devices_total, 3);
+    assert_eq!(capped.stuck_patches, 4);
 }
 
 #[test]
@@ -2440,12 +2906,32 @@ fn demo_grouping_fixture_is_current() {
             _ => ("Low", 2),
         }
     };
+    //
+    // The product rows exercise `GroupBy::Product`: one product across three
+    // titles, two of which strip to the same name and outvote the third; a
+    // single-version product; and a software record with no identifier, which
+    // must fall back to the by-patch key.
     let mut rows = vec![
         group_row(1, "web-01", Some("KB5040434"), "Cumulative Update", 7),
-        group_row(1, "web-01", None, "Google Chrome 138", 3),
+        product_row(1, "web-01", "Google Chrome 138", Some("chrome-uuid"), 3),
         group_row(2, "web-02", Some("KB5040434"), "Cumulative Update", 7),
         group_row(3, "db-01", Some("KB5031234"), "Security Update", 5),
-        group_row(3, "db-01", None, "7-Zip 24.09", 2),
+        product_row(3, "db-01", "7-Zip 24.09", Some("7zip-uuid"), 2),
+        product_row(
+            2,
+            "web-02",
+            "Google Chrome 138.0.7204.50",
+            Some("chrome-uuid"),
+            3,
+        ),
+        product_row(
+            3,
+            "db-01",
+            "Google Chrome 137.0.7151.69",
+            Some("chrome-uuid"),
+            3,
+        ),
+        product_row(2, "web-02", "Legacy Tool 1.0", None, 2),
     ];
     for row in &mut rows {
         let (label, rank) = sev(row.severity_rank);
@@ -2463,8 +2949,10 @@ fn demo_grouping_fixture_is_current() {
         "rows": rows,
         "byDevice": build_groups(&rows, GroupBy::Device),
         "byPatch": build_groups(&rows, GroupBy::Patch),
+        "byProduct": build_groups(&rows, GroupBy::Product),
         "keysByDevice": rows.iter().map(|r| group_key(r, GroupBy::Device)).collect::<Vec<_>>(),
         "keysByPatch": rows.iter().map(|r| group_key(r, GroupBy::Patch)).collect::<Vec<_>>(),
+        "keysByProduct": rows.iter().map(|r| group_key(r, GroupBy::Product)).collect::<Vec<_>>(),
     });
     let rendered = format!(
         "{}\n",

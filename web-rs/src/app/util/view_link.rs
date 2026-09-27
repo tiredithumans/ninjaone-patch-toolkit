@@ -202,6 +202,8 @@ fn validate(w: Wire) -> SharedView {
             .filter(|d| DETECTED_WINDOWS.contains(d)),
         detected_after: f.detected_after.filter(|t| (0..=MAX_EPOCH).contains(t)),
         detected_before: f.detected_before.filter(|t| (0..=MAX_EPOCH).contains(t)),
+        installed_after: f.installed_after.filter(|t| (0..=MAX_EPOCH).contains(t)),
+        installed_before: f.installed_before.filter(|t| (0..=MAX_EPOCH).contains(t)),
     };
     let mut statuses = clean_list(w.s, |s| STATUS_OPTIONS.contains(&s));
     if statuses.is_empty() {
@@ -334,6 +336,9 @@ mod tests {
                 detected_within_days: Some(30),
                 detected_after: None,
                 detected_before: None,
+                // A custom install-history range travels with the view.
+                installed_after: Some(1_772_323_200),
+                installed_before: Some(1_774_915_200),
             },
             patch_type: "OS".to_string(),
             statuses: vec!["PENDING".to_string(), "FAILED".to_string()],

@@ -68,6 +68,13 @@ impl AppState {
         self.filters.detected_window.set(window);
         self.filters.detected_after_date.set(after);
         self.filters.detected_before_date.set(before);
+        // The install range rides on the filter, so a preset saved for "review
+        // March" reopens on March rather than on the relative lookback.
+        let (custom, after, before) =
+            util::install_window_fields(f.installed_after, f.installed_before);
+        self.filters.install_custom.set(custom);
+        self.filters.install_after_date.set(after);
+        self.filters.install_before_date.set(before);
         // Load the locations for the restored org scope, then restore the saved
         // location selection — the list has to exist before the ids can be pruned
         // against it.

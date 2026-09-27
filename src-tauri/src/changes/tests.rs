@@ -11,6 +11,7 @@ const ALL: PatchFamilies = PatchFamilies {
 fn row(device_id: i64, kb: Option<&str>, name: &str, status: &str) -> PatchRow {
     PatchRow {
         device_id,
+        product_identifier: None,
         device_name: format!("srv{device_id:02}").into(),
         organization: "Contoso".into(),
         location: None,

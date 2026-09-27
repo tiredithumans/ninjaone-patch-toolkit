@@ -305,22 +305,75 @@ pub(crate) fn Filters() -> impl IntoView {
                 <Show when=install_history_selected>
                     <div class="control-group">
                         <span class="chips-label" id="filter-install-days-label">
-                            "Install history window (days):"
+                            "Install history:"
                         </span>
-                        <input
-                            type="number"
+                        // "Custom range" replaces the relative lookback (backend-side
+                        // too), so a past patch cycle can be reviewed on its own dates.
+                        // Selection rides on each option for the same `<Show>` remount
+                        // reason as the First-seen select above.
+                        <select
                             aria-labelledby="filter-install-days-label"
-                            class="narrow"
-                            min="1"
-                            max="3650"
-                            prop:value=move || state.filters.install_days.get().to_string()
                             on:change=move |ev| {
-                                let v = event_target_value(&ev)
-                                    .parse::<i64>()
-                                    .unwrap_or_else(|_| state.filters.install_days.get_untracked());
-                                state.filters.install_days.set(v.clamp(1, 3650));
+                                state.filters.install_custom.set(event_target_value(&ev) == "custom")
                             }
-                        />
+                        >
+                            <option value="" prop:selected=move || !state.filters.install_custom.get()>
+                                "Last N days"
+                            </option>
+                            <option value="custom" prop:selected=move || state.filters.install_custom.get()>
+                                "Custom range…"
+                            </option>
+                        </select>
+                        <Show
+                            when=move || state.filters.install_custom.get()
+                            fallback=move || {
+                                view! {
+                                    <input
+                                        type="number"
+                                        aria-label="Install history window (days)"
+                                        class="narrow"
+                                        min="1"
+                                        max="3650"
+                                        prop:value=move || state.filters.install_days.get().to_string()
+                                        on:change=move |ev| {
+                                            let v = event_target_value(&ev)
+                                                .parse::<i64>()
+                                                .unwrap_or_else(|_| state.filters.install_days.get_untracked());
+                                            state.filters.install_days.set(v.clamp(1, 3650));
+                                        }
+                                    />
+                                    <span class="chips-label">"days"</span>
+                                }
+                            }
+                        >
+                            <label class="inline">
+                                "From"
+                                <input
+                                    type="date"
+                                    prop:value=move || state.filters.install_after_date.get()
+                                    on:change=move |ev| {
+                                        state.filters.install_after_date.set(event_target_value(&ev))
+                                    }
+                                />
+                            </label>
+                            <label class="inline">
+                                "To"
+                                <input
+                                    type="date"
+                                    prop:value=move || state.filters.install_before_date.get()
+                                    on:change=move |ev| {
+                                        state.filters.install_before_date.set(event_target_value(&ev))
+                                    }
+                                />
+                            </label>
+                            {move || {
+                                util::install_range_problem(
+                                    &state.filters.install_after_date.get(),
+                                    &state.filters.install_before_date.get(),
+                                )
+                                    .map(|msg| view! { <span class="field-hint" role="alert">{msg}</span> })
+                            }}
+                        </Show>
                     </div>
                 </Show>
             </div>

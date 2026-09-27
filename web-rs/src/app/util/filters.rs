@@ -108,6 +108,10 @@ pub(crate) struct FilterInputs {
     pub detected_window: String,
     pub detected_after: String,
     pub detected_before: String,
+    /// The install-history control is on "Custom range" rather than "Last N days".
+    pub install_custom: bool,
+    pub install_after: String,
+    pub install_before: String,
 }
 
 /// Builds the `FilterParams` sent over IPC for a query.
@@ -132,6 +136,17 @@ pub(crate) fn filter_params(i: FilterInputs) -> FilterParams {
         ),
         _ => (None, None, None),
     };
+    // Sent only in custom mode, so dates left in the hidden inputs after switching
+    // back to "Last N days" cannot keep overriding the relative window backend-side.
+    let (installed_after, installed_before) = if i.install_custom {
+        (
+            date_to_epoch(&i.install_after),
+            // Whole "to" day, for the same reason as the first-seen range.
+            date_to_epoch(&i.install_before).map(|e| e + 86_399),
+        )
+    } else {
+        (None, None)
+    };
     FilterParams {
         organization_ids: i.organization_ids,
         location_ids: i.location_ids,
@@ -143,6 +158,8 @@ pub(crate) fn filter_params(i: FilterInputs) -> FilterParams {
         detected_within_days,
         detected_after,
         detected_before,
+        installed_after,
+        installed_before,
     }
 }
 
@@ -231,6 +248,48 @@ pub(crate) fn detected_label(window: &str, after: &str, before: &str) -> Option<
 /// dashboard. The Filters panel and the chip snapshot both ask this one question.
 pub(crate) fn needs_install_window(statuses: &[String]) -> bool {
     statuses.iter().any(|s| s == "INSTALLED" || s == "FAILED")
+}
+
+/// The install-history chip's value: the relative lookback, or the custom range the
+/// operator picked. A custom range with no dates sends nothing (see
+/// `filter_params`), so the backend falls back to the lookback and the chip says so.
+pub(crate) fn install_window_label(custom: bool, days: i64, after: &str, before: &str) -> String {
+    let (a, b) = (after.trim(), before.trim());
+    match (custom, a.is_empty(), b.is_empty()) {
+        (true, false, false) => format!("{a} \u{2192} {b}"),
+        (true, false, true) => format!("since {a}"),
+        (true, true, false) => format!("until {b}"),
+        _ => format!("last {days}d"),
+    }
+}
+
+/// What is wrong with a custom install range as typed, for the inline hint under
+/// the date inputs. The backend refuses the same shapes (`FilterParams::install_range`);
+/// saying so beside the control beats a toast after the Run. `yyyy-mm-dd` strings
+/// compare correctly as text, so no date parsing is needed.
+pub(crate) fn install_range_problem(after: &str, before: &str) -> Option<&'static str> {
+    let (a, b) = (after.trim(), before.trim());
+    if a.is_empty() && !b.is_empty() {
+        Some("Pick a start date \u{2014} a custom range needs one.")
+    } else if !a.is_empty() && !b.is_empty() && a > b {
+        Some("The start date is after the end date.")
+    } else {
+        None
+    }
+}
+
+/// The install-history control's `(custom, after, before)` fields for a saved
+/// filter's bounds — the inverse of the mapping `filter_params` applies. The saved
+/// `before` carries the +86 399 s end-of-day, which `epoch_to_date` floors back to
+/// the picked day.
+pub(crate) fn install_window_fields(
+    after: Option<i64>,
+    before: Option<i64>,
+) -> (bool, String, String) {
+    if after.is_none() && before.is_none() {
+        return (false, String::new(), String::new());
+    }
+    (true, epoch_to_date(after), epoch_to_date(before))
 }
 
 /// The First-seen control's `(window, after, before)` fields for a saved filter's
@@ -470,12 +529,12 @@ pub(crate) fn filter_chips(f: &AppliedFilters) -> Vec<FilterChip> {
             patch: true,
         });
     }
-    if let Some(d) = f.install_days {
+    if let Some(w) = &f.install_window {
         // Covers FAILED as well as INSTALLED — the backend bounds the whole
         // install-history pull by this window, so "Installed within" understated
         // what it applies to on a failures-only run.
         out.push(FilterChip {
-            label: format!("Install history: last {d}d"),
+            label: format!("Install history: {w}"),
             patch: true,
         });
     }

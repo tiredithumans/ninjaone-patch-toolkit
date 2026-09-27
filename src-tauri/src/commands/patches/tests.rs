@@ -20,6 +20,7 @@ fn empty_summary() -> QuerySummary {
             time_to_install: Default::default(),
             sla_policy: Default::default(),
             instance: "https://app.ninjarmm.com".into(),
+            approvals: Default::default(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,
@@ -123,7 +124,8 @@ fn install_results_route_to_history_and_the_rest_narrow_the_current_feed() {
         args_with(vec![PatchStatus::Failed], PatchType::All),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert!(history.want_installs);
     // The set carries FAILED too: it narrows only the *rows* built from the
     // current feed (the rollups take the unnarrowed feed), and a FAILED record
@@ -138,7 +140,8 @@ fn install_results_route_to_history_and_the_rest_narrow_the_current_feed() {
         args_with(vec![PatchStatus::Pending], PatchType::All),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert!(
         !pending.want_installs,
         "no history fetch for a pending query"
@@ -155,7 +158,8 @@ fn a_single_install_status_is_pushed_down_and_two_are_not() {
         args_with(vec![PatchStatus::Failed], PatchType::All),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(one.install_status, Some("FAILED"));
 
     let both = QueryPlan::build(
@@ -165,7 +169,8 @@ fn a_single_install_status_is_pushed_down_and_two_are_not() {
         ),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(both.install_status, None);
     assert_eq!(both.install_status_set.len(), 2);
 }
@@ -185,9 +190,10 @@ fn the_install_window_is_clamped_against_hand_edited_settings() {
             },
             30,
             now,
-        );
+        )
+        .expect("a valid plan");
         assert_eq!(
-            plan.installed_after,
+            plan.install_window.after,
             (now - Duration::days(expect_days)).timestamp(),
             "requested {requested:?} should clamp to {expect_days} day(s)"
         );
@@ -200,11 +206,86 @@ fn the_install_window_is_clamped_against_hand_edited_settings() {
         },
         30,
         now,
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(
-        huge.installed_after,
+        huge.install_window.after,
         (now - Duration::days(MAX_WINDOW_DAYS)).timestamp()
     );
+}
+
+/// A custom install range replaces the relative lookback outright — the per-query
+/// override and the configured default both — and a malformed one fails the plan
+/// instead of running under a window the export would misstate.
+#[test]
+fn an_absolute_install_range_replaces_the_relative_lookback() {
+    let now = fixed_now();
+    let after = (now - Duration::days(60)).timestamp();
+    let before = (now - Duration::days(31)).timestamp();
+    let plan = QueryPlan::build(
+        PatchQueryArgs {
+            filter: FilterParams {
+                installed_after: Some(after),
+                installed_before: Some(before),
+                ..FilterParams::default()
+            },
+            install_after_days: Some(7),
+            ..args_with(vec![PatchStatus::Installed], PatchType::All)
+        },
+        30,
+        now,
+    )
+    .expect("a valid range");
+    assert_eq!(
+        plan.install_window,
+        InstallWindow {
+            after,
+            before: Some(before),
+            relative_days: None,
+        }
+    );
+
+    let relative = QueryPlan::build(
+        args_with(vec![PatchStatus::Installed], PatchType::All),
+        30,
+        now,
+    )
+    .expect("a valid plan");
+    assert_eq!(relative.install_window.before, None);
+    assert_eq!(relative.install_window.relative_days, Some(30));
+
+    let inverted = QueryPlan::build(
+        PatchQueryArgs {
+            filter: FilterParams {
+                installed_after: Some(before),
+                installed_before: Some(after),
+                ..FilterParams::default()
+            },
+            ..args_with(vec![PatchStatus::Installed], PatchType::All)
+        },
+        30,
+        now,
+    );
+    assert!(
+        inverted.is_err(),
+        "an inverted range is refused, not swapped"
+    );
+
+    // The same stale range on a Pending-only query is never used (and its control
+    // is hidden), so it must not fail the query.
+    let pending = QueryPlan::build(
+        PatchQueryArgs {
+            filter: FilterParams {
+                installed_after: Some(before),
+                installed_before: Some(after),
+                ..FilterParams::default()
+            },
+            ..args_with(vec![PatchStatus::Pending], PatchType::All)
+        },
+        30,
+        now,
+    );
+    assert!(pending.is_ok(), "an unused range is not validated");
 }
 
 /// The relative first-seen window is resolved to an absolute bound here because
@@ -222,7 +303,8 @@ fn a_relative_detection_window_becomes_an_absolute_lower_bound() {
         },
         30,
         now,
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(
         plan.filter.detected_after,
         Some((now - Duration::days(7)).timestamp())
@@ -236,14 +318,16 @@ fn the_requested_patch_type_decides_which_families_are_fetched() {
         args_with(vec![PatchStatus::Pending], PatchType::Os),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert!(os.include_os && !os.include_sw);
 
     let all = QueryPlan::build(
         args_with(vec![PatchStatus::Pending], PatchType::All),
         30,
         fixed_now(),
-    );
+    )
+    .expect("a valid plan");
     assert!(all.include_os && all.include_sw);
 }
 
@@ -337,6 +421,7 @@ fn cur(device_id: i64, kb: &str, status: &str, severity: &str) -> Patch {
         patch_type: None,
         collected_timestamp: Some(fixed_now().timestamp() as f64),
         installed_timestamp: None,
+        product_identifier: None,
     }
 }
 
@@ -654,6 +739,106 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         kbs,
         vec!["KBRECENT", "KBUNDATED"],
         "a 45-day-old record is outside the 30-day window whatever the server sent"
+    );
+}
+
+/// Reviewing one patch window: both bounds reach the history endpoint as
+/// `installedAfter`/`installedBefore`, and both are re-applied client-side, since
+/// the spec types them only as `string` and the response cannot show they were
+/// honored. The mock deliberately ignores the bounds and returns records on
+/// either side of the range.
+#[tokio::test]
+async fn a_custom_install_range_is_pushed_down_and_reapplied_client_side() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [], "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+
+    let now = fixed_now().timestamp();
+    let after = now - 60 * 86_400;
+    let before = now - 30 * 86_400;
+    // Mounted with both query params required, so a request that dropped either
+    // bound finds no mock and the query fails.
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patch-installs"))
+        .and(query_param("installedAfter", after.to_string()))
+        .and(query_param("installedBefore", before.to_string()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "deviceId": 10, "kbNumber": "KBTOOOLD", "status": "INSTALLED",
+                  "installedAt": after - 86_400 },
+                { "deviceId": 10, "kbNumber": "KBFIRSTDAY", "status": "INSTALLED",
+                  "installedAt": after },
+                { "deviceId": 10, "kbNumber": "KBINSIDE", "status": "INSTALLED",
+                  "installedAt": after + 10 * 86_400 },
+                { "deviceId": 10, "kbNumber": "KBLASTSECOND", "status": "INSTALLED",
+                  "installedAt": before },
+                { "deviceId": 10, "kbNumber": "KBTOONEW", "status": "INSTALLED",
+                  "installedAt": now - 86_400 },
+                { "deviceId": 10, "kbNumber": "KBUNDATED", "status": "INSTALLED" }
+            ],
+            "cursor": ""
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut ranged = args(PatchType::Os, vec![PatchStatus::Installed]);
+    ranged.filter.installed_after = Some(after);
+    ranged.filter.installed_before = Some(before);
+    // Ignored: the absolute range replaces the relative lookback.
+    ranged.install_after_days = Some(7);
+
+    let progress = |_: &'static str, _: usize| {};
+    let result = run_query(
+        &client(&server),
+        async { Ok::<_, anyhow::Error>(lookups()) },
+        fleet_devices_via(&client(&server)),
+        fleet_current_via(&client(&server)),
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        ranged,
+        fixed_now(),
+        &progress,
+    )
+    .await
+    .expect("query");
+
+    let mut kbs: Vec<&str> = result.rows.iter().filter_map(|r| r.kb.as_deref()).collect();
+    kbs.sort();
+    assert_eq!(
+        kbs,
+        vec!["KBFIRSTDAY", "KBINSIDE", "KBLASTSECOND", "KBUNDATED"],
+        "both bounds are inclusive; records outside them are dropped whatever the \
+         server sent, and an undated one is kept as with the relative window"
+    );
+
+    let facets: Vec<(&str, &str)> = result
+        .scope
+        .patch_facets
+        .iter()
+        .map(|(l, v)| (*l, v.as_str()))
+        .collect();
+    assert!(
+        facets.contains(&("Install history since", "2023-09-15 22:13 UTC")),
+        "{facets:?}"
+    );
+    assert!(
+        facets.contains(&("Install history until", "2023-10-15 22:13 UTC")),
+        "{facets:?}"
     );
 }
 
@@ -1132,7 +1317,8 @@ fn an_untyped_install_record_takes_the_pushed_down_status() {
         args(PatchType::All, vec![PatchStatus::Failed]),
         30,
         Utc::now(),
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(
         failed_only.install_status,
         Some("FAILED"),
@@ -1143,7 +1329,8 @@ fn an_untyped_install_record_takes_the_pushed_down_status() {
         args(PatchType::All, vec![PatchStatus::Installed]),
         30,
         Utc::now(),
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(installed_only.install_status, Some("INSTALLED"));
 
     // With both requested nothing is narrowed, so the label falls back and the
@@ -1155,7 +1342,8 @@ fn an_untyped_install_record_takes_the_pushed_down_status() {
         ),
         30,
         Utc::now(),
-    );
+    )
+    .expect("a valid plan");
     assert_eq!(both.install_status, None);
     assert_eq!(
         both.install_status.unwrap_or("INSTALLED"),

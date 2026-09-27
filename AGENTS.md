@@ -64,7 +64,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   └── tests.rs
 ├── src/history.rs               # append-only run-history.jsonl (one rollup + per-org line per query) + RunRecord
 ├── src/changes.rs               # per-scope run-snapshots/ → RunChanges (changes since the previous comparable run)
-├── src/export.rs                # rust_xlsxwriter workbook: detail, rollup, Devices, device-list, Changes, About; UTC date cells
+├── src/export.rs                # rust_xlsxwriter workbook: detail, rollup, Devices, device-list, Stuck Approvals, Changes, About; UTC date cells
 ├── src/csv_export.rs            # detail-row CSV: BOM, CRLF, RFC 4180 quoting, formula-injection guard
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
 ├── src/window_state.rs          # window geometry: debounced save, clamped restore before first show
@@ -141,10 +141,8 @@ in **Settings** (persisted via the `directories` crate; secrets go to the keyrin
 
 Backend — commands, cache, concurrency:
 
-- **Tauri commands:** `State<'_, AppState>` first, `Result<T, UiError>` out, registered in
-  `generate_handler![]` **and** wrapped by `ipc!`. `async` only when the handler awaits. A mutating
-  handler calls `require_actions_enabled` — enforced by
-  `every_mutating_command_checks_that_actions_are_enabled`. → `docs/design/frontend.md#tauri-commands`
+- **Tauri commands** follow the 3 steps above; a mutating handler calls `require_actions_enabled` —
+  enforced by `every_mutating_command_checks_that_actions_are_enabled`. → `docs/design/frontend.md#tauri-commands`
 - **IPC arg keys equal the handler's parameter names, camelCase.** Renaming a parameter is a
   wire-format change; update both sides. → `docs/design/frontend.md#ipc-arg-shape--keys-match-rust-fn-parameter-names-camelcase`
 - **`AppState.last_result` is the single source of truth for paging, export and the HTML report.**
@@ -158,9 +156,9 @@ Backend — commands, cache, concurrency:
   and `clear_session_state` on the backend. → `docs/design/query-cache.md#a-tenant-switch-a-sign-out-a-sign-in-and-a-re-authorization-all-clear-the-frontend`
 - **Paging/grouping/sorting commands (and `device_detail`) return empty on a cache miss, never an error.** Sort/group
   memos live in `CachedResult` (built on `spawn_blocking`, stored only if `Arc::ptr_eq` holds); the
-  cached rows are never reordered. Group headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
-- **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`, `changes`, `worst_devices`, …) ride on both `QueryResult` and
-  `QuerySummary`.** Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
+  cached rows are never reordered. Group headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`, pinned by `web-rs/tests/backend-grouping.json`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
+- **Compact aggregates (`failures`, `approvals`, `changes`, `worst_devices`, …) ride on both `QueryResult` and
+  `QuerySummary`** (`approvals.stuck_devices` capped there). Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
   demo's `assemble`, and `serialized_shapes_carry_every_frontend_required_key`. `QueryScope` and
   `instance` are the `QueryResult`-only exceptions. → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
 - **Every TTL'd cache slot is a `TenantCache<T>`** — it owns the tenant stamp, TTL,
@@ -260,18 +258,18 @@ Compliance and rollups — violating these silently misreports a fleet:
   mirrors it. → `docs/design/compliance.md#devices_offline-devices_unpatchable-and-patch_families-ride-on-queryresultquerysummary`
 - **Both exports print both clocks, the instance, app version, the result's `sla_policy`, and the
   `QueryScope` facets in two tiers** (`facets` narrow every sheet; `patch_facets` only the detail
-  rows), built from the `QueryPlan`, never the request. Date bounds are absolute UTC via
-  `DateTime::from_timestamp`. The CSV states scope + clocks in its file name only. → `docs/design/compliance.md#both-exports-state-the-facets-from-rowsqueryscope`
+  rows), built from the `QueryPlan`, never the request. Date bounds are absolute UTC. The CSV states scope + clocks in its file name only. → `docs/design/compliance.md#both-exports-state-the-facets-from-rowsqueryscope`
 - **Dates are `TableCell::DateTime` (Unix seconds)**: real Excel date-times in UTC; CSV text cells
   are formula-guarded, numbers never. → `docs/design/compliance.md#the-workbook-writes-real-date-times-in-utc`
 - **The Devices sheet and the drill-down read one per-device rollup** (`apply_device_health`); an
   excluded device's counts are blank, not zero. → `docs/design/compliance.md#one-per-device-rollup-for-the-devices-sheet-and-the-drill-down`
 - **`Type` is a device-tier chip** — rollups cover only the fetched families. → `docs/design/compliance.md#the-fleet-health-rollups-do-depend-on-the-patch-type-facet`
 - **`is_pending` is an exclude list** (not `REJECTED`/`INSTALLED`); current sources get
-  `status_override = MANUAL`; `current_status_set` carries every selected status. → `docs/design/compliance.md#rowsis_pending-is-an-exclude-list`
+  `status_override = MANUAL`; `current_status_set` carries every selected status. The approval
+  split (`approval_state`) reads the vendor status, never that override. → `docs/design/compliance.md#rowsis_pending-is-an-exclude-list`
 - **`Installed` and `Failed` route to the install-history endpoints; current patches are always
-  fetched.** One requested install status is pushed down server-side; the lookback is re-applied
-  client-side. → `docs/design/compliance.md#installedfailed-vs-current-patches-status-routing`
+  fetched.** One install status and the window (lookback, or an absolute
+  `install_range` that replaces it) are pushed down and re-applied client-side. → `docs/design/compliance.md#installedfailed-vs-current-patches-status-routing`
 - **Changes since last run:** identity is `changes::patch_key`, scope is tenant + `changes::scope_key`,
   snapshot saved only on `StoreOutcome::Stored`. → `docs/design/compliance.md#changes-since-the-previous-comparable-run`
 - **SLA aging is per band** (`SlaCutoffs` from the result's `SlaPolicy`). → `docs/design/compliance.md#the-sla-is-per-severity-band`

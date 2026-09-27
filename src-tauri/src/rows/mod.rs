@@ -64,6 +64,10 @@ pub struct QueryResult {
     /// The NinjaOne instance the data came from, for the exports' provenance.
     /// `QueryResult`-only like [`QueryScope`]: the frontend knows its own instance.
     pub instance: String,
+    /// Approval workflow totals and the devices whose approved patches are not
+    /// installing. Uncapped here (the workbook lists every stuck device); the
+    /// summary carries a capped copy.
+    pub approvals: ApprovalBacklog,
     pub devices_total: usize,
     /// How many of `devices_total` are offline.
     ///
@@ -140,6 +144,9 @@ pub struct QuerySummary {
     /// See [`QueryResult::sla_policy`]. The Compliance tab states it, since the
     /// policy in Settings may have changed since this result was computed.
     pub sla_policy: SlaPolicy,
+    /// Approval workflow totals and the oldest [`STUCK_DEVICES_SUMMARY_CAP`] stuck
+    /// devices (the totals still count every one).
+    pub approvals: ApprovalBacklog,
     pub devices_total: usize,
     /// How many of `devices_total` are offline.
     ///
@@ -199,6 +206,7 @@ impl QuerySummary {
             offline_backlog: result.offline_backlog.clone(),
             time_to_install: result.time_to_install.clone(),
             sla_policy: result.sla_policy,
+            approvals: result.approvals.capped(STUCK_DEVICES_SUMMARY_CAP),
             devices_total: result.devices_total,
             devices_offline: result.devices_offline,
             devices_unpatchable: result.devices_unpatchable,

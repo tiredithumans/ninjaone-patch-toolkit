@@ -9,10 +9,10 @@ use std::fmt::Write;
 use crate::changes::{ChangeRow, RunChanges};
 
 use crate::rows::{
-    AgeBucket, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceSummary, FailureGroup,
-    InstallLatency, OFFLINE_BACKLOG_NOTE, OrgSeverity, OsCompliance, QueryResult, QueryScope,
-    SeverityCounts, TIME_TO_INSTALL_NOTE, TableCell, TableColumn, TimeToInstall,
-    WORST_DEVICES_NOTE,
+    AgeBucket, ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceSummary,
+    FailureGroup, InstallLatency, OFFLINE_BACKLOG_NOTE, OrgSeverity, OsCompliance, QueryResult,
+    QueryScope, SeverityCounts, StuckDevice, TIME_TO_INSTALL_NOTE, TableCell, TableColumn,
+    TimeToInstall, WORST_DEVICES_NOTE,
 };
 
 /// At most this many table rows are rendered per section; a fleet-scale failure or
@@ -158,6 +158,10 @@ pub fn render_report(result: &QueryResult) -> String {
     write_age_chart(&mut buf, &result.age_buckets);
     buf.push_str("</section>");
 
+    buf.push_str("<section><h2>Approvals</h2>");
+    write_approvals(&mut buf, &result.approvals);
+    buf.push_str("</section>");
+
     buf.push_str("<section><h2>Worst devices</h2>");
     write_device_list(
         &mut buf,
@@ -273,12 +277,65 @@ fn write_compliance_bars(buf: &mut String, rows: &[(String, f64)]) {
     buf.push_str("</svg>");
 }
 
+/// The "Compliance by organization" section: the bar chart plus the detail table,
+/// so the pending/aged counts and the approval split reach the printed report the
+/// same way they reach the workbook's Compliance sheet.
 fn write_compliance_chart(buf: &mut String, compliance: &[ComplianceBucket]) {
     let rows: Vec<(String, f64)> = compliance
         .iter()
         .map(|b| (b.organization.clone(), b.compliance_pct))
         .collect();
     write_compliance_bars(buf, &rows);
+    if compliance.is_empty() {
+        return;
+    }
+    let rows: Vec<&ComplianceBucket> = compliance.iter().collect();
+    write_table(buf, &ComplianceBucket::COLUMNS, &rows);
+    if compliance.len() > MAX_TABLE_ROWS {
+        let _ = write!(
+            buf,
+            "<p class=\"empty\">Showing the top {MAX_TABLE_ROWS} of {} organizations.</p>",
+            compliance.len()
+        );
+    }
+}
+
+/// The approval workflow: fleet totals of the two approval columns, then the
+/// devices whose approved patches have not installed past the SLA window — the
+/// agent-trouble signal. Totals first, because a clean table under a large
+/// "approved, not installed" number means "recent", not "fine".
+fn write_approvals(buf: &mut String, approvals: &ApprovalBacklog) {
+    let _ = write!(
+        buf,
+        "<p class=\"meta\">{} awaiting approval \u{00b7} {} approved, not installed</p>",
+        approvals.awaiting_approval, approvals.approved_not_installed
+    );
+    let days = approvals.stuck_after_days;
+    if approvals.stuck_devices.is_empty() {
+        let _ = write!(
+            buf,
+            "<p class=\"empty\">No approved patch has gone uninstalled for more than \
+             {days} days since first seen.</p>"
+        );
+        return;
+    }
+    let _ = write!(
+        buf,
+        "<p class=\"meta\">Approved patches still not installed more than {days} days \
+         after NinjaOne first reported them \u{2014} {} patches on {} devices. Usually a \
+         sign the agent is not applying patches.</p>",
+        approvals.stuck_patches, approvals.stuck_devices_total
+    );
+    let rows: Vec<&StuckDevice> = approvals.stuck_devices.iter().collect();
+    write_table(buf, &StuckDevice::COLUMNS, &rows);
+    if approvals.stuck_devices_total > MAX_TABLE_ROWS.min(approvals.stuck_devices.len()) {
+        let _ = write!(
+            buf,
+            "<p class=\"empty\">Showing the oldest {} of {} devices; the workbook lists every one.</p>",
+            MAX_TABLE_ROWS.min(approvals.stuck_devices.len()),
+            approvals.stuck_devices_total
+        );
+    }
 }
 
 /// The "Compliance by OS" section: the same bar chart as the per-org view, plus a
@@ -739,6 +796,27 @@ mod tests {
         );
     }
 
+    /// The approval split reaches the report through the shared compliance columns
+    /// (both tables), and the stuck-approvals table through its own — escaped like
+    /// every other NinjaOne name on the page.
+    #[test]
+    fn the_approval_split_and_stuck_devices_are_reported() {
+        let html = render_report(&sample_result());
+        let titles = ComplianceBucket::COLUMNS
+            .iter()
+            .map(|(t, _)| *t)
+            .chain(StuckDevice::COLUMNS.iter().map(|(t, _)| *t));
+        for title in titles {
+            assert!(
+                html.contains(&format!("<th>{title}</th>")),
+                "missing {title:?}"
+            );
+        }
+        assert!(html.contains("2 awaiting approval \u{00b7} 1 approved, not installed"));
+        assert!(html.contains("more than 30 days"));
+        assert!(html.contains("&lt;b&gt;web-01&lt;/b&gt;") && !html.contains("<b>web-01</b>"));
+    }
+
     /// The by-OS compliance table was the one table the shared-column refactor
     /// skipped, and it had already drifted: "Compliance" against the canonical
     /// "Compliance %", and `{:.0}%` against `pct_cell`'s one-decimal number. This is
@@ -930,6 +1008,8 @@ mod tests {
                 compliance_pct: 90.0,
                 pending_critical: 1,
                 aged_critical: 0,
+                awaiting_approval: 2,
+                approved_not_installed: 1,
             }],
             compliance_by_os: vec![OsCompliance {
                 os: "Windows Server 2022".into(),
@@ -938,6 +1018,8 @@ mod tests {
                 compliance_pct: 90.0,
                 pending_critical: 1,
                 aged_critical: 0,
+                awaiting_approval: 2,
+                approved_not_installed: 1,
             }],
             failures: vec![FailureGroup {
                 patch_type: "OS",
@@ -973,6 +1055,21 @@ mod tests {
             time_to_install: Default::default(),
             sla_policy: Default::default(),
             instance: "https://app.ninjarmm.com".into(),
+            approvals: ApprovalBacklog {
+                awaiting_approval: 2,
+                approved_not_installed: 1,
+                stuck_after_days: 30,
+                stuck_patches: 1,
+                stuck_devices_total: 1,
+                stuck_devices: vec![StuckDevice {
+                    device_id: 1,
+                    device_name: "<b>web-01</b>".into(),
+                    organization: "Contoso".into(),
+                    patches: 1,
+                    oldest_first_seen: Some("2025-11-02 00:00 UTC".into()),
+                    oldest_first_seen_ts: Some(1_762_041_600),
+                }],
+            },
             devices_total: 10,
             devices_offline: 0,
             devices_unpatchable: 0,
@@ -1012,6 +1109,7 @@ mod tests {
             "Top patch failures",
             "Devices needing reboot",
             "Changes since the previous run",
+            "Approvals",
         ] {
             assert!(html.contains(heading), "missing section: {heading}");
         }
@@ -1063,6 +1161,7 @@ mod tests {
             time_to_install: Default::default(),
             sla_policy: Default::default(),
             instance: "https://app.ninjarmm.com".into(),
+            approvals: Default::default(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,

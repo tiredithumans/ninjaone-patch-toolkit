@@ -19,13 +19,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::app::util::{date_to_epoch, median, nearest_rank, severity_rank, sla_days_for};
+use crate::app::util::{
+    date_to_epoch, median, nearest_rank, product_display_name, severity_rank, sla_days_for,
+    strip_version_token,
+};
 use crate::types::QueryResult;
 use crate::types::{
-    AgeBucket, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceDetail, DeviceSummary,
-    FailureGroup, FilterParams, GroupBy, InstallLatency, Location, NodeClass, OrgSeverity,
-    Organization, OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role, RollupScope,
-    SeverityCounts, SlaBySeverity, SlaPolicy, TimeToInstall,
+    AgeBucket, ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceDetail,
+    DeviceSummary, FailureGroup, FilterParams, GroupBy, InstallLatency, Location, NodeClass,
+    OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role,
+    RollupScope, SeverityCounts, SlaBySeverity, SlaPolicy, StuckDevice, TimeToInstall,
 };
 use crate::types::{ChangeItem, RunChanges};
 
@@ -166,6 +169,17 @@ fn row(
             status: status.to_string(),
             first_seen_date: opt(first_seen_date),
             installed_date: opt(installed_date),
+            // NinjaOne sends a uuid per third-party product; the sample derives a
+            // stable stand-in from the version-free title, so every version of one
+            // product shares it and the By product view has something to fold.
+            product_identifier: patch_type.eq_ignore_ascii_case("software").then(|| {
+                format!(
+                    "demo-{}",
+                    strip_version_token(name)
+                        .to_ascii_lowercase()
+                        .replace(' ', "-")
+                )
+            }),
         },
     }
 }
@@ -244,7 +258,7 @@ fn demo_rows() -> Vec<DemoRow> {
         row("Northwind Traders", "Branch — Austin", "Workstation", "ATX-WKS-2207", "Windows 10 Pro", "OS", "KB5062560", "2026-06 Cumulative Update for Windows 10 22H2 (KB5062560)", "Important", "PENDING", "2026-06-10", "", "WINDOWS_WORKSTATION"),
         row("Northwind Traders", "Branch — Austin", "Workstation", "ATX-WKS-2207", "Windows 10 Pro", "Software", "", "Mozilla Firefox 140.0", "Moderate", "REJECTED", "2026-06-10", "", "WINDOWS_WORKSTATION"),
         row("Northwind Traders", "Branch — Austin", "Workstation", "ATX-MAC-0099", "macOS 15.5 Sequoia", "OS", "", "macOS 15.5 Security Update 2026-003", "Important", "PENDING", "2026-06-09", "", "MAC"),
-        row("Northwind Traders", "Branch — Austin", "Workstation", "ATX-MAC-0099", "macOS 15.5 Sequoia", "Software", "", "Google Chrome 137.0.7151.69", "Important", "INSTALLED", "2026-06-11", "2026-06-12", "MAC"),
+        row("Northwind Traders", "Branch — Austin", "Workstation", "ATX-MAC-0099", "macOS 15.5 Sequoia", "Software", "", "Google Chrome 137.0.7151.104", "Important", "INSTALLED", "2026-06-11", "2026-06-12", "MAC"),
         row("Northwind Traders", "Datacenter B", "Application Server", "NW-APP05", "Windows Server 2022", "Software", "", "Notepad++ 8.7.6", "Low", "APPROVED", "2026-06-03", "", "WINDOWS_SERVER"),
         // --- Fabrikam Inc ---
         row("Fabrikam Inc", "Cloud — us-east-1", "Application Server", "FAB-LNX-APP3", "Ubuntu 22.04 LTS", "Software", "", "OpenSSL 3.0.16 (libssl)", "Critical", "PENDING", "2026-06-08", "", "LINUX_SERVER"),
@@ -267,6 +281,8 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
             compliance_pct: 66.7,
             pending_critical: 5,
             aged_critical: 2,
+            awaiting_approval: 6,
+            approved_not_installed: 7,
         },
         ComplianceBucket {
             organization: "Northwind Traders".to_string(),
@@ -275,6 +291,8 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
             compliance_pct: 78.6,
             pending_critical: 3,
             aged_critical: 1,
+            awaiting_approval: 4,
+            approved_not_installed: 3,
         },
         ComplianceBucket {
             organization: "Fabrikam Inc".to_string(),
@@ -283,8 +301,41 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
             compliance_pct: 90.0,
             pending_critical: 1,
             aged_critical: 0,
+            awaiting_approval: 2,
+            approved_not_installed: 1,
         },
     ]
+}
+
+/// The approval backlog for the demo: totals summed from the (org-narrowed)
+/// compliance buckets, as the backend's equal the compliance columns' sums, and a
+/// fixed stuck-device list narrowed by the same organization facet.
+fn sample_approvals(
+    compliance: &[ComplianceBucket],
+    keep: &dyn Fn(&str) -> bool,
+) -> ApprovalBacklog {
+    let stuck: Vec<StuckDevice> = [
+        ("SEA-WKS-1187", "Contoso Ltd", 4, "2026-04-14 09:20 UTC"),
+        ("NW-APP02", "Northwind Traders", 2, "2026-05-02 17:05 UTC"),
+        ("SEA-FILE02", "Contoso Ltd", 1, "2026-05-19 03:40 UTC"),
+    ]
+    .into_iter()
+    .filter(|(_, org, _, _)| keep(org))
+    .map(|(name, org, patches, seen)| StuckDevice {
+        device_name: name.to_string(),
+        organization: org.to_string(),
+        patches,
+        oldest_first_seen: Some(seen.to_string()),
+    })
+    .collect();
+    ApprovalBacklog {
+        awaiting_approval: compliance.iter().map(|b| b.awaiting_approval).sum(),
+        approved_not_installed: compliance.iter().map(|b| b.approved_not_installed).sum(),
+        stuck_after_days: 30,
+        stuck_patches: stuck.iter().map(|d| d.patches).sum(),
+        stuck_devices_total: stuck.len(),
+        stuck_devices: stuck,
+    }
 }
 
 /// Per-OS compliance for the "Compliance by OS" section. Totals match the fleet size
@@ -297,22 +348,28 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
 /// backend's `build_compliance_by_os`, which likewise derives from the scoped set
 /// rather than from a fixed table.
 fn scoped_compliance_by_os(rows: &[PatchRow]) -> Vec<OsCompliance> {
-    // os -> (all devices, devices with a pending row, pending critical/important)
-    let mut by_os: BTreeMap<String, (BTreeSet<i64>, BTreeSet<i64>, usize)> = BTreeMap::new();
+    // os -> (all devices, devices with a pending row, pending critical/important,
+    // awaiting approval, approved-not-installed)
+    type Acc = (BTreeSet<i64>, BTreeSet<i64>, usize, usize, usize);
+    let mut by_os: BTreeMap<String, Acc> = BTreeMap::new();
     for r in rows {
         let os = r.os_name.clone().unwrap_or_else(|| "(unknown)".to_string());
         let e = by_os.entry(os).or_default();
         e.0.insert(r.device_id);
         if r.status == "PENDING" {
             e.1.insert(r.device_id);
+            e.3 += 1;
             if matches!(r.severity.as_str(), "Critical" | "Important") {
                 e.2 += 1;
             }
         }
+        if r.status == "APPROVED" {
+            e.4 += 1;
+        }
     }
     by_os
         .into_iter()
-        .map(|(os, (devices, pending, critical))| {
+        .map(|(os, (devices, pending, critical, awaiting, approved))| {
             let total = devices.len();
             let compliant = total - pending.len();
             OsCompliance {
@@ -328,6 +385,8 @@ fn scoped_compliance_by_os(rows: &[PatchRow]) -> Vec<OsCompliance> {
                 // The sample carries no SLA breach detail; the real backend
                 // computes this from first-seen age.
                 aged_critical: 0,
+                awaiting_approval: awaiting,
+                approved_not_installed: approved,
             }
         })
         .collect()
@@ -844,6 +903,7 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64], statuses: &[String]) -> Que
     let devices_total = compliance.iter().map(|b| b.devices_total).sum::<usize>() + devices_offline;
     let worst_devices = demo_worst_devices(&rows);
     let time_to_install = demo_time_to_install(&rows, statuses);
+    let approvals = sample_approvals(&compliance, &keep);
     // Both of these used to ship whole-fleet regardless of the facet, so with an
     // organization selected the Compliance tab's by-OS chart and the age histogram
     // described a fleet the rest of the screen — and `devices_total` beside them —
@@ -867,6 +927,7 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64], statuses: &[String]) -> Que
         },
         time_to_install,
         sla_policy: DEMO_SLA,
+        approvals,
         devices_total,
         // Both families are represented and one sample laptop is offline, so the
         // demo's scope note reads like a whole-fleet desktop query.
@@ -914,7 +975,7 @@ fn patch_matches(
                 .any(|s| s.eq_ignore_ascii_case(&row.severity)))
         && f.search.as_deref().is_none_or(|q| search_matches(row, q))
         && first_seen_in_window(row, f)
-        && install_in_window(row, install_after_days)
+        && install_in_window(row, f, install_after_days)
 }
 
 fn type_matches(patch_type: &str, row_type: &str) -> bool {
@@ -962,14 +1023,22 @@ fn first_seen_in_window(row: &PatchRow, f: &FilterParams) -> bool {
     true
 }
 
-fn install_in_window(row: &PatchRow, install_after_days: Option<i64>) -> bool {
+fn install_in_window(row: &PatchRow, f: &FilterParams, install_after_days: Option<i64>) -> bool {
     // The window only constrains install-history rows (INSTALLED / FAILED).
     let is_history =
         row.status.eq_ignore_ascii_case("INSTALLED") || row.status.eq_ignore_ascii_case("FAILED");
-    let Some(days) = install_after_days.filter(|_| is_history) else {
+    if !is_history {
+        return true;
+    }
+    let installed = row.installed_date.as_deref().and_then(date_to_epoch);
+    // An absolute range replaces the relative lookback, as it does backend-side.
+    if let Some(after) = f.installed_after {
+        return installed.is_some_and(|t| t >= after && f.installed_before.is_none_or(|b| t <= b));
+    }
+    let Some(days) = install_after_days else {
         return true;
     };
-    match row.installed_date.as_deref().and_then(date_to_epoch) {
+    match installed {
         Some(installed) => installed >= SAMPLE_NOW_EPOCH - days * 86_400,
         None => false,
     }
@@ -986,13 +1055,25 @@ fn contains_ci(haystack: &str, needle: &str) -> bool {
 pub fn group_key(row: &PatchRow, group_by: GroupBy) -> String {
     match group_by {
         GroupBy::Device => row.device_id.to_string(),
-        GroupBy::Patch => format!(
+        GroupBy::Product if product_of(row).is_some() => {
+            format!("SOFTWARE\u{1f}{}", product_of(row).unwrap_or_default())
+        }
+        GroupBy::Patch | GroupBy::Product => format!(
             "{}\u{1f}{}\u{1f}{}",
             row.patch_type,
             row.kb.as_deref().unwrap_or(""),
             row.name
         ),
     }
+}
+
+/// The product a row groups under by product — mirrors `rows::product_of`. The
+/// sample spells the type "Software", the backend "SOFTWARE", hence the
+/// case-insensitive compare.
+fn product_of(row: &PatchRow) -> Option<&str> {
+    row.product_identifier
+        .as_deref()
+        .filter(|p| row.patch_type.eq_ignore_ascii_case("SOFTWARE") && !p.trim().is_empty())
 }
 
 /// Groups the sample rows the way `rows::build_groups` groups the real ones:
@@ -1002,8 +1083,17 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
     let mut order: Vec<String> = Vec::new();
     let mut acc: BTreeMap<String, PatchGroup> = BTreeMap::new();
     let mut devices: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
+    // Product groups only: member titles and their row counts, for the label.
+    let mut titles: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     for r in rows {
         let key = group_key(r, group_by);
+        if group_by == GroupBy::Product && product_of(r).is_some() {
+            *titles
+                .entry(key.clone())
+                .or_default()
+                .entry(r.name.clone())
+                .or_default() += 1;
+        }
         let rank = severity_rank(&r.severity);
         let entry = acc.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
@@ -1011,11 +1101,11 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 key: key.clone(),
                 label: match group_by {
                     GroupBy::Device => r.device_name.clone(),
-                    GroupBy::Patch => r.name.clone(),
+                    GroupBy::Patch | GroupBy::Product => r.name.clone(),
                 },
                 sublabel: match group_by {
                     GroupBy::Device => Some(r.organization.clone()),
-                    GroupBy::Patch => r.kb.clone().filter(|k| !k.is_empty()),
+                    GroupBy::Patch | GroupBy::Product => r.kb.clone().filter(|k| !k.is_empty()),
                 },
                 rows: 0,
                 devices: 0,
@@ -1044,6 +1134,12 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
         .filter_map(|k| {
             acc.remove(&k).map(|mut g| {
                 g.devices = devices.get(&k).map(|d| d.len()).unwrap_or(0);
+                // A product group is named for the product and counts its versions,
+                // as `rows::build_groups` does.
+                if let Some(t) = titles.get(&k) {
+                    g.label = product_display_name(t.iter().map(|(title, n)| (title.as_str(), *n)));
+                    g.sublabel = (t.len() > 1).then(|| format!("{} versions", t.len()));
+                }
                 g
             })
         })
@@ -1056,7 +1152,7 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 g.label.to_lowercase(),
             )
         }),
-        GroupBy::Patch => out.sort_by_key(|g| {
+        GroupBy::Patch | GroupBy::Product => out.sort_by_key(|g| {
             (
                 std::cmp::Reverse(g.devices),
                 std::cmp::Reverse(g.severity_rank),
@@ -1382,6 +1478,44 @@ mod tests {
         );
     }
 
+    /// The backend's approval totals are the compliance columns summed (one
+    /// population), and the organization facet narrows the stuck list too.
+    #[test]
+    fn approval_totals_match_the_compliance_columns_and_follow_the_org_facet() {
+        let all = filtered_result(&filter(), "ALL", &all_statuses(), None);
+        let sum = |r: &QueryResult, f: fn(&ComplianceBucket) -> usize| {
+            r.compliance.iter().map(f).sum::<usize>()
+        };
+        assert_eq!(
+            all.approvals.awaiting_approval,
+            sum(&all, |b| b.awaiting_approval)
+        );
+        assert_eq!(
+            all.approvals.approved_not_installed,
+            sum(&all, |b| b.approved_not_installed)
+        );
+        assert!(
+            all.approvals.stuck_devices_total > 0,
+            "the demo shows the card populated"
+        );
+
+        let northwind = FilterParams {
+            organization_ids: vec![2],
+            ..filter()
+        };
+        let r = filtered_result(&northwind, "ALL", &all_statuses(), None);
+        assert!(
+            r.approvals
+                .stuck_devices
+                .iter()
+                .all(|d| d.organization == "Northwind Traders")
+        );
+        assert_eq!(
+            r.approvals.awaiting_approval,
+            sum(&r, |b| b.awaiting_approval)
+        );
+    }
+
     #[test]
     fn search_matches_kb_or_name() {
         let f = FilterParams {
@@ -1430,8 +1564,10 @@ mod tests {
             rows: Vec<PatchRow>,
             by_device: Vec<PatchGroup>,
             by_patch: Vec<PatchGroup>,
+            by_product: Vec<PatchGroup>,
             keys_by_device: Vec<String>,
             keys_by_patch: Vec<String>,
+            keys_by_product: Vec<String>,
         }
         let fixture: Fixture = serde_json::from_str(include_str!("../tests/backend-grouping.json"))
             .expect("the committed backend fixture parses");
@@ -1439,6 +1575,11 @@ mod tests {
         for (group_by, expected, expected_keys) in [
             (GroupBy::Device, &fixture.by_device, &fixture.keys_by_device),
             (GroupBy::Patch, &fixture.by_patch, &fixture.keys_by_patch),
+            (
+                GroupBy::Product,
+                &fixture.by_product,
+                &fixture.keys_by_product,
+            ),
         ] {
             let actual = group_rows(&fixture.rows, group_by);
             assert_eq!(
@@ -1504,10 +1645,27 @@ mod tests {
         );
     }
 
+    /// The sample carries two versions of one Chrome build pair, so the By product
+    /// view has a multi-version group to show — named for the product.
+    #[test]
+    fn the_sample_folds_chrome_versions_into_one_product_group() {
+        let rows = filtered_result(&FilterParams::default(), "ALL", &all_statuses(), None).rows;
+        let groups = group_rows(&rows, GroupBy::Product);
+        let chrome = groups
+            .iter()
+            .find(|g| g.label == "Google Chrome")
+            .expect("a Google Chrome product group");
+        assert_eq!(chrome.sublabel.as_deref(), Some("2 versions"));
+        assert!(
+            groups.len() < group_rows(&rows, GroupBy::Patch).len(),
+            "folding versions yields fewer groups than one per title"
+        );
+    }
+
     #[test]
     fn group_members_partition_the_rows_exactly() {
         let rows = filtered_result(&FilterParams::default(), "ALL", &["PENDING".into()], None).rows;
-        for group_by in [GroupBy::Device, GroupBy::Patch] {
+        for group_by in [GroupBy::Device, GroupBy::Patch, GroupBy::Product] {
             let groups = group_rows(&rows, group_by);
             let mut seen = 0usize;
             for g in &groups {

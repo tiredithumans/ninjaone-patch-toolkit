@@ -36,6 +36,13 @@ pub struct FilterParams {
     pub detected_after: Option<i64>,
     #[serde(default)]
     pub detected_before: Option<i64>,
+    /// Absolute install-history range (Unix seconds). When `installed_after` is set
+    /// it replaces the relative install lookback backend-side; both `None` = the
+    /// lookback applies. Mirrors `filter::FilterParams::installed_*`.
+    #[serde(default)]
+    pub installed_after: Option<i64>,
+    #[serde(default)]
+    pub installed_before: Option<i64>,
 }
 
 /// Mirror of the backend's `rows::PatchFamilies` — the honest scope of every
@@ -130,6 +137,10 @@ pub struct PatchRow {
     pub status: String,
     pub first_seen_date: Option<String>,
     pub installed_date: Option<String>,
+    /// `DeviceSoftwarePatch.productIdentifier`, shared by every version of one
+    /// third-party product; `None` on OS rows. Read by the demo's product grouping.
+    #[serde(default)]
+    pub product_identifier: Option<String>,
 }
 
 /// A device's facts and per-device rollup: the Needs-Reboot view's rows (the
@@ -202,6 +213,12 @@ pub struct ComplianceBucket {
     pub compliance_pct: f64,
     pub pending_critical: usize,
     pub aged_critical: usize,
+    /// Pending approval (vendor status `MANUAL`), any severity.
+    #[serde(default)]
+    pub awaiting_approval: usize,
+    /// `APPROVED` and still not installed, any severity.
+    #[serde(default)]
+    pub approved_not_installed: usize,
 }
 
 /// Per-OS compliance row for the Compliance tab's "Compliance by OS" section.
@@ -215,6 +232,35 @@ pub struct OsCompliance {
     pub compliance_pct: f64,
     pub pending_critical: usize,
     pub aged_critical: usize,
+    #[serde(default)]
+    pub awaiting_approval: usize,
+    #[serde(default)]
+    pub approved_not_installed: usize,
+}
+
+/// Mirror of the backend `rows::ApprovalBacklog`: fleet totals of the two approval
+/// columns and the devices whose approved patches are not installing. The
+/// `stuck_devices` list is capped on the wire; `stuck_devices_total` is not.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ApprovalBacklog {
+    pub awaiting_approval: usize,
+    pub approved_not_installed: usize,
+    pub stuck_after_days: i64,
+    pub stuck_patches: usize,
+    pub stuck_devices_total: usize,
+    pub stuck_devices: Vec<StuckDevice>,
+}
+
+/// Mirror of the backend `rows::StuckDevice` (its `deviceId` and
+/// `oldestFirstSeenTs` are not rendered, so not mirrored).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StuckDevice {
+    pub device_name: String,
+    pub organization: String,
+    pub patches: usize,
+    pub oldest_first_seen: Option<String>,
 }
 
 // Backend also sends severityRank and latestFailureTs; serde ignores undeclared
@@ -387,6 +433,9 @@ impl Default for SlaPolicy {
 pub enum GroupBy {
     Device,
     Patch,
+    /// Third-party rows by product identifier (every version in one group); every
+    /// other row by its patch key.
+    Product,
 }
 
 /// One collapsed group header. Mirrors `rows::PatchGroup`. Members are fetched
@@ -465,6 +514,9 @@ pub struct QueryResult {
     /// from Settings if the policy changed since.
     #[serde(default)]
     pub sla_policy: SlaPolicy,
+    /// Approval workflow totals and the stuck-approval devices.
+    #[serde(default)]
+    pub approvals: ApprovalBacklog,
     pub devices_total: usize,
     /// How many of `devices_total` are offline. The compliance rollups exclude them
     /// from both the denominator and the pending counts, so the Devices column of the

@@ -269,10 +269,13 @@ fn ColumnMenu() -> impl IntoView {
 #[component]
 fn ViewModeSwitch() -> impl IntoView {
     let state = expect_context::<AppState>();
-    const MODES: [(Option<GroupBy>, &str); 3] = [
+    // "By product" folds every version of a third-party product (NinjaOne's
+    // `productIdentifier`) into one group; OS patches group as they do by patch.
+    const MODES: [(Option<GroupBy>, &str); 4] = [
         (None, "Flat"),
         (Some(GroupBy::Device), "By device"),
         (Some(GroupBy::Patch), "By patch"),
+        (Some(GroupBy::Product), "By product"),
     ];
     view! {
         <div class="view-modes" role="group" aria-label="Patch view mode">

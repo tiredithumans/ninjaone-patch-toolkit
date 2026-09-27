@@ -12,11 +12,12 @@ use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
-    DeviceDetail, GroupBy, GroupPage, LookupMaps, PatchFamilies, PatchSource, QueryResult,
-    QuerySummary, RowSort, SlaCutoffs, apply_device_health, build_age_buckets, build_compliance,
-    build_compliance_by_os, build_device_backlogs, build_device_summaries, build_failures,
-    build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
-    group_member_page, page_rows, pending_counts, slice_groups, sort_device_summaries, sort_order,
+    DeviceDetail, GroupBy, GroupPage, InstallWindow, LookupMaps, PatchFamilies, PatchSource,
+    QueryResult, QuerySummary, RowSort, SlaCutoffs, apply_device_health, build_age_buckets,
+    build_approval_backlog, build_compliance, build_compliance_by_os, build_device_backlogs,
+    build_device_summaries, build_failures, build_groups, build_query_scope, build_rows,
+    build_severity_by_org, build_time_to_install, group_member_page, page_rows, pending_counts,
+    slice_groups, sort_device_summaries, sort_order,
 };
 use crate::settings::{MAX_WINDOW_DAYS, SlaPolicy};
 use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
@@ -51,7 +52,8 @@ pub struct PatchQueryArgs {
     pub filter: FilterParams,
     pub patch_type: PatchType,
     pub statuses: Vec<PatchStatus>,
-    /// Overrides the configured install-history lookback window (days).
+    /// Overrides the configured install-history lookback window (days). Ignored
+    /// when `filter` carries an absolute install range, which replaces it.
     #[serde(default)]
     pub install_after_days: Option<i64>,
 }
@@ -101,6 +103,14 @@ pub async fn query_patches(
         return Err(UiError::new(
             "Select at least one patch status before running a query.",
         ));
+    }
+    // Validated before the token is claimed: a malformed range must not supersede a
+    // good query that is still in flight. `QueryPlan::build` re-checks it — and, like
+    // it, only when the range can matter at all.
+    if args.statuses.iter().any(|s| s.is_install_history()) {
+        args.filter
+            .install_range(Utc::now().timestamp())
+            .map_err(UiError::new)?;
     }
     let settings = state.settings_snapshot();
     // Claimed before any fetch so overlapping queries are ordered by *start*, and so
@@ -313,12 +323,17 @@ struct QueryPlan {
     install_status: Option<&'static str>,
     include_os: bool,
     include_sw: bool,
-    /// Lower bound of the install-history lookback, as Unix seconds.
-    installed_after: i64,
+    /// The install-history window, pushed down as `installedAfter` /
+    /// `installedBefore` and re-applied client-side in [`assemble_result`].
+    install_window: InstallWindow,
 }
 
 impl QueryPlan {
-    fn build(args: PatchQueryArgs, install_window_days: i64, now: DateTime<Utc>) -> Self {
+    fn build(
+        args: PatchQueryArgs,
+        install_window_days: i64,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Self> {
         let mut filter = args.filter;
         // Resolve the relative first-seen window into an absolute lower bound; the
         // filter is applied client-side in build_rows, which has no clock.
@@ -369,8 +384,32 @@ impl QueryPlan {
             .install_after_days
             .unwrap_or(install_window_days)
             .clamp(1, MAX_WINDOW_DAYS);
+        // An absolute range replaces the relative lookback rather than intersecting
+        // it — see `FilterParams::installed_after`. Validated only when it can
+        // matter: with no install status the window is never used, and the Filters
+        // panel hides the control, so a stale range left in it must not fail a
+        // Pending query with an error whose cause is off screen.
+        let install_range = if want_installs {
+            filter
+                .install_range(now.timestamp())
+                .map_err(anyhow::Error::msg)?
+        } else {
+            None
+        };
+        let install_window = match install_range {
+            Some(range) => InstallWindow {
+                after: range.after,
+                before: range.before,
+                relative_days: None,
+            },
+            None => InstallWindow {
+                after: (now - Duration::days(days)).timestamp(),
+                before: None,
+                relative_days: Some(days),
+            },
+        };
 
-        Self {
+        Ok(Self {
             filter,
             statuses: args.statuses,
             patch_df,
@@ -380,8 +419,8 @@ impl QueryPlan {
             install_status,
             include_os: args.patch_type.includes_os(),
             include_sw: args.patch_type.includes_software(),
-            installed_after: (now - Duration::days(days)).timestamp(),
-        }
+            install_window,
+        })
     }
 }
 
@@ -425,7 +464,7 @@ where
     D: std::future::Future<Output = anyhow::Result<Arc<Vec<Device>>>>,
     C: std::future::Future<Output = anyhow::Result<CurrentPatches>>,
 {
-    let plan = QueryPlan::build(args, install_window_days, now);
+    let plan = QueryPlan::build(args, install_window_days, now)?;
 
     // The cached whole-fleet devices/current-patches (futures), the lookups, and the
     // per-query install history are all independent — resolve them concurrently so
@@ -452,8 +491,8 @@ where
                 api.fleet_os_patch_installs(
                     patch_df_ref,
                     plan.install_status,
-                    plan.installed_after,
-                    None,
+                    plan.install_window.after,
+                    plan.install_window.before,
                     Some(&p_os_inst as &ProgressFn),
                 )
                 .await
@@ -466,8 +505,8 @@ where
                 api.fleet_software_patch_installs(
                     patch_df_ref,
                     plan.install_status,
-                    plan.installed_after,
-                    None,
+                    plan.install_window.after,
+                    plan.install_window.before,
                     Some(&p_sw_inst as &ProgressFn),
                 )
                 .await
@@ -571,9 +610,14 @@ fn assemble_result(
     // this app has always sent, but nothing in the response says whether the bound
     // was honored, and the exports print "Install history since <date>" on the
     // strength of it. Undated records are kept: the window cannot prove them out.
+    // Both bounds, for the same reason: `installedBefore` is as unspecified as
+    // `installedAfter`, and a custom range's export prints its end date too.
+    let window = plan.install_window;
     let within_window = |p: &&Patch| {
-        p.installed_at()
-            .is_none_or(|t| t.timestamp() >= plan.installed_after)
+        p.installed_at().is_none_or(|t| {
+            let t = t.timestamp();
+            t >= window.after && window.before.is_none_or(|b| t <= b)
+        })
     };
     let os_install_refs: Vec<&Patch> = src.os_installs.iter().filter(within_window).collect();
     let sw_install_refs: Vec<&Patch> = src.sw_installs.iter().filter(within_window).collect();
@@ -686,6 +730,13 @@ fn assemble_result(
     let age_buckets = build_age_buckets(&all_current, &devices_by_id, now);
     let time_to_install =
         build_time_to_install(&rows, plan.statuses.contains(&PatchStatus::Installed));
+    // "Stuck" reuses the default SLA window: an approved patch still not installed
+    // past the point the SLA calls overdue is the agent-trouble signal, and a second
+    // knob for the same idea of "too long" would only let the two disagree. The
+    // default rather than the per-band policy, because a stuck approval is an agent
+    // problem whatever the patch's severity.
+    let approvals =
+        build_approval_backlog(&all_current, &devices_by_id, &maps, sla.default_days, now);
 
     let families = PatchFamilies {
         os: plan.include_os,
@@ -705,6 +756,7 @@ fn assemble_result(
         time_to_install,
         sla_policy: sla,
         instance,
+        approvals,
         devices_total: scoped_devices.len(),
         // Counted over the same scoped set the compliance rollups draw from, so the
         // two device numbers on screen are reconcilable: `devices_total` is every
@@ -726,7 +778,7 @@ fn assemble_result(
             &maps,
             families,
             &plan.statuses,
-            plan.want_installs.then_some(plan.installed_after),
+            plan.want_installs.then_some(plan.install_window),
         ),
         // Needs the stored snapshot, so `query_patches` fills it after the join.
         changes: Default::default(),

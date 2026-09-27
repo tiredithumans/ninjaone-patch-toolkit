@@ -253,6 +253,7 @@ fn sortable(device: &str, sev: &str, installed: Option<&str>) -> PatchRow {
         status: "PENDING".into(),
         first_seen_date: None,
         installed_date: installed.map(Into::into),
+        product_identifier: None,
     }
 }
 
@@ -273,6 +274,7 @@ fn sel_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, ty: &str)
         status: "PENDING".into(),
         first_seen_date: None,
         installed_date: None,
+        product_identifier: None,
     }
 }
 
@@ -603,6 +605,86 @@ fn a_custom_window_tolerates_one_open_end() {
     let f = filter_params(inputs("custom", "", "2026-03-01"));
     assert_eq!(f.detected_after, None);
     assert!(f.detected_before.is_some());
+}
+
+fn install_inputs(custom: bool, after: &str, before: &str) -> FilterInputs {
+    FilterInputs {
+        install_custom: custom,
+        install_after: after.into(),
+        install_before: before.into(),
+        ..Default::default()
+    }
+}
+
+/// A custom install range reaches the backend as two absolute bounds, the "to"
+/// day included whole; in "Last N days" mode nothing is sent even though the
+/// hidden date inputs still hold the last range, or they would keep overriding the
+/// relative window backend-side.
+#[test]
+fn a_custom_install_range_is_sent_only_in_custom_mode() {
+    let f = filter_params(install_inputs(true, "2026-01-01", "2026-01-31"));
+    assert_eq!(f.installed_after, Some(1_767_225_600));
+    assert_eq!(f.installed_before, Some(1_769_903_999));
+
+    let open = filter_params(install_inputs(true, "2026-01-01", ""));
+    assert_eq!(
+        (open.installed_after, open.installed_before),
+        (Some(1_767_225_600), None)
+    );
+
+    let relative = filter_params(install_inputs(false, "2026-01-01", "2026-01-31"));
+    assert_eq!(
+        (relative.installed_after, relative.installed_before),
+        (None, None)
+    );
+}
+
+/// The chip says which control was in force, and a custom range with no dates —
+/// which sends nothing, so the backend uses the lookback — says the lookback.
+#[test]
+fn the_install_chip_names_the_range_or_the_lookback() {
+    assert_eq!(
+        install_window_label(false, 30, "2026-01-01", ""),
+        "last 30d"
+    );
+    assert_eq!(
+        install_window_label(true, 30, "2026-03-01", "2026-03-31"),
+        "2026-03-01 \u{2192} 2026-03-31"
+    );
+    assert_eq!(
+        install_window_label(true, 30, "2026-03-01", ""),
+        "since 2026-03-01"
+    );
+    assert_eq!(
+        install_window_label(true, 30, "", "2026-03-31"),
+        "until 2026-03-31"
+    );
+    assert_eq!(install_window_label(true, 14, " ", ""), "last 14d");
+}
+
+/// The inline hint flags exactly the shapes the backend refuses on input alone.
+#[test]
+fn the_install_range_hint_flags_what_the_backend_would_refuse() {
+    assert_eq!(install_range_problem("", ""), None);
+    assert_eq!(install_range_problem("2026-03-01", ""), None);
+    assert_eq!(install_range_problem("2026-03-01", "2026-03-01"), None);
+    assert!(install_range_problem("", "2026-03-31").is_some());
+    assert!(install_range_problem("2026-03-31", "2026-03-01").is_some());
+}
+
+/// Restoring a preset inverts `filter_params`: the saved end-of-day bound floors
+/// back to the day the operator picked, and no range means the relative control.
+#[test]
+fn install_window_fields_invert_the_saved_range() {
+    let f = filter_params(install_inputs(true, "2026-03-01", "2026-03-31"));
+    assert_eq!(
+        install_window_fields(f.installed_after, f.installed_before),
+        (true, "2026-03-01".to_string(), "2026-03-31".to_string())
+    );
+    assert_eq!(
+        install_window_fields(None, None),
+        (false, String::new(), String::new())
+    );
 }
 
 #[test]
@@ -1315,7 +1397,7 @@ fn filter_chips_emits_only_non_default_facets() {
         detected_window: "7".to_string(),
         detected_after: String::new(),
         detected_before: String::new(),
-        install_days: Some(30),
+        install_window: Some("last 30d".to_string()),
     };
     let chips = filter_chips(&full);
     let labels: Vec<&str> = chips.iter().map(|c| c.label.as_str()).collect();
@@ -2828,5 +2910,62 @@ fn a_capped_device_row_list_is_labelled_as_partial() {
     assert_eq!(
         device_rows_note(1_000, 1_250),
         Some("Showing the first 1,000 of 1,250 rows — sorting applies to these.".into())
+    );
+}
+
+/// The fleet line reads the two approval totals with thousands separators.
+#[test]
+fn the_approval_totals_line_names_both_halves_of_the_workflow() {
+    assert_eq!(
+        approval_totals_line(1_204, 3),
+        "1,204 awaiting approval \u{00b7} 3 approved, not installed"
+    );
+}
+
+/// "Stuck" means nothing without the threshold, and a capped list must say it is
+/// capped — the wire copy carries only the oldest devices.
+#[test]
+fn the_stuck_approvals_caption_states_the_threshold_and_the_cap() {
+    assert_eq!(stuck_approvals_caption(0, 0, 0, 30), None);
+    let one = stuck_approvals_caption(1, 1, 1, 30).unwrap();
+    assert!(one.starts_with("1 approved patch on 1 device still not installed more than 30 days"));
+    assert!(!one.contains("Showing"), "nothing was capped: {one}");
+    let capped = stuck_approvals_caption(200, 1_523, 4_100, 14).unwrap();
+    assert!(
+        capped.contains("4,100 approved patches on 1,523 devices"),
+        "{capped}"
+    );
+    assert!(capped.contains("more than 14 days"), "{capped}");
+    assert!(
+        capped.contains("Showing the oldest 200 of 1,523"),
+        "{capped}"
+    );
+}
+
+/// The demo's product labels must agree with the backend's; these are the same
+/// cases `rows::tests` pins, so a drift fails on both sides.
+#[test]
+fn product_names_strip_one_trailing_version_like_the_backend() {
+    for (title, want) in [
+        ("Google Chrome 141.0.7390.55", "Google Chrome"),
+        ("OpenSSL 3.0.16-1ubuntu1", "OpenSSL"),
+        ("Zoom Workplace (64-bit) v6.4.3", "Zoom Workplace (64-bit)"),
+        ("OpenSSL 3.0.16 (libssl)", "OpenSSL 3.0.16 (libssl)"),
+        ("Microsoft Office 2016", "Microsoft Office 2016"),
+        ("1.2.3", "1.2.3"),
+    ] {
+        assert_eq!(strip_version_token(title), want, "{title:?}");
+    }
+    assert_eq!(
+        product_display_name([
+            ("Google Chrome 138", 5),
+            ("Google Chrome 141.0.7390.55", 3),
+            ("Google Chrome 141.0.7390.66", 4),
+        ]),
+        "Google Chrome"
+    );
+    assert_eq!(
+        product_display_name([("Beta Tool 1.0", 2), ("alpha tool 2.0", 2)]),
+        "alpha tool"
     );
 }

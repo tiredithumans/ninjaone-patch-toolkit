@@ -18,6 +18,7 @@ fn sample_result() -> QueryResult {
         time_to_install: Default::default(),
         sla_policy: Default::default(),
         instance: "https://app.ninjarmm.com".into(),
+        approvals: Default::default(),
         devices_total: 0,
         devices_offline: 0,
         devices_unpatchable: 0,
@@ -72,6 +73,7 @@ fn result_with_devices(names: &[&str]) -> QueryResult {
                 installed_date: None,
                 first_seen_ts: None,
                 installed_ts: None,
+                product_identifier: None,
             })
             .collect(),
         ..sample_result()

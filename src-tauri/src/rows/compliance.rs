@@ -192,6 +192,12 @@ pub struct ComplianceBucket {
     /// Pending Critical/Important patches first seen longer ago than the SLA
     /// window — the backlog that has aged past target.
     pub aged_critical: usize,
+    /// Patches, of any severity, NinjaOne holds for an approval decision (vendor
+    /// status `MANUAL`) — waiting on a person. See [`approval_state`].
+    pub awaiting_approval: usize,
+    /// Patches, of any severity, already `APPROVED` and still not installed —
+    /// waiting on the agent.
+    pub approved_not_installed: usize,
 }
 
 /// One compliance bucket under construction, keyed by whatever the caller groups on.
@@ -201,6 +207,43 @@ struct ComplianceAcc {
     compliant: usize,
     pending_critical: usize,
     aged_critical: usize,
+    awaiting_approval: usize,
+    approved_not_installed: usize,
+}
+
+/// Where a current-feed record stands in NinjaOne's approval workflow, read from
+/// the **vendor's** `status` on the cached [`Patch`] — never from a row's display
+/// status.
+///
+/// The distinction matters because the two ends of the pipeline stall for
+/// different reasons: `MANUAL` (NinjaOne's "Pending", i.e. pending approval) is
+/// waiting on a person, `APPROVED` is waiting on the agent. Both count as pending
+/// in [`is_pending`], so the compliance percentage cannot tell them apart.
+///
+/// Deliberately *not* the row status. `assemble_result` gives the current sources
+/// `status_override = MANUAL` so an untyped record matches the Pending selection
+/// and renders as PENDING — a display decision. Reading that here would file every
+/// untyped record as "awaiting approval", a claim the vendor never made. The
+/// rollups take the raw cached records (the override only ever reaches
+/// `build_rows`), so an untyped, `FAILED` or never-seen status is pending but in
+/// **neither** column, and the two columns can sum to less than the pending count.
+/// Compared exactly, like [`is_pending`]: `status` is free-form in the spec, and
+/// this crate has only ever seen it upper-case.
+pub(super) fn approval_state(status: Option<&str>) -> Option<ApprovalState> {
+    match status {
+        Some("MANUAL") => Some(ApprovalState::Awaiting),
+        Some("APPROVED") => Some(ApprovalState::Approved),
+        _ => None,
+    }
+}
+
+/// See [`approval_state`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ApprovalState {
+    /// `MANUAL`: pending an approval decision.
+    Awaiting,
+    /// `APPROVED`: approved, not yet installed.
+    Approved,
 }
 
 impl ComplianceAcc {
@@ -346,7 +389,11 @@ fn accumulate_compliance<'a>(
         let Some(device) = rollup_device(devices_by_id, p.device_id) else {
             continue;
         };
-        if !counts_toward_backlog(p) {
+        // The approval split counts every severity (it describes the workflow, not
+        // the urgency); the SLA backlog only Important and above.
+        let approval = approval_state(p.status.as_deref());
+        let backlog = counts_toward_backlog(p);
+        if approval.is_none() && !backlog {
             continue;
         }
         let key = patch_key(Some(device));
@@ -354,9 +401,16 @@ fn accumulate_compliance<'a>(
             Some(acc) => acc,
             None => by_key.entry(key.into_owned()).or_default(),
         };
-        acc.pending_critical += 1;
-        if sla.is_aged(p) {
-            acc.aged_critical += 1;
+        match approval {
+            Some(ApprovalState::Awaiting) => acc.awaiting_approval += 1,
+            Some(ApprovalState::Approved) => acc.approved_not_installed += 1,
+            None => {}
+        }
+        if backlog {
+            acc.pending_critical += 1;
+            if sla.is_aged(p) {
+                acc.aged_critical += 1;
+            }
         }
     }
 
@@ -391,6 +445,8 @@ pub fn build_compliance(
             compliance_pct: a.pct(),
             pending_critical: a.pending_critical,
             aged_critical: a.aged_critical,
+            awaiting_approval: a.awaiting_approval,
+            approved_not_installed: a.approved_not_installed,
         })
         .collect();
     buckets.sort_by_cached_key(|b| b.organization.to_lowercase());
@@ -409,6 +465,8 @@ pub struct OsCompliance {
     pub compliance_pct: f64,
     pub pending_critical: usize,
     pub aged_critical: usize,
+    pub awaiting_approval: usize,
+    pub approved_not_installed: usize,
 }
 
 /// Computes compliance grouped by OS name, mirroring [`build_compliance`] (offline
@@ -439,6 +497,8 @@ pub fn build_compliance_by_os(
             compliance_pct: a.pct(),
             pending_critical: a.pending_critical,
             aged_critical: a.aged_critical,
+            awaiting_approval: a.awaiting_approval,
+            approved_not_installed: a.approved_not_installed,
         })
         .collect();
     buckets.sort_by_cached_key(|b| b.os.to_lowercase());
@@ -554,7 +614,7 @@ fn included_count(d: &DeviceSummary, n: usize) -> TableCell {
 
 impl ComplianceBucket {
     /// The per-organization compliance columns.
-    pub const COLUMNS: [TableColumn<ComplianceBucket>; 6] = [
+    pub const COLUMNS: [TableColumn<ComplianceBucket>; 8] = [
         ("Organization", |b| TableCell::Text(b.organization.clone())),
         ("Devices", |b| TableCell::Count(b.devices_total)),
         ("Compliant", |b| TableCell::Count(b.devices_compliant)),
@@ -563,13 +623,19 @@ impl ComplianceBucket {
             TableCell::Count(b.pending_critical)
         }),
         ("Aged (past SLA)", |b| TableCell::Count(b.aged_critical)),
+        ("Awaiting Approval", |b| {
+            TableCell::Count(b.awaiting_approval)
+        }),
+        ("Approved, Not Installed", |b| {
+            TableCell::Count(b.approved_not_installed)
+        }),
     ];
 }
 
 impl OsCompliance {
     /// The per-OS compliance columns. Same shape as [`ComplianceBucket::COLUMNS`]
     /// apart from the leading identity column.
-    pub const COLUMNS: [TableColumn<OsCompliance>; 6] = [
+    pub const COLUMNS: [TableColumn<OsCompliance>; 8] = [
         ("OS", |b| TableCell::Text(b.os.clone())),
         ("Devices", |b| TableCell::Count(b.devices_total)),
         ("Compliant", |b| TableCell::Count(b.devices_compliant)),
@@ -578,6 +644,12 @@ impl OsCompliance {
             TableCell::Count(b.pending_critical)
         }),
         ("Aged (past SLA)", |b| TableCell::Count(b.aged_critical)),
+        ("Awaiting Approval", |b| {
+            TableCell::Count(b.awaiting_approval)
+        }),
+        ("Approved, Not Installed", |b| {
+            TableCell::Count(b.approved_not_installed)
+        }),
     ];
 }
 

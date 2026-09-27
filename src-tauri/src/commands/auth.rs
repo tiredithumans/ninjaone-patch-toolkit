@@ -137,6 +137,7 @@ mod tests {
             time_to_install: Default::default(),
             sla_policy: Default::default(),
             instance: "https://app.ninjarmm.com".into(),
+            approvals: Default::default(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,

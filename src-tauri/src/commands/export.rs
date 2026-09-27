@@ -159,6 +159,7 @@ pub async fn export_patches_xlsx(
                 offline_backlog: &result.offline_backlog,
                 time_to_install: &result.time_to_install,
             },
+            &result.approvals,
             &WorkbookMeta {
                 generated_at: &result.generated_at,
                 data_fetched_at: &result.data_fetched_at,
@@ -465,6 +466,7 @@ mod tests {
             time_to_install: Default::default(),
             sla_policy: Default::default(),
             instance: "https://app.ninjarmm.com".into(),
+            approvals: Default::default(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,

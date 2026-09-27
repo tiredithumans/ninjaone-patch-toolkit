@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{Device, Severity};
+use crate::settings::MAX_WINDOW_DAYS;
 
 /// Filter facets chosen by the operator in the UI. The device inventory and current
 /// patches are prefetched **whole-fleet** and cached, so every identity facet
@@ -49,6 +50,25 @@ pub struct FilterParams {
     pub detected_after: Option<i64>,
     #[serde(default)]
     pub detected_before: Option<i64>,
+    /// Absolute install-history range (Unix seconds) for reviewing one patch window,
+    /// e.g. last month's Patch Tuesday cycle. When `installed_after` is set it
+    /// **replaces** the relative lookback (`install_after_days` / the configured
+    /// window) outright rather than intersecting with it: an operator reviewing
+    /// March does not expect a 30-day default to silently truncate it. `None` for
+    /// both = the relative lookback applies. Validated by [`install_range`](Self::install_range).
+    #[serde(default)]
+    pub installed_after: Option<i64>,
+    /// Inclusive upper bound of the absolute range; `None` = open-ended (up to now).
+    #[serde(default)]
+    pub installed_before: Option<i64>,
+}
+
+/// A validated absolute install-history range, as Unix seconds. See
+/// [`FilterParams::install_range`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallRange {
+    pub after: i64,
+    pub before: Option<i64>,
 }
 
 /// Deserializes an id facet from `null`, a bare id, or a list of ids, then sorts and
@@ -134,6 +154,43 @@ impl FilterParams {
     pub fn patch_filter(&self) -> Option<String> {
         let parts = self.identity_clauses();
         (!parts.is_empty()).then(|| parts.join(" AND "))
+    }
+
+    /// The absolute install-history range, validated against `now` (Unix seconds).
+    /// `Ok(None)` when no range is set, i.e. the relative lookback applies.
+    ///
+    /// Rejected rather than repaired, because each of these would otherwise run a
+    /// query whose export states a window nobody asked for: an end without a start
+    /// (there is no sensible start to invent — the relative lookback anchors on
+    /// *now*, not on the end date), a start after the end or in the future (matches
+    /// nothing, and reads as "no installs happened"), a negative bound, or a span
+    /// longer than the [`MAX_WINDOW_DAYS`] the relative window is capped at — an
+    /// unbounded range is a whole-tenant history pull the relative control cannot
+    /// request either.
+    pub fn install_range(&self, now: i64) -> Result<Option<InstallRange>, String> {
+        let (after, before) = match (self.installed_after, self.installed_before) {
+            (None, None) => return Ok(None),
+            (None, Some(_)) => {
+                return Err("A custom install-history range needs a start date.".into());
+            }
+            (Some(after), before) => (after, before),
+        };
+        if after < 0 || before.is_some_and(|b| b < 0) {
+            return Err("The install-history range has an invalid date.".into());
+        }
+        if after > now {
+            return Err("The install-history range starts in the future.".into());
+        }
+        if before.is_some_and(|b| b < after) {
+            return Err("The install-history range ends before it starts.".into());
+        }
+        let span = before.unwrap_or(now).max(after) - after;
+        if span > MAX_WINDOW_DAYS * 86_400 {
+            return Err(format!(
+                "The install-history range can span at most {MAX_WINDOW_DAYS} days."
+            ));
+        }
+        Ok(Some(InstallRange { after, before }))
     }
 
     /// Lowers the query needles and parses the severity strings **once** into a
@@ -770,5 +827,69 @@ mod tests {
         };
         let by_name = by_name_params.prepare();
         assert!(by_name.search_allowed(None, Some("Cumulative Update")));
+    }
+
+    /// The absolute install range is the one filter that can ask for something
+    /// nonsensical *and* have it printed on an export as though it were a real
+    /// window, so every malformed shape is refused with a message rather than
+    /// quietly repaired.
+    #[test]
+    fn the_install_range_is_validated_rather_than_repaired() {
+        const DAY: i64 = 86_400;
+        let now = 1_700_000_000;
+        let range = |after: Option<i64>, before: Option<i64>| FilterParams {
+            installed_after: after,
+            installed_before: before,
+            ..Default::default()
+        };
+
+        assert_eq!(range(None, None).install_range(now), Ok(None));
+        assert_eq!(
+            range(Some(now - 10 * DAY), Some(now - DAY)).install_range(now),
+            Ok(Some(InstallRange {
+                after: now - 10 * DAY,
+                before: Some(now - DAY),
+            }))
+        );
+        // Open-ended is fine: "everything since the 1st".
+        assert_eq!(
+            range(Some(now - DAY), None).install_range(now),
+            Ok(Some(InstallRange {
+                after: now - DAY,
+                before: None,
+            }))
+        );
+        // A single day (start == end) is a legitimate window.
+        assert!(
+            range(Some(now - DAY), Some(now - DAY))
+                .install_range(now)
+                .is_ok()
+        );
+
+        for (after, before, why) in [
+            (None, Some(now), "an end without a start"),
+            (
+                Some(now - DAY),
+                Some(now - 2 * DAY),
+                "an end before the start",
+            ),
+            (Some(now + DAY), None, "a start in the future"),
+            (Some(-1), None, "a negative bound"),
+            (
+                Some(now - (MAX_WINDOW_DAYS + 1) * DAY),
+                None,
+                "an open range longer than the cap",
+            ),
+            (
+                Some(now - (MAX_WINDOW_DAYS + 5) * DAY),
+                Some(now - 2 * DAY),
+                "a closed range longer than the cap",
+            ),
+        ] {
+            assert!(
+                range(after, before).install_range(now).is_err(),
+                "{why} must be refused"
+            );
+        }
     }
 }

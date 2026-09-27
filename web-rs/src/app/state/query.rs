@@ -12,8 +12,14 @@ impl AppState {
         let statuses = self.filters.statuses.get_untracked();
         // An operator reading "12 failures" must be able to see it meant "12 in 30
         // days" — see `util::needs_install_window`.
-        let install_days = util::needs_install_window(&statuses)
-            .then(|| self.filters.install_days.get_untracked());
+        let install_window = util::needs_install_window(&statuses).then(|| {
+            util::install_window_label(
+                self.filters.install_custom.get_untracked(),
+                self.filters.install_days.get_untracked(),
+                &self.filters.install_after_date.get_untracked(),
+                &self.filters.install_before_date.get_untracked(),
+            )
+        });
 
         let organizations = util::names_for(
             &self.filters.org_ids.get_untracked(),
@@ -56,7 +62,7 @@ impl AppState {
             detected_window: self.filters.detected_window.get_untracked(),
             detected_after: self.filters.detected_after_date.get_untracked(),
             detected_before: self.filters.detected_before_date.get_untracked(),
-            install_days,
+            install_window,
         }
     }
 

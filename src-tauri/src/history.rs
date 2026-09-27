@@ -531,6 +531,8 @@ mod tests {
             compliance_pct: 50.0,
             pending_critical: 1,
             aged_critical: 0,
+            awaiting_approval: 0,
+            approved_not_installed: 0,
         };
         let result = QueryResult {
             rows: Vec::new(),
@@ -552,6 +554,7 @@ mod tests {
             time_to_install: Default::default(),
             sla_policy: Default::default(),
             instance: String::new(),
+            approvals: Default::default(),
             devices_total: 0,
             devices_offline: 0,
             devices_unpatchable: 0,
@@ -605,6 +608,7 @@ mod tests {
                 time_to_install: Default::default(),
                 sla_policy: Default::default(),
                 instance: "https://app.ninjarmm.com".into(),
+                approvals: Default::default(),
                 devices_total: 0,
                 devices_offline: 0,
                 devices_unpatchable: 0,
