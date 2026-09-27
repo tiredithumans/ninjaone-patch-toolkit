@@ -107,6 +107,49 @@ families instead of claiming Type is ignored. The `Type` chip is therefore a **d
 panel renders the Type control *outside* the fold that hides the row-only facets there — for a
 while the chip said "Ignored on this tab" directly above a banner saying the opposite.
 
+## Changes since the previous comparable run
+
+`changes.rs` answers "what moved since last time" by diffing each query against a snapshot of the
+previous one, and three decisions shape what the numbers mean.
+
+- **Comparable is tenant + facets.** The snapshot file is keyed by a hash of the tenant (instance
+  + client id, from the `QueryToken`, i.e. the tenant the rows were *fetched* under) and
+  `changes::scope_key`: `QueryScope::fingerprint` (already canonical and order-insensitive) plus
+  the patch families and — only when installs were fetched — the install lookback, the two
+  inputs the fingerprint leaves out. The tenant and scope are also stamped inside the file and
+  checked on load, so a hash collision or a copied file cannot diff across tenants. Org A against
+  org B would report org A's whole backlog as resolved.
+- **It diffs the detail rows, not the rollup population.** The rows carry every facet (status,
+  severity, search, first-seen window), so the diff describes exactly what the Patches tab lists;
+  a CRITICAL-only scope reports critical changes. The price is that a status selection without
+  Pending/Approved measures no new/resolved, and one without Failed cannot tell a failed install
+  from a resolved one (a failed patch leaves the current feed). `RunChanges` carries
+  `tracks_pending` / `tracks_failed` and every surface prints the resulting caveat
+  (`RunChanges::notes`, mirrored by `util::changes_notes`) instead of showing zeros that read
+  as "nothing changed". A FAILED row is its own category, not pending, and "resolved" excludes
+  anything failed now, so one failure is never listed twice.
+- **Resolved needs display text the current rows do not have.** A resolved patch is absent from
+  this run by definition, so the snapshot stores the pending set's device names and patch titles
+  (interned: device and patch tables, items as index pairs — ~11 bytes a pending row) rather than
+  bare hashes. Failed items use the same form; they are few.
+
+Patch identity is `changes::patch_key`: an OS patch is its normalized KB, anything else its
+lowercased title. It is the one place to adopt `productIdentifier` for third-party patches.
+
+The baseline advances only when a result **wins the cache** (`StoreOutcome::Stored`); a
+superseded run is older than the one that won, and writing it would roll the baseline back. The
+write is atomic (temp + rename, 0600) on a blocking thread; the directory keeps the 20 most
+recently written scopes within 64 MB, always keeping the newest. A run past a million items is
+not written and says so (`too_large`). Consequence worth knowing: every stored run is the next
+baseline, so re-running the same scope over a warm cache reports "no changes since" the run
+seconds earlier — "since the previous run", literally.
+
+The Trend tab's per-organization table reads `history::RunRecord::orgs` (the Compliance tab's
+per-org rows plus each org's pending count), capped at the 100 largest organizations per line so
+an MSP's history file stays bounded; `read_run_history` returns that detail only for the newest
+200 lines, since the table compares only the newest run with the previous comparable one. Cards
+lead with the change against that previous run; the change over the whole series is the footer.
+
 ## "Compliant" and "Pending Critical/Important" grade differently, on purpose
 
 Compliant is `pending_count == 0` over patches of *any* severity (`is_pending`), while the two
