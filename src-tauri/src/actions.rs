@@ -167,7 +167,8 @@ pub enum RebootChoice {
 }
 
 impl RebootChoice {
-    /// The token the PowerShell side expects for `rebootBehavior`.
+    /// The token the PowerShell side expects for `rebootBehavior` — the vocabulary
+    /// `remediation/*.ps1` accept (`ConvertTo-ToolkitRebootBehavior`).
     pub fn script_value(self) -> &'static str {
         match self {
             Self::Never => "Never",
@@ -646,6 +647,9 @@ fn window_label(s: &ActionSettings) -> String {
 /// `ActionKind::Script`, which falls to the `kbAllowList` arm, so a software
 /// remediation script was handed a KB list — and third-party patches carry no KB at
 /// all, so the list was always empty.
+///
+/// The reference scripts in `remediation/` parse this string; the shared fixture
+/// `remediation/tests/fixtures/parameter-contract.json` pins it on both sides.
 pub fn build_parameters(
     kind: ActionKind,
     targets: &[String],
@@ -1480,6 +1484,56 @@ mod tests {
         // The whole point: no spaces leak into what NinjaOne tokenizes.
         assert!(!encoded.contains(' '));
         assert!(params.ends_with(" rebootBehavior=Auto dryRun=false"));
+    }
+
+    /// The reference scripts in `remediation/` parse exactly these strings, and their
+    /// Pester suite reads the same fixture — so a change to the encoding here fails
+    /// this test until the fixture, and with it the scripts' tests, are updated too.
+    #[test]
+    fn build_parameters_matches_the_reference_script_fixture() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Case {
+            name: String,
+            kind: ActionKind,
+            targets: Vec<String>,
+            reboot: RebootChoice,
+            dry_run: bool,
+            parameters: String,
+        }
+        #[derive(Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../remediation/tests/fixtures/parameter-contract.json"
+        ))
+        .expect("fixture parses");
+
+        for case in &fixture.cases {
+            assert_eq!(
+                build_parameters(case.kind, &case.targets, case.reboot, case.dry_run),
+                case.parameters,
+                "{}",
+                case.name
+            );
+        }
+        // Every value of the `rebootBehavior` vocabulary and both encodings are pinned.
+        for reboot in [RebootChoice::Never, RebootChoice::Auto] {
+            assert!(
+                fixture.cases.iter().any(|c| c.reboot == reboot),
+                "{reboot:?} missing from the fixture"
+            );
+        }
+        for kind in [
+            ActionKind::OsPatchRemediate,
+            ActionKind::SoftwarePatchRemediate,
+        ] {
+            assert!(
+                fixture.cases.iter().any(|c| c.kind == kind),
+                "{kind:?} missing from the fixture"
+            );
+        }
     }
 
     fn job(activity_id: Option<i64>, series_uid: Option<&str>, dispatched_ts: i64) -> JobReport {

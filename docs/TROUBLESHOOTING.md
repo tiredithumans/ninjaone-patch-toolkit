@@ -115,6 +115,17 @@ for a *configuration* error — meaning it never received its parameters. Either
 entry is missing the **String / Overridable** `kbAllowList`, `rebootBehavior` and `dryRun`
 script variables, or the script has no `param()` block to catch positional arguments.
 
+With the reference scripts in [`remediation/`](../remediation/README.md#exit-codes), each exit
+code means something specific:
+
+- **1**: bad or empty input.
+- **2**: none of the listed KBs is offered to the device.
+- **3**: at least one KB failed, is hidden, or wasn't offered.
+- **4**: the updates installed, but `rebootBehavior=Never` held back a required restart.
+- **5**: the Windows Update Agent or elevation failed.
+- **10**: the software script has no install mechanism configured yet, so it installed nothing.
+  This is by design.
+
 Also confirm you configured the right script: two files in `ninjaone-scripts` share the name
 `Install-CriticalSecurityUpdates.ps1`, and only the one under `Windows/Install/` accepts
 command-line arguments. Binding by numeric **ID** rather than name avoids picking the wrong

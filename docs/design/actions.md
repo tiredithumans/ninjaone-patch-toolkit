@@ -52,6 +52,14 @@ hand-typed string (sent verbatim) and the native endpoints are not checked again
 never send. `build_parameters` also drops a malformed KB, in case a caller skips the planner.
 Software targets are free-form product titles and need no such check: they travel base64-encoded.
 
+The receiving end is [`remediation/`](../../remediation/README.md): reference scripts that parse
+exactly this string, strictly (an unknown key, a malformed KB or an empty list exits 1 rather
+than installing nothing and reporting success). `remediation/tests/fixtures/parameter-contract.json`
+is read by both `build_parameters_matches_the_reference_script_fixture` and the scripts' Pester
+suites, so changing the encoding here fails a test until the scripts follow. A library script is
+only offered per-KB targeting or dry run when it **declares** the `kbAllowList` / `dryRun` script
+variable (`AutomationScript`), so the import instructions there name the variables to declare.
+
 ## Selection is per patch row; dispatch is per device, with per-device targets
 
 `DeviceSelection.patches` maps each ticked row's `patch_key` → a `SelectedPatch { kb, name,
