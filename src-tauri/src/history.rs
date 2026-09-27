@@ -431,6 +431,7 @@ mod tests {
                 devices_unpatchable: 0,
                 patch_families: families,
                 scope: build_query_scope(&filter, &maps, families, &[PatchStatus::Pending], None),
+                changes: Default::default(),
                 generated_at: "2026-09-01 10:00:00 UTC".into(),
                 data_fetched_at: "2026-09-01 10:00:00 UTC".into(),
             };

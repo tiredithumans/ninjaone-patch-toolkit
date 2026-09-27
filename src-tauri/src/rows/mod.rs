@@ -24,6 +24,7 @@ pub use rollups::*;
 pub use scope::*;
 pub use table::*;
 
+use crate::changes::RunChanges;
 use crate::model::PatchRow;
 use serde::Serialize;
 
@@ -75,6 +76,9 @@ pub struct QueryResult {
     /// The facets this result was computed under, for the exports' provenance block.
     /// `QueryResult`-only on purpose — see [`QueryScope`].
     pub scope: QueryScope,
+    /// What changed since the previous comparable run (`crate::changes`). Filled in
+    /// by `query_patches` after the join, since it needs the stored snapshot.
+    pub changes: RunChanges,
     /// When the query was computed (the join/rollup clock).
     pub generated_at: String,
     /// When the underlying whole-fleet patch data was last fetched from NinjaOne —
@@ -136,6 +140,9 @@ pub struct QuerySummary {
     /// on such a query, which is a defensible reading but not one the operator can
     /// infer from a bare percentage. Reported so every surface can name its scope.
     pub patch_families: PatchFamilies,
+    /// What changed since the previous comparable run — counts plus capped lists,
+    /// so it ships whole.
+    pub changes: RunChanges,
     pub generated_at: String,
     /// When the underlying whole-fleet patch data was last fetched (see
     /// [`QueryResult::data_fetched_at`]).
@@ -164,6 +171,7 @@ impl QuerySummary {
             devices_offline: result.devices_offline,
             devices_unpatchable: result.devices_unpatchable,
             patch_families: result.patch_families,
+            changes: result.changes.clone(),
             generated_at: result.generated_at.clone(),
             data_fetched_at: result.data_fetched_at.clone(),
         }

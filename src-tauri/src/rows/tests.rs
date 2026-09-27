@@ -656,6 +656,7 @@ fn query_result_serializes_camel_case_for_the_frontend() {
             software: true,
         },
         scope: Default::default(),
+        changes: Default::default(),
         generated_at: "2026-01-01 00:00 UTC".into(),
         data_fetched_at: "2026-01-01 00:00 UTC".into(),
     };
@@ -719,6 +720,7 @@ fn query_summary_trims_to_first_page_and_reboot_subset() {
             software: true,
         },
         scope: Default::default(),
+        changes: Default::default(),
         generated_at: "2026-01-01 00:00 UTC".into(),
         data_fetched_at: "2026-01-01 00:00 UTC".into(),
     };
@@ -1068,6 +1070,7 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             software: true,
         },
         scope: Default::default(),
+        changes: Default::default(),
         generated_at: "2026-01-01 00:00:00 UTC".into(),
         data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
     };
@@ -1086,10 +1089,46 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "devicesOffline",
             "devicesUnpatchable",
             "patchFamilies",
+            "changes",
             "generatedAt",
             "dataFetchedAt",
         ],
         "QuerySummary",
+    );
+
+    // The changes aggregate with a populated list, so `ChangeItem`'s keys are
+    // checked too and not just an empty array's.
+    let statuses = [PatchStatus::Pending];
+    let before = crate::changes::RunSnapshot::build(&[], "t", "s".into(), "t0", &statuses);
+    let now = crate::changes::RunSnapshot::build(&result.rows, "t", "s".into(), "t1", &statuses);
+    let changes = serde_json::to_value(crate::changes::diff(Some(&before), &now)).unwrap();
+    assert_keys_present(
+        &changes,
+        &[
+            "previousAt",
+            "tracksPending",
+            "tracksFailed",
+            "tooLarge",
+            "newPending",
+            "resolved",
+            "newlyFailed",
+            "newPendingItems",
+            "resolvedItems",
+            "newlyFailedItems",
+        ],
+        "RunChanges",
+    );
+    assert_keys_present(
+        &changes["newPendingItems"][0],
+        &[
+            "deviceId",
+            "deviceName",
+            "patchType",
+            "kb",
+            "name",
+            "severity",
+        ],
+        "ChangeItem",
     );
 }
 

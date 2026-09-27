@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+
+use crate::changes::{ChangeRow, RunChanges};
 use rust_xlsxwriter::{Color, Format, Workbook};
 
 use crate::model::PatchRow;
@@ -64,6 +66,8 @@ const FAILURE_WIDTHS: [f64; FailureGroup::COLUMNS.len()] =
 /// Column widths for the About sheet's label/value pair.
 const ABOUT_WIDTHS: [f64; 2] = [24.0, 64.0];
 
+const CHANGE_WIDTHS: [f64; ChangeRow::COLUMNS.len()] = [16.0, 24.0, 12.0, 14.0, 60.0, 12.0];
+
 /// What the workbook's numbers describe and when they were taken.
 ///
 /// Until this existed the workbook carried **no** timestamp at all — the only stamp
@@ -86,6 +90,8 @@ pub struct WorkbookMeta<'a> {
     pub scope: &'a QueryScope,
     /// The sentence `rows::compliance_scope_note` builds.
     pub scope_note: &'a str,
+    /// What changed since the previous comparable run; the Changes sheet.
+    pub changes: &'a RunChanges,
 }
 
 fn header_format() -> Format {
@@ -216,6 +222,13 @@ fn write_workbook_split(
         )?;
     }
 
+    // Written whenever there is a baseline, even with nothing in it: "nothing
+    // changed since Tuesday" is an answer. With no baseline there is nothing to
+    // tabulate, and a sheet of headers would read as that same answer.
+    if meta.changes.previous_at.is_some() {
+        write_changes_sheet(&mut workbook, &header, meta.changes)?;
+    }
+
     // Last, so the workbook still opens on the detail table the operator asked for
     // (Excel activates the first sheet), and so the provenance sits outside every
     // data range rather than trailing a sheet someone will sort or filter.
@@ -294,6 +307,34 @@ fn write_about_sheet(
 
     sheet.write_string(row + 2, 0, meta.scope_note)?;
     apply_widths(sheet, &ABOUT_WIDTHS)?;
+    Ok(())
+}
+
+/// The Changes sheet: every listed change through the shared columns, then the
+/// headline and its caveats under the data, where the other sheets put their notes.
+fn write_changes_sheet(
+    workbook: &mut Workbook,
+    header: &Format,
+    changes: &RunChanges,
+) -> Result<()> {
+    let rows = changes.table_rows();
+    write_sheet(
+        workbook,
+        header,
+        "Changes",
+        &ChangeRow::COLUMNS,
+        &CHANGE_WIDTHS,
+        &rows,
+        false,
+    )?;
+    let last = workbook.worksheets().len() - 1;
+    let sheet = workbook.worksheet_from_index(last)?;
+    let lines = std::iter::once(changes.headline()).chain(changes.notes());
+    for (i, line) in lines.enumerate() {
+        sheet
+            .write_string((rows.len() + 2 + i) as u32, 0, line)
+            .context("write changes note")?;
+    }
     Ok(())
 }
 
@@ -398,8 +439,11 @@ mod tests {
                 ..Default::default()
             }),
             scope_note: NOTE,
+            changes: CHANGES.get_or_init(RunChanges::default),
         }
     }
+
+    static CHANGES: std::sync::OnceLock<RunChanges> = std::sync::OnceLock::new();
 
     fn sample_row() -> PatchRow {
         PatchRow {
@@ -648,6 +692,74 @@ mod tests {
         );
         assert_eq!(reboot_range.get_value((1, 3)).unwrap().to_string(), "srv07");
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_changes_sheet_lists_each_change_and_states_its_baseline() {
+        use crate::changes::ChangeItem;
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = std::env::temp_dir().join("npt-export-changes.xlsx");
+        let item = |device: &str| ChangeItem {
+            device_id: 1,
+            device_name: device.into(),
+            patch_type: "OS".into(),
+            kb: Some("KB5040434".into()),
+            name: "Cumulative Update".into(),
+            severity: "Critical".into(),
+            severity_rank: 5,
+        };
+        let changes = RunChanges {
+            previous_at: Some("2026-05-01 09:00:00 UTC".into()),
+            tracks_pending: true,
+            tracks_failed: false,
+            new_pending: 1,
+            resolved: 1,
+            new_pending_items: vec![item("srv01")],
+            resolved_items: vec![item("srv02")],
+            ..Default::default()
+        };
+        let with_changes = WorkbookMeta {
+            changes: &changes,
+            ..meta()
+        };
+        write_workbook(
+            &path.to_string_lossy(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &with_changes,
+        )
+        .unwrap();
+
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let range = wb.worksheet_range("Changes").unwrap();
+        assert_eq!(range.get_value((0, 0)).unwrap().to_string(), "Change");
+        assert_eq!(
+            range.get_value((1, 0)).unwrap().to_string(),
+            "Newly pending"
+        );
+        assert_eq!(range.get_value((2, 0)).unwrap().to_string(), "Resolved");
+        assert_eq!(range.get_value((2, 1)).unwrap().to_string(), "srv02");
+        assert_eq!(
+            range.get_value((4, 0)).unwrap().to_string(),
+            "Since 2026-05-01 09:00:00 UTC: 1 newly pending, 1 resolved, 0 newly failed."
+        );
+        let notes: Vec<String> = (5..8)
+            .filter_map(|r| range.get_value((r, 0)).map(|v| v.to_string()))
+            .collect();
+        assert!(
+            notes.iter().any(|n| n.contains("Failed is not selected")),
+            "the caveat that resolved includes failed installs travels with the sheet: {notes:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        // No baseline: no sheet, rather than an empty table reading "nothing changed".
+        write_workbook(&path.to_string_lossy(), &[], &[], &[], &[], &[], &meta()).unwrap();
+        let wb: Xlsx<_> = open_workbook(&path).unwrap();
+        assert!(!wb.sheet_names().contains(&"Changes".to_string()));
         let _ = std::fs::remove_file(&path);
     }
 
