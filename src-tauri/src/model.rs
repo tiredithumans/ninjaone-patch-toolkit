@@ -281,6 +281,13 @@ pub struct Patch {
     pub collected_timestamp: Option<f64>,
     #[serde(default, alias = "installedAt")]
     pub installed_timestamp: Option<f64>,
+    /// `productIdentifier` on `DeviceSoftwarePatch` — the uuid of the third-party
+    /// *product*, shared by every version of it. `DeviceOSPatch` declares no such
+    /// field, so OS records always leave it `None`. It is what lets the Patches view
+    /// group "Google Chrome 141.0.7390.55" and "Google Chrome 141.0.7390.66" as one
+    /// product instead of one group per version string (`rows::GroupBy::Product`).
+    #[serde(default)]
+    pub product_identifier: Option<String>,
 }
 
 impl Patch {
@@ -483,6 +490,9 @@ pub struct PatchRow {
     pub installed_date: Option<String>,
     pub first_seen_ts: Option<i64>,
     pub installed_ts: Option<i64>,
+    /// [`Patch::product_identifier`], shared across the row set like the other
+    /// repeated strings. `None` on every OS row.
+    pub product_identifier: Option<Arc<str>>,
 }
 
 /// How `POST /v2/device/{id}/reboot/{mode}` is addressed. `Forced` skips the
@@ -976,6 +986,7 @@ mod tests {
             patch_type: None,
             collected_timestamp: Some(ts),
             installed_timestamp: None,
+            product_identifier: None,
         }
     }
 

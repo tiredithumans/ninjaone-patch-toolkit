@@ -459,6 +459,7 @@ mod tests {
             installed_date: None,
             first_seen_ts: Some(1_777_000_000),
             installed_ts: None,
+            product_identifier: None,
         }
     }
 

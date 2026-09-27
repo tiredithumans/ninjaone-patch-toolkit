@@ -414,6 +414,7 @@ fn cur(device_id: i64, kb: &str, status: &str, severity: &str) -> Patch {
         patch_type: None,
         collected_timestamp: Some(fixed_now().timestamp() as f64),
         installed_timestamp: None,
+        product_identifier: None,
     }
 }
 

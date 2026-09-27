@@ -67,6 +67,7 @@ fn result_with_devices(names: &[&str]) -> QueryResult {
                 installed_date: None,
                 first_seen_ts: None,
                 installed_ts: None,
+                product_identifier: None,
             })
             .collect(),
         ..sample_result()

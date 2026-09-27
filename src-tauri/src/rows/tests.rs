@@ -152,6 +152,7 @@ fn patch(device_id: i64, status: &str, sev: &str, first_seen_days_ago: Option<i6
         collected_timestamp: first_seen_days_ago
             .map(|d| (Utc::now() - Duration::days(d)).timestamp() as f64),
         installed_timestamp: None,
+        product_identifier: None,
     }
 }
 
@@ -897,6 +898,8 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "status",
             "firstSeenDate",
             "installedDate",
+            // The demo's product grouping reads it off the row.
+            "productIdentifier",
         ],
         "PatchRow",
     );
@@ -1236,6 +1239,222 @@ fn group_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, rank: u
     }
 }
 
+/// A third-party row on `device` carrying `product` as its `productIdentifier`.
+fn product_row(
+    device_id: i64,
+    device: &str,
+    title: &str,
+    product: Option<&str>,
+    rank: u8,
+) -> PatchRow {
+    PatchRow {
+        product_identifier: product.map(Into::into),
+        ..group_row(device_id, device, None, title, rank)
+    }
+}
+
+/// The trailing version is what makes every Chrome build its own title; it goes,
+/// and only it. A bare number stays — "Office 2016" and "Java 8 Update 451" are
+/// names, not versions — and a title that is only a version is not emptied.
+#[test]
+fn a_trailing_version_token_is_stripped_and_nothing_else() {
+    for (title, want) in [
+        ("Google Chrome 141.0.7390.55", "Google Chrome"),
+        ("Mozilla Firefox 140.0", "Mozilla Firefox"),
+        ("7-Zip 24.09", "7-Zip"),
+        ("Notepad++ 8.7.6", "Notepad++"),
+        ("OpenSSL 3.0.16-1ubuntu1", "OpenSSL"),
+        ("Zoom Workplace (64-bit) v6.4.3", "Zoom Workplace (64-bit)"),
+        ("OpenSSL 3.0.16 (libssl)", "OpenSSL 3.0.16 (libssl)"),
+        ("Microsoft Office 2016", "Microsoft Office 2016"),
+        ("Java 8 Update 451", "Java 8 Update 451"),
+        ("1.2.3", "1.2.3"),
+        ("  Slack  4.41.105 ", "Slack"),
+        ("", ""),
+    ] {
+        assert_eq!(strip_version_token(title), want, "{title:?}");
+    }
+}
+
+/// The label is the most common version-free title, and ties resolve the same
+/// way whatever order the rows arrived in.
+#[test]
+fn a_product_label_is_the_most_common_version_free_title() {
+    assert_eq!(
+        product_display_name([
+            ("Google Chrome 138", 5),
+            ("Google Chrome 141.0.7390.55", 3),
+            ("Google Chrome 141.0.7390.66", 4),
+        ]),
+        "Google Chrome",
+        "3 + 4 rows strip to one name and outvote the 5 that do not strip"
+    );
+    let forward = product_display_name([("Beta Tool 1.0", 2), ("alpha tool 2.0", 2)]);
+    let reverse = product_display_name([("alpha tool 2.0", 2), ("Beta Tool 1.0", 2)]);
+    assert_eq!(forward, reverse);
+    assert_eq!(
+        forward, "alpha tool",
+        "a tie goes to the case-insensitive first"
+    );
+    assert_eq!(product_display_name([]), "");
+}
+
+/// Grouping by product folds every version of a third-party product into one
+/// group labelled with the product's name, and leaves everything without a
+/// product — OS patches, and a software record missing its identifier — keyed
+/// exactly as grouping by patch keys it.
+#[test]
+fn build_groups_by_product_folds_versions_and_falls_back_to_the_patch_key() {
+    let rows = vec![
+        product_row(
+            1,
+            "web-01",
+            "Google Chrome 141.0.7390.55",
+            Some("chrome"),
+            3,
+        ),
+        product_row(
+            2,
+            "web-02",
+            "Google Chrome 141.0.7390.66",
+            Some("chrome"),
+            5,
+        ),
+        product_row(
+            3,
+            "web-03",
+            "Google Chrome 141.0.7390.66",
+            Some("chrome"),
+            3,
+        ),
+        product_row(1, "web-01", "7-Zip 24.09", Some("7zip"), 2),
+        product_row(2, "web-02", "Legacy Tool 1.0", None, 2),
+        group_row(1, "web-01", Some("KB1"), "Cumulative Update", 7),
+    ];
+    let groups = build_groups(&rows, GroupBy::Product);
+    assert_eq!(
+        groups.len(),
+        4,
+        "chrome, 7-Zip, the id-less tool and the KB"
+    );
+
+    let chrome = &groups[0];
+    assert_eq!(&*chrome.label, "Google Chrome");
+    assert_eq!(chrome.sublabel.as_deref(), Some("2 versions"));
+    assert_eq!((chrome.rows, chrome.devices), (3, 3));
+    assert_eq!(chrome.severity_rank, 5, "the worst member's severity");
+
+    let zip = groups.iter().find(|g| &*g.label == "7-Zip").expect("7-Zip");
+    assert_eq!(zip.sublabel, None, "one version needs no count");
+
+    // The fallbacks are indistinguishable from their by-patch groups.
+    let by_patch = build_groups(&rows, GroupBy::Patch);
+    for fallback in [&rows[4], &rows[5]] {
+        let key = group_key(fallback, GroupBy::Product);
+        assert_eq!(key, group_key(fallback, GroupBy::Patch));
+        let a = groups
+            .iter()
+            .find(|g| g.key == key)
+            .expect("product-mode group");
+        let b = by_patch
+            .iter()
+            .find(|g| g.key == key)
+            .expect("patch-mode group");
+        assert_eq!(
+            (&a.label, &a.sublabel, a.rows),
+            (&b.label, &b.sublabel, b.rows)
+        );
+    }
+}
+
+/// A product key is two fields and a patch key three, so neither can pass for
+/// the other; and in product mode a row that has a product belongs only to its
+/// product group, even beside an id-less row with identical fields.
+#[test]
+fn product_members_partition_the_rows_and_keys_cannot_cross_modes() {
+    let rows = vec![
+        product_row(1, "web-01", "Tool 1.0", Some("tool"), 2),
+        product_row(2, "web-02", "Tool 1.0", None, 2),
+        product_row(3, "web-03", "Tool 1.1", Some("tool"), 2),
+        group_row(1, "web-01", Some("KB1"), "Cumulative Update", 7),
+    ];
+    let groups = build_groups(&rows, GroupBy::Product);
+    let mut seen = 0;
+    for g in &groups {
+        let members = group_member_page(&rows, GroupBy::Product, &g.key, 0, 100);
+        assert_eq!(members.len(), g.rows, "{:?}", g.key);
+        seen += members.len();
+    }
+    assert_eq!(
+        seen,
+        rows.len(),
+        "every row in exactly one product-mode group"
+    );
+
+    let product_key = group_key(&rows[0], GroupBy::Product);
+    assert!(
+        group_member_page(&rows, GroupBy::Patch, &product_key, 0, 100).is_empty(),
+        "a product key means nothing to the by-patch view"
+    );
+    let tool = group_member_page(&rows, GroupBy::Product, &product_key, 0, 100);
+    assert_eq!(
+        tool.iter().map(|r| r.device_id).collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+}
+
+/// The join carries the vendor's `productIdentifier` onto the row, from a record
+/// shaped exactly as `DeviceSoftwarePatch` is — and shares it like the other
+/// repeated strings.
+#[test]
+fn a_software_rows_product_identifier_survives_the_join() {
+    let d = device(1, 10, "Windows Server 2022");
+    let by_id = HashMap::from([(1, &d)]);
+    let patches: Vec<Patch> = [
+        crate::model::software_patch_json(
+            1,
+            "uuid-chrome",
+            "Google Chrome 141.0.7390.55",
+            "high",
+            "MANUAL",
+        ),
+        crate::model::software_patch_json(
+            1,
+            "uuid-chrome",
+            "Google Chrome 141.0.7390.66",
+            "high",
+            "MANUAL",
+        ),
+    ]
+    .into_iter()
+    .map(|v| serde_json::from_value(v).expect("a DeviceSoftwarePatch deserializes"))
+    .collect();
+    let rows = build_rows(
+        &by_id,
+        &maps(),
+        &[PatchSource {
+            patches: &refs(&patches),
+            type_label: "SOFTWARE",
+            status_override: None,
+            status_filter: None,
+        }],
+        &FilterParams::default().prepare(),
+    );
+    assert_eq!(rows.len(), 2);
+    let ids: Vec<Option<&str>> = rows
+        .iter()
+        .map(|r| r.product_identifier.as_deref())
+        .collect();
+    assert_eq!(ids, vec![Some("uuid-chrome"), Some("uuid-chrome")]);
+    assert!(Arc::ptr_eq(
+        rows[0].product_identifier.as_ref().unwrap(),
+        rows[1].product_identifier.as_ref().unwrap()
+    ));
+    let groups = build_groups(&rows, GroupBy::Product);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(&*groups[0].label, "Google Chrome");
+}
+
 #[test]
 fn build_groups_by_device_rolls_up_rows_and_worst_severity() {
     let rows = vec![
@@ -1292,7 +1511,27 @@ fn group_key_and_matcher_agree() {
         group_row(1, "web-01", None, "Google Chrome 138", 3),
         group_row(3, "db-01", Some("KB2"), "Security Update", 7),
     ];
-    for group_by in [GroupBy::Device, GroupBy::Patch] {
+    let rows: Vec<PatchRow> = rows
+        .into_iter()
+        .chain([
+            product_row(
+                1,
+                "web-01",
+                "Google Chrome 141.0.7390.55",
+                Some("chrome"),
+                3,
+            ),
+            product_row(
+                2,
+                "web-02",
+                "Google Chrome 141.0.7390.66",
+                Some("chrome"),
+                3,
+            ),
+            product_row(2, "web-02", "Google Chrome 138", None, 3),
+        ])
+        .collect();
+    for group_by in [GroupBy::Device, GroupBy::Patch, GroupBy::Product] {
         for row in &rows {
             let key = group_key(row, group_by);
             let matcher = GroupKeyMatcher::new(group_by, &key);
@@ -1609,6 +1848,7 @@ fn failed_row(device_id: i64, device: &str, kb: &str, installed_ts: Option<i64>)
         installed_date: installed_ts.map(|_| "2026-01-01 00:00 UTC".into()),
         first_seen_ts: None,
         installed_ts,
+        product_identifier: None,
     }
 }
 
@@ -2422,12 +2662,32 @@ fn demo_grouping_fixture_is_current() {
             _ => ("Low", 2),
         }
     };
+    //
+    // The product rows exercise `GroupBy::Product`: one product across three
+    // titles, two of which strip to the same name and outvote the third; a
+    // single-version product; and a software record with no identifier, which
+    // must fall back to the by-patch key.
     let mut rows = vec![
         group_row(1, "web-01", Some("KB5040434"), "Cumulative Update", 7),
-        group_row(1, "web-01", None, "Google Chrome 138", 3),
+        product_row(1, "web-01", "Google Chrome 138", Some("chrome-uuid"), 3),
         group_row(2, "web-02", Some("KB5040434"), "Cumulative Update", 7),
         group_row(3, "db-01", Some("KB5031234"), "Security Update", 5),
-        group_row(3, "db-01", None, "7-Zip 24.09", 2),
+        product_row(3, "db-01", "7-Zip 24.09", Some("7zip-uuid"), 2),
+        product_row(
+            2,
+            "web-02",
+            "Google Chrome 138.0.7204.50",
+            Some("chrome-uuid"),
+            3,
+        ),
+        product_row(
+            3,
+            "db-01",
+            "Google Chrome 137.0.7151.69",
+            Some("chrome-uuid"),
+            3,
+        ),
+        product_row(2, "web-02", "Legacy Tool 1.0", None, 2),
     ];
     for row in &mut rows {
         let (label, rank) = sev(row.severity_rank);
@@ -2445,8 +2705,10 @@ fn demo_grouping_fixture_is_current() {
         "rows": rows,
         "byDevice": build_groups(&rows, GroupBy::Device),
         "byPatch": build_groups(&rows, GroupBy::Patch),
+        "byProduct": build_groups(&rows, GroupBy::Product),
         "keysByDevice": rows.iter().map(|r| group_key(r, GroupBy::Device)).collect::<Vec<_>>(),
         "keysByPatch": rows.iter().map(|r| group_key(r, GroupBy::Patch)).collect::<Vec<_>>(),
+        "keysByProduct": rows.iter().map(|r| group_key(r, GroupBy::Product)).collect::<Vec<_>>(),
     });
     let rendered = format!(
         "{}\n",
