@@ -58,14 +58,15 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/rows/                    # join → PatchRow and every rollup off the cached result
 │   ├── mod.rs                   # QueryResult / QuerySummary + re-exports of every submodule
 │   ├── join.rs                  # device↔patch join, Interner, DeviceLabels, build_rows
-│   ├── compliance.rs            # compliance / by-OS / reboot rollups, rollup_device, compliance_scope_note
+│   ├── compliance.rs            # compliance / by-OS / per-device rollups (apply_device_health), rollup_device, compliance_scope_note
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
-│   ├── groups.rs                # grouping, sorting, paging over the cache
+│   ├── groups.rs                # grouping, sorting, paging, device_detail over the cache
 │   ├── scope.rs                 # QueryScope export provenance
 │   ├── table.rs                 # TableCell / TableColumn / format_pct / clamp_cell / join_capped — the shared column definition
 │   └── tests.rs
 ├── src/history.rs               # append-only run-history.jsonl (one rollup line per query) + RunRecord
-├── src/export.rs                # rust_xlsxwriter workbook (Patches [+ Patches (n) past the row limit] / Compliance / by OS / Needs-Reboot / Failures / About)
+├── src/export.rs                # rust_xlsxwriter workbook (Patches [+ Patches (n)] / Compliance / by OS / Devices / Needs-Reboot / Failures / About), real UTC date cells
+├── src/csv_export.rs            # detail-row CSV: BOM, CRLF, RFC 4180 quoting, formula-injection guard
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
@@ -87,11 +88,11 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
 │   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
-│   ├── tables/                  # one file per results tab: patches · compliance · failures · reboot · trend
+│   ├── tables/                  # one file per results tab: patches · compliance · failures · reboot · trend; device (drill-down dialog)
 │   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · toaster.rs · update.rs
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
-│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · tests.rs
+│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · device.rs · tests.rs
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
@@ -157,7 +158,7 @@ Backend — commands, cache, concurrency:
   summary; `TenantChanged`/`Poisoned` are errors (`commands::patches::summary_for`). → `docs/design/query-cache.md#the-write-is-generation--and-tenant-gated`
 - **Tenant switch, sign-out, sign-in and re-authorize all call `clear_session()`** on the frontend
   and `clear_session_state` on the backend. → `docs/design/query-cache.md#a-tenant-switch-a-sign-out-a-sign-in-and-a-re-authorization-all-clear-the-frontend`
-- **Paging/grouping/sorting commands return empty on a cache miss, never an error.** Sorted and
+- **Paging/grouping/sorting commands (and `device_detail`) return empty on a cache miss, never an error.** Sorted and
   grouped views are memoized inside `CachedResult`, built on `spawn_blocking` and stored only if
   `Arc::ptr_eq` still holds; the cached rows are never reordered. Group
   headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
@@ -258,10 +259,14 @@ Compliance and rollups — violating these silently misreports a fleet:
 - **Every surface prints `rows::compliance_scope_note`** (offline + non-patchable counts;
   `devices_total − devices_offline − devices_unpatchable` is the denominator). The frontend `util`
   mirrors it. → `docs/design/compliance.md#devices_offline-devices_unpatchable-and-patch_families-ride-on-queryresultquerysummary`
-- **Both exports print both clocks (`generated_at`, `data_fetched_at`) and the `QueryScope`
+- **The workbook and report print both clocks (`generated_at`, `data_fetched_at`) and the `QueryScope`
   facets in two tiers** (`facets` narrow every sheet; `patch_facets` only the detail rows), built
   from the `QueryPlan`, never the request. Date bounds are absolute UTC via
-  `DateTime::from_timestamp`. → `docs/design/compliance.md#both-exports-state-the-facets-from-rowsqueryscope`
+  `DateTime::from_timestamp`. The CSV states scope + clocks in its file name only. → `docs/design/compliance.md#both-exports-state-the-facets-from-rowsqueryscope`
+- **Dates are `TableCell::DateTime` (Unix seconds)** — real Excel date-times in UTC, `utc_text`
+  in the report/CSV; CSV text cells are formula-guarded, numbers never. → `docs/design/compliance.md#the-workbook-writes-real-date-times-in-utc`
+- **The Devices sheet and the drill-down read one per-device rollup** (`apply_device_health`,
+  `RollupScope`); an excluded device's counts are blank, not zero. → `docs/design/compliance.md#one-per-device-rollup-for-the-devices-sheet-and-the-drill-down`
 - **`Type` is a device-tier chip** — rollups cover only the fetched families. → `docs/design/compliance.md#the-fleet-health-rollups-do-depend-on-the-patch-type-facet`
 - **`is_pending` is an exclude list** (not `REJECTED`/`INSTALLED`); current sources get
   `status_override = MANUAL`; `current_status_set` carries every selected status. → `docs/design/compliance.md#rowsis_pending-is-an-exclude-list`
