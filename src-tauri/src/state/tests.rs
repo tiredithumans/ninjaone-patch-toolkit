@@ -726,6 +726,7 @@ fn sample_job(id: u64, state: JobState) -> JobReport {
         activity_id: None,
         series_uid: None,
         exit_code: None,
+        request: None,
     }
 }
 
