@@ -11,10 +11,11 @@ use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
-    GroupBy, GroupPage, LookupMaps, PatchFamilies, PatchSource, QueryResult, QuerySummary, RowSort,
-    build_age_buckets, build_compliance, build_compliance_by_os, build_device_summaries,
-    build_failures, build_groups, build_query_scope, build_rows, build_severity_by_org,
-    group_member_page, page_rows, pending_counts, slice_groups, sort_order,
+    DeviceDetail, GroupBy, GroupPage, LookupMaps, PatchFamilies, PatchSource, QueryResult,
+    QuerySummary, RowSort, apply_device_health, build_age_buckets, build_compliance,
+    build_compliance_by_os, build_device_summaries, build_failures, build_groups,
+    build_query_scope, build_rows, build_severity_by_org, group_member_page, page_rows,
+    pending_counts, slice_groups, sort_device_summaries, sort_order,
 };
 use crate::settings::MAX_WINDOW_DAYS;
 use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
@@ -590,7 +591,29 @@ fn assemble_result(
         .copied()
         .collect();
     let counts = pending_counts(&all_current);
-    let summaries = build_device_summaries(&scoped_devices, &counts, &maps);
+    let mut summaries = build_device_summaries(&scoped_devices, &counts, &maps);
+    // Failed installs per device exist only when the Failed status reached the
+    // history endpoints; otherwise the per-device count stays unknown (`None`), not
+    // zero. Labelled the way the row join labels them — an untyped record takes the
+    // pushed-down status — and over the same lookback-filtered records.
+    let failed_installs: Option<Vec<&Patch>> =
+        plan.install_status_set.contains("FAILED").then(|| {
+            let label = plan.install_status.unwrap_or("INSTALLED");
+            os_install_refs
+                .iter()
+                .chain(&sw_install_refs)
+                .copied()
+                .filter(|p| p.status.as_deref().unwrap_or(label) == "FAILED")
+                .collect()
+        });
+    apply_device_health(
+        &mut summaries,
+        &all_current,
+        failed_installs.as_deref(),
+        sla_days,
+        now,
+    );
+    sort_device_summaries(&mut summaries);
     let compliance = build_compliance(
         &summaries,
         &all_current,
@@ -772,6 +795,28 @@ pub async fn get_patch_group_members(
     })
     .await
     .map_err(|e| UiError::new(format!("reading the group's rows panicked: {e}")))
+}
+
+/// Serves the device drill-down — one device's facts, its per-device rollup and up
+/// to [`MAX_PAGE_LIMIT`] of its detail rows — from the cached result. Read-only.
+///
+/// `None` on a cache miss, like the paging commands: the drill-down is a view over
+/// the rows already on screen, and a tenant switch or superseded query retiring
+/// them is not something to toast about. The scan over every cached row runs on the
+/// blocking pool against a handle, not under the result mutex.
+#[tauri::command]
+pub async fn device_detail(
+    state: State<'_, AppState>,
+    device_id: i64,
+) -> Result<Option<DeviceDetail>, UiError> {
+    let Some(result) = state.current_result_handle()? else {
+        return Ok(None);
+    };
+    tokio::task::spawn_blocking(move || {
+        crate::rows::device_detail(&result, device_id, MAX_PAGE_LIMIT)
+    })
+    .await
+    .map_err(|e| UiError::new(format!("reading the device's rows panicked: {e}")))
 }
 
 #[cfg(test)]

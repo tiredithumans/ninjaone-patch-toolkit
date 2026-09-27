@@ -134,8 +134,7 @@ pub async fn export_patches_xlsx(
     let path_str = path.to_string_lossy().to_string();
 
     // A handle on the cached result, not a copy of it. The whole thing moves into the
-    // blocking task and the sheets borrow out of it there, so the only allocation on
-    // this path is the reboot subset — which is a filtered projection either way.
+    // blocking task and the sheets borrow out of it there.
     let result = cached_result(&state)?;
     let scope_note = crate::rows::compliance_scope_note(
         result.devices_offline,
@@ -147,18 +146,12 @@ pub async fn export_patches_xlsx(
     // plus the file write — both of which would hold a tokio worker for the duration.
     let written = path_str.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let reboot: Vec<_> = result
-            .devices
-            .iter()
-            .filter(|d| d.needs_reboot)
-            .cloned()
-            .collect();
         write_workbook(
             &written,
             &result.rows,
             &result.compliance,
             &result.compliance_by_os,
-            &reboot,
+            &result.devices,
             &result.failures,
             &WorkbookMeta {
                 generated_at: &result.generated_at,

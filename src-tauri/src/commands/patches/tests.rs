@@ -315,6 +315,7 @@ fn dev(id: i64, org: i64) -> Device {
         node_class: Some("WINDOWS_SERVER".into()),
         offline: Some(false),
         os: None,
+        last_contact: None,
     }
 }
 
@@ -690,6 +691,141 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
     let top = &result.failures[0];
     assert_eq!(top.kb.as_deref(), Some("KBFAIL"));
     assert_eq!(top.affected_devices, 2, "KBFAIL failed on two devices");
+}
+
+/// The per-device rollup behind the workbook's Devices sheet and the drill-down,
+/// end to end: bands and SLA aging from the unnarrowed current feed, failed
+/// installs only when Failed was queried (unknown otherwise, not zero), the
+/// vendor's `lastContact`, the rollup verdict for an offline device, and the
+/// (organization, name, id) order.
+#[tokio::test]
+async fn devices_carry_their_own_health_in_a_stable_order() {
+    let server = MockServer::start().await;
+    let old = fixed_now().timestamp() - 90 * 86_400;
+    let contact = fixed_now().timestamp() - 3_600;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 30, "systemName": "zeta", "organizationId": 1, "offline": false,
+              "nodeClass": "WINDOWS_SERVER", "lastContact": contact as f64 + 0.25 },
+            { "id": 10, "systemName": "Alpha", "organizationId": 1, "offline": true,
+              "nodeClass": "WINDOWS_SERVER" },
+            { "id": 20, "systemName": "beta", "organizationId": 1, "offline": false,
+              "nodeClass": "WINDOWS_SERVER" }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "deviceId": 30, "kbNumber": "KB1", "status": "MANUAL",
+                  "severity": "CRITICAL", "timestamp": old },
+                { "deviceId": 30, "kbNumber": "KB2", "status": "APPROVED",
+                  "severity": "LOW", "timestamp": old },
+                { "deviceId": 30, "kbNumber": "KB3", "status": "REJECTED",
+                  "severity": "CRITICAL", "timestamp": old },
+                { "deviceId": 20, "kbNumber": "KB1", "status": "MANUAL",
+                  "severity": "IMPORTANT", "timestamp": fixed_now().timestamp() }
+            ],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patch-installs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "deviceId": 30, "kbNumber": "KB9", "status": "FAILED",
+                  "severity": "CRITICAL", "installedAt": fixed_now().timestamp() - 86_400 },
+                { "deviceId": 30, "kbNumber": "KB8", "status": "INSTALLED",
+                  "severity": "CRITICAL", "installedAt": fixed_now().timestamp() - 86_400 }
+            ],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+
+    let progress = |_: &'static str, _: usize| {};
+    let run = |statuses: Vec<PatchStatus>| {
+        let server = &server;
+        async move {
+            run_query(
+                &client(server),
+                async { Ok::<_, anyhow::Error>(lookups()) },
+                fleet_devices_via(&client(server)),
+                fleet_current_via(&client(server)),
+                30,
+                30,
+                args(PatchType::Os, statuses),
+                fixed_now(),
+                &progress,
+            )
+            .await
+            .expect("query")
+        }
+    };
+
+    let result = run(vec![PatchStatus::Pending, PatchStatus::Failed]).await;
+    let names: Vec<&str> = result
+        .devices
+        .iter()
+        .map(|d| d.device_name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["Alpha", "beta", "zeta"],
+        "case-insensitive name order"
+    );
+
+    let zeta = &result.devices[2];
+    assert_eq!(zeta.pending_by_severity.critical, 1);
+    assert_eq!(zeta.pending_by_severity.low, 1);
+    assert_eq!(
+        zeta.pending_by_severity.total(),
+        zeta.pending_count,
+        "the bands sum to the pending count (REJECTED is in neither)"
+    );
+    assert_eq!(
+        zeta.aged_critical, 1,
+        "the 90-day-old CRITICAL, not the LOW"
+    );
+    assert_eq!(zeta.failed_installs, Some(1), "FAILED only, not INSTALLED");
+    assert_eq!(zeta.last_contact_ts, Some(contact));
+    assert_eq!(zeta.rollup_scope, crate::rows::RollupScope::Included);
+
+    let beta = &result.devices[1];
+    assert_eq!(beta.pending_by_severity.important, 1);
+    assert_eq!(beta.aged_critical, 0, "first seen today is within SLA");
+    assert_eq!(beta.failed_installs, Some(0), "queried, and none failed");
+
+    let alpha = &result.devices[0];
+    assert_eq!(alpha.rollup_scope, crate::rows::RollupScope::Offline);
+    assert_eq!(alpha.last_contact, None, "absent on the record, blank here");
+
+    // Without the Failed status the history was never asked about failures.
+    let pending_only = run(vec![PatchStatus::Pending]).await;
+    assert!(
+        pending_only
+            .devices
+            .iter()
+            .all(|d| d.failed_installs.is_none()),
+        "unknown, not zero"
+    );
+
+    // The drill-down reads the same summary and the device's own rows.
+    let detail = crate::rows::device_detail(&result, 30, 1).expect("in scope");
+    assert_eq!(detail.device.as_ref().map(|d| d.device_id), Some(30));
+    assert_eq!(
+        detail.rows_total, 2,
+        "the Patches rows: KB1 pending and KB9 failed (APPROVED was not selected)"
+    );
+    assert_eq!(
+        detail.rows.len(),
+        1,
+        "capped at the limit, total still stated"
+    );
+    assert!(crate::rows::device_detail(&result, 999, 10).is_none());
 }
 
 /// The provenance block must describe what the query *did*, so it is built from

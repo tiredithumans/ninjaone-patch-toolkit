@@ -53,9 +53,22 @@ pub struct Device {
     pub offline: Option<bool>,
     #[serde(default)]
     pub os: Option<OsInfo>,
+    /// `lastContact` on the `/v2/devices-detailed` records: when the agent last
+    /// checked in, as epoch seconds (a fractional number on the wire). Read only for
+    /// display — the device drill-down and the workbook's Devices sheet — and never
+    /// to decide anything, since `offline` is the vendor's own verdict on reachability.
+    /// Absent on a sparse record, which renders blank rather than as the epoch.
+    #[serde(default)]
+    pub last_contact: Option<f64>,
 }
 
 impl Device {
+    /// [`Device::last_contact`] as a UTC instant, normalised the same way the patch
+    /// timestamps are (a millisecond value is scaled down, not read as year 58000).
+    pub fn last_contact_at(&self) -> Option<DateTime<Utc>> {
+        self.last_contact.and_then(unix_to_datetime)
+    }
+
     pub fn label(&self) -> &str {
         self.display_name
             .as_deref()
@@ -713,6 +726,7 @@ mod tests {
             node_class: None,
             offline: None,
             os: None,
+            last_contact: None,
         }
     }
 

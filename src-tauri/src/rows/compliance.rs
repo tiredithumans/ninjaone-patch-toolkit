@@ -16,7 +16,8 @@ use super::rollups::is_pending;
 use super::table::pct_cell;
 use super::*;
 
-/// A device-level rollup for the reboot view and compliance computation.
+/// A device-level rollup for the reboot view, compliance computation, the
+/// workbook's Devices sheet and the device drill-down.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSummary {
@@ -29,6 +30,61 @@ pub struct DeviceSummary {
     pub node_class: Option<String>,
     pub needs_reboot: bool,
     pub pending_count: usize,
+    pub offline: bool,
+    /// Whether this device is in the population every fleet-health rollup describes
+    /// ([`rollup_device`]), and if not, why. Carried per device so the Devices sheet
+    /// and the drill-down can say *which* devices the scope note's "N offline and M
+    /// non-patchable devices excluded" means, rather than leaving the reader to infer
+    /// it from an Online column and a node class.
+    pub rollup_scope: RollupScope,
+    /// Pending current patches ([`is_pending`]) on this device, by severity band.
+    /// Sums to `pending_count`; filled by [`apply_device_health`].
+    pub pending_by_severity: SeverityCounts,
+    /// Pending Critical/Important patches first seen longer ago than the SLA window
+    /// (or undated) — [`ComplianceBucket::aged_critical`] for one device.
+    pub aged_critical: usize,
+    /// FAILED install-history records for this device inside the lookback window,
+    /// or `None` when the query did not ask for the Failed status and so never
+    /// fetched them — blank rather than zero, because "no failures" is not something
+    /// such a result can know.
+    pub failed_installs: Option<usize>,
+    /// When the agent last checked in ([`Device::last_contact`]), formatted like the
+    /// row dates, plus the instant for the workbook's date cell.
+    pub last_contact: Option<String>,
+    pub last_contact_ts: Option<i64>,
+}
+
+/// Whether a device counts toward the fleet-health rollups — [`rollup_device`]'s
+/// verdict, with the reason when it does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RollupScope {
+    Included,
+    /// It reports no current patch records, so a zero pending count says nothing.
+    Offline,
+    /// Online, but not something NinjaOne patch management covers.
+    NonPatchable,
+}
+
+impl RollupScope {
+    fn of(d: &Device) -> Self {
+        if d.is_offline() {
+            Self::Offline
+        } else if !d.is_patchable() {
+            Self::NonPatchable
+        } else {
+            Self::Included
+        }
+    }
+
+    /// The Devices sheet's wording: an exclusion names its reason.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Included => "Included",
+            Self::Offline => "Excluded (offline)",
+            Self::NonPatchable => "Excluded (non-patchable)",
+        }
+    }
 }
 
 pub fn build_device_summaries(
@@ -38,18 +94,89 @@ pub fn build_device_summaries(
 ) -> Vec<DeviceSummary> {
     devices
         .iter()
-        .map(|d| DeviceSummary {
-            device_id: d.id,
-            device_name: d.label().to_string(),
-            organization: maps.org_name(d.organization_id),
-            location: maps.location_name(d.location_id),
-            device_role: maps.role_name(d.node_role_id),
-            os_name: d.os_name(),
-            node_class: d.node_class.clone(),
-            needs_reboot: d.needs_reboot(),
-            pending_count: pending_counts.get(&d.id).copied().unwrap_or(0),
+        .map(|d| {
+            let last_contact = d.last_contact_at();
+            DeviceSummary {
+                device_id: d.id,
+                device_name: d.label().to_string(),
+                organization: maps.org_name(d.organization_id),
+                location: maps.location_name(d.location_id),
+                device_role: maps.role_name(d.node_role_id),
+                os_name: d.os_name(),
+                node_class: d.node_class.clone(),
+                needs_reboot: d.needs_reboot(),
+                pending_count: pending_counts.get(&d.id).copied().unwrap_or(0),
+                offline: d.is_offline(),
+                rollup_scope: RollupScope::of(d),
+                pending_by_severity: SeverityCounts::default(),
+                aged_critical: 0,
+                failed_installs: None,
+                last_contact: super::join::fmt_dt(last_contact),
+                last_contact_ts: last_contact.map(|t| t.timestamp()),
+            }
         })
         .collect()
+}
+
+/// Fills each summary's per-device health — pending by severity band, pending past
+/// SLA and, when they were fetched, failed installs — from the same unnarrowed
+/// current feed the compliance rollups read, through the same [`is_pending`],
+/// backlog and SLA predicates. One function, so the Devices sheet and the
+/// drill-down cannot grade a device differently from the Compliance sheet that
+/// counts it.
+///
+/// `failed_installs` is the FAILED install-history records, or `None` when the query
+/// did not request the Failed status; the summaries then keep `None` rather than
+/// claiming zero. A patch whose device is not in `summaries` is ignored.
+pub fn apply_device_health(
+    summaries: &mut [DeviceSummary],
+    current_patches: &[&Patch],
+    failed_installs: Option<&[&Patch]>,
+    sla_days: i64,
+    now: DateTime<Utc>,
+) {
+    let index: HashMap<i64, usize> = summaries
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.device_id, i))
+        .collect();
+    let slot = |id: Option<i64>| id.and_then(|id| index.get(&id).copied());
+    let sla_cutoff = now - Duration::days(sla_days);
+    for p in current_patches {
+        let Some(i) = slot(p.device_id) else {
+            continue;
+        };
+        if !is_pending(p.status.as_deref()) {
+            continue;
+        }
+        let s = &mut summaries[i];
+        s.pending_by_severity.add(p.severity_enum());
+        if counts_toward_backlog(p) && is_aged(p, sla_cutoff) {
+            s.aged_critical += 1;
+        }
+    }
+    if let Some(failed) = failed_installs {
+        let mut counts = vec![0usize; summaries.len()];
+        for p in failed {
+            if let Some(i) = slot(p.device_id) {
+                counts[i] += 1;
+            }
+        }
+        for (s, n) in summaries.iter_mut().zip(counts) {
+            s.failed_installs = Some(n);
+        }
+    }
+}
+
+/// The order the Devices sheet and the reboot list read in: organization, then
+/// device name (both case-insensitive), then id — so two devices sharing a name
+/// still list the same way every run.
+pub fn sort_device_summaries(summaries: &mut [DeviceSummary]) {
+    summaries.sort_by(|a, b| {
+        cmp_ci(&a.organization, &b.organization)
+            .then_with(|| cmp_ci(&a.device_name, &b.device_name))
+            .then_with(|| a.device_id.cmp(&b.device_id))
+    });
 }
 
 /// Per-organization compliance rollup for the summary view and Excel summary sheet.
@@ -320,6 +447,76 @@ impl DeviceSummary {
         }),
         ("Pending Patches", |d| TableCell::Count(d.pending_count)),
     ];
+
+    /// The workbook's Devices sheet: one row per in-scope device, with its
+    /// rollup status and its share of every fleet-health number.
+    ///
+    /// The count columns are blank — not zero — for a device outside the
+    /// [`rollup_device`] population: an offline or non-patchable device reports no
+    /// current patch records, so a 0 there would read as "clean" when it means
+    /// "unknown", which is the exact misreading the exclusion exists to prevent.
+    /// The band columns are one per [`SeverityCounts::BANDS`] entry, in its order.
+    pub const DEVICE_COLUMNS: [TableColumn<DeviceSummary>; 19] = [
+        ("Organization", |d| TableCell::text(&d.organization)),
+        ("Location", |d| TableCell::opt_text(d.location.as_deref())),
+        ("Device Role", |d| {
+            TableCell::opt_text(d.device_role.as_deref())
+        }),
+        ("Device", |d| TableCell::text(&d.device_name)),
+        ("OS", |d| TableCell::opt_text(d.os_name.as_deref())),
+        ("Online", |d| {
+            TableCell::text(if d.offline { "No" } else { "Yes" })
+        }),
+        ("Compliance Scope", |d| {
+            TableCell::text(d.rollup_scope.label())
+        }),
+        (DEVICE_BAND_HEADERS[0], band_cell::<0>),
+        (DEVICE_BAND_HEADERS[1], band_cell::<1>),
+        (DEVICE_BAND_HEADERS[2], band_cell::<2>),
+        (DEVICE_BAND_HEADERS[3], band_cell::<3>),
+        (DEVICE_BAND_HEADERS[4], band_cell::<4>),
+        (DEVICE_BAND_HEADERS[5], band_cell::<5>),
+        (DEVICE_BAND_HEADERS[6], band_cell::<6>),
+        (DEVICE_BAND_HEADERS[7], band_cell::<7>),
+        ("Aged (past SLA)", |d| included_count(d, d.aged_critical)),
+        ("Failed Installs", |d| match d.failed_installs {
+            Some(n) => TableCell::Count(n),
+            None => TableCell::Text(String::new()),
+        }),
+        ("Needs Reboot", |d| {
+            TableCell::text(if d.needs_reboot { "Yes" } else { "No" })
+        }),
+        ("Last Contact", |d| TableCell::DateTime(d.last_contact_ts)),
+    ];
+}
+
+/// Headers of the Devices sheet's per-band columns, index-aligned with
+/// [`SeverityCounts::BANDS`] (`device_band_headers_follow_the_bands` pins it — a
+/// `const` cannot concatenate the band labels itself).
+pub const DEVICE_BAND_HEADERS: [&str; SeverityCounts::BANDS.len()] = [
+    "Pending Critical",
+    "Pending Important",
+    "Pending Security",
+    "Pending Moderate",
+    "Pending Recommended",
+    "Pending Low",
+    "Pending Optional",
+    "Pending Unknown",
+];
+
+/// One band's pending count for [`DeviceSummary::DEVICE_COLUMNS`], read through
+/// [`SeverityCounts::BANDS`] rather than a named field so the band list stays the
+/// one enumeration.
+fn band_cell<const BAND: usize>(d: &DeviceSummary) -> TableCell {
+    included_count(d, (SeverityCounts::BANDS[BAND].1)(&d.pending_by_severity))
+}
+
+/// A rollup count for a device in the rollup population, blank for one outside it.
+fn included_count(d: &DeviceSummary, n: usize) -> TableCell {
+    match d.rollup_scope {
+        RollupScope::Included => TableCell::Count(n),
+        RollupScope::Offline | RollupScope::NonPatchable => TableCell::Text(String::new()),
+    }
 }
 
 impl ComplianceBucket {

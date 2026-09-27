@@ -35,6 +35,54 @@ fn refs(patches: &[Patch]) -> Vec<&Patch> {
 /// with the fields, and everything derived from `BANDS` (the report's chart, its
 /// legend, its denominator) would silently drop that band.
 ///
+/// The Devices sheet's band columns are declared by hand (a `const` cannot build
+/// "Pending {label}"), so this pins them to `SeverityCounts::BANDS`: one column per
+/// band, in its order, each reading its own band.
+#[test]
+fn device_band_headers_follow_the_bands() {
+    assert_eq!(DEVICE_BAND_HEADERS.len(), SeverityCounts::BANDS.len());
+    for (header, (label, _)) in DEVICE_BAND_HEADERS.iter().zip(SeverityCounts::BANDS) {
+        assert_eq!(*header, format!("Pending {label}"));
+    }
+
+    let d = DeviceSummary {
+        device_id: 1,
+        device_name: "srv1".into(),
+        organization: "Org".into(),
+        location: None,
+        device_role: None,
+        os_name: None,
+        node_class: None,
+        needs_reboot: false,
+        pending_count: 0,
+        offline: false,
+        rollup_scope: RollupScope::Included,
+        pending_by_severity: SeverityCounts {
+            critical: 2,
+            important: 3,
+            security: 5,
+            moderate: 7,
+            recommended: 11,
+            low: 13,
+            optional: 17,
+            unknown: 19,
+        },
+        aged_critical: 0,
+        failed_installs: None,
+        last_contact: None,
+        last_contact_ts: None,
+    };
+    let read: Vec<usize> = DeviceSummary::DEVICE_COLUMNS
+        .iter()
+        .filter(|(title, _)| DEVICE_BAND_HEADERS.contains(title))
+        .map(|(_, get)| match get(&d) {
+            TableCell::Count(n) => n,
+            _ => panic!("a band cell of an included device is a count"),
+        })
+        .collect();
+    assert_eq!(read, vec![2, 3, 5, 7, 11, 13, 17, 19]);
+}
+
 /// Distinct prime-ish values so a duplicated or transposed accessor is caught
 /// too, not just a missing one.
 #[test]
@@ -136,6 +184,7 @@ fn device(id: i64, org: i64, os: &str) -> Device {
             name: Some(os.into()),
             needs_reboot: Some(id % 2 == 0),
         }),
+        last_contact: None,
     }
 }
 
@@ -941,8 +990,48 @@ fn serialized_shapes_carry_every_frontend_required_key() {
             "deviceRole",
             "osName",
             "pendingCount",
+            // The drill-down and the reboot list's device link read these.
+            "deviceId",
+            "needsReboot",
+            "offline",
+            "rollupScope",
+            "pendingBySeverity",
+            "agedCritical",
+            "failedInstalls",
+            "lastContact",
         ],
         "DeviceSummary",
+    );
+    let summary_json = serde_json::to_value(&summaries[0]).unwrap();
+    assert_eq!(
+        summary_json["rollupScope"], "included",
+        "the frontend mirrors RollupScope as camelCase variants"
+    );
+    assert!(summary_json["pendingBySeverity"]["critical"].is_u64());
+
+    let result = QueryResult {
+        rows: rows.clone(),
+        devices: summaries.clone(),
+        compliance: Vec::new(),
+        compliance_by_os: Vec::new(),
+        failures: Vec::new(),
+        severity_by_org: Vec::new(),
+        age_buckets: Vec::new(),
+        devices_total: 1,
+        devices_offline: 0,
+        devices_unpatchable: 0,
+        patch_families: PatchFamilies {
+            os: true,
+            software: false,
+        },
+        scope: QueryScope::default(),
+        generated_at: String::new(),
+        data_fetched_at: String::new(),
+    };
+    assert_keys_present(
+        &serde_json::to_value(device_detail(&result, 1, 10).unwrap()).unwrap(),
+        &["device", "rows", "rowsTotal"],
+        "DeviceDetail",
     );
 
     let compliance = build_compliance(&summaries, &refs(&patches), &by_id, &maps, 30, Utc::now());

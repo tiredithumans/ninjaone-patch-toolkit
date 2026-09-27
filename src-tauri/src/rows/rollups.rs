@@ -45,8 +45,9 @@ impl FailureGroup {
         ("KB", |f| TableCell::opt_text(f.kb.as_deref())),
         ("Patch", |f| TableCell::text(&f.name)),
         ("Affected Devices", |f| TableCell::Count(f.affected_devices)),
+        // The instant, not its text: the workbook writes a real date-time.
         ("Latest Failure", |f| {
-            TableCell::opt_text(f.latest_failure.as_deref())
+            TableCell::DateTime(f.latest_failure_ts)
         }),
         ("Devices", |f| {
             // Capped at Excel's per-cell limit: a patch failing on a couple of
@@ -99,6 +100,22 @@ impl SeverityCounts {
         (Severity::Optional.label(), |c| c.optional),
         (Severity::Unknown.label(), |c| c.unknown),
     ];
+
+    /// Counts one pending patch into its band. The single place a [`Severity`] maps
+    /// to a field, shared by the per-organization breakdown and the per-device
+    /// rollup so the two cannot file the same patch under different bands.
+    pub fn add(&mut self, severity: Severity) {
+        match severity {
+            Severity::Critical => self.critical += 1,
+            Severity::Important => self.important += 1,
+            Severity::Security => self.security += 1,
+            Severity::Moderate => self.moderate += 1,
+            Severity::Recommended => self.recommended += 1,
+            Severity::Low => self.low += 1,
+            Severity::Optional => self.optional += 1,
+            Severity::Unknown => self.unknown += 1,
+        }
+    }
 
     /// Total across every band. Derived from [`BANDS`](Self::BANDS) so it can never
     /// sum a different set than the charts draw.
@@ -279,17 +296,7 @@ pub fn build_severity_by_org(
             continue;
         };
         let org = maps.org_name_str(device.organization_id);
-        let counts = by_org.entry(org).or_default();
-        match p.severity_enum() {
-            Severity::Critical => counts.critical += 1,
-            Severity::Important => counts.important += 1,
-            Severity::Security => counts.security += 1,
-            Severity::Moderate => counts.moderate += 1,
-            Severity::Recommended => counts.recommended += 1,
-            Severity::Low => counts.low += 1,
-            Severity::Optional => counts.optional += 1,
-            Severity::Unknown => counts.unknown += 1,
-        }
+        by_org.entry(org).or_default().add(p.severity_enum());
     }
     let mut out: Vec<OrgSeverity> = by_org
         .into_iter()
