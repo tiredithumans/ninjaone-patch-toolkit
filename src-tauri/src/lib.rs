@@ -2,6 +2,7 @@ mod actions;
 mod api;
 mod auth;
 mod commands;
+mod csv_export;
 mod error;
 mod export;
 mod filter;
@@ -106,6 +107,7 @@ pub fn run() {
             commands::patches::device_detail,
             commands::export::export_patches_xlsx,
             commands::export::export_report_html,
+            commands::export::export_csv,
             commands::diagnostics::read_action_audit,
             commands::diagnostics::read_run_history,
             commands::diagnostics::open_diagnostics_folder,
