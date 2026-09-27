@@ -1,6 +1,7 @@
 mod actions;
 mod api;
 mod auth;
+mod changes;
 mod commands;
 mod error;
 mod export;

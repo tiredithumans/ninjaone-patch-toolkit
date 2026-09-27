@@ -108,6 +108,19 @@ pub struct QueryToken {
     result_epoch: u64,
 }
 
+impl QueryToken {
+    /// The tenant this run started under, spelled for on-disk state keyed per tenant
+    /// (`changes` snapshots). From the token rather than the settings for the same
+    /// reason the cache stamp is: the tenant can change while a fetch is in flight.
+    pub fn tenant_label(&self) -> String {
+        format!(
+            "{}\n{}",
+            self.tenant.instance_base_url,
+            self.tenant.client_id.as_deref().unwrap_or_default()
+        )
+    }
+}
+
 /// The cached query result plus a memo of the grouping most recently asked for.
 ///
 /// `group_page` rebuilt the entire grouping — a HashMap accumulation plus a sort

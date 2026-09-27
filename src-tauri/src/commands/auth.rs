@@ -140,6 +140,7 @@ mod tests {
                 software: true,
             },
             scope: Default::default(),
+            changes: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }

@@ -6,6 +6,8 @@
 
 use std::fmt::Write;
 
+use crate::changes::{ChangeRow, RunChanges};
+
 use crate::rows::{
     AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, OrgSeverity, OsCompliance,
     QueryResult, QueryScope, SeverityCounts, TableCell, TableColumn,
@@ -128,6 +130,10 @@ pub fn render_report(result: &QueryResult) -> String {
         ))
     );
     write_scope(&mut buf, &result.scope);
+
+    buf.push_str("<section><h2>Changes since the previous run</h2>");
+    write_changes(&mut buf, &result.changes);
+    buf.push_str("</section>");
 
     buf.push_str("<section><h2>Compliance by organization</h2>");
     write_compliance_chart(&mut buf, &result.compliance);
@@ -389,6 +395,35 @@ fn write_table<T>(buf: &mut String, columns: &[TableColumn<T>], rows: &[&T]) {
         buf.push_str("</tr>");
     }
     buf.push_str("</tbody></table>");
+}
+
+/// The changes section: the headline (which also says when there is no baseline),
+/// the caveats that decide how the counts read, then the listed changes.
+fn write_changes(buf: &mut String, changes: &RunChanges) {
+    let _ = write!(
+        buf,
+        "<p class=\"meta\">{}</p>",
+        escape_html(&changes.headline())
+    );
+    if changes.previous_at.is_none() {
+        return;
+    }
+    for note in changes.notes() {
+        let _ = write!(buf, "<p class=\"empty\">{}</p>", escape_html(&note));
+    }
+    let rows = changes.table_rows();
+    if rows.is_empty() {
+        return;
+    }
+    let refs: Vec<&ChangeRow> = rows.iter().collect();
+    write_table(buf, &ChangeRow::COLUMNS, &refs);
+    if rows.len() > MAX_TABLE_ROWS {
+        let _ = write!(
+            buf,
+            "<p class=\"empty\">Showing the first {MAX_TABLE_ROWS} of {} listed changes.</p>",
+            rows.len()
+        );
+    }
 }
 
 fn write_failures_table(buf: &mut String, failures: &[FailureGroup]) {
@@ -785,6 +820,7 @@ mod tests {
                 software: true,
             },
             scope: Default::default(),
+            changes: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         }
@@ -811,12 +847,41 @@ mod tests {
             "Pending patch age (since first seen)",
             "Top patch failures",
             "Devices needing reboot",
+            "Changes since the previous run",
         ] {
             assert!(html.contains(heading), "missing section: {heading}");
         }
         // Well-formed standalone document.
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.trim_end().ends_with("</html>"));
+    }
+
+    #[test]
+    fn the_changes_section_lists_changes_escaped_with_their_caveats() {
+        let mut result = sample_result();
+        result.changes = RunChanges {
+            previous_at: Some("2026-04-30 08:00:00 UTC".into()),
+            tracks_pending: true,
+            tracks_failed: true,
+            newly_failed: 1,
+            newly_failed_items: vec![crate::changes::ChangeItem {
+                device_id: 3,
+                device_name: "<b>srv03</b>".into(),
+                patch_type: "SOFTWARE".into(),
+                kb: None,
+                name: "Chrome".into(),
+                severity: "Important".into(),
+                severity_rank: 4,
+            }],
+            ..Default::default()
+        };
+        let html = render_report(&result);
+        assert!(html.contains(
+            "Since 2026-04-30 08:00:00 UTC: 0 newly pending, 0 resolved, 1 newly failed."
+        ));
+        assert!(html.contains("Newly failed"));
+        assert!(html.contains("&lt;b&gt;srv03"), "device names are escaped");
+        assert!(html.contains("Resolved means no longer pending"));
     }
 
     #[test]
@@ -837,10 +902,12 @@ mod tests {
                 software: true,
             },
             scope: Default::default(),
+            changes: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
         };
         let html = render_report(&empty);
+        assert!(html.contains("No previous comparable run"));
         assert!(html.contains("No compliance data"));
         assert!(html.contains("No patch failures"));
     }

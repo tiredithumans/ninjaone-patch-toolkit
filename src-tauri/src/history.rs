@@ -45,6 +45,22 @@ const MAX_LINES: usize = 4_000;
 /// happens once per `TRIM_SLACK` appends.
 const TRIM_SLACK: usize = 500;
 
+/// Organizations kept per record, largest (by devices in scope) first.
+///
+/// One line is ~400 bytes; a per-org entry is ~60. Uncapped, an MSP with a few
+/// hundred organizations would write tens of kilobytes per query and push the
+/// [`MAX_LINES`] file toward a hundred megabytes. At this cap the worst line is
+/// ~6 KB. [`RunRecord::orgs_total`] records how many were cut.
+const MAX_ORGS: usize = 100;
+
+/// Records, newest first, whose per-org detail [`read_all`] returns.
+///
+/// The Trend tab's per-org table compares the newest run with the previous
+/// comparable one; it never reads per-org numbers from further back. Returning them
+/// for every line would push up to the whole file's org detail over IPC to render
+/// two rows of it. Two hundred lines leaves room for other scopes run in between.
+const ORG_DETAIL_RECORDS: usize = 200;
+
 /// Serializes every append and trim in this process.
 ///
 /// Queries overlap by design (an auto-refresh tick during a manual Run), and each
@@ -106,6 +122,32 @@ pub struct RunRecord {
     /// field existed read back as an empty string, which matches no current run.
     #[serde(default)]
     pub scope_key: String,
+    /// Per-organization rollup, at most [`MAX_ORGS`] entries. Empty on lines
+    /// written before it existed, and on lines [`read_all`] returns without detail.
+    #[serde(default)]
+    pub orgs: Vec<OrgRun>,
+    /// Organizations in the result before the [`MAX_ORGS`] cap.
+    #[serde(default)]
+    pub orgs_total: usize,
+}
+
+/// One organization's numbers in one run — the same population and counts as its
+/// Compliance-tab row. Keys are short because this repeats per org on every line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrgRun {
+    #[serde(rename = "o")]
+    pub organization: String,
+    #[serde(rename = "n", default)]
+    pub devices_in_scope: usize,
+    #[serde(rename = "c", default)]
+    pub devices_compliant: usize,
+    /// Pending patches of every severity (`rows::build_severity_by_org`).
+    #[serde(rename = "p", default)]
+    pub pending: usize,
+    #[serde(rename = "pc", default)]
+    pub pending_critical: usize,
+    #[serde(rename = "ac", default)]
+    pub aged_critical: usize,
 }
 
 impl RunRecord {
@@ -113,6 +155,33 @@ impl RunRecord {
     /// result, which carries no tenant of its own.
     pub fn from_result(result: &QueryResult, instance: &str) -> Self {
         let devices_compliant = result.compliance.iter().map(|c| c.devices_compliant).sum();
+        let pending_by_org: std::collections::HashMap<&str, usize> = result
+            .severity_by_org
+            .iter()
+            .map(|o| (o.organization.as_str(), o.counts.total()))
+            .collect();
+        let mut orgs: Vec<OrgRun> = result
+            .compliance
+            .iter()
+            .map(|c| OrgRun {
+                organization: c.organization.clone(),
+                devices_in_scope: c.devices_total,
+                devices_compliant: c.devices_compliant,
+                pending: pending_by_org
+                    .get(c.organization.as_str())
+                    .copied()
+                    .unwrap_or(0),
+                pending_critical: c.pending_critical,
+                aged_critical: c.aged_critical,
+            })
+            .collect();
+        orgs.sort_by(|a, b| {
+            b.devices_in_scope
+                .cmp(&a.devices_in_scope)
+                .then_with(|| crate::rows::cmp_ci(&a.organization, &b.organization))
+        });
+        let orgs_total = orgs.len();
+        orgs.truncate(MAX_ORGS);
         let devices_in_scope = result.compliance.iter().map(|c| c.devices_total).sum();
         Self {
             at: result.generated_at.clone(),
@@ -134,6 +203,8 @@ impl RunRecord {
             // patch type) and a severity-only run as whole-fleet only by accident.
             scoped: result.scope.device_scoped,
             scope_key: result.scope.fingerprint.clone(),
+            orgs,
+            orgs_total,
         }
     }
 }
@@ -244,7 +315,17 @@ pub fn read_all() -> Vec<RunRecord> {
     let Some(path) = history_path() else {
         return Vec::new();
     };
-    parse(&std::fs::read_to_string(&path).unwrap_or_default())
+    let mut records = parse(&std::fs::read_to_string(&path).unwrap_or_default());
+    strip_old_org_detail(&mut records);
+    records
+}
+
+/// Drops the per-org detail from all but the newest [`ORG_DETAIL_RECORDS`].
+fn strip_old_org_detail(records: &mut [RunRecord]) {
+    let old = records.len().saturating_sub(ORG_DETAIL_RECORDS);
+    for record in &mut records[..old] {
+        record.orgs = Vec::new();
+    }
 }
 
 fn parse(body: &str) -> Vec<RunRecord> {
@@ -276,6 +357,8 @@ mod tests {
             software_patches: true,
             scoped: false,
             scope_key: String::new(),
+            orgs: Vec::new(),
+            orgs_total: 0,
         }
     }
 
@@ -403,6 +486,92 @@ mod tests {
         assert_eq!(parsed[0].scope_key, "");
     }
 
+    /// Lines written before the per-org rollup existed read back with none.
+    #[test]
+    fn a_record_from_before_the_org_rollup_still_parses() {
+        let mut old = serde_json::to_value(rec("2026-01-01 00:00:00 UTC", 5, 10)).unwrap();
+        old.as_object_mut().unwrap().remove("orgs");
+        old.as_object_mut().unwrap().remove("orgsTotal");
+        let parsed = parse(&old.to_string());
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].orgs.is_empty());
+        assert_eq!(parsed[0].orgs_total, 0);
+    }
+
+    #[test]
+    fn only_the_newest_records_keep_their_org_detail() {
+        let org = OrgRun {
+            organization: "Contoso".into(),
+            devices_in_scope: 10,
+            devices_compliant: 5,
+            pending: 3,
+            pending_critical: 1,
+            aged_critical: 0,
+        };
+        let mut records: Vec<RunRecord> = (0..ORG_DETAIL_RECORDS + 3)
+            .map(|i| RunRecord {
+                orgs: vec![org.clone()],
+                ..rec(&format!("t{i}"), 5, 10)
+            })
+            .collect();
+        strip_old_org_detail(&mut records);
+        assert!(records[..3].iter().all(|r| r.orgs.is_empty()));
+        assert!(records[3..].iter().all(|r| r.orgs.len() == 1));
+    }
+
+    /// The per-org rollup is the Compliance tab's rows plus each org's pending
+    /// count, largest orgs first, capped.
+    #[test]
+    fn from_result_carries_a_capped_per_org_rollup() {
+        use crate::rows::{ComplianceBucket, OrgSeverity, PatchFamilies, SeverityCounts};
+        let bucket = |i: usize| ComplianceBucket {
+            organization: format!("org-{i:03}"),
+            devices_total: i,
+            devices_compliant: i / 2,
+            compliance_pct: 50.0,
+            pending_critical: 1,
+            aged_critical: 0,
+        };
+        let result = QueryResult {
+            rows: Vec::new(),
+            devices: Vec::new(),
+            compliance: (1..=MAX_ORGS + 5).map(bucket).collect(),
+            compliance_by_os: Vec::new(),
+            failures: Vec::new(),
+            severity_by_org: vec![OrgSeverity {
+                organization: format!("org-{:03}", MAX_ORGS + 5),
+                counts: SeverityCounts {
+                    critical: 2,
+                    low: 3,
+                    ..Default::default()
+                },
+            }],
+            age_buckets: Vec::new(),
+            devices_total: 0,
+            devices_offline: 0,
+            devices_unpatchable: 0,
+            patch_families: PatchFamilies {
+                os: true,
+                software: true,
+            },
+            scope: Default::default(),
+            changes: Default::default(),
+            generated_at: "2026-09-01 10:00:00 UTC".into(),
+            data_fetched_at: "2026-09-01 10:00:00 UTC".into(),
+        };
+        let record = RunRecord::from_result(&result, "https://app.ninjarmm.com");
+        assert_eq!(record.orgs_total, MAX_ORGS + 5);
+        assert_eq!(record.orgs.len(), MAX_ORGS);
+        let largest = &record.orgs[0];
+        assert_eq!(largest.devices_in_scope, MAX_ORGS + 5, "largest first");
+        assert_eq!(largest.pending, 5, "pending sums every severity band");
+        assert_eq!(record.orgs[1].pending, 0, "an org with no backlog has none");
+        assert!(
+            record.orgs.iter().all(|o| o.devices_in_scope > 5),
+            "the smallest orgs are the ones cut"
+        );
+    }
+
     /// `scoped` means a *device* facet narrowed the run. It used to count facet
     /// lines, so an unfiltered run (whole-fleet line + patch type) read as scoped
     /// and a severity-only run read as whole-fleet.
@@ -431,6 +600,7 @@ mod tests {
                 devices_unpatchable: 0,
                 patch_families: families,
                 scope: build_query_scope(&filter, &maps, families, &[PatchStatus::Pending], None),
+                changes: Default::default(),
                 generated_at: "2026-09-01 10:00:00 UTC".into(),
                 data_fetched_at: "2026-09-01 10:00:00 UTC".into(),
             };

@@ -7,6 +7,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::api::{NinjaApiClient, ProgressFn};
+use crate::changes::{self, RunSnapshot};
 use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
@@ -134,6 +135,18 @@ pub async fn query_patches(
         Some(&p_sw as &ProgressFn),
     );
 
+    // What the changes diff needs from the request; `args` moves into the query.
+    let statuses = args.statuses.clone();
+    let install_days = args
+        .statuses
+        .iter()
+        .any(|s| s.is_install_history())
+        .then(|| {
+            args.install_after_days
+                .unwrap_or(settings.install_window_days)
+                .clamp(1, MAX_WINDOW_DAYS)
+        });
+
     let result = run_query(
         &state.api,
         state.lookups(),
@@ -151,6 +164,9 @@ pub async fn query_patches(
     .await
     .map_err(UiError::from)?;
 
+    let (result, snapshot) =
+        diff_against_previous_run(result, token.tenant_label(), statuses, install_days).await?;
+
     // Hand the frontend a lightweight summary (first page + rollups) and keep the
     // full result in the tenant-stamped cache for paging (`get_patch_rows`) and
     // export — moving it in rather than cloning every row.
@@ -163,11 +179,48 @@ pub async fn query_patches(
     let entry = crate::history::RunRecord::from_result(&result, &settings.instance_base_url);
     tokio::task::spawn_blocking(move || crate::history::record(&entry));
 
-    summary_for(
-        state.store_last_result_if_current(token, result),
-        summary,
-        qid,
-    )
+    let outcome = state.store_last_result_if_current(token, result);
+    // Only a stored result becomes the next run's baseline. A superseded one is by
+    // definition older than the run that won the cache; writing it would roll the
+    // baseline backwards, and the next diff would report changes that already
+    // happened. A dropped (tenant-drifted, session-cleared) one belongs to nobody.
+    if matches!(outcome, StoreOutcome::Stored) {
+        tokio::task::spawn_blocking(move || changes::save(&snapshot));
+    }
+    summary_for(outcome, summary, qid)
+}
+
+/// Fills `result.changes` from the previous comparable run's snapshot and returns
+/// this run's snapshot for the caller to persist once the result is stored.
+///
+/// Off the runtime: it reads a file and walks every row. The run is compared
+/// against whatever baseline is on disk *now*, so an auto-refresh tick diffs
+/// against the run immediately before it in the same scope.
+async fn diff_against_previous_run(
+    mut result: QueryResult,
+    tenant: String,
+    statuses: Vec<PatchStatus>,
+    install_days: Option<i64>,
+) -> Result<(QueryResult, RunSnapshot), UiError> {
+    tokio::task::spawn_blocking(move || {
+        let scope = changes::scope_key(
+            &result.scope.fingerprint,
+            result.patch_families,
+            install_days,
+        );
+        let previous = changes::load(&tenant, &scope);
+        let snapshot = RunSnapshot::build(
+            &result.rows,
+            &tenant,
+            scope,
+            &result.generated_at,
+            &statuses,
+        );
+        result.changes = changes::diff(previous.as_ref(), &snapshot);
+        (result, snapshot)
+    })
+    .await
+    .map_err(|e| UiError::new(format!("comparing with the previous run panicked: {e}")))
 }
 
 /// Decides what a query hands back once its cache write has been adjudicated.
@@ -645,6 +698,8 @@ fn assemble_result(
             &plan.statuses,
             plan.want_installs.then_some(plan.installed_after),
         ),
+        // Needs the stored snapshot, so `query_patches` fills it after the join.
+        changes: Default::default(),
         generated_at: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         data_fetched_at: src
             .current

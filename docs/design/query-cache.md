@@ -158,6 +158,11 @@ Add such a field in lockstep: `QueryResult` + `QuerySummary` + clone in `QuerySu
 The one documented exception is `QueryScope`, which lives on `QueryResult` only — see
 [compliance.md](./compliance.md#both-exports-state-the-facets-from-rowsqueryscope).
 
+`changes` (`changes::RunChanges`) rides the same way, but is filled *after* `assemble_result`:
+it needs the previous run's snapshot from disk, so `query_patches` reads it on a blocking thread
+between the join and the summary. Its lists are capped at `CHANGE_LIST_LIMIT` so it stays
+compact — see [compliance.md](./compliance.md#changes-since-the-previous-comparable-run).
+
 ## Whole-fleet prefetch + client-side scoping
 
 The device inventory and current patches (OS + 3rd-party) are fetched **whole-fleet** (no `df`)

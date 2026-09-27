@@ -64,8 +64,9 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── scope.rs                 # QueryScope export provenance
 │   ├── table.rs                 # TableCell / TableColumn / format_pct / clamp_cell / join_capped — the shared column definition
 │   └── tests.rs
-├── src/history.rs               # append-only run-history.jsonl (one rollup line per query) + RunRecord
-├── src/export.rs                # rust_xlsxwriter workbook (Patches [+ Patches (n) past the row limit] / Compliance / by OS / Needs-Reboot / Failures / About)
+├── src/history.rs               # append-only run-history.jsonl (one rollup line per query, per-org rollup) + RunRecord
+├── src/changes.rs               # changes since the previous comparable run: per-scope run-snapshots/, diff → RunChanges
+├── src/export.rs                # rust_xlsxwriter workbook (Patches [+ Patches (n) past the row limit] / Compliance / by OS / Needs-Reboot / Failures / Changes / About)
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
@@ -87,11 +88,11 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
 │   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
-│   ├── tables/                  # one file per results tab: patches · compliance · failures · reboot · trend
+│   ├── tables/                  # one file per results tab: patches · compliance · failures · reboot · trend (+ changes panel)
 │   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · toaster.rs · update.rs
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
-│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · guardrails.rs · tests.rs
+│       ├── mod.rs · query.rs · selection.rs · filters.rs · pager.rs · format.rs · sort.rs · changelog.rs · jobs.rs · guardrails.rs · changes.rs · tests.rs
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers + is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend
@@ -162,7 +163,7 @@ Backend — commands, cache, concurrency:
   grouped views are memoized inside `CachedResult`, built on `spawn_blocking` and stored only if
   `Arc::ptr_eq` still holds; the cached rows are never reordered. Group
   headers carry no members; never regroup `page_rows` client-side. `demo.rs` mirrors `group_key`. → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
-- **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`) ride on both `QueryResult` and
+- **Compact aggregates (`failures`, `severity_by_org`, `age_buckets`, `changes`) ride on both `QueryResult` and
   `QuerySummary`.** Add one in lockstep with `QuerySummary::from_result`, the `types.rs` mirror, the
   demo's `assemble`, and `serialized_shapes_carry_every_frontend_required_key`. `QueryScope` is the
   one `QueryResult`-only exception. → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
@@ -278,6 +279,9 @@ Compliance and rollups — violating these silently misreports a fleet:
 - **`Installed` and `Failed` route to the install-history endpoints; current patches are always
   fetched.** One requested install status is pushed down server-side; the lookback is re-applied
   client-side. → `docs/design/compliance.md#installedfailed-vs-current-patches-status-routing`
+- **Changes since last run diff the detail rows against the previous run of the same tenant +
+  `changes::scope_key`; identity is `changes::patch_key` only; the snapshot is saved only on
+  `StoreOutcome::Stored`.** → `docs/design/compliance.md#changes-since-the-previous-comparable-run`
 - **`format_pct` never rounds up to 100** (caps at 99%; `pct_cell` at one decimal). → `docs/design/compliance.md#a-percentage-never-rounds-up-to-100`
 - **There is no patch release date in the API.** `first_seen_at()` is detection time; keep "First
   seen" / "since first seen" naming; fixtures must emit `timestamp`. → `docs/design/compliance.md#there-is-no-patch-release-date-in-the-ninjaone-api`

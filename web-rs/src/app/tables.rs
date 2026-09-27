@@ -6,12 +6,14 @@ use wasm_bindgen::JsCast;
 
 use super::*;
 
+mod changes;
 mod compliance;
 mod failures;
 mod patches;
 mod reboot;
 mod trend;
 
+use changes::ChangesPanel;
 use compliance::ComplianceTab;
 use failures::FailuresTable;
 use patches::PatchesTable;

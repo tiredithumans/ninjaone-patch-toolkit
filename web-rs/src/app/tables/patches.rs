@@ -79,6 +79,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
                 reflects="every patch matching your device scope and all patch filters."
                 filters="Device scope + Type, Status, Severity, Search, First-seen and Installed-within are all applied."
             />
+            <ChangesPanel/>
             <Show
                 when=move || { rows_total() > 0 }
                 fallback=|| {
