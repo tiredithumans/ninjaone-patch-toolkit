@@ -7,12 +7,15 @@ use wasm_bindgen::JsCast;
 use super::*;
 
 mod compliance;
+mod device;
 mod failures;
 mod patches;
 mod reboot;
 mod trend;
 
 use compliance::ComplianceTab;
+pub(crate) use device::DeviceDetailModal;
+use device::DeviceLink;
 use failures::FailuresTable;
 use patches::PatchesTable;
 use reboot::RebootTable;

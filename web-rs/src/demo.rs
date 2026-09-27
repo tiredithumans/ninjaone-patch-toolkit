@@ -22,9 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::app::util::{date_to_epoch, severity_rank};
 use crate::types::QueryResult;
 use crate::types::{
-    AgeBucket, ComplianceBucket, DeviceSummary, FailureGroup, FilterParams, GroupBy, Location,
-    NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role,
-    SeverityCounts,
+    AgeBucket, ComplianceBucket, DeviceDetail, DeviceSummary, FailureGroup, FilterParams, GroupBy,
+    Location, NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup,
+    PatchRow, Role, RollupScope, SeverityCounts,
 };
 
 /// Wall-clock label shown in the results summary. Fixed (not "now") so the build
@@ -342,67 +342,117 @@ const REBOOT_DEVICE_NAMES: [&str; 5] = [
     "FAB-LNX-WEB1",
 ];
 
+/// The Needs Reboot list: the reboot devices' own rollups, so its Pending Patches
+/// column and the drill-down opened from it are the same number. The demo used to
+/// hardcode those counts, which a drill-down built from the sample rows would then
+/// have contradicted on the first click.
 fn sample_reboot() -> Vec<DeviceSummary> {
-    vec![
-        reboot(
-            "Contoso Ltd",
-            "HQ — Seattle",
-            "Domain Controller",
-            "SEA-DC01",
-            "Windows Server 2022",
-            3,
-        ),
-        reboot(
-            "Contoso Ltd",
-            "Datacenter A",
-            "Web Server",
-            "DCA-WEB02",
-            "Windows Server 2022",
-            2,
-        ),
-        reboot(
-            "Northwind Traders",
-            "Datacenter B",
-            "Database Server",
-            "NW-SQL01",
-            "Windows Server 2022",
-            2,
-        ),
-        reboot(
-            "Northwind Traders",
-            "Branch — Austin",
-            "Workstation",
-            "ATX-WKS-2207",
-            "Windows 10 Pro",
-            4,
-        ),
-        reboot(
-            "Fabrikam Inc",
-            "Cloud — us-east-1",
-            "Web Server",
-            "FAB-LNX-WEB1",
-            "Ubuntu 22.04 LTS",
-            1,
-        ),
-    ]
+    REBOOT_DEVICE_NAMES
+        .iter()
+        .filter_map(|name| sample_device_summary(device_id_of(name), false))
+        .collect()
 }
 
-fn reboot(
-    org: &str,
-    location: &str,
-    role: &str,
-    device: &str,
-    os: &str,
-    pending: usize,
-) -> DeviceSummary {
-    DeviceSummary {
-        device_name: device.to_string(),
-        organization: org.to_string(),
-        location: opt(location),
-        device_role: opt(role),
-        os_name: opt(os),
-        pending_count: pending,
+/// When every sample device last checked in — the snapshot's minute, since the
+/// sample fleet is all online.
+const SAMPLE_LAST_CONTACT: &str = "2026-06-26 14:31 UTC";
+
+/// The SLA window the demo grades "Aged (past SLA)" against, the backend's default.
+const SAMPLE_SLA_DAYS: i64 = 30;
+
+/// One device's facts and per-device rollup over the **whole** sample — the demo
+/// counterpart of `rows::apply_device_health`, which reads the unnarrowed current
+/// feed: the patch facets (status, severity, search, dates) do not narrow it.
+///
+/// Pending mirrors the backend's exclude list over the current feed; the sample's
+/// `FAILED` rows are install-history records (they carry an installed date), so
+/// they count as failed installs rather than as pending. Failed installs are
+/// `None` unless the query asked for the Failed status, as on the desktop.
+fn sample_device_summary(device_id: i64, failed_queried: bool) -> Option<DeviceSummary> {
+    let rows: Vec<PatchRow> = demo_rows()
+        .into_iter()
+        .map(|d| d.row)
+        .filter(|r| r.device_id == device_id)
+        .collect();
+    let first = rows.first()?;
+    let mut counts = SeverityCounts::default();
+    let mut aged = 0;
+    let mut failed = 0;
+    let mut pending = 0;
+    let sla_cutoff = SAMPLE_NOW_EPOCH - SAMPLE_SLA_DAYS * 86_400;
+    for r in &rows {
+        match r.status.as_str() {
+            "INSTALLED" | "REJECTED" => {}
+            "FAILED" => failed += 1,
+            _ => {
+                pending += 1;
+                add_band(&mut counts, &r.severity);
+                let backlog = severity_rank(&r.severity) >= severity_rank("Important");
+                let old = r
+                    .first_seen_date
+                    .as_deref()
+                    .and_then(date_to_epoch)
+                    .is_none_or(|seen| seen < sla_cutoff);
+                if backlog && old {
+                    aged += 1;
+                }
+            }
+        }
     }
+    Some(DeviceSummary {
+        device_id,
+        device_name: first.device_name.clone(),
+        organization: first.organization.clone(),
+        location: first.location.clone(),
+        device_role: first.device_role.clone(),
+        os_name: first.os_name.clone(),
+        pending_count: pending,
+        needs_reboot: first.needs_reboot,
+        offline: first.offline,
+        // Every sample device is a Windows, macOS or Linux agent.
+        rollup_scope: RollupScope::Included,
+        pending_by_severity: counts,
+        aged_critical: aged,
+        failed_installs: failed_queried.then_some(failed),
+        last_contact: Some(SAMPLE_LAST_CONTACT.to_string()),
+    })
+}
+
+/// Files one pending patch under its band by display label.
+fn add_band(c: &mut SeverityCounts, severity: &str) {
+    let band = match severity {
+        "Critical" => &mut c.critical,
+        "Important" => &mut c.important,
+        "Security" => &mut c.security,
+        "Moderate" => &mut c.moderate,
+        "Recommended" => &mut c.recommended,
+        "Low" => &mut c.low,
+        "Optional" => &mut c.optional,
+        _ => &mut c.unknown,
+    };
+    *band += 1;
+}
+
+/// The demo's `device_detail`: the device's rollup over the whole sample, plus its
+/// rows as the displayed result filtered them (the Patches tab's rows, as on the
+/// desktop). `None` for an id the sample does not have.
+pub fn device_detail(
+    result: &QueryResult,
+    device_id: i64,
+    failed_queried: bool,
+) -> Option<DeviceDetail> {
+    let device = sample_device_summary(device_id, failed_queried)?;
+    let rows: Vec<PatchRow> = result
+        .rows
+        .iter()
+        .filter(|r| r.device_id == device_id)
+        .cloned()
+        .collect();
+    Some(DeviceDetail {
+        device: Some(device),
+        rows_total: rows.len(),
+        rows,
+    })
 }
 
 /// Groups the demo's FAILED display rows by patch (KB + name) — the demo mirror of
@@ -1140,5 +1190,73 @@ mod tests {
             assert_eq!(seen, rows.len(), "every row belongs to exactly one group");
         }
         assert!(group_members(&rows, GroupBy::Device, "no-such-key").is_empty());
+    }
+
+    fn statuses(s: &[&str]) -> Vec<String> {
+        s.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The Needs Reboot tab and the drill-down opened from it must show the same
+    /// pending count — the demo once hardcoded the tab's numbers, which the
+    /// drill-down (built from the sample rows) would have contradicted.
+    #[test]
+    fn the_reboot_tab_and_the_drill_down_agree() {
+        let r = filtered_result(&filter(), "ALL", &statuses(&["PENDING"]), None);
+        for d in &r.reboot_devices {
+            let detail = device_detail(&r, d.device_id, false).expect("a sample device");
+            let device = detail.device.expect("with facts");
+            assert_eq!(device.pending_count, d.pending_count, "{}", d.device_name);
+            assert!(
+                device.needs_reboot,
+                "{} is on the reboot tab",
+                d.device_name
+            );
+        }
+    }
+
+    /// The per-device rollup is fleet-tier, like the backend's: the patch facets
+    /// narrow the rows under it, never the counts. Failed installs are unknown
+    /// unless the query asked for Failed.
+    #[test]
+    fn the_drill_down_counts_ignore_patch_filters_and_its_rows_do_not() {
+        let critical_only = FilterParams {
+            severities: vec!["CRITICAL".into()],
+            ..filter()
+        };
+        let r = filtered_result(
+            &critical_only,
+            "ALL",
+            &statuses(&["PENDING", "APPROVED"]),
+            None,
+        );
+        let id = device_id_of("DCA-APP01");
+        let detail = device_detail(&r, id, false).expect("a sample device");
+        let device = detail.device.expect("with facts");
+        assert_eq!(device.pending_by_severity.critical, 1);
+        assert_eq!(
+            device.pending_by_severity.important, 1,
+            "the Important patch still counts"
+        );
+        assert_eq!(device.pending_count, 2);
+        assert_eq!(device.failed_installs, None, "Failed was not queried");
+        assert_eq!(
+            detail.rows_total, 1,
+            "only the Critical row passed the filter"
+        );
+        assert!(detail.rows.iter().all(|row| row.device_id == id));
+
+        let with_failed = device_detail(&r, device_id_of("DCA-WEB02"), true)
+            .and_then(|d| d.device)
+            .expect("a sample device");
+        assert_eq!(with_failed.failed_installs, Some(1));
+        assert_eq!(
+            with_failed.pending_count, 0,
+            "a FAILED install is not pending"
+        );
+
+        assert!(
+            device_detail(&r, 42, false).is_none(),
+            "not a sample device"
+        );
     }
 }

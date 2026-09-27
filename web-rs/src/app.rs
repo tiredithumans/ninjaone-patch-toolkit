@@ -27,7 +27,7 @@ use filters::Filters;
 use header::Header;
 use settings::SettingsPanel;
 use state::*;
-use tables::Results;
+use tables::{DeviceDetailModal, Results};
 use toaster::Toaster;
 use update::UpdateSplash;
 use util::{
@@ -238,6 +238,7 @@ pub fn App() -> impl IntoView {
             <Toaster/>
             <UpdateSplash/>
             <ConfirmActionModal/>
+            <DeviceDetailModal/>
         </main>
         </Show>
     }

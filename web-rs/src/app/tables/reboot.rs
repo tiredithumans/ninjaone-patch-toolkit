@@ -74,7 +74,7 @@ pub(super) fn RebootTable() -> impl IntoView {
                                             <td>{d.organization}</td>
                                             <td>{d.location.unwrap_or_default()}</td>
                                             <td>{d.device_role.unwrap_or_default()}</td>
-                                            <td>{d.device_name}</td>
+                                            <td><DeviceLink device_id=d.device_id name=d.device_name/></td>
                                             <td>{d.os_name.unwrap_or_default()}</td>
                                             <td>{d.pending_count}</td>
                                         </tr>

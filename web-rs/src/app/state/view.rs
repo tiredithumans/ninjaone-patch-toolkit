@@ -241,6 +241,78 @@ impl AppState {
         (n == rows.len(), n > 0 && n < rows.len())
     }
 
+    /// Opens the device drill-down for `device_id` and loads it. `name` is what the
+    /// operator clicked, shown until the detail lands. A row with no device (the
+    /// orphan sentinel) has nothing to drill into.
+    pub(in crate::app) fn open_device(self, device_id: i64, name: String) {
+        if device_id == util::ORPHAN_DEVICE_ID {
+            return;
+        }
+        self.query.drill.set(Some(DeviceDrill {
+            device_id,
+            name,
+            load: DrillLoad::Loading,
+        }));
+        self.load_device_detail(device_id);
+    }
+
+    pub(in crate::app) fn close_device(self) {
+        self.query.drill.set(None);
+        // A load still in flight must not reopen it.
+        self.query
+            .drill_seq
+            .update(|s| *s = util::next_query_seq(*s));
+    }
+
+    /// Reloads an open drill-down against the result just put on screen — an
+    /// auto-refresh or re-run keeps the dialog but not its old numbers.
+    pub(in crate::app) fn reload_device_detail(self) {
+        if let Some(id) = self
+            .query
+            .drill
+            .with_untracked(|d| d.as_ref().map(|d| d.device_id))
+        {
+            self.load_device_detail(id);
+        }
+    }
+
+    /// Fetches the drill-down from the backend's cached result, or builds it from
+    /// the sample in demo mode, and applies it only if it is still the newest load
+    /// for the device on screen.
+    fn load_device_detail(self, device_id: i64) {
+        let seq = util::next_query_seq(self.query.drill_seq.get_untracked());
+        self.query.drill_seq.set(seq);
+        let apply = move |outcome: Result<Option<DeviceDetail>, String>| {
+            if util::is_superseded(self.query.drill_seq.get_untracked(), seq) {
+                return;
+            }
+            self.query.drill.update(|drill| {
+                if let Some(drill) = drill.as_mut().filter(|d| d.device_id == device_id) {
+                    drill.load = match outcome {
+                        Ok(Some(detail)) => DrillLoad::Ready(detail),
+                        Ok(None) => DrillLoad::Gone,
+                        Err(e) => DrillLoad::Failed(e),
+                    };
+                }
+            });
+        };
+        if self.session.demo.get_untracked() {
+            // Read off the Run-time snapshot, not the live controls: it is the
+            // query on screen that did or did not ask about failures.
+            let failed_queried = self.query.applied_filters.with_untracked(|a| {
+                a.as_ref()
+                    .is_some_and(|a| a.statuses.iter().any(|s| s == "FAILED"))
+            });
+            let detail = self.query.result.with_untracked(|r| {
+                r.as_ref()
+                    .and_then(|r| demo::device_detail(r, device_id, failed_queried))
+            });
+            apply(Ok(detail));
+            return;
+        }
+        spawn_local(async move { apply(api::device_detail(device_id).await) });
+    }
+
     /// Cycles a Patches-table column through none → ascending → descending and
     /// re-fetches page 1 in the new order (demo mode re-sorts its in-memory sample
     /// inside `fetch_page`).
