@@ -238,7 +238,7 @@ pub struct SeverityCounts {
 }
 
 /// Which key the Patches view groups its rows by. Mirrors `rows::GroupBy`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum GroupBy {
     Device,
@@ -458,7 +458,9 @@ pub struct RowSort {
     pub desc: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+// `Deserialize` only so a shared view link can name a sort column by the same
+// spelling the backend uses; see `util::view_link`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RowSortKey {
     Organization,

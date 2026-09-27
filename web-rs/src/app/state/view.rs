@@ -241,6 +241,29 @@ impl AppState {
         (n == rows.len(), n > 0 && n < rows.len())
     }
 
+    /// Pages in the Patches view as it is currently shown — rows when flat, group
+    /// headers when grouped (see `util::paged_total`).
+    pub(in crate::app) fn patches_page_count(self) -> usize {
+        let grouped = self.query.group_by.get().is_some();
+        let rows_total = self
+            .query
+            .result
+            .with(|r| r.as_ref().map_or(0, |r| r.rows_total));
+        let total = util::paged_total(grouped, rows_total, self.query.groups_total.get());
+        util::page_count(total, PATCHES_PAGE_SIZE)
+    }
+
+    /// Moves the Patches view to `target` and fetches that page — of headers or of
+    /// rows, matching what the view is actually showing.
+    pub(in crate::app) fn go_to_patches_page(self, target: usize) {
+        self.query.patches_page.set(target);
+        if self.query.group_by.get_untracked().is_some() {
+            self.fetch_groups(target);
+        } else {
+            self.fetch_page(target);
+        }
+    }
+
     /// Cycles a Patches-table column through none → ascending → descending and
     /// re-fetches page 1 in the new order (demo mode re-sorts its in-memory sample
     /// inside `fetch_page`).

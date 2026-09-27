@@ -38,7 +38,14 @@ lists individual patches per server, and exports to Excel.
   - Install‑history export (what actually installed / failed) over a date window.
   - Reboot & failure views (devices pending reboot; `FAILED` patches).
   - Compliance & SLA aging — per‑org compliance % and aged Critical/Important backlog.
-  - Saved filter presets and optional auto‑refresh.
+  - Saved filter presets and optional auto‑refresh with a visible countdown and Pause (it
+    also waits while a dialog or Settings is open, or the window is hidden).
+- **Operator comforts** — keyboard shortcuts (below); a **Columns** menu to hide Patches‑table
+  columns (remembered per machine; the Excel export still writes every column); **Copy view
+  link** / **Open view…** to hand a colleague the same filters, tab, grouping and sort (never
+  the selection or any credential — a link from another instance warns before applying; the web
+  demo keeps it in the URL); Light / Dark / System theme; reduced motion honoured; the window
+  reopens where you left it.
 - **Patch actions** *(opt‑in — see [Patch actions](#patch-actions))* — select patch rows and
   scan, apply, reboot, or run any script from the tenant's automation library, then watch
   each dispatch to a terminal state in the **Jobs** tab.
@@ -111,6 +118,22 @@ flow.
 
 Sign-in hanging, a 404, an empty export, or blank fields? See
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+### Keyboard shortcuts
+
+Press <kbd>?</kbd> in the app for this list. Shortcuts are ignored while you type in a field,
+while a dialog is open, and with Ctrl/Alt/⌘ held. None of them dispatches an action, exports,
+or changes a device.
+
+| Key | Does |
+|---|---|
+| <kbd>r</kbd> | Run the query |
+| <kbd>1</kbd> – <kbd>6</kbd> | Switch results tab: Patches, Failures, Compliance, Needs Reboot, Trend, Jobs |
+| <kbd>/</kbd> | Jump to the Search filter |
+| <kbd>[</kbd> <kbd>]</kbd> | Previous / next page of the Patches table |
+| <kbd>p</kbd> | Pause or resume auto-refresh |
+| <kbd>?</kbd> | Show the shortcuts |
+| <kbd>Esc</kbd> | Close a dialog |
 
 ## Build & verify
 
