@@ -11,7 +11,7 @@ Regenerate with `just licenses`. Do not edit by hand.
 
 ## Desktop app (src-tauri)
 
-- MIT License (540 crates)
+- MIT License (532 crates)
 - ISC License (20 crates)
 - Unicode License v3 (19 crates)
 - Apache License 2.0 (9 crates)
@@ -955,7 +955,7 @@ limitations under the License.
 
 Used by:
 - [dpi 0.1.2](https://github.com/rust-windowing/winit)
-- [tao 0.35.3](https://github.com/tauri-apps/tao)
+- [tao 0.37.1](https://github.com/tauri-apps/tao)
 
 ```
 Apache License
@@ -1311,8 +1311,8 @@ pub(crate) static GB18030_2022_OVERRIDE_BYTES: [[u8; 2]; 18] &#x3D; [
 ### BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
 
 Used by:
-- [alloc-no-stdlib 2.0.4](https://github.com/dropbox/rust-alloc-no-stdlib)
-- [brotli 8.0.4](https://github.com/dropbox/rust-brotli)
+- [alloc-no-stdlib 3.0.0](https://github.com/dropbox/rust-alloc-no-stdlib)
+- [brotli 9.0.0](https://github.com/dropbox/rust-brotli)
 
 ```
 Copyright (c) 2016 Dropbox, Inc.
@@ -1371,7 +1371,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ### BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
 
 Used by:
-- [alloc-stdlib 0.2.4](https://github.com/dropbox/rust-alloc-no-stdlib)
+- [alloc-stdlib 0.3.0](https://github.com/dropbox/rust-alloc-no-stdlib)
 - [aws-lc-sys 0.45.0](https://github.com/aws/aws-lc-rs)
 
 ```
@@ -2329,7 +2329,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [brotli 8.0.4](https://github.com/dropbox/rust-brotli)
+- [brotli 9.0.0](https://github.com/dropbox/rust-brotli)
 
 ```
 Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
@@ -2787,8 +2787,8 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [html5ever 0.38.0](https://github.com/servo/html5ever)
-- [markup5ever 0.38.0](https://github.com/servo/html5ever)
+- [html5ever 0.39.0](https://github.com/servo/html5ever)
+- [markup5ever 0.39.0](https://github.com/servo/html5ever)
 - [web_atoms 0.2.6](https://github.com/servo/html5ever)
 
 ```
@@ -3989,7 +3989,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [keyboard-types 0.7.0](https://github.com/pyfisch/keyboard-types)
+- [keyboard-types 0.8.3](https://github.com/rust-windowing/keyboard-types)
 
 ```
 Copyright (c) 2017 Pyfisch
@@ -4608,6 +4608,7 @@ DEALINGS IN THE SOFTWARE.
 Used by:
 - [dirs-sys 0.5.0](https://github.com/dirs-dev/dirs-sys-rs)
 - [dirs 6.0.0](https://github.com/soc/dirs-rs)
+- [dirs 7.0.0](https://codeberg.org/dirs/dirs-rs)
 
 ```
 Copyright (c) 2018-2019 dirs-rs contributors
@@ -6032,9 +6033,7 @@ Used by:
 - [serde_spanned 0.6.9](https://github.com/toml-rs/toml)
 - [serde_spanned 1.1.1](https://github.com/toml-rs/toml)
 - [toml 0.8.2](https://github.com/toml-rs/toml)
-- [toml 0.9.12+spec-1.1.0](https://github.com/toml-rs/toml)
 - [toml 1.1.6+spec-1.1.0](https://github.com/toml-rs/toml)
-- [toml_datetime 0.7.5+spec-1.1.0](https://github.com/toml-rs/toml)
 - [toml_datetime 1.1.1+spec-1.1.0](https://github.com/toml-rs/toml)
 - [toml_edit 0.19.15](https://github.com/toml-rs/toml)
 - [toml_edit 0.20.2](https://github.com/toml-rs/toml)
@@ -6391,6 +6390,42 @@ SOFTWARE.
 ### MIT License
 
 Used by:
+- [tauri-build 2.7.0](https://github.com/tauri-apps/tauri)
+- [tauri-codegen 2.7.0](https://github.com/tauri-apps/tauri)
+- [tauri-macros 2.7.0](https://github.com/tauri-apps/tauri)
+- [tauri-runtime-wry 2.12.0](https://github.com/tauri-apps/tauri)
+- [tauri-runtime 2.12.0](https://github.com/tauri-apps/tauri)
+- [tauri-utils 2.10.0](https://github.com/tauri-apps/tauri)
+- [tauri 2.12.0](https://github.com/tauri-apps/tauri)
+
+```
+MIT License
+
+Copyright (c) 2017 - Present Tauri Apps Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
 - [fs_extra 1.3.0](https://github.com/webdesus/fs_extra)
 
 ```
@@ -6451,7 +6486,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [json-patch 3.0.1](https://github.com/idubrov/json-patch)
+- [json-patch 4.2.0](https://github.com/idubrov/json-patch)
 
 ```
 MIT License
@@ -6481,6 +6516,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
+- [cfb 0.14.0](https://github.com/mdsteele/rust-cfb)
 - [cfb 0.7.3](https://github.com/mdsteele/rust-cfb)
 
 ```
@@ -6604,6 +6640,7 @@ SOFTWARE.
 
 Used by:
 - [infer 0.19.0](https://github.com/bojand/infer)
+- [infer 0.22.0](https://github.com/bojand/infer)
 
 ```
 MIT License
@@ -6841,7 +6878,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [window-vibrancy 0.6.0](https://github.com/tauri-apps/tauri-plugin-vibrancy)
+- [window-vibrancy 0.8.1](https://github.com/tauri-apps/tauri-plugin-vibrancy)
 
 ```
 MIT License
@@ -6871,7 +6908,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [wry 0.55.1](https://github.com/tauri-apps/wry)
+- [wry 0.57.0](https://github.com/tauri-apps/wry)
 
 ```
 MIT License
@@ -6932,7 +6969,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [urlpattern 0.3.0](https://github.com/denoland/rust-urlpattern)
+- [urlpattern 0.6.0](https://github.com/denoland/rust-urlpattern)
 
 ```
 MIT License
@@ -7052,7 +7089,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [jsonptr 0.6.3](https://github.com/chanced/jsonptr)
+- [jsonptr 0.7.1](https://github.com/chanced/jsonptr)
 
 ```
 MIT License
@@ -7082,7 +7119,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [muda 0.19.3](https://github.com/tauri-apps/muda)
+- [muda 0.20.0](https://github.com/tauri-apps/muda)
 
 ```
 MIT License
@@ -7142,7 +7179,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [dom_query 0.27.0](https://github.com/niklak/dom_query)
+- [dom_query 0.28.0](https://github.com/niklak/dom_query)
 
 ```
 MIT License
@@ -7208,9 +7245,39 @@ SOFTWARE.
 ### MIT License
 
 Used by:
+- [web-time 1.1.0](https://github.com/daxpedda/web-time)
+
+```
+MIT License
+
+Copyright (c) 2023 dAxpeDDa
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
 - [block2 0.6.2](https://github.com/madsmtm/objc2)
-- [brotli-decompressor 5.0.3](https://github.com/dropbox/rust-brotli-decompressor)
-- [cargo_toml 0.22.3](https://gitlab.com/lib.rs/cargo_toml)
+- [brotli-decompressor 6.0.1](https://github.com/dropbox/rust-brotli-decompressor)
+- [cargo_toml 1.0.1](https://gitlab.com/lib.rs/cargo_toml)
 - [cesu8 1.1.0](https://github.com/emk/cesu8-rs)
 - [chrono 0.4.45](https://github.com/chronotope/chrono)
 - [dispatch2 0.3.1](https://github.com/madsmtm/objc2)
@@ -7221,6 +7288,7 @@ Used by:
 - [jni-sys-macros 0.4.1](https://github.com/jni-rs/jni-sys)
 - [jni 0.22.4](https://github.com/jni-rs/jni-rs)
 - [minisign-verify 0.2.5](https://github.com/jedisct1/rust-minisign-verify)
+- [ndk-context 0.1.1](https://github.com/rust-windowing/android-ndk-rs)
 - [ndk-sys 0.6.0+11769913](https://github.com/rust-mobile/ndk)
 - [ndk 0.9.0](https://github.com/rust-mobile/ndk)
 - [objc2-app-kit 0.3.2](https://github.com/madsmtm/objc2)
@@ -7244,40 +7312,24 @@ Used by:
 - [r-efi 6.0.0](https://github.com/r-efi/r-efi)
 - [rust_xlsxwriter 0.99.1](https://github.com/jmcnamara/rust_xlsxwriter)
 - [rustls-platform-verifier-android 0.2.0](https://github.com/rustls/rustls-platform-verifier)
-- [tauri-build 2.6.3](https://github.com/tauri-apps/tauri)
-- [tauri-codegen 2.6.3](https://github.com/tauri-apps/tauri)
-- [tauri-macros 2.6.3](https://github.com/tauri-apps/tauri)
-- [tauri-plugin-dialog 2.7.3](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin-fs 2.5.2](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin-updater 2.12.0](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin 2.6.3](https://github.com/tauri-apps/tauri)
-- [tauri-runtime-wry 2.11.4](https://github.com/tauri-apps/tauri)
-- [tauri-runtime 2.11.3](https://github.com/tauri-apps/tauri)
-- [tauri-utils 2.9.3](https://github.com/tauri-apps/tauri)
-- [tauri 2.11.6](https://github.com/tauri-apps/tauri)
-- [unic-char-property 0.9.0](https://github.com/open-i18n/rust-unic/)
-- [unic-char-range 0.9.0](https://github.com/open-i18n/rust-unic/)
-- [unic-common 0.9.0](https://github.com/open-i18n/rust-unic/)
-- [unic-ucd-ident 0.9.0](https://github.com/open-i18n/rust-unic/)
-- [unic-ucd-version 0.9.0](https://github.com/open-i18n/rust-unic/)
+- [tauri-plugin-dialog 2.8.0](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-fs 2.6.0](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-updater 2.13.0](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin 2.7.0](https://github.com/tauri-apps/tauri)
 - [webview2-com-macros 0.8.1](https://github.com/wravery/webview2-rs)
-- [webview2-com-sys 0.38.2](https://github.com/wravery/webview2-rs)
-- [webview2-com 0.38.2](https://github.com/wravery/webview2-rs)
+- [webview2-com-sys 0.39.1](https://github.com/wravery/webview2-rs)
+- [webview2-com 0.39.1](https://github.com/wravery/webview2-rs)
 - [winapi-i686-pc-windows-gnu 0.4.0](https://github.com/retep998/winapi-rs)
 - [winapi-x86_64-pc-windows-gnu 0.4.0](https://github.com/retep998/winapi-rs)
-- [windows-collections 0.2.0](https://github.com/microsoft/windows-rs)
-- [windows-core 0.61.2](https://github.com/microsoft/windows-rs)
+- [windows-collections 0.3.2](https://github.com/microsoft/windows-rs)
 - [windows-core 0.62.2](https://github.com/microsoft/windows-rs)
-- [windows-future 0.2.1](https://github.com/microsoft/windows-rs)
+- [windows-future 0.3.2](https://github.com/microsoft/windows-rs)
 - [windows-implement 0.60.2](https://github.com/microsoft/windows-rs)
 - [windows-interface 0.59.3](https://github.com/microsoft/windows-rs)
-- [windows-link 0.1.3](https://github.com/microsoft/windows-rs)
 - [windows-link 0.2.1](https://github.com/microsoft/windows-rs)
-- [windows-numerics 0.2.0](https://github.com/microsoft/windows-rs)
+- [windows-numerics 0.3.1](https://github.com/microsoft/windows-rs)
 - [windows-registry 0.6.1](https://github.com/microsoft/windows-rs)
-- [windows-result 0.3.4](https://github.com/microsoft/windows-rs)
 - [windows-result 0.4.1](https://github.com/microsoft/windows-rs)
-- [windows-strings 0.4.2](https://github.com/microsoft/windows-rs)
 - [windows-strings 0.5.1](https://github.com/microsoft/windows-rs)
 - [windows-sys 0.45.0](https://github.com/microsoft/windows-rs)
 - [windows-sys 0.52.0](https://github.com/microsoft/windows-rs)
@@ -7287,9 +7339,9 @@ Used by:
 - [windows-targets 0.42.2](https://github.com/microsoft/windows-rs)
 - [windows-targets 0.52.6](https://github.com/microsoft/windows-rs)
 - [windows-targets 0.53.5](https://github.com/microsoft/windows-rs)
-- [windows-threading 0.1.0](https://github.com/microsoft/windows-rs)
+- [windows-threading 0.2.1](https://github.com/microsoft/windows-rs)
 - [windows-version 0.1.7](https://github.com/microsoft/windows-rs)
-- [windows 0.61.3](https://github.com/microsoft/windows-rs)
+- [windows 0.62.2](https://github.com/microsoft/windows-rs)
 - [windows_aarch64_gnullvm 0.42.2](https://github.com/microsoft/windows-rs)
 - [windows_aarch64_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
 - [windows_aarch64_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
@@ -7696,7 +7748,6 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [winnow 0.5.40](https://github.com/winnow-rs/winnow)
-- [winnow 0.7.15](https://github.com/winnow-rs/winnow)
 - [winnow 1.0.4](https://github.com/winnow-rs/winnow)
 
 ```
@@ -7798,8 +7849,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [ctor-proc-macro 0.0.7](https://github.com/mmastrac/rust-ctor)
-- [ctor 0.8.0](https://github.com/mmastrac/rust-ctor)
+- [ctor 1.0.13](https://github.com/mmastrac/linktime)
 
 ```
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the &quot;Software&quot;), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
@@ -9255,8 +9305,8 @@ Exhibit B - &quot;Incompatible With Secondary Licenses&quot; Notice
 ### Mozilla Public License 2.0
 
 Used by:
-- [cssparser-macros 0.6.1](https://github.com/servo/rust-cssparser)
-- [cssparser 0.36.0](https://github.com/servo/rust-cssparser)
+- [cssparser-macros 0.7.1](https://github.com/servo/rust-cssparser)
+- [cssparser 0.37.0](https://github.com/servo/rust-cssparser)
 
 ```
 Mozilla Public License Version 2.0
@@ -9639,7 +9689,7 @@ Exhibit B - &quot;Incompatible With Secondary Licenses&quot; Notice
 
 Used by:
 - [option-ext 0.2.0](https://github.com/soc/option-ext.git)
-- [selectors 0.36.1](https://github.com/servo/stylo)
+- [selectors 0.38.0](https://github.com/servo/stylo)
 
 ```
 Mozilla Public License Version 2.0
