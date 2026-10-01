@@ -38,3 +38,16 @@ code against the rule, not against the examples.
 
 `settings`/`last_result` are `std::sync::Mutex`. Take a `settings_snapshot()` (clone) before any
 `.await`; don't hold a guard across an API call.
+
+## The Windows main thread has a 1 MiB stack
+
+Windows MSVC gives the main thread 1 MiB; macOS and Linux give 8 MiB. v0.15.0's optimized build
+overflowed it on every Run query (`STATUS_STACK_OVERFLOW`, `thread 'main' has overflowed its
+stack`) while `just dev` (debug) did not, so the overflow only exists in an optimized Windows build.
+`src-tauri/.cargo/config.toml` links an 8 MiB stack for `x86_64-pc-windows-msvc`, which fixed it.
+
+The query itself is not the cause: assembling 548,000 software patches, diffing and serializing the
+summary passes on a 1 MiB stack off the main thread. The frames that use main-thread stack at the end
+of a query were never identified, so this raises the limit rather than removing the cause. Do not
+set it with `RUSTFLAGS`: that also reaches the Trunk WASM build and build scripts and fails them.
+
