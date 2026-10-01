@@ -73,7 +73,6 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
 ├── src/commands/actions/        # mod.rs handlers · confirm.rs request_hash · plan.rs build_plan · dispatch.rs send_action · poller.rs poll_tick · tests.rs
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
-├── .cargo/config.toml           # Windows-only: 8 MiB main-thread stack linker flag
 ├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint); main window starts hidden
 ├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
 └── capabilities/default.json    # webview capabilities: `core:default` only (the save dialog runs in Rust)
@@ -179,9 +178,7 @@ Backend — commands, cache, concurrency:
   hold the result mutex for a handle (`current_result_handle`), not for the work. Settings writers
   go through `settings_write` + `replace_settings` (I/O on a blocking thread, published after the
   disk write); only an instance/client-id change clears caches on save. → `docs/design/concurrency.md`
-- **The Windows build links an 8 MiB main-thread stack** (`src-tauri/.cargo/config.toml`); the default
-  1 MiB overflowed on Run query in release only. Never set it via `RUSTFLAGS` (breaks the Trunk build).
-  → `docs/design/concurrency.md#the-windows-main-thread-stack`
+- **Windows links an 8 MiB main-thread stack** (`src-tauri/.cargo/config.toml`, never `RUSTFLAGS`). → `docs/design/concurrency.md`
 
 Auth:
 
