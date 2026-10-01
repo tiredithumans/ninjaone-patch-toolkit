@@ -1,0 +1,9 @@
+# Windows gives the main thread a 1 MiB stack (macOS/Linux: 8 MiB). v0.15.0's release
+# build overflowed it (0xc00000fd, `thread 'main' has overflowed its stack`) on every
+# Run query; a debug build did not, and 8 MiB fixed the release build. See
+# docs/design/concurrency.md#the-windows-main-thread-stack.
+#
+# Scoped to this crate and the MSVC target: `RUSTFLAGS` would also reach the Trunk
+# WASM build and build scripts, and `/STACK` is an MSVC linker option.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]

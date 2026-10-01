@@ -11,6 +11,12 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows: Run query no longer closes the app.** The 0.15.0 release build overflowed the
+  main thread's 1 MiB stack (`0xc00000fd`) when a query finished. The Windows build now links an
+  8 MiB main-thread stack.
+
 ## [0.15.0] - 2026-09-27
 
 ### Added
