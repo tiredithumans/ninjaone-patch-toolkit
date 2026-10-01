@@ -11,11 +11,17 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-09-30
+
 ### Fixed
 
 - **Windows: Run query no longer closes the app.** The 0.15.0 release build overflowed the
   main thread's 1 MiB stack (`0xc00000fd`) when a query finished. The Windows build now links an
   8 MiB main-thread stack.
+
+### Changed
+
+- Dependency updates: `tauri` 2.12, `leptos` 0.8.21 and other minor/patch bumps.
 
 ## [0.15.0] - 2026-09-27
 
