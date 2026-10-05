@@ -942,7 +942,7 @@ async fn a_tick_that_spans_a_sign_out_touches_nothing_in_the_next_session() {
     let updates = resolved_against_a_completed_apply(pending).await;
 
     // Sign-out and sign-in while the tick was reading; the next operator dispatches.
-    state.clear_jobs();
+    let _closings = state.clear_jobs();
     let theirs = pending_job(2, 8, ActionKind::OsPatchApply, ts);
     assert!(state.append_jobs(&state.job_session(), vec![theirs]));
 
@@ -963,8 +963,8 @@ async fn a_tick_that_spans_a_sign_out_touches_nothing_in_the_next_session() {
 
 /// Across a tenant switch the feed was read through the *new* instance's client,
 /// so a device id there is another machine and its verdict means nothing for this
-/// job: no closing record, rather than one claiming an outcome read from the wrong
-/// tenant.
+/// job. Its record is closed as unresolved, labelled with the instance it was sent
+/// to, rather than with an outcome read from the wrong tenant.
 #[tokio::test]
 async fn a_tick_that_spans_an_instance_switch_writes_no_verdict() {
     let state = AppState::new().expect("build state");
@@ -978,14 +978,20 @@ async fn a_tick_that_spans_an_instance_switch_writes_no_verdict() {
         instance_base_url: "https://other.ninjarmm.com".into(),
         ..state.settings_snapshot()
     });
-    state.clear_jobs();
+    let _closings = state.clear_jobs();
 
     let before = state.cache_epochs();
     let tick = poller::settle_tick(&state, &session, updates);
 
     assert!(tick.applied.is_empty());
     assert_eq!(state.cache_epochs(), before);
-    assert!(tick.closing.is_empty());
+    assert_eq!(tick.closing.len(), 1);
+    assert_eq!(tick.closing[0].outcome, audit::UNRESOLVED_SESSION_ENDED);
+    assert_eq!(tick.closing[0].instance, session.instance());
+    assert_eq!(
+        tick.closing[0].activity_id, None,
+        "901 was the other tenant's"
+    );
 }
 
 /// Two jobs of the *same* kind on one device share one read, and the claimed-id

@@ -766,7 +766,7 @@ fn a_poll_tick_from_the_previous_session_applies_nothing() {
 
     // Sign-out and sign-in mid-tick; the next session dispatches a job with an id
     // the old tick also holds.
-    state.clear_jobs();
+    let _closings = state.clear_jobs();
     assert!(state.append_jobs(&state.job_session(), vec![sample_job(1, JobState::Running)]));
 
     let applied = state.apply_job_updates(&session, vec![sample_job(1, JobState::Completed)]);
@@ -784,7 +784,7 @@ fn a_batch_dispatching_at_sign_out_is_not_recorded_in_the_next_session() {
     let session = state.job_session();
 
     // The operator signs out while the batch is still dispatching.
-    state.clear_jobs();
+    let _closings = state.clear_jobs();
 
     assert!(
         !state.append_jobs(&session, vec![sample_job(1, JobState::Running)]),
@@ -795,6 +795,51 @@ fn a_batch_dispatching_at_sign_out_is_not_recorded_in_the_next_session() {
     // A batch begun in the new session records normally.
     assert!(state.append_jobs(&state.job_session(), vec![sample_job(2, JobState::Running)]));
     assert_eq!(state.jobs_snapshot().len(), 1);
+}
+
+/// Ending the session drops jobs no poller will now settle, so their "dispatching"
+/// audit records need a close. `clear_jobs` hands back one "unresolved" record per
+/// unsettled job, labelled with the tenant the jobs were stored under; a job that
+/// already settled was closed when it did.
+#[test]
+fn ending_the_session_closes_the_audit_record_of_every_unsettled_job() {
+    let state = AppState::new().expect("build state");
+    let instance = state.settings_snapshot().instance_base_url;
+    assert!(state.append_jobs(
+        &state.job_session(),
+        vec![
+            sample_job(1, JobState::Running),
+            sample_job(2, JobState::Completed),
+        ]
+    ));
+
+    let closings = state.clear_jobs();
+
+    assert_eq!(closings.len(), 1);
+    assert_eq!(closings[0].job_id, 1);
+    assert_eq!(
+        closings[0].outcome,
+        crate::actions::audit::UNRESOLVED_SESSION_ENDED
+    );
+    assert_eq!(closings[0].instance, instance);
+    assert!(state.clear_jobs().is_empty(), "nothing left to close");
+}
+
+/// A batch refused at `append_jobs` is never polled either, so `run_action` closes
+/// its unsettled rows from the session it dispatched in. Rows already terminal (a
+/// rejection, a device not sent) were closed at dispatch.
+#[test]
+fn a_refused_batch_closes_only_its_unsettled_jobs() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+    let closings = session.unresolved_closings(&[
+        sample_job(1, JobState::Running),
+        sample_job(2, JobState::Unknown("timed out".into())),
+        sample_job(3, JobState::Skipped("not sent".into())),
+    ]);
+    let ids: Vec<u64> = closings.iter().map(|c| c.job_id).collect();
+    assert_eq!(ids, vec![1, 2]);
+    assert_eq!(closings[0].instance, session.instance());
 }
 
 #[test]
@@ -888,7 +933,7 @@ fn a_plan_in_flight_at_sign_out_cannot_store_a_confirm_token() {
     let session = state.job_session();
 
     // The operator signs out (and the next one signs in) while the plan is fetching.
-    state.clear_jobs();
+    let _closings = state.clear_jobs();
 
     assert!(
         !state.store_pending_confirm(&session, "tok".into(), "hash-a".into()),
@@ -906,7 +951,7 @@ fn a_plan_in_flight_across_an_instance_switch_cannot_store_a_confirm_token() {
     let session = state.job_session();
 
     state.settings.lock().unwrap().instance_base_url = "https://other.ninjarmm.com".into();
-    state.clear_jobs();
+    let _closings = state.clear_jobs();
 
     assert!(!state.store_pending_confirm(&session, "tok".into(), "hash-a".into()));
     assert!(!state.consume_confirm_token("tok", "hash-a"));
@@ -917,7 +962,7 @@ fn a_plan_in_flight_across_an_instance_switch_cannot_store_a_confirm_token() {
 #[test]
 fn a_plan_started_after_the_clear_is_approvable() {
     let state = AppState::new().expect("build state");
-    state.clear_jobs();
+    let _closings = state.clear_jobs();
     let session = state.job_session();
     state.clear_job_history();
 

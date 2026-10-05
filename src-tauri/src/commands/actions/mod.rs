@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{info, warn};
 
 use crate::actions::{
-    ActionKind, ActionPlan, JobReport, JobRequest, JobState, RebootChoice, fmt_ts,
+    ActionKind, ActionPlan, JobReport, JobRequest, JobState, RebootChoice, audit, fmt_ts,
 };
 use crate::error::UiError;
 use crate::model::{AutomationScript, RebootMode};
@@ -324,6 +324,8 @@ pub async fn run_action(
             sent = live,
             "session ended mid-dispatch; batch not recorded"
         );
+        // No poller will settle these now, so their opening records are closed here.
+        audit::record_off_runtime(session.unresolved_closings(&jobs)).await;
         return Err(UiError::new(format!(
             "You signed in again or switched instance while this batch was dispatching. {live} \
              device(s) had already been sent the action; any still queued were not. The action \

@@ -323,8 +323,16 @@ under it: `apply_job_updates` returns the ids it applied, and only those are inv
 emitted. A tick that spans a sign-out used to invalidate the next session's caches and emit the
 old rows, which the frontend merged into the next operator's Jobs tab. A settled job still gets
 its closing audit record, labelled with the session's instance and client id (not Settings read
-now), unless the tenant changed: the feed was then read from the other instance, so it has no
-verdict to record.
+now), unless the tenant changed: the feed was then read from the other instance, so the record is
+closed as unresolved instead.
+
+**Every opening "dispatching" audit record gets a close**, even when the session ends first. The
+close is `AuditEntry::unresolved` ("unresolved: session ended before the outcome was known", with
+no activity id or exit code) in three places. `clear_jobs` returns one for each unsettled row it
+drops, and the async callers write it off the runtime. `run_action` writes one for each unsettled
+row of a batch refused at `append_jobs`. `settle_tick` writes one across a tenant change. A
+same-tenant tick that settles a row `clear_jobs` already closed adds its real verdict after the
+unresolved line. The log is append-only, so the later line is the more informed one.
 
 **NinjaOne v2 has no script-output endpoint.** A job resolves from `/activities` only, so surface
 the exit code plus the activity/series correlator.

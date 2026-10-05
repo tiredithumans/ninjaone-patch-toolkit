@@ -61,7 +61,9 @@ version and start a fresh `[Unreleased]`.
   check still running when you signed out, signed in again or switched instance sent the
   previous session's jobs to the new session's Jobs tab, cleared its cached patch data, and
   wrote the closing audit record under the new instance's name. Its results are now dropped, and
-  the audit record names the instance the action was sent to.
+  the audit record names the instance the action was sent to. A job whose outcome was still
+  unknown when the session ended is closed in the audit log as unresolved instead of being left
+  open.
 
 ### Changed
 

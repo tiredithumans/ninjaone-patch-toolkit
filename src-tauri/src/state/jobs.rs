@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 
 use super::{AppState, TenantKey};
+use crate::actions::audit::AuditEntry;
 use crate::actions::{JobReport, MAX_JOBS};
 
 /// How long a confirmation token issued by `plan_action` stays usable. Short
@@ -69,6 +70,25 @@ impl JobSession {
     pub fn client_id(&self) -> Option<&str> {
         self.tenant.client_id.as_deref()
     }
+
+    /// The "unresolved" closing records for every job in `jobs` that has no outcome
+    /// yet, labelled with this session.
+    pub fn unresolved_closings(&self, jobs: &[JobReport]) -> Vec<AuditEntry> {
+        unresolved_closings(&self.tenant, jobs)
+    }
+}
+
+fn unresolved_closings(tenant: &TenantKey, jobs: &[JobReport]) -> Vec<AuditEntry> {
+    jobs.iter()
+        .filter(|j| !j.state.is_terminal())
+        .map(|j| {
+            AuditEntry::unresolved(
+                j,
+                tenant.instance_base_url.clone(),
+                tenant.client_id.clone(),
+            )
+        })
+        .collect()
 }
 
 /// RAII claim on the single job-poller slot, issued by
@@ -249,12 +269,27 @@ impl AppState {
     /// Ends the job session on sign-out, sign-in, re-authorization or an instance
     /// change: dispatch history and any pending confirmation are dropped, and every
     /// plan, dispatch or poll tick still in flight is refused at its store.
-    pub fn clear_jobs(&self) {
+    ///
+    /// Returns the "unresolved" closing records for the jobs it dropped unsettled —
+    /// their poller will never settle them now. The caller writes them off the
+    /// runtime (`audit::record_off_runtime`); this runs under the jobs lock.
+    #[must_use]
+    pub fn clear_jobs(&self) -> Vec<AuditEntry> {
         // Bumped *before* the slots are cleared, as `clear_last_result` does: each
         // store re-reads the epoch under its slot lock, so whichever order the two
         // interleave, the departed session's write loses.
         self.job_epoch.fetch_add(1, Ordering::SeqCst);
-        self.clear_job_history();
+        let closings = match self.jobs.lock() {
+            Ok(mut guard) => match guard.take() {
+                Some((tenant, jobs)) => unresolved_closings(&tenant, &jobs),
+                None => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+        if let Ok(mut guard) = self.pending_confirm.lock() {
+            *guard = None;
+        }
+        closings
     }
 
     /// The Jobs tab's Clear: drops the history and any pending confirmation without
