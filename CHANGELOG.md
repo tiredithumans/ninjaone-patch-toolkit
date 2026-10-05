@@ -40,6 +40,11 @@ version and start a fresh `[Unreleased]`.
   that alternated between two cursors kept the query fetching the same pages until the app ran
   out of memory. A cursor seen earlier in the same fetch is now an error, and a fetch stops with
   an error after 10,000 pages.
+### Changed
+
+- **Excel export uses less memory on large fleets.** The Patches sheets now stream their rows to
+  a temporary file as they are written instead of holding the whole table in memory until the
+  workbook is saved. The workbook's contents are unchanged.
 
 ## [0.15.1] - 2026-09-30
 
