@@ -1,10 +1,12 @@
 # Design notes
 
-[AGENTS.md](../../AGENTS.md) is the **contract**: one short bullet per rule, naming the file to
-read and the test that enforces it. These notes are the **rationale** behind those rules — why
+[AGENTS.md](../../AGENTS.md) is the **index** and [`.claude/rules/`](../../.claude/rules/) holds
+the **contract** — one short rule per bullet, naming the file to read and the test that enforces
+it. Claude Code auto-loads a rule file when a matching source file is opened; other agents read
+it directly. These notes are the **rationale** behind those rules — why
 each invariant exists, what went wrong before it did, and the trade-offs that were weighed. Read
 the note for a domain before changing it; update the note when the reasoning changes and keep the
-contract line in AGENTS.md short.
+rule line short.
 
 | Note | Covers |
 |---|---|
