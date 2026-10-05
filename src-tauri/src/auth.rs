@@ -880,10 +880,14 @@ impl AuthState {
                 }
             }
             // A new sign-in that issued no refresh token must not leave the previous
-            // session's on disk, or the next launch restores it.
+            // session's on disk, or the next launch restores it. That includes the
+            // pre-tenant-scoping entry, as `logout` does: a migration whose write
+            // failed leaves it in place, and the next keyring read adopts it.
             None if new_session => {
-                if let Err(e) = delete_keyring(&entry) {
-                    warn!(error = %e, "could not delete the previous session's refresh token");
+                for stale in [entry.as_str(), LEGACY_KEYRING_USER_REFRESH] {
+                    if let Err(e) = delete_keyring(stale) {
+                        warn!(error = %e, "could not delete the previous session's refresh token");
+                    }
                 }
             }
             None => {}

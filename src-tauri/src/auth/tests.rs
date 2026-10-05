@@ -221,6 +221,8 @@ fn a_non_rotating_refresh_keeps_the_existing_token() {
 /// and the keyring kept it for the next launch.
 #[test]
 fn a_new_sign_in_does_not_inherit_the_previous_refresh_token() {
+    // The store below also clears the legacy entry.
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
     let auth = launched("https://new-session.example.com", "client-new-session");
     let entry = saved_refresh_entry("https://new-session.example.com", "client-new-session");
     auth.store_tokens_blocking(
@@ -1260,13 +1262,36 @@ async fn a_failure_from_a_previous_session_is_not_shared() {
     auth.refresh_failures.fetch_add(1, Ordering::AcqRel);
     // ...and before the caller runs, the operator signs in afresh, with a token
     // that is already due for refresh.
-    auth.store_tokens_blocking(token_response(Some("new-refresh")), auth.grant_stamp(), true)
-        .expect("interactive sign-in");
+    auth.store_tokens_blocking(
+        token_response(Some("new-refresh")),
+        auth.grant_stamp(),
+        true,
+    )
+    .expect("interactive sign-in");
     auth.invalidate_access_token("access");
     drop(held);
 
     assert_eq!(
-        queued.await.expect("join").expect("the new grant is refreshed"),
+        queued
+            .await
+            .expect("join")
+            .expect("the new grant is refreshed"),
         "new-session-access"
     );
+}
+
+/// A legacy migration whose scoped write failed leaves the pre-tenant-scoping
+/// entry in place, and the next keyring read adopts it. A new sign-in that issued
+/// no refresh token clears it, as `logout` does, so the next launch cannot restore
+/// the previous operator's grant from it.
+#[test]
+fn a_new_sign_in_clears_a_leftover_legacy_refresh_token() {
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
+    save_keyring(LEGACY_KEYRING_USER_REFRESH, "previous-operator").expect("seed legacy");
+    let auth = launched("https://legacy-left.example.com", "client-legacy-left");
+
+    auth.store_tokens_blocking(token_response(None), auth.grant_stamp(), true)
+        .expect("interactive sign-in without a refresh token");
+
+    assert_eq!(load_keyring(LEGACY_KEYRING_USER_REFRESH).unwrap(), None);
 }
