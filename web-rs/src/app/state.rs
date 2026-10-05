@@ -7,6 +7,7 @@
 //! anything worth asserting belongs in `util`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use leptos::task::spawn_local;
 
@@ -274,7 +275,9 @@ pub(crate) struct QueryState {
     pub(super) patches_page: RwSignal<usize>,
     /// The detail rows for the currently displayed page, fetched from the backend
     /// cache via `get_patch_rows` (the full row set is never shipped over IPC).
-    pub(super) page_rows: RwSignal<Vec<PatchRow>>,
+    /// Each row behind an `Arc`, so a render hands the select checkbox a refcount
+    /// rather than a second copy of the row.
+    pub(super) page_rows: RwSignal<Vec<Arc<PatchRow>>>,
     /// The last failed query/paging error, kept as a persistent banner in the
     /// results area after the announcing toast auto-dismisses. Cleared by the next
     /// successful run/page fetch or an explicit dismiss.
@@ -294,7 +297,11 @@ pub(crate) struct QueryState {
     pub(super) expanded: RwSignal<BTreeSet<String>>,
     /// Member rows per opened group. A key present in `expanded` but absent here
     /// is still loading — which is what the view renders a spinner from.
-    pub(super) members: RwSignal<BTreeMap<String, Vec<PatchRow>>>,
+    ///
+    /// Each entry sits behind an `Arc` that is replaced, never mutated, so an open
+    /// group's body can tell by pointer whether *its* entry changed: loading or
+    /// ticking another group must not re-render this one's table.
+    pub(super) members: RwSignal<BTreeMap<String, Arc<Vec<PatchRow>>>>,
     /// Stamp of the newest page/group-header request. A response carrying an older
     /// stamp is dropped: requests overlap (Next clicked twice, a sort change while
     /// a page is loading, a refresh landing mid-page) and resolve in any order, so

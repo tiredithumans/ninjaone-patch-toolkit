@@ -89,6 +89,17 @@ reloading it) re-ran the outer closure, the new trap would record the outgoing d
 opener and return focus to a detached node on close. Escape closes it; it has no action buttons
 (dispatch stays on the one `ActionBar`).
 
+**A table re-renders only the rows whose data changed.** Leptos rebuilds a re-run list in
+place, so focus already survived a full re-render; the cost is the clone and the diff of every
+row on every tick, which grows with open groups and batch size. An open group's body reads its
+own `query.members` slot through a `Memo` compared by `Arc::ptr_eq`
+(`util::member_entry_changed`), so a slot is always replaced with a fresh `Arc` and never
+mutated in place — an in-place edit would never be seen. The Jobs table is a keyed `<For>`
+that builds a row's cells once per `util::job_row_key`, so every column that can change after
+dispatch (status, exit code, duration, correlators, retryability) must be in that key or the
+row keeps showing the old value. The header checkboxes read `(all, some)` from one `Memo` over
+nested `.with` reads (`util::rows_selection_state`), never a clone of the rows.
+
 **An async response applies only if its request is still current.** Every page, group-header and
 group-member fetch is stamped (`QueryState.view_seq`, `members_gen`) and dropped on arrival if a
 newer request, a regroup, or a re-query has moved the stamp. Without it a slow sort overwrote a

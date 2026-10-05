@@ -46,9 +46,12 @@ version and start a fresh `[Unreleased]`.
   password in a URL (`https://user:…@host`) and a SAS `sig=` in a query string are now redacted,
   through the closing quote when the value is quoted. Ordinary flags such as `-PassThru`,
   `-KeyPath` and `-RegistryKey` keep their values in the log instead of showing `<redacted>`.
-
 ### Changed
 
+- **Selecting rows, opening patch groups and job status updates do less work.** The select-all
+  and group checkboxes no longer copy up to 500 rows on every selection change, an open group
+  is no longer re-rendered when another group loads, and a job status update re-renders only
+  the Jobs rows it changed.
 - **Excel export uses less memory on large fleets.** The Patches sheets now stream their rows to
   a temporary file as they are written instead of holding the whole table in memory until the
   workbook is saved. The workbook's contents are unchanged.

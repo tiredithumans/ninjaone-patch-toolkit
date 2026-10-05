@@ -22,6 +22,35 @@ pub(crate) fn merge_jobs(jobs: &mut Vec<JobReport>, incoming: impl IntoIterator<
     }
 }
 
+/// What a Jobs-table row is keyed on: the job id plus every field a later report
+/// for that job can change (status, exit code, duration, correlators, whether a
+/// retry can be rebuilt). A keyed list builds a row's cells once per key, so a
+/// progress event re-renders only the rows it actually advanced — the rest keep
+/// their DOM and any keyboard focus. The other columns are fixed at dispatch.
+pub(crate) type JobRowKey = (
+    u64,
+    String,
+    Option<i32>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    bool,
+);
+
+pub(crate) fn job_row_key(job: &JobReport) -> JobRowKey {
+    (
+        job.id,
+        // The label is distinct per variant and carries its message, so it also
+        // decides the status pill's class.
+        job.state.label(),
+        job.exit_code,
+        job.duration_seconds,
+        job.activity_id,
+        job.series_uid.clone(),
+        job.request.is_some(),
+    )
+}
+
 /// How many jobs have not reached a terminal state (queued, running, or still being
 /// resolved after an ambiguous dispatch).
 pub(crate) fn jobs_in_flight(jobs: &[JobReport]) -> usize {

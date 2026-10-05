@@ -18,7 +18,9 @@ impl AppState {
                 sort_patch_rows(&mut rows, sort);
             }
             let (start, end) = util::page_bounds(page, PATCHES_PAGE_SIZE, rows.len());
-            self.query.page_rows.set(rows[start..end].to_vec());
+            self.query
+                .page_rows
+                .set(rows.drain(start..end).map(Arc::new).collect());
             self.query.query_error.set(None);
             return;
         }
@@ -30,7 +32,9 @@ impl AppState {
             }
             match outcome {
                 Ok(rows) => {
-                    self.query.page_rows.set(rows);
+                    self.query
+                        .page_rows
+                        .set(rows.into_iter().map(Arc::new).collect());
                     self.query.query_error.set(None);
                 }
                 Err(e) => {
@@ -158,13 +162,13 @@ impl AppState {
             };
             match outcome {
                 Ok(rows) => self.query.members.update(|m| {
-                    m.insert(key, rows);
+                    m.insert(key, Arc::new(rows));
                 }),
                 Err(e) => {
                     // Leave the group open but empty and say why, rather than
                     // silently collapsing it back under the operator.
                     self.query.members.update(|m| {
-                        m.insert(key, Vec::new());
+                        m.insert(key, Arc::default());
                     });
                     self.notify(Toast::err(e));
                 }
@@ -191,7 +195,7 @@ impl AppState {
     /// collapsed header left the only trace in the action bar's running total.
     pub(in crate::app) fn toggle_group_selection(self, key: &str, label: String, checked: bool) {
         if let Some(rows) = self.query.members.with_untracked(|m| m.get(key).cloned()) {
-            for row in &rows {
+            for row in rows.iter() {
                 self.toggle_row_selection(row, checked);
             }
             return;
@@ -220,7 +224,7 @@ impl AppState {
                         });
                     }
                     self.query.members.update(|m| {
-                        m.insert(key, rows);
+                        m.insert(key, Arc::new(rows));
                     });
                 }
                 Err(e) => self.notify(Toast::err(e)),
@@ -229,16 +233,14 @@ impl AppState {
     }
 
     /// `(all, some)` ticked state for a group's loaded members, for its checkbox.
+    /// Reads both maps in place — no copy of up to `GROUP_MEMBER_LIMIT` rows or of
+    /// the selection; the view wraps it in one `Memo` per group header.
     pub(in crate::app) fn group_selection_state(self, key: &str) -> (bool, bool) {
-        let rows = self
-            .query
-            .members
-            .with(|m| m.get(key).cloned().unwrap_or_default());
-        if rows.is_empty() {
-            return (false, false);
-        }
-        let n = rows.iter().filter(|r| self.is_row_selected(r)).count();
-        (n == rows.len(), n > 0 && n < rows.len())
+        self.query.members.with(|m| {
+            self.actions
+                .selected
+                .with(|sel| util::rows_selection_state(m.get(key).map(|r| r.as_slice()), sel))
+        })
     }
 
     /// Pages in the Patches view as it is currently shown — rows when flat, group

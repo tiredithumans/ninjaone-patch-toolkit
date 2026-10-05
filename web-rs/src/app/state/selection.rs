@@ -27,25 +27,14 @@ impl AppState {
 
     /// Whether every row on the current page is selected. Used for the header
     /// checkbox's checked/indeterminate state.
+    /// Reads both signals in place rather than cloning the page and the selection;
+    /// the view wraps it in one `Memo` shared by both checkbox props.
     pub(in crate::app) fn page_selection_state(self) -> (bool, bool) {
-        let rows = self.query.page_rows.get();
-        if rows.is_empty() {
-            return (false, false);
-        }
-        let sel = self.actions.selected.get();
-        // Counts ticked *rows*, not devices: with per-row selection a device can
-        // be partly ticked, and the header box must read indeterminate for that.
-        let selected = rows
-            .iter()
-            .filter(|r| {
-                sel.get(&r.device_id)
-                    .is_some_and(|d| d.patches.contains_key(&patch_key(r)))
-            })
-            .count();
-        (
-            selected == rows.len(),
-            selected > 0 && selected < rows.len(),
-        )
+        self.query.page_rows.with(|rows| {
+            self.actions
+                .selected
+                .with(|sel| util::rows_selection_state(Some(rows.as_slice()), sel))
+        })
     }
 
     /// Ticks or clears every patch row on the current page. Idempotent per row, so

@@ -208,7 +208,9 @@ impl AppState {
                         // active sort — is fetched instead. Stamped like a fetch, so
                         // a page request still in flight cannot overwrite it.
                         self.query.next_view_seq();
-                        self.query.page_rows.set(r.rows.clone());
+                        self.query
+                            .page_rows
+                            .set(r.rows.iter().cloned().map(Arc::new).collect());
                     } else {
                         self.fetch_page(page);
                     }
