@@ -33,11 +33,11 @@ async function fixtureDist() {
   return dir;
 }
 
-// The server is loopback HTTPS with a throwaway cert, so verification is off here
-// exactly as `ignoreHTTPSErrors` does it for Chromium in the real capture.
-function fetchOnce(url) {
+// The server is loopback HTTPS with a throwaway self-signed cert; trusting exactly
+// that cert (rather than disabling verification) also proves the TLS material is real.
+function fetchOnce(url, ca) {
   return new Promise((resolve, reject) => {
-    get(url, { rejectUnauthorized: false }, (res) => {
+    get(url, { ca }, (res) => {
       const chunks = [];
       res.on("data", (c) => chunks.push(c));
       res.on("end", () =>
@@ -70,7 +70,7 @@ test("withServer serves the dist over working TLS", async () => {
   try {
     // Reaching a 200 at all is the regression guard: an unawaited `generate` leaves
     // key/cert undefined and the TLS handshake never completes.
-    const res = await withServer((url) => fetchOnce(`${url}/index.html`), dir);
+    const res = await withServer((url, ca) => fetchOnce(`${url}/index.html`, ca), dir);
     assert.equal(res.status, 200);
     assert.match(res.type, /^text\/html/);
     assert.equal(res.nosniff, "nosniff");
@@ -84,7 +84,7 @@ test("withServer sends .wasm as application/wasm", async () => {
   const dir = await fixtureDist();
   try {
     // Trunk's streaming compile rejects anything else, so this MIME is load-bearing.
-    const res = await withServer((url) => fetchOnce(`${url}/app.wasm`), dir);
+    const res = await withServer((url, ca) => fetchOnce(`${url}/app.wasm`, ca), dir);
     assert.equal(res.status, 200);
     assert.equal(res.type, "application/wasm");
   } finally {
@@ -95,7 +95,7 @@ test("withServer sends .wasm as application/wasm", async () => {
 test("an unknown path falls back to index.html so the SPA loads", async () => {
   const dir = await fixtureDist();
   try {
-    const res = await withServer((url) => fetchOnce(`${url}/patches`), dir);
+    const res = await withServer((url, ca) => fetchOnce(`${url}/patches`, ca), dir);
     assert.equal(res.status, 200);
     assert.match(res.body.toString(), /fixture/);
   } finally {
@@ -106,8 +106,8 @@ test("an unknown path falls back to index.html so the SPA loads", async () => {
 test("withServer closes its listener once fn returns", async () => {
   const dir = await fixtureDist();
   try {
-    const url = await withServer((u) => u, dir);
-    await assert.rejects(() => fetchOnce(`${url}/index.html`));
+    const [url, ca] = await withServer((u, c) => [u, c], dir);
+    await assert.rejects(() => fetchOnce(`${url}/index.html`, ca));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
