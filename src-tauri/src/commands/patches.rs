@@ -194,14 +194,34 @@ pub async fn query_patches(
     tokio::task::spawn_blocking(move || crate::history::record(&entry));
 
     let outcome = state.store_last_result_if_current(token, result);
-    // Only a stored result becomes the next run's baseline. A superseded one is by
-    // definition older than the run that won the cache; writing it would roll the
-    // baseline backwards, and the next diff would report changes that already
-    // happened. A dropped (tenant-drifted, session-cleared) one belongs to nobody.
-    if matches!(outcome, StoreOutcome::Stored) {
-        tokio::task::spawn_blocking(move || changes::save(&snapshot));
-    }
+    save_baseline_if_stored(&outcome, move || changes::save(&snapshot)).await;
     summary_for(outcome, summary, qid)
+}
+
+/// Writes this run's snapshot as the next run's baseline, and returns only once it
+/// is on disk.
+///
+/// Only a stored result becomes the baseline. A superseded one is by definition
+/// older than the run that won the cache; writing it would roll the baseline
+/// backwards, and the next diff would report changes that already happened. A
+/// dropped (tenant-drifted, session-cleared) one belongs to nobody.
+///
+/// Awaited, not detached. The save used to be spawned and left to finish whenever,
+/// so a query started straight after this one returned (an auto-refresh tick, a
+/// quick re-run) could load the baseline before the save landed and diff against
+/// the run *before* this one. The wait is one serialize and an atomic write of a
+/// snapshot capped at a million items, small next to the fetch it follows. A
+/// failed save is logged inside `save`; it never fails the query.
+async fn save_baseline_if_stored(outcome: &StoreOutcome, save: impl FnOnce() + Send + 'static) {
+    if !matches!(outcome, StoreOutcome::Stored) {
+        return;
+    }
+    if let Err(err) = tokio::task::spawn_blocking(save).await {
+        tracing::warn!(
+            ?err,
+            "saving the run snapshot panicked; baseline not advanced"
+        );
+    }
 }
 
 /// Fills `result.changes` from the previous comparable run's snapshot and returns

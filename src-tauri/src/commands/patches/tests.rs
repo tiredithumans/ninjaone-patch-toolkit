@@ -46,6 +46,41 @@ fn a_superseded_query_still_returns_its_summary() {
     assert!(summary_for(StoreOutcome::Stored, empty_summary(), 7).is_ok());
 }
 
+/// A query returns only once its baseline is on disk. The save was detached, so the
+/// next query (an auto-refresh tick, a quick re-run) could load the baseline before
+/// the save landed and report changes against the run before this one.
+#[tokio::test]
+async fn a_stored_run_returns_only_after_its_baseline_is_saved() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let saved = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&saved);
+    save_baseline_if_stored(&StoreOutcome::Stored, move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        flag.store(true, Ordering::SeqCst);
+    })
+    .await;
+    assert!(
+        saved.load(Ordering::SeqCst),
+        "returned before the save finished"
+    );
+
+    // A run that did not win the cache never becomes the baseline.
+    for outcome in [
+        StoreOutcome::Superseded,
+        StoreOutcome::TenantChanged,
+        StoreOutcome::SessionCleared,
+        StoreOutcome::Poisoned,
+    ] {
+        let wrote = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&wrote);
+        save_baseline_if_stored(&outcome, move || flag.store(true, Ordering::SeqCst)).await;
+        tokio::task::yield_now().await;
+        assert!(!wrote.load(Ordering::SeqCst));
+    }
+}
+
 /// The frontend has no guard for this: `query_seq` counts runs it *starts*, and
 /// switching instance never bumps it, so a returned summary was rendered — the
 /// previous tenant's rows and rollups over the new tenant's empty cache, while

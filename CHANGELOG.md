@@ -77,6 +77,10 @@ version and start a fresh `[Unreleased]`.
   app checked every device still in progress at the same moment, so a batch of hundreds of
   devices could hit NinjaOne's rate limit, and each round of checks then waited out the limit
   and took far longer. At most 8 checks now run at once.
+- **"Changes since the previous run" no longer skips a run.** A query that started right after
+  another one finished, such as an auto-refresh tick or a quick re-run, could compare against
+  the run before that one, and list as new or resolved patches that had already been reported.
+  A query now finishes saving its comparison point before it returns.
 
 ### Changed
 
