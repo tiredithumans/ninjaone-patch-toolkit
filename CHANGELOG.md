@@ -40,6 +40,13 @@ version and start a fresh `[Unreleased]`.
   that alternated between two cursors kept the query fetching the same pages until the app ran
   out of memory. A cursor seen earlier in the same fetch is now an error, and a fetch stops with
   an error after 10,000 pages.
+- **The action audit log redacts more credential shapes.** Script
+  parameters named `-Pwd`, `-Cred`/`-Credential`, `-Auth`, `-Sas` or `-Authorization`, a password
+  inside a connection string (`Server=a;Password=…`, including MSBuild's `/p:Password=…`), the
+  password in a URL (`https://user:…@host`) and a SAS `sig=` in a query string are now redacted,
+  through the closing quote when the value is quoted. Ordinary flags such as `-PassThru`,
+  `-KeyPath` and `-RegistryKey` keep their values in the log instead of showing `<redacted>`.
+
 ### Changed
 
 - **Excel export uses less memory on large fleets.** The Patches sheets now stream their rows to

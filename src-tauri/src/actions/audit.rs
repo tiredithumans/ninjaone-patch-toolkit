@@ -23,9 +23,49 @@ use super::{ActionKind, JobReport, JobState};
 #[cfg(test)]
 const AUDIT_FILE: &str = "action-audit.jsonl";
 
-/// Key fragments whose `key=value` token gets its value replaced. Matched
-/// case-insensitively against the token's key half.
-const SENSITIVE_KEY_FRAGMENTS: [&str; 5] = ["pass", "secret", "token", "apikey", "key"];
+/// A key naming any of these anywhere is a credential. Matched against the key
+/// lowercased with every non-alphanumeric dropped, so `--api-key`, `api_key` and
+/// `ApiKey` are one name.
+///
+/// `key`, `pass` and `pw` are deliberately substrings — `-Key1`, `-StorageKeys`,
+/// `-EncryptionKeyValue`, `-AdminPass2` are all credentials — and the few ordinary
+/// names they catch are exempted one by one in [`BENIGN_KEY_NAMES`].
+/// (`pass` covers password/passphrase, `pw` covers pwd, `key` covers apikey, `cred`
+/// covers credential.)
+const SENSITIVE_KEY_FRAGMENTS: [&str; 9] = [
+    "pass",
+    "pw",
+    "secret",
+    "token",
+    "key",
+    "cred",
+    "authorization",
+    "bearer",
+    // A connection string carries its password as one `;` segment among several,
+    // and a quoted one spans tokens; redacting the whole value is the safe reading.
+    "connectionstring",
+];
+
+/// Credential words only at the *end* of a name: `auth` anywhere would take
+/// `-Author` and `-Authentication Kerberos` (a mechanism, not a secret), while
+/// `-Auth` and `basicAuth` carry one.
+const SENSITIVE_KEY_SUFFIXES: [&str; 2] = ["auth", "sas"];
+
+/// Whole names that contain a credential fragment but are ordinary PowerShell or
+/// registry parameters. Their values are evidence of what ran, and redacting them
+/// cost the audit trail that evidence.
+const BENIGN_KEY_NAMES: [&str; 6] = [
+    "passthru",
+    "registrykey",
+    "regkey",
+    "subkey",
+    "keypath",
+    "bypass",
+];
+
+/// Query-string names that carry a credential but are too short to match as a
+/// parameter name: `sig` is an Azure SAS signature.
+const SENSITIVE_QUERY_NAMES: [&str; 1] = ["sig"];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +135,9 @@ impl AuditEntry {
 ///
 /// Operators paste script parameters by hand, and a script that takes a service
 /// password would otherwise write it to disk in cleartext.
+///
+/// Redaction is by *name*: a credential passed positionally (`Set-Thing hunter2`)
+/// has none and cannot be told from any other value, so it is written as typed.
 pub fn redact_parameters(parameters: &str) -> String {
     // Split on *any* whitespace, not just `' '`. NinjaOne itself splits `parameters`
     // on spaces, but this string is typed — and routinely pasted — by hand in the
@@ -118,8 +161,13 @@ pub fn redact_parameters(parameters: &str) -> String {
     // credential went to disk verbatim and the *following* token was redacted in its
     // place. And a quoted value spans tokens once split on whitespace, so a redaction
     // that stopped at the first one left the rest of the passphrase in the log.
+    //
+    // A credential can also sit inside a quoted run that an *unredacted* token opened
+    // (`-Conn "Server=a; Password=hunter 2"`), so the open quote is tracked across
+    // tokens and a redaction inside it swallows through its close.
     let mut out: Vec<String> = Vec::new();
     let mut owed = Owed::Nothing;
+    let mut open_quote: Option<char> = None;
     for token in parameters.split_whitespace() {
         match owed {
             Owed::ClosingQuote(q) => {
@@ -135,35 +183,83 @@ pub fn redact_parameters(parameters: &str) -> String {
                 // lose evidence and misrepresent what ran.
                 if !is_flag(token) {
                     out.push("<redacted>".into());
-                    owed = quote_owed(token);
+                    // `"Server=a; Password= hunter 2"`: the value's tail runs to the
+                    // close of a quote an earlier token opened.
+                    owed = match open_quote.take() {
+                        Some(q) if !closes_quote(token, q) => Owed::ClosingQuote(q),
+                        Some(_) => Owed::Nothing,
+                        None => quote_owed(token),
+                    };
                     continue;
                 }
             }
             Owed::Nothing => {}
         }
-        match split_key_value(token) {
+        let (text, redacted, own_owed) = match split_key_value(token) {
             // `-Password: hunter2` / `password= hunter2`: the value is the next token.
             Some((key, sep, "")) if is_sensitive(key) => {
                 out.push(format!("{key}{sep}"));
                 owed = Owed::Value;
+                // `"Password= hunter 2"`: the quote is on this token, and the value
+                // token must know it is inside the run.
+                open_quote = quote_after(open_quote, token);
+                continue;
             }
-            Some((key, sep, value)) if is_sensitive(key) => {
-                out.push(format!("{key}{sep}<redacted>"));
-                owed = quote_owed(value);
-            }
+            // The quote may sit on the key (`"Pwd=hunter 2;Server=a"`), not the value.
+            Some((key, sep, value)) if is_sensitive(key) => (
+                format!("{key}{sep}<redacted>"),
+                true,
+                opens_quote(token).map_or_else(|| quote_owed(value), Owed::ClosingQuote),
+            ),
             // Only a bare flag names the next token as its value. A flag that already
             // carried one (`-Mode:password-reset`) must not redact whatever follows
-            // it just because its *value* looks sensitive.
-            Some(_) => out.push(token.to_string()),
-            None => {
-                if is_flag(token) && is_sensitive(token) {
+            // it just because its *value* looks sensitive. A quoted flag name
+            // (`"-Password" hunter2`) is still a flag.
+            kv => {
+                let bare = token.trim_matches(['"', '\'']);
+                if (kv.is_none() && is_flag(bare) && is_sensitive(bare))
+                    || ends_with_empty_sensitive_segment(token)
+                {
                     owed = Owed::Value;
                 }
-                out.push(token.to_string());
+                let text = redact_embedded(token);
+                let redacted = text != token;
+                let own = match opens_quote(token) {
+                    Some(q) if redacted => Owed::ClosingQuote(q),
+                    _ => Owed::Nothing,
+                };
+                (text, redacted, own)
             }
+        };
+        out.push(text);
+        if redacted {
+            owed = match open_quote.take() {
+                // Inside a run this token does not close: the rest of the run is the
+                // redacted value's tail.
+                Some(q) if !closes_quote(token, q) => Owed::ClosingQuote(q),
+                Some(_) => Owed::Nothing,
+                None => own_owed,
+            };
+        } else {
+            open_quote = quote_after(open_quote, token);
         }
     }
     out.join(" ")
+}
+
+/// The quote `token` opens and leaves open: it starts the token or its value, and
+/// appears an odd number of times. An apostrophe inside a word (`O'Brien`) opens
+/// nothing.
+fn opens_quote(token: &str) -> Option<char> {
+    let value = split_key_value(token).map_or(token, |(_, _, v)| v);
+    ['"', '\'']
+        .into_iter()
+        .find(|&q| (token.starts_with(q) || value.starts_with(q)) && closes_quote(token, q))
+}
+
+/// Whether `token` holds an odd number of `q`, so it closes a run `q` opened.
+fn closes_quote(token: &str, q: char) -> bool {
+    token.matches(q).count() % 2 == 1
 }
 
 /// What [`redact_parameters`] still owes after the token it just wrote.
@@ -200,9 +296,119 @@ fn is_flag(token: &str) -> bool {
     token.starts_with('-') || token.starts_with('/')
 }
 
+/// The form every name is judged in: lowercase ASCII alphanumerics only.
+fn normalize(name: &str) -> String {
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
 fn is_sensitive(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    SENSITIVE_KEY_FRAGMENTS.iter().any(|f| lower.contains(f))
+    let name = normalize(key);
+    if BENIGN_KEY_NAMES.contains(&name.as_str()) {
+        return false;
+    }
+    SENSITIVE_KEY_FRAGMENTS.iter().any(|f| name.contains(f))
+        || SENSITIVE_KEY_SUFFIXES.iter().any(|f| name.ends_with(f))
+}
+
+/// The quoted run still open after an unredacted `token`, given the one open before it.
+fn quote_after(open: Option<char>, token: &str) -> Option<char> {
+    match open {
+        Some(q) if closes_quote(token, q) => None,
+        Some(q) => Some(q),
+        None => opens_quote(token),
+    }
+}
+
+/// `conn=a;Password= hunter2`: a sensitive segment with an empty value, whose value
+/// is the next token, as with `-Password hunter2`. Only a segment's *own* name
+/// counts — a name chained after an `=` is how base64 padding (`…Pw=`) looks.
+fn ends_with_empty_sensitive_segment(token: &str) -> bool {
+    let Some(at) = token.rfind([';', '&', '?']) else {
+        return false;
+    };
+    token[at + 1..]
+        .strip_suffix('=')
+        .is_some_and(|name| !name.contains(['=', ':']) && is_sensitive(name))
+}
+
+/// Redacts credentials carried *inside* a token whose own key is not sensitive.
+///
+/// The key/value split stops at the first `=` or `:`, so `conn=Server=a;Password=x`
+/// is keyed on `conn`, `/p:Password=x` on `/p` and `https://user:pass@host` on
+/// `https`, and all of them went to disk verbatim. Two embedded shapes are common
+/// enough to scan for: URL userinfo, and `;`/`&`/`?`-separated segments
+/// (connection strings, query strings), each scanned by [`embedded_value_at`].
+fn redact_embedded(token: &str) -> String {
+    let token = redact_userinfo(token);
+    let mut out = String::with_capacity(token.len());
+    for (i, piece) in token.split_inclusive([';', '&', '?']).enumerate() {
+        let body = piece.trim_end_matches([';', '&', '?']);
+        match embedded_value_at(body, i > 0) {
+            Some(at) => {
+                out.push_str(&body[..at]);
+                out.push_str("<redacted>");
+                out.push_str(&piece[body.len()..]);
+            }
+            None => out.push_str(piece),
+        }
+    }
+    out
+}
+
+/// Where a credential value starts in one segment, if a name in it is sensitive.
+///
+/// Names chain: `conn=Pwd=x` is `conn` then `Pwd`, and `-Conn:Pwd=x` is `-Conn`
+/// then `Pwd`, so every name up to an `=` is judged, not only the first. The first
+/// name may end at `:` as well, like the token-level split; later ones only at `=`,
+/// so a URL's `host:port` is not read as a name. A value that is empty or only `=`
+/// is base64 padding (`productAllowListB64=…Pw==`), not a credential.
+fn embedded_value_at(segment: &str, after_separator: bool) -> Option<usize> {
+    let mut start = 0;
+    loop {
+        let seps: &[char] = if start == 0 { &['=', ':'] } else { &['='] };
+        let end = start + segment[start..].find(seps)?;
+        let name = &segment[start..end];
+        // Both separators are one byte.
+        let value = end + 1;
+        let query_secret = after_separator
+            && start == 0
+            && SENSITIVE_QUERY_NAMES.contains(&normalize(name).as_str());
+        if (is_sensitive(name) || query_secret) && !segment[value..].trim_matches('=').is_empty() {
+            return Some(value);
+        }
+        start = value;
+    }
+}
+
+/// `scheme://user:secret@host` → `scheme://user:<redacted>@host`. Userinfo with no
+/// `:` is usually a token standing in for the user name (`https://ghp_x@github.com`),
+/// so all of it is redacted.
+fn redact_userinfo(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let mut rest = token;
+    while let Some(at) = rest.find("://") {
+        let (head, tail) = rest.split_at(at + 3);
+        out.push_str(head);
+        let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
+        match tail[..authority_end].rfind('@') {
+            Some(userinfo_end) => {
+                match tail[..userinfo_end].split_once(':') {
+                    Some((user, _)) => {
+                        out.push_str(user);
+                        out.push_str(":<redacted>");
+                    }
+                    None => out.push_str("<redacted>"),
+                }
+                rest = &tail[userinfo_end..];
+            }
+            None => rest = tail,
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn audit_path() -> Option<PathBuf> {
@@ -335,6 +541,188 @@ mod tests {
             !redacted.contains("hunter2") && !redacted.contains("abc"),
             "no credential value may survive: {redacted}"
         );
+    }
+
+    /// Credential names the fragment list used to miss, and credentials embedded in a
+    /// value whose own key is not sensitive (the key split stops at the first `=`/`:`).
+    #[test]
+    fn credential_names_and_embedded_credentials_the_matcher_used_to_miss() {
+        for (input, expected) in [
+            ("-Pwd hunter2 -Force", "-Pwd <redacted> -Force"),
+            ("-Credential hunter2", "-Credential <redacted>"),
+            ("-Cred hunter2", "-Cred <redacted>"),
+            ("-Auth hunter2", "-Auth <redacted>"),
+            ("basicAuth=hunter2", "basicAuth=<redacted>"),
+            ("-StorageSas hunter2", "-StorageSas <redacted>"),
+            ("adminPass=hunter2", "adminPass=<redacted>"),
+            (
+                "connectionString=Server=a;Password=hunter2",
+                "connectionString=<redacted>",
+            ),
+            (
+                r#"-ConnectionString "Server=a;Password=hunter2" -Force"#,
+                "-ConnectionString <redacted> -Force",
+            ),
+            // The key is not sensitive; the `;` segment is.
+            (
+                "conn=Server=a;Pwd=hunter2;Encrypt=true",
+                "conn=Server=a;Pwd=<redacted>;Encrypt=true",
+            ),
+            (
+                r#"-Conn "Server=a;Password=hunter2""#,
+                r#"-Conn "Server=a;Password=<redacted>"#,
+            ),
+            (
+                "https://user:hunter2@host/path",
+                "https://user:<redacted>@host/path",
+            ),
+            (
+                "-Uri:https://user:hunter2@host",
+                "-Uri:https://user:<redacted>@host",
+            ),
+            (
+                "repo=https://hunter2@github.com/o/r",
+                "repo=https://<redacted>@github.com/o/r",
+            ),
+            (
+                "url=https://host/x?a=1&token=hunter2",
+                "url=https://host/x?a=1&token=<redacted>",
+            ),
+        ] {
+            let redacted = redact_parameters(input);
+            assert_eq!(redacted, expected, "{input}");
+            assert!(!redacted.contains("hunter2"), "{redacted}");
+        }
+    }
+
+    /// Narrowing `key`/`pass` to suffixes un-redacted names the old substring match
+    /// caught; nested names after `:`/`=` and quoted runs opened by an unredacted
+    /// token leaked through the embedded scan. Never redact less than before.
+    #[test]
+    fn names_the_substring_match_caught_and_nested_or_quoted_embedded_values() {
+        for (input, expected) in [
+            ("-Key1 hunter2", "-Key1 <redacted>"),
+            ("-AdminPass2 hunter2", "-AdminPass2 <redacted>"),
+            ("-PassString hunter2", "-PassString <redacted>"),
+            (
+                "-EncryptionKeyValue hunter2",
+                "-EncryptionKeyValue <redacted>",
+            ),
+            ("-KeyData hunter2", "-KeyData <redacted>"),
+            ("-StorageKeys hunter2", "-StorageKeys <redacted>"),
+            ("-Keys hunter2", "-Keys <redacted>"),
+            // The first segment's value is itself a name nobody judged.
+            (
+                "-Conn:Pwd=hunter2;Server=a",
+                "-Conn:Pwd=<redacted>;Server=a",
+            ),
+            ("conn=Pwd=hunter2;Server=a", "conn=Pwd=<redacted>;Server=a"),
+            ("/p:Password=hunter2", "/p:Password=<redacted>"),
+            // The embedded redaction opens no quote of its own, but the token did.
+            (
+                r#"-Conn "Server=a;Password=hunter 2" -Force"#,
+                r#"-Conn "Server=a;Password=<redacted> -Force"#,
+            ),
+            // The quote was opened by an earlier, unredacted token.
+            (
+                r#"-Conn "Server=a; Password=hunter 2" -Force"#,
+                r#"-Conn "Server=a; Password=<redacted> -Force"#,
+            ),
+            (
+                r#"-Authorization "Bearer hunter2" -Force"#,
+                "-Authorization <redacted> -Force",
+            ),
+            (
+                "-Headers Authorization=Bearer_hunter2",
+                "-Headers Authorization=<redacted>",
+            ),
+            ("-BearerValue hunter2", "-BearerValue <redacted>"),
+            (
+                "-Uri https://h/x?sv=1&sig=hunter2",
+                "-Uri https://h/x?sv=1&sig=<redacted>",
+            ),
+        ] {
+            let redacted = redact_parameters(input);
+            assert_eq!(redacted, expected, "{input}");
+            assert!(!redacted.contains("hunter"), "{redacted}");
+        }
+    }
+
+    /// The quote that opens a sensitive value can sit on its *key* token, on an
+    /// earlier token, or around a flag name; and a nested segment's value can be the
+    /// next token. Each left the tail of the credential in the log.
+    #[test]
+    fn quotes_on_the_key_and_values_in_the_next_token_are_redacted() {
+        for (input, expected) in [
+            (
+                r#"-Conn "Pwd=hunter 2;Server=a" -Force"#,
+                r#"-Conn "Pwd=<redacted> -Force"#,
+            ),
+            (
+                "-Conn 'Password=hunter 2' -Force",
+                "-Conn 'Password=<redacted> -Force",
+            ),
+            (
+                r#"x "token=hunter b c" -Force"#,
+                r#"x "token=<redacted> -Force"#,
+            ),
+            (
+                "conn=a;Password= hunter2 -Force",
+                "conn=a;Password= <redacted> -Force",
+            ),
+            (
+                r#"-Conn "Server=a; Password= hunter 2" -Force"#,
+                r#"-Conn "Server=a; Password= <redacted> -Force"#,
+            ),
+            // The quote is on the key token and the value is the next one.
+            (
+                r#"-Conn "Password= hunter 2" -Force"#,
+                r#"-Conn "Password= <redacted> -Force"#,
+            ),
+            (
+                r#"-Conn "Pwd: hunter 2" -Force"#,
+                r#"-Conn "Pwd: <redacted> -Force"#,
+            ),
+            (
+                r#""-Password" hunter2 -Force"#,
+                r#""-Password" <redacted> -Force"#,
+            ),
+        ] {
+            let redacted = redact_parameters(input);
+            assert_eq!(redacted, expected, "{input}");
+            assert!(
+                !redacted.contains("hunter") && !redacted.contains(" 2"),
+                "{redacted}"
+            );
+        }
+    }
+
+    /// Standard base64 pads with `=`, and a chunk before the padding can spell a
+    /// credential fragment (`Pw`, `Key`). Padding is not a value.
+    #[test]
+    fn base64_padding_is_not_read_as_an_embedded_value() {
+        let params = "productAllowListB64=Q2hyb21lPw== rebootBehavior=Never dryRun=true";
+        assert_eq!(redact_parameters(params), params);
+        // `sig` is only a credential as a query name, not as the token's own key.
+        assert_eq!(redact_parameters("sig=abc"), "sig=abc");
+    }
+
+    /// `pass` and `key` match anywhere, which redacted ordinary PowerShell and registry
+    /// flags and cost the audit trail its evidence of what ran; those are exempted by
+    /// whole name. `-Author` and `-Authentication` must not trip the `auth` suffix.
+    #[test]
+    fn names_that_only_contain_a_short_credential_word_pass_through() {
+        for params in [
+            "-PassThru C:/out -Force",
+            r"-RegistryKey HKLM\SOFTWARE\Contoso -Force",
+            r"-KeyPath HKLM\SOFTWARE\Contoso",
+            "-Author ops -Authentication Kerberos",
+            "-ExecutionPolicy Bypass -Bypass yes",
+            "https://example.com/path?a=1&b=2 ssh://host:22/x",
+            "kbAllowList=5040434 productAllowListB64=Q2hyb21l dryRun=true",
+        ] {
+            assert_eq!(redact_parameters(params), params);
+        }
     }
 
     #[test]

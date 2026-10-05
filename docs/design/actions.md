@@ -342,3 +342,35 @@ pair, and PowerShell's inline `-Password:value` (`:` is a separator as well as `
 read as one bare flag, so the credential was written verbatim and the *next* token redacted
 instead). A quoted value is redacted through its closing quote — split on whitespace,
 `-Password "a b"` is several tokens — and an unterminated quote swallows the rest of the line.
+
+A name is sensitive when, lowercased with punctuation dropped, it *contains* `pass`, `pw`, `key`,
+`cred`, `secret`, `token`, `authorization`, `bearer` or `connectionstring`, or *ends with* `auth`
+or `sas`, unless the whole name is a known benign one (`passthru`, `registrykey`, `regkey`,
+`subkey`, `keypath`, `bypass`). The rule is never to redact less than before: `key` and `pass`
+stay substrings because `-Key1`, `-StorageKeys` and `-AdminPass2` are credentials, and ordinary
+flags they catch are exempted one whole name at a time. `auth` is a suffix so `-Author` and
+`-Authentication Kerberos` survive.
+
+The key/value split stops at the first `=` or `:`, so a credential can sit *inside* a value
+whose own key is innocent: `conn=Server=a;Password=x`, `/p:Password=x`, `https://user:pass@host`
+(keyed on `https`). Every token that is not already redacted is also scanned for URL userinfo
+(the password after `user:` is redacted; userinfo with no `:` is a token standing in for the
+user name and is redacted whole) and for `;`/`&`/`?`-separated segments. Within a segment every
+name up to an `=` is judged (`conn=Pwd=x` is `conn` then `Pwd`); after a `?`/`&`/`;`, `sig` (a SAS
+signature) counts too. A value that is only `=` is base64 padding and is left alone. When such a
+redaction lands inside a quoted run — opened by this token or by an earlier, unredacted one
+(`-Conn "Server=a; Password=a b"`), or sitting on the key itself (`"Pwd=a b;Server=x"`) — the
+rest of the run is swallowed through its closing quote. A segment with an empty value
+(`conn=a;Password= x`) owes the next token, as `-Password x` does, and a quoted flag name
+(`"-Password" x`) is still a flag.
+
+Redaction is by name, so some shapes reach the log as typed:
+
+- a positional credential (`Set-Thing hunter2`, or a bare `password hunter2` with no flag
+  marker or separator) carries no name the scanner can judge;
+- `user:pass@host` without a `scheme://` (`-Remote user:pw@host`, `-u user:pass`) is not
+  recognised as userinfo;
+- a URL password containing an unencoded `/` ends the authority early, so the `@` is never seen
+  (`https://u:p/ss@h`); percent-encoded passwords are fine.
+
+Scripts that take a secret should take it as a named parameter.
