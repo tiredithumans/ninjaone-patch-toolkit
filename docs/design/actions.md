@@ -302,6 +302,14 @@ departed session's jobs in the new one, where the poller resolved them against t
 API and invalidated its caches. The Jobs tab's Clear is `clear_job_history`: it empties the list
 without ending the session.
 
+The poller takes the session from `pending_jobs` alongside the rows, and `settle_tick` applies
+under it: `apply_job_updates` returns the ids it applied, and only those are invalidated for and
+emitted. A tick that spans a sign-out used to invalidate the next session's caches and emit the
+old rows, which the frontend merged into the next operator's Jobs tab. A settled job still gets
+its closing audit record, labelled with the session's instance and client id (not Settings read
+now), unless the tenant changed: the feed was then read from the other instance, so it has no
+verdict to record.
+
 **NinjaOne v2 has no script-output endpoint.** A job resolves from `/activities` only, so surface
 the exit code plus the activity/series correlator.
 

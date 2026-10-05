@@ -749,7 +749,29 @@ fn jobs_are_invisible_after_an_instance_switch() {
     // tenant's dispatch history.
     state.settings.lock().unwrap().instance_base_url = "https://other.example.com".into();
     assert!(state.jobs_snapshot().is_empty());
-    assert!(state.pending_jobs().is_empty());
+    assert!(state.pending_jobs().1.is_empty());
+}
+
+/// A poll tick applies its updates under the session `pending_jobs` read them in,
+/// and reports nothing applied once that session has ended — the poller emits and
+/// invalidates only for what this returns. Re-reading the tenant at apply time
+/// could not tell a same-instance sign-in from no change at all. (Job ids never
+/// repeat in practice; the shared id here makes the refusal observable.)
+#[test]
+fn a_poll_tick_from_the_previous_session_applies_nothing() {
+    let state = AppState::new().expect("build state");
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(1, JobState::Running)]));
+    let (session, pending) = state.pending_jobs();
+    assert_eq!(pending.len(), 1);
+
+    // Sign-out and sign-in mid-tick; the next session dispatches a job with an id
+    // the old tick also holds.
+    state.clear_jobs();
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(1, JobState::Running)]));
+
+    let applied = state.apply_job_updates(&session, vec![sample_job(1, JobState::Completed)]);
+    assert!(applied.is_empty());
+    assert_eq!(state.jobs_snapshot()[0].state, JobState::Running);
 }
 
 /// `run_action` awaits the whole dispatch before it records the batch. A sign-out
@@ -787,11 +809,15 @@ fn job_updates_key_on_job_id_not_device_id() {
         ]
     ));
 
-    state.apply_job_updates(vec![sample_job(2, JobState::Completed)]);
+    let applied = state.apply_job_updates(
+        &state.job_session(),
+        vec![sample_job(2, JobState::Completed)],
+    );
+    assert!(applied.contains(&2));
     let jobs = state.jobs_snapshot();
     assert_eq!(jobs[0].state, JobState::Running, "row 1 must be untouched");
     assert_eq!(jobs[1].state, JobState::Completed);
-    assert_eq!(state.pending_jobs().len(), 1);
+    assert_eq!(state.pending_jobs().1.len(), 1);
 }
 
 #[test]
@@ -971,7 +997,11 @@ fn the_poller_keeps_its_claim_when_work_arrives_during_release() {
     );
 
     // Once the job settles, the poller may retire.
-    state.apply_job_updates(vec![sample_job(1, JobState::Completed)]);
+    let applied = state.apply_job_updates(
+        &state.job_session(),
+        vec![sample_job(1, JobState::Completed)],
+    );
+    assert!(applied.contains(&1));
     assert!(state.release_job_poller_if_idle(claim).is_none());
     assert!(state.try_claim_job_poller().is_some());
 }

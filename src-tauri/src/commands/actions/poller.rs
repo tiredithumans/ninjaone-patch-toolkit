@@ -11,7 +11,7 @@ use super::{ActionProgressEvent, emit_progress};
 use crate::actions::{ActionKind, JobReport, JobState, audit};
 use crate::api::NinjaApiClient;
 use crate::model::Activity;
-use crate::state::AppState;
+use crate::state::{AppState, JobSession};
 
 /// How often the poller re-reads the activity feed for unresolved jobs.
 const POLL_INTERVAL_SECS: u64 = 15;
@@ -36,9 +36,10 @@ pub(super) fn spawn_job_poller(app: &AppHandle) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
 
-            let (pending, api) = {
+            let (session, pending, api) = {
                 let state = app.state::<AppState>();
-                (state.pending_jobs(), state.api.clone())
+                let (session, pending) = state.pending_jobs();
+                (session, pending, state.api.clone())
             };
             if pending.is_empty() {
                 // Release and exit only if still idle when checked under the jobs
@@ -53,7 +54,7 @@ pub(super) fn spawn_job_poller(app: &AppHandle) {
                 }
             }
 
-            poll_tick(&app, pending, api, &mut confirmed_series).await;
+            poll_tick(&app, &session, pending, api, &mut confirmed_series).await;
         }
     });
 }
@@ -63,6 +64,7 @@ pub(super) fn spawn_job_poller(app: &AppHandle) {
 /// audit records and tell the frontend.
 async fn poll_tick(
     app: &AppHandle,
+    session: &JobSession,
     pending: Vec<JobReport>,
     api: NinjaApiClient,
     confirmed_series: &mut HashSet<String>,
@@ -81,57 +83,97 @@ async fn poll_tick(
         .collect();
     let updates = resolve_pending(&api, pending, &mut claimed, confirmed_series, now).await;
 
-    let settled: Vec<JobReport> = updates
-        .iter()
-        .filter(|j| j.state.is_terminal())
-        .cloned()
-        .collect();
-    let settings = {
-        let state = app.state::<AppState>();
-        state.apply_job_updates(updates.clone());
-        // Patch state changes on completion, not on dispatch — and only for
-        // the kinds that actually changed something. Same rule as the
-        // dispatch site, via the same function.
-        // Deduped so a 200-device batch does not bump the epochs 200 times;
-        // a handful of variants makes a Vec the right container.
-        let mut seen: Vec<ActionKind> = Vec::new();
-        for job in settled.iter() {
-            if !seen.contains(&job.kind) {
-                seen.push(job.kind);
-                invalidate_after(job.kind, job.dry_run, &state);
-            }
-        }
-        state.settings_snapshot()
-    };
-    // Close out the audit record opened at dispatch, now that the outcome
-    // and exit code are known.
-    // Collected first and written in one pass: the poller settles a whole
-    // batch at a time, so a per-job write reopened the log once per device.
-    let closing = settled
-        .iter()
-        .map(|job| {
-            audit::AuditEntry::closing(
-                job,
-                settings.instance_base_url.clone(),
-                settings.client_id.clone(),
-            )
-        })
-        .collect();
-    audit::record_off_runtime(closing).await;
+    let tick = settle_tick(&app.state::<AppState>(), session, updates);
+    // Close out the audit records opened at dispatch, now that the outcome and exit
+    // code are known. Collected first and written in one pass: the poller settles a
+    // whole batch at a time, so a per-job write reopened the log once per device.
+    audit::record_off_runtime(tick.closing).await;
     emit_progress(
         app,
         ActionProgressEvent {
             batch_id: 0,
-            stage: if settled.is_empty() {
-                "polling"
-            } else {
+            stage: if tick.settled_any {
                 "settled"
+            } else {
+                "polling"
             },
             dispatched: 0,
             total: 0,
-            jobs: updates,
+            jobs: tick.applied,
         },
     );
+}
+
+/// What a tick hands back to the async half of [`poll_tick`]: the rows to emit and
+/// the closing audit records to write.
+pub(super) struct SettledTick {
+    /// Updates the job store accepted — the only ones the frontend is told about.
+    pub(super) applied: Vec<JobReport>,
+    /// Whether any applied update reached a terminal state.
+    pub(super) settled_any: bool,
+    pub(super) closing: Vec<audit::AuditEntry>,
+}
+
+/// The synchronous half of a tick: apply the resolved updates under `session` —
+/// the one [`AppState::pending_jobs`] read them under — and decide what to
+/// invalidate, emit and audit.
+///
+/// A tick awaits a feed read per device, and a sign-out, sign-in or tenant switch
+/// can land in that time. `apply_job_updates` already refused the departed
+/// session's rows, but the tick went on regardless: it invalidated the *new*
+/// session's caches for them, emitted them to the frontend (whose merge re-added
+/// them to the new session's Jobs tab), and labelled their closing audit records
+/// with the instance read from Settings *now*. Invalidation and the emit now cover
+/// only what was applied.
+///
+/// A settled job still gets its closing record when its row is gone — the device
+/// acted, and the trail should say how — labelled with the session it was
+/// dispatched in. The exception is a tenant change: the feed was then read through
+/// the new instance's client, so its verdict says nothing about this device, and
+/// the opening record's "dispatching" is left as the honest last word.
+pub(super) fn settle_tick(
+    state: &AppState,
+    session: &JobSession,
+    updates: Vec<JobReport>,
+) -> SettledTick {
+    let applied_ids = state.apply_job_updates(session, updates.clone());
+    let read_on_this_tenant = state.is_session_tenant(session);
+    let mut applied = Vec::with_capacity(applied_ids.len());
+    let mut closing = Vec::new();
+    // Deduped so a 200-device batch does not bump the epochs 200 times; a handful
+    // of variants makes a Vec the right container.
+    let mut invalidated: Vec<ActionKind> = Vec::new();
+    let mut settled_any = false;
+    for job in updates {
+        let was_applied = applied_ids.contains(&job.id);
+        if job.state.is_terminal() {
+            if was_applied {
+                settled_any = true;
+                // Patch state changes on completion, not on dispatch — and only for
+                // the kinds that actually changed something. Same rule as the
+                // dispatch site, via the same function.
+                if !invalidated.contains(&job.kind) {
+                    invalidated.push(job.kind);
+                    invalidate_after(job.kind, job.dry_run, state);
+                }
+            }
+            if was_applied || read_on_this_tenant {
+                closing.push(audit::AuditEntry::closing(
+                    &job,
+                    session.instance().to_string(),
+                    session.client_id().map(str::to_string),
+                ));
+            }
+        }
+        if was_applied {
+            applied.push(job);
+        }
+    }
+    SettledTick {
+        applied,
+        settled_any,
+        closing,
+    }
 }
 
 /// One `/activities` read in a tick: the device it covers, the series it may be

@@ -879,6 +879,115 @@ async fn a_tick_reads_each_devices_feed_once_and_resolves_every_job_on_it() {
     assert_eq!(claimed, HashSet::from([901, 902]));
 }
 
+/// Resolves `pending` against a device-7 feed holding one completed patch run —
+/// the async half of a tick, ahead of `settle_tick`.
+async fn resolved_against_a_completed_apply(pending: Vec<JobReport>) -> Vec<JobReport> {
+    let server = MockServer::start().await;
+    let now = Utc::now();
+    Mock::given(method("GET"))
+        .and(path("/api/v2/activities"))
+        .and(query_param("df", "id=7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 901, "activityType": "PATCH_MANAGEMENT",
+              "activityTime": (now.timestamp() - 2) as f64,
+              "statusCode": "COMPLETED", "activityResult": "SUCCESS" },
+        ])))
+        .mount(&server)
+        .await;
+    let updates = poller::resolve_pending(
+        &mock_api(&server),
+        pending,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+        now,
+    )
+    .await;
+    assert_eq!(updates[0].state, JobState::Completed);
+    updates
+}
+
+/// The control for the two tests below: a tick within one session applies,
+/// invalidates, emits and audits as it always has.
+#[tokio::test]
+async fn a_tick_within_one_session_settles_its_jobs() {
+    let state = AppState::new().expect("build state");
+    let ts = Utc::now().timestamp();
+    let apply = pending_job(1, 7, ActionKind::OsPatchApply, ts - 30);
+    assert!(state.append_jobs(&state.job_session(), vec![apply]));
+    let (session, pending) = state.pending_jobs();
+    let updates = resolved_against_a_completed_apply(pending).await;
+
+    let before = state.cache_epochs();
+    let tick = poller::settle_tick(&state, &session, updates);
+
+    assert_eq!(tick.applied.len(), 1);
+    assert!(tick.settled_any);
+    assert_ne!(state.cache_epochs(), before, "a settled apply invalidates");
+    assert_eq!(tick.closing.len(), 1);
+}
+
+/// A tick awaits the feed reads, and a sign-out and sign-in (same instance) can
+/// land in that time. `apply_job_updates` refused the departed session's rows, but
+/// the tick still invalidated the next session's caches and emitted the old rows,
+/// which the frontend merged into the next operator's Jobs tab. The device did act,
+/// so the closing audit record is still written, labelled with the session the job
+/// was dispatched in.
+#[tokio::test]
+async fn a_tick_that_spans_a_sign_out_touches_nothing_in_the_next_session() {
+    let state = AppState::new().expect("build state");
+    let ts = Utc::now().timestamp();
+    let apply = pending_job(1, 7, ActionKind::OsPatchApply, ts - 30);
+    assert!(state.append_jobs(&state.job_session(), vec![apply]));
+    let (session, pending) = state.pending_jobs();
+    let updates = resolved_against_a_completed_apply(pending).await;
+
+    // Sign-out and sign-in while the tick was reading; the next operator dispatches.
+    state.clear_jobs();
+    let theirs = pending_job(2, 8, ActionKind::OsPatchApply, ts);
+    assert!(state.append_jobs(&state.job_session(), vec![theirs]));
+
+    let before = state.cache_epochs();
+    let tick = poller::settle_tick(&state, &session, updates);
+
+    assert!(tick.applied.is_empty(), "the old rows must not be emitted");
+    assert!(!tick.settled_any);
+    assert_eq!(
+        state.cache_epochs(),
+        before,
+        "nor invalidate the next session"
+    );
+    assert_eq!(state.jobs_snapshot()[0].state, JobState::Running);
+    assert_eq!(tick.closing.len(), 1, "the device acted; the trail says so");
+    assert_eq!(tick.closing[0].instance, session.instance());
+}
+
+/// Across a tenant switch the feed was read through the *new* instance's client,
+/// so a device id there is another machine and its verdict means nothing for this
+/// job: no closing record, rather than one claiming an outcome read from the wrong
+/// tenant.
+#[tokio::test]
+async fn a_tick_that_spans_an_instance_switch_writes_no_verdict() {
+    let state = AppState::new().expect("build state");
+    let ts = Utc::now().timestamp();
+    let apply = pending_job(1, 7, ActionKind::OsPatchApply, ts - 30);
+    assert!(state.append_jobs(&state.job_session(), vec![apply]));
+    let (session, pending) = state.pending_jobs();
+    let updates = resolved_against_a_completed_apply(pending).await;
+
+    state.replace_settings(crate::settings::Settings {
+        instance_base_url: "https://other.ninjarmm.com".into(),
+        ..state.settings_snapshot()
+    });
+    state.clear_jobs();
+
+    let before = state.cache_epochs();
+    let tick = poller::settle_tick(&state, &session, updates);
+
+    assert!(tick.applied.is_empty());
+    assert_eq!(state.cache_epochs(), before);
+    assert!(tick.closing.is_empty());
+}
+
 /// Two jobs of the *same* kind on one device share one read, and the claimed-id
 /// exclusion still hands each its own activity rather than both the newest.
 #[tokio::test]

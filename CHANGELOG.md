@@ -55,6 +55,11 @@ version and start a fresh `[Unreleased]`.
   signed in again or switched instance, and its jobs then appeared in the new session's Jobs tab.
   Devices still queued are now recorded as not sent, the batch reports an error saying how many
   had already been sent, and none of its jobs carry over to the new session.
+- **Job status checks that span a sign-out no longer leak into the next session.** A status
+  check still running when you signed out, signed in again or switched instance sent the
+  previous session's jobs to the new session's Jobs tab, cleared its cached patch data, and
+  wrote the closing audit record under the new instance's name. Its results are now dropped, and
+  the audit record names the instance the action was sent to.
 
 ### Changed
 

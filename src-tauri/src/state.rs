@@ -22,6 +22,7 @@ mod cache;
 mod jobs;
 
 use cache::TenantCache;
+pub use jobs::JobSession;
 use jobs::PendingConfirm;
 
 /// How long cached org/location/role lookups stay fresh before a query refetches

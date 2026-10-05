@@ -1,6 +1,7 @@
 //! The dispatched-job store, the single-claim poller slot and the confirm-token
 //! slot — the mutable action state `AppState` carries between IPC calls.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -57,6 +58,19 @@ pub struct JobSession {
     epoch: u64,
 }
 
+impl JobSession {
+    /// The instance this session acted on, for labelling an audit record written
+    /// after the session may have ended — never the settings read at write time.
+    pub fn instance(&self) -> &str {
+        &self.tenant.instance_base_url
+    }
+
+    /// The client-id half of the same label.
+    pub fn client_id(&self) -> Option<&str> {
+        self.tenant.client_id.as_deref()
+    }
+}
+
 /// RAII claim on the single job-poller slot, issued by
 /// [`AppState::try_claim_job_poller`].
 ///
@@ -111,6 +125,13 @@ impl AppState {
             && self.tenant_key() == session.tenant
     }
 
+    /// Whether the tenant is still the one `session` was taken under, whatever has
+    /// happened to the epoch. The poller asks this to decide whether a feed it read
+    /// came from the instance its jobs were dispatched to.
+    pub fn is_session_tenant(&self, session: &JobSession) -> bool {
+        self.tenant_key() == session.tenant
+    }
+
     /// Appends newly dispatched rows for `session`, trimming history to
     /// [`MAX_JOBS`] by dropping the oldest **terminal** rows first — an in-flight
     /// job must never be evicted out from under the poller.
@@ -161,33 +182,55 @@ impl AppState {
         true
     }
 
-    /// Applies polled updates, matching on `JobReport.id`. Rows the caller no
-    /// longer knows about are left untouched.
-    pub fn apply_job_updates(&self, updates: Vec<JobReport>) {
-        let key = self.tenant_key();
+    /// Applies polled updates, matching on `JobReport.id`, and returns the ids it
+    /// actually applied. Rows the store no longer holds are left out, and nothing
+    /// applies when `session` — the one [`Self::pending_jobs`] handed the poller —
+    /// has ended since: the caller invalidates and emits only for what is returned.
+    pub fn apply_job_updates(&self, session: &JobSession, updates: Vec<JobReport>) -> HashSet<u64> {
+        let mut applied = HashSet::new();
         let Ok(mut guard) = self.jobs.lock() else {
-            return;
+            return applied;
         };
+        if !self.job_session_is_current(session) {
+            return applied;
+        }
         let Some((t, jobs)) = guard.as_mut() else {
-            return;
+            return applied;
         };
-        if *t != key {
-            return;
+        if *t != session.tenant {
+            return applied;
         }
         for update in updates {
             if let Some(slot) = jobs.iter_mut().find(|j| j.id == update.id) {
+                applied.insert(update.id);
                 *slot = update;
             }
         }
+        applied
     }
 
-    /// Clone-out of the jobs still awaiting a terminal state. Returns owned rows so
-    /// the lock is released before the poller's `.await`s.
-    pub fn pending_jobs(&self) -> Vec<JobReport> {
-        self.jobs_snapshot()
-            .into_iter()
-            .filter(|j| !j.state.is_terminal())
-            .collect()
+    /// Clone-out of the jobs still awaiting a terminal state, with the session they
+    /// were read under. Returns owned rows so the lock is released before the
+    /// poller's `.await`s; the session goes back to [`Self::apply_job_updates`].
+    pub fn pending_jobs(&self) -> (JobSession, Vec<JobReport>) {
+        // Sampled before the read, so a clear landing between the two leaves the
+        // session stale (and the tick's writes refused) rather than the rows unowned.
+        let session = self.job_session();
+        let pending = self
+            .jobs
+            .lock()
+            .ok()
+            .and_then(|g| match g.as_ref() {
+                Some((t, jobs)) if *t == session.tenant => Some(
+                    jobs.iter()
+                        .filter(|j| !j.state.is_terminal())
+                        .cloned()
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        (session, pending)
     }
 
     /// All jobs for the current tenant, newest last. Empty after a tenant switch.
