@@ -1232,7 +1232,10 @@ async fn a_device_queued_when_the_session_ends_is_not_sent() {
     live.store(false, Ordering::SeqCst);
     drop(ahead);
 
-    assert!(queued.await.is_none(), "a queued device must not be sent");
+    assert!(
+        queued.await.outcome.is_none(),
+        "a queued device must not be sent"
+    );
     assert!(
         server
             .received_requests()
@@ -1243,9 +1246,51 @@ async fn a_device_queued_when_the_session_ends_is_not_sent() {
 
     // A live session sends as before.
     live.store(true, Ordering::SeqCst);
-    let sent = dispatch::send_if_current(&ctx, 7, &sem).await;
+    let sent = dispatch::send_if_current(&ctx, 7, &sem).await.outcome;
     assert!(matches!(sent, Some(Ok(None))), "{sent:?}");
     assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+}
+
+/// A device's dispatch time is when its POST goes out, not when its batch began.
+/// It was stamped before the permit, so a device queued behind slow sends carried
+/// a dispatch time minutes before its request: the wait came off its job timeout
+/// and lowered the poller's activity floor below the send.
+#[tokio::test]
+async fn a_queued_device_is_stamped_when_its_turn_comes() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204).set_delay(std::time::Duration::from_millis(400)))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/8/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let ctx = scan_context(mock_api(&server), Arc::new(AtomicBool::new(true)));
+    let sem = tokio::sync::Semaphore::new(1);
+
+    // Device 7 is polled first and takes the only permit; device 8 queues.
+    let first = async {
+        let turn = dispatch::send_if_current(&ctx, 7, &sem).await;
+        (turn, Utc::now())
+    };
+    let ((first, first_done), second) =
+        tokio::join!(first, dispatch::send_if_current(&ctx, 8, &sem));
+
+    assert!(matches!(first.outcome, Some(Ok(None))));
+    assert!(matches!(second.outcome, Some(Ok(None))));
+    assert!(
+        second.at >= first_done - chrono::Duration::milliseconds(50),
+        "device 8 was stamped at {} but could only send after {}",
+        second.at,
+        first_done
+    );
 }
 
 /// The session check before the send is not enough on its own: a 429 parks the
@@ -1287,6 +1332,7 @@ async fn a_dispatch_retry_after_the_session_ends_is_not_sent() {
     };
     let outcome = dispatch::send_if_current(&ctx, 7, &sem)
         .await
+        .outcome
         .expect("the session was live when the permit came");
     ender.await.expect("ender");
 

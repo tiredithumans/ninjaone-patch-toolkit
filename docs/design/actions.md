@@ -369,6 +369,13 @@ apply and a reboot was asked for the same feed three times a tick. Correlation s
 `pending` order with `claimed` threaded through, so two jobs on one device never bind the same
 activity; `commands::actions::tests` pins both with wiremock.
 
+That floor is only as good as `dispatched_ts`, so a job's dispatch time is taken once it holds
+its permit and has passed the session check (`dispatch::send_if_current`), as its POST goes out.
+It used to be taken before the wait. With 8 permits, a 45 s request timeout and up to 500
+devices, the tail of a batch could queue for minutes, and that time came off the 45-minute job
+timeout and pulled the floor back far enough for the third-tier heuristic to bind an activity
+older than the send. The opening "dispatching" audit record is still written before the wait.
+
 A read is narrowed with the documented `seriesUid` parameter only when the device has exactly one
 pending job **and** that job's series uid has already been seen on an activity in its feed
 (`confirmed_series`, held by the poller task). A dispatch response's uid alone is not proof:

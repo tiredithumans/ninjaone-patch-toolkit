@@ -68,6 +68,11 @@ version and start a fresh `[Unreleased]`.
   history** emptied the whole list, so a job still in progress was never checked again: its
   outcome never appeared and the audit log never recorded one. The button is now **Clear
   finished**, and it removes only jobs that have finished.
+- **Devices late in a large patch action no longer time out early or pick up an older result.**
+  A job's dispatch time was taken when the batch started rather than when its device was sent,
+  so in a batch larger than the concurrency setting the devices waiting their turn lost that wait
+  from their 45-minute timeout, and their job could be matched to an activity from before the
+  action was sent. The dispatch time shown in the Jobs tab is now when the request went out.
 
 ### Changed
 
