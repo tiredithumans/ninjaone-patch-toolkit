@@ -59,11 +59,11 @@ version and start a fresh `[Unreleased]`.
   sign-in.
 - **Job status checks that span a sign-out no longer leak into the next session.** A status
   check still running when you signed out, signed in again or switched instance sent the
-  previous session's jobs to the new session's Jobs tab, cleared its cached patch data, and
-  wrote the closing audit record under the new instance's name. Its results are now dropped, and
-  the audit record names the instance the action was sent to. A job whose outcome was still
-  unknown when the session ended is closed in the audit log as unresolved instead of being left
-  open.
+  previous session's jobs to the new session's Jobs tab, cleared the new instance's cached patch
+  data, and wrote the closing audit record under the new instance's name. Its results are now
+  kept out of the new session, and the audit record names the instance the action was sent to.
+  A job whose outcome was still unknown when the session ended is closed in the audit log as
+  unresolved instead of being left open.
 
 ### Changed
 

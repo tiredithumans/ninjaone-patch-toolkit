@@ -319,9 +319,12 @@ uses the token and URL read under the departed session, so it acts with that ses
 authority. Nothing can close that gap from the client side.
 
 The poller takes the session from `pending_jobs` alongside the rows, and `settle_tick` applies
-under it: `apply_job_updates` returns the ids it applied, and only those are invalidated for and
-emitted. A tick that spans a sign-out used to invalidate the next session's caches and emit the
-old rows, which the frontend merged into the next operator's Jobs tab. A settled job still gets
+under it: `apply_job_updates` returns the ids it applied, and only those are emitted. A tick that
+spans a sign-out used to emit the old rows, which the frontend merged into the next operator's Jobs
+tab. Invalidation follows the *read*, not the row. It happens when the row was applied or the
+tenant is unchanged: after a same-instance sign-in the device really did change, and the next
+session's caches hold that same fleet. It never happens across a tenant switch, where the verdict
+came from the other instance and the caches belong to it. A settled job still gets
 its closing audit record, labelled with the session's instance and client id (not Settings read
 now), unless the tenant changed: the feed was then read from the other instance, so the record is
 closed as unresolved instead.

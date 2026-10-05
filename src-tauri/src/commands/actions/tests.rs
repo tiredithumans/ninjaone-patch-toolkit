@@ -928,12 +928,11 @@ async fn a_tick_within_one_session_settles_its_jobs() {
 
 /// A tick awaits the feed reads, and a sign-out and sign-in (same instance) can
 /// land in that time. `apply_job_updates` refused the departed session's rows, but
-/// the tick still invalidated the next session's caches and emitted the old rows,
-/// which the frontend merged into the next operator's Jobs tab. The device did act,
-/// so the closing audit record is still written, labelled with the session the job
-/// was dispatched in.
+/// the tick still emitted them, and the frontend merged them into the next
+/// operator's Jobs tab. The device did act, so the closing audit record is still
+/// written, labelled with the session the job was dispatched in.
 #[tokio::test]
-async fn a_tick_that_spans_a_sign_out_touches_nothing_in_the_next_session() {
+async fn a_tick_that_spans_a_sign_out_emits_nothing_to_the_next_session() {
     let state = AppState::new().expect("build state");
     let ts = Utc::now().timestamp();
     let apply = pending_job(1, 7, ActionKind::OsPatchApply, ts - 30);
@@ -951,10 +950,12 @@ async fn a_tick_that_spans_a_sign_out_touches_nothing_in_the_next_session() {
 
     assert!(tick.applied.is_empty(), "the old rows must not be emitted");
     assert!(!tick.settled_any);
-    assert_eq!(
+    // Same instance: the device really changed and the next session's caches hold
+    // that same fleet, so they are still dropped for it.
+    assert_ne!(
         state.cache_epochs(),
         before,
-        "nor invalidate the next session"
+        "a same-tenant apply still invalidates"
     );
     assert_eq!(state.jobs_snapshot()[0].state, JobState::Running);
     assert_eq!(tick.closing.len(), 1, "the device acted; the trail says so");

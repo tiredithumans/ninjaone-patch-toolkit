@@ -123,8 +123,13 @@ pub(super) struct SettledTick {
 /// session's rows, but the tick went on regardless: it invalidated the *new*
 /// session's caches for them, emitted them to the frontend (whose merge re-added
 /// them to the new session's Jobs tab), and labelled their closing audit records
-/// with the instance read from Settings *now*. Invalidation and the emit now cover
-/// only what was applied.
+/// with the instance read from Settings *now*. The emit now covers only what was
+/// applied.
+///
+/// Invalidation follows the *read*, not the row. After a same-instance sign-in the
+/// device really did change and the next session's caches hold that same tenant's
+/// data, so they are dropped for it; after a tenant switch the verdict came from
+/// the other instance and the caches belong to it, so nothing is dropped.
 ///
 /// A settled job still gets its closing record when its row is gone — the device
 /// acted, and the trail should say how — labelled with the session it was
@@ -147,8 +152,8 @@ pub(super) fn settle_tick(
     for job in updates {
         let was_applied = applied_ids.contains(&job.id);
         if job.state.is_terminal() {
-            if was_applied {
-                settled_any = true;
+            settled_any |= was_applied;
+            if was_applied || read_on_this_tenant {
                 // Patch state changes on completion, not on dispatch — and only for
                 // the kinds that actually changed something. Same rule as the
                 // dispatch site, via the same function.
