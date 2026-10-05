@@ -1,15 +1,16 @@
 ---
 name: debug
-description: Debug issues in the NinjaOne Patch Toolkit (Tauri + Leptos WASM app). Use when the user says "debug X" where X is a symptom (e.g., "sign-in hangs", "patches not loading", "export is empty", "action buttons greyed out", "job stuck on Running", "WASM build error"), or asks for help diagnosing a problem.
+description: Debug issues in the NinjaOne Patch Toolkit (Tauri + Leptos WASM app). Use when the user reports a symptom (e.g., "sign-in hangs", "export is empty", "action buttons greyed out", "job stuck on Running", "WASM build error") or asks for help diagnosing a problem.
 argument-hint: "[symptom] — e.g., 'sign-in hangs', 'export is empty', 'job stuck'"
 ---
 
 # Debug — diagnose Tauri + Leptos WASM issues
 
 Start with a hypothesis from the symptom, then check the layer it points at. The rationale
-behind each subsystem lives in `docs/design/<domain>.md`; read the matching note before
-changing anything there. `docs/TROUBLESHOOTING.md` is the operator-facing list of the same
-symptoms — check it first, it may already name the cause.
+behind each subsystem lives in `docs/design/<domain>.md`; the per-domain invariants (what must
+never change) are in `.claude/rules/` — read the matching pair before changing anything there.
+`docs/TROUBLESHOOTING.md` is the operator-facing list of the same symptoms — check it first, it
+may already name the cause. `docs/architecture.md` is the file-by-file layer map.
 
 ## 0. Clarify the symptom
 
@@ -37,16 +38,15 @@ symptoms — check it first, it may already name the cause.
 ## 2. Frontend (`web-rs/`)
 
 - `just web-clippy` (wasm) and `just web-test` (host-target pure helpers).
-- `src/api.rs` — every wrapper is an `ipc!(...)` declaration; the command string and the camelCase
-  arg keys derive from the wrapper's own name and parameters, so a mismatch is a typo in one place.
+- `src/api.rs` — every wrapper is an `ipc!(...)` declaration; the command string and the
+  camelCase arg keys derive from the wrapper's own name and parameters, so a mismatch is a typo
+  in one place.
 - `src/types.rs` — the hand-mirrored IPC types; a missing field deserializes as an error toast
-  "decode <cmd>". `rows::tests::serialized_shapes_carry_every_frontend_required_key` pins the keys.
-- `src/app/state.rs` (signals) with its `impl AppState` split by concern under `src/app/state/`
-  (`query.rs` runs/refresh/drill-downs, `view.rs` paging/sort/groups, `selection.rs`,
-  `actions.rs` dispatch/jobs, `lookups.rs`, `presets.rs`), and the view modules under `src/app/`:
-  `tables.rs` + `tables/` (one file per results tab), `filters.rs`, `controls.rs`, `actions.rs`, `settings.rs`, `charts.rs`,
-  `header.rs`, `update.rs`, `modal.rs`, `toaster.rs`. Pure helpers live in `src/app/util/` and are
-  the only frontend code with tests.
+  "decode <cmd>". `rows::tests::serialized_shapes_carry_every_frontend_required_key` pins the
+  keys.
+- Signal state lives in `src/app/state.rs` + `state/<concern>.rs`; view modules in `src/app/`;
+  the only frontend code with tests is the pure `src/app/util/`. Full layer map:
+  `docs/architecture.md`.
 
 ## 3. Auth (`src-tauri/src/auth.rs`, `docs/design/auth.md`)
 
@@ -79,8 +79,8 @@ symptoms — check it first, it may already name the cause.
 ## 5. IPC boundary
 
 - Registered in `generate_handler![]` (`src-tauri/src/lib.rs`)? Declared with `ipc!` in
-  `web-rs/src/api.rs`? The `command-parity-check.sh` hook reports either gap after an edit to the
-  chain; `.claude/hooks/test.sh` proves the hook itself works.
+  `web-rs/src/api.rs`? The `command-parity-check.sh` hook reports either gap after an edit to
+  the chain; `.claude/hooks/test.sh` proves the hook itself works.
 - Every mutating handler calls `require_actions_enabled`; the test
   `every_mutating_command_checks_that_actions_are_enabled` derives the list from source.
 

@@ -8,6 +8,8 @@ argument-hint: "[PR number, commit sha, or branch name]"
 
 Review work before it lands on `main`. The rules below are the ones a diff can violate
 silently; each names where the rationale lives so you can check the intent, not just the text.
+The same rules auto-load per-file from `.claude/rules/` while editing — this list is the
+review-time copy; when a domain here feels thin, Read its rule file before judging.
 
 ## 0. Find the work
 
@@ -59,8 +61,9 @@ silently; each names where the rationale lives so you can check the intent, not 
   `#[component]`; a new dialog calls `modal::focus_trap()`.
 
 **Docs**
-- User-facing change → `CHANGELOG.md` `[Unreleased]`. New rule → AGENTS.md line + design note.
-  Hook or skill change → `.claude/hooks/test.sh` still passes.
+- User-facing change → `CHANGELOG.md` `[Unreleased]`. New rule → `.claude/rules/<domain>.md`
+  line + design note (AGENTS.md only if a cross-domain flow changed). Hook or skill change →
+  `.claude/hooks/test.sh` still passes.
 
 ## 2. Run the gates
 
