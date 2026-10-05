@@ -1226,3 +1226,47 @@ async fn a_caller_after_a_failed_refresh_tries_again() {
     assert!(auth.access_token().await.is_err());
     assert_eq!(auth.access_token().await.unwrap(), "recovered-access");
 }
+
+/// A recorded failure belongs to the grant it was recorded for. A caller that
+/// queued before a sign-out and a fresh sign-in must refresh the *new* grant, not
+/// hand back the previous session's error.
+#[tokio::test]
+async fn a_failure_from_a_previous_session_is_not_shared() {
+    let server = wiremock::MockServer::start().await;
+    token_endpoint(&server, granted("new-session-access", "rotated-refresh"), 1).await;
+    let auth = AuthState::seeded_refreshable(
+        reqwest::Client::new(),
+        server.uri(),
+        "expired-access",
+        "old-refresh",
+        "client-stamp-scope",
+    );
+    auth.invalidate_access_token("expired-access");
+
+    // Hold the lock as an in-flight refresh would, so the caller queues behind it
+    // having noted the failure count.
+    let mut held = auth.refresh_lock.lock().await;
+    let queued = {
+        let auth = auth.clone();
+        tokio::spawn(async move { auth.access_token().await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // The held attempt fails transiently for the old session...
+    *held = Some(RefreshFailure {
+        stamp: auth.grant_stamp(),
+        message: "refresh failed (503 Service Unavailable): ".into(),
+    });
+    auth.refresh_failures.fetch_add(1, Ordering::AcqRel);
+    // ...and before the caller runs, the operator signs in afresh, with a token
+    // that is already due for refresh.
+    auth.store_tokens_blocking(token_response(Some("new-refresh")), auth.grant_stamp(), true)
+        .expect("interactive sign-in");
+    auth.invalidate_access_token("access");
+    drop(held);
+
+    assert_eq!(
+        queued.await.expect("join").expect("the new grant is refreshed"),
+        "new-session-access"
+    );
+}
