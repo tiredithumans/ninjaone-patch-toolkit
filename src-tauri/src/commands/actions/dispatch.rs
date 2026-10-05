@@ -99,22 +99,37 @@ pub(super) async fn dispatch_batch(
         match res {
             Ok((index, job)) => {
                 done += 1;
-                emit_progress(
-                    app,
-                    ActionProgressEvent {
-                        batch_id: ctx.batch_id,
-                        stage: "dispatching",
-                        dispatched: done,
-                        total: dispatched.len(),
-                        jobs: vec![job.clone()],
-                    },
-                );
+                if let Some(ev) = device_progress(&ctx, done, dispatched.len(), &job) {
+                    emit_progress(app, ev);
+                }
                 dispatched[index] = Some(job);
             }
             Err(err) => warn!(?err, "a dispatch task panicked"),
         }
     }
     dispatched.into_iter().flatten().collect()
+}
+
+/// The progress event for one device's outcome — `None` once the session that
+/// dispatched it has ended.
+///
+/// The frontend merges every row an event carries into its Jobs list. After a
+/// sign-out it has already cleared that list for the next session, so a send
+/// still finishing (or a queued device recorded as not sent) re-added the departed
+/// session's rows there, Failed ones with a Retry button.
+pub(super) fn device_progress(
+    ctx: &DispatchContext,
+    done: usize,
+    total: usize,
+    job: &JobReport,
+) -> Option<ActionProgressEvent> {
+    (ctx.still_current)().then(|| ActionProgressEvent {
+        batch_id: ctx.batch_id,
+        stage: "dispatching",
+        dispatched: done,
+        total,
+        jobs: vec![job.clone()],
+    })
 }
 
 /// Audits, dispatches and records the outcome for a single device.

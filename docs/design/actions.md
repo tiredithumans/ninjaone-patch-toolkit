@@ -299,7 +299,9 @@ POSTing it; and `append_jobs` re-checks it under the jobs lock, refusing the bat
 returns an error instead of the batch. All of these used to read the tenant only at store time,
 after the dispatch, so a sign-out mid-batch kept POSTing the queued devices and landed the
 departed session's jobs in the new one, where the poller resolved them against the new session's
-API and invalidated its caches. The Jobs tab's Clear is `clear_job_history`: it empties the list
+API and invalidated its caches. The per-device `action:progress` emit is gated the same way
+(`dispatch::device_progress`): the frontend merges each event's rows into a Jobs list that
+`clear_session()` has already handed to the next session. The Jobs tab's Clear is `clear_job_history`: it empties the list
 without ending the session.
 
 The same check also runs **before every attempt of the POST**, retries included. The dispatch

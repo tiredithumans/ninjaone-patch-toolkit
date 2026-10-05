@@ -1272,3 +1272,23 @@ async fn a_dispatch_retry_after_the_session_ends_is_not_sent() {
     );
     server.verify().await;
 }
+
+/// A device's progress event carries its row, and the frontend merges it into the
+/// Jobs list. Once the session has ended that list belongs to the next one, so an
+/// outcome landing after the sign-out must not be emitted at all.
+#[tokio::test]
+async fn a_dispatch_outcome_after_the_session_ends_is_not_emitted() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let server = MockServer::start().await;
+    let live = Arc::new(AtomicBool::new(true));
+    let ctx = scan_context(mock_api(&server), Arc::clone(&live));
+    let job = pending_job(1, 7, ActionKind::OsPatchScan, 0);
+
+    let ev = dispatch::device_progress(&ctx, 1, 2, &job).expect("live session emits");
+    assert_eq!(ev.jobs.len(), 1);
+
+    live.store(false, Ordering::SeqCst);
+    assert!(dispatch::device_progress(&ctx, 2, 2, &job).is_none());
+}
