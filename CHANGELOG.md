@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-10-05
+
 ### Fixed
 
 - **Patch actions no longer lock mid-session after a token refresh.** A refresh response may
