@@ -95,7 +95,7 @@ For each field the toolkit branches on: the vocabulary the spec declares, or **f
 ### `Activity`
 
 - `severity` — `NONE`, `MINOR`, `MODERATE`, `MAJOR`, `CRITICAL`
-- `statusCode` — 675 values (count only: NinjaOne's whole activity vocabulary, which grows every release; `actions::is_action_activity` matches the handful the native action endpoints emit)
+- `statusCode` — 702 values (count only: NinjaOne's whole activity vocabulary, which grows every release; `actions::is_action_activity` matches the handful the native action endpoints emit)
 - `status` — **free-form string**, no enum declared
 - `activityResult` — `SUCCESS`, `FAILURE`, `UNSUPPORTED`, `UNCOMPLETED`
 - `type` — **free-form string**, no enum declared
