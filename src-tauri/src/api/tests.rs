@@ -1067,10 +1067,10 @@ async fn an_acting_post_is_not_replayed_to_a_redirect_target() {
         .await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(307)
-                .insert_header("Location", format!("{}/elsewhere", elsewhere.uri())),
-        )
+        .respond_with(ResponseTemplate::new(307).insert_header(
+            "Location",
+            format!("{}/elsewhere?sig=secret", elsewhere.uri()),
+        ))
         .expect(1)
         .mount(&server)
         .await;
@@ -1081,7 +1081,7 @@ async fn an_acting_post_is_not_replayed_to_a_redirect_target() {
         .post_action("/device/1/reboot/NORMAL", None)
         .await
         .expect_err("a redirect is an error, not a success");
-    assert!(format!("{err:#}").contains("307"), "{err:#}");
+    assert_redirect_named(&format!("{err:#}"), &elsewhere.uri());
 }
 
 /// The token grant shares the client, so a 307 from `/ws/oauth/token` must not
@@ -1105,10 +1105,10 @@ async fn a_token_grant_is_not_replayed_to_a_redirect_target() {
         .await;
     Mock::given(method("POST"))
         .and(path("/ws/oauth/token"))
-        .respond_with(
-            ResponseTemplate::new(307)
-                .insert_header("Location", format!("{}/ws/oauth/token", elsewhere.uri())),
-        )
+        .respond_with(ResponseTemplate::new(307).insert_header(
+            "Location",
+            format!("{}/ws/oauth/token?sig=secret", elsewhere.uri()),
+        ))
         .expect(1)
         .mount(&server)
         .await;
@@ -1125,5 +1125,26 @@ async fn a_token_grant_is_not_replayed_to_a_redirect_target() {
         .devices(None, None)
         .await
         .expect_err("a redirected grant is a failed refresh");
-    assert!(format!("{err:#}").contains("307"), "{err:#}");
+    assert_redirect_named(&format!("{err:#}"), &elsewhere.uri());
+}
+
+/// Without redirects followed, an Instance that redirects (an old regional host,
+/// `http` -> `https`) would fail as a bare 3xx with an empty body. The error names
+/// the target's scheme and host and what to change — and never its path or query.
+fn assert_redirect_named(err: &str, origin: &str) {
+    assert!(err.contains("307"), "{err}");
+    assert!(
+        err.contains(&format!(
+            "NinjaOne redirected to {origin}; set Instance in Settings to that address"
+        )),
+        "{err}"
+    );
+    assert!(
+        !err.contains("sig=secret"),
+        "the Location query leaked: {err}"
+    );
+    assert!(
+        !err.contains("/elsewhere"),
+        "the Location path leaked: {err}"
+    );
 }

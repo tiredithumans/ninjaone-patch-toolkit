@@ -28,11 +28,14 @@ version and start a fresh `[Unreleased]`.
 - **A plaintext instance URL is upgraded to https however it is spelled.** A hand-edited
   `settings.json` holding `HTTP://`, `Http://`, `http:host` or `http:/host` was logged as
   "upgrading to https" but kept in cleartext, so sign-in, token refreshes and API calls sent the
-  bearer token and client secret unencrypted. The URL is now rewritten from its parsed form.
+  bearer token and client secret unencrypted. The URL is now rewritten from its parsed form,
+  which also normalises it: an uppercase host becomes lowercase and a `:443` port is dropped. If
+  your hand-edited instance URL was written that way, the app may ask you to sign in once more.
 - **HTTP redirects are no longer followed.** A 307 or 308 from the token endpoint re-sent the
   refresh token, client secret or PKCE verifier to the redirect target, and a redirected patch
-  action was sent again to a host the app never chose. A redirect now fails the request with
-  its status.
+  action was sent again to a host the app never chose. A redirect now fails the request, and
+  the error names the address NinjaOne redirected to (scheme and host only) so you can set
+  **Instance** in Settings to it.
 - **A patch feed whose paging cursor loops now fails instead of running forever.** A server
   that alternated between two cursors kept the query fetching the same pages until the app ran
   out of memory. A cursor seen earlier in the same fetch is now an error, and a fetch stops with

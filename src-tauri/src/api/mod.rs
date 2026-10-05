@@ -16,7 +16,7 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::auth::AuthState;
-use crate::error::truncate_body;
+use crate::error::{redirect_hint, truncate_body};
 
 const MAX_RETRIES: u8 = 3;
 /// The longest `Retry-After` this client sits out. The header is server-controlled,
@@ -221,6 +221,10 @@ impl NinjaApiClient {
             }
 
             if !status.is_success() {
+                if let Some(hint) = redirect_hint(&resp) {
+                    warn!(%method, %url, %status, "redirect not followed");
+                    bail!("{method} {url} failed ({status}): {hint}");
+                }
                 let text = truncate_body(&resp.text().await.unwrap_or_default());
                 warn!(%method, %url, %status, body = %text, "http error");
                 // See `retry_for`: a 5xx on an acting POST is not a rejection but an
