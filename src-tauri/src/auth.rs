@@ -762,7 +762,15 @@ impl AuthState {
             // turned a non-rotating server plus a locked keychain into "not
             // authenticated" mid-session, which is exactly the forced re-login this
             // function exists to prevent.
-            let previous_refresh = inner.tokens.as_ref().and_then(|t| t.refresh_token.clone());
+            //
+            // Only a refresh carries it over. An interactive sign-in is a new grant,
+            // possibly by a different operator (`sign_in` runs it after a failed
+            // restore that can leave the previous session's tokens in memory), and
+            // pairing its access token with the previous refresh token would revive
+            // that operator's session on the next refresh.
+            let previous_refresh = (!new_session)
+                .then(|| inner.tokens.as_ref().and_then(|t| t.refresh_token.clone()))
+                .flatten();
             let token_set = TokenSet {
                 access_token: parsed.access_token.clone(),
                 refresh_token: parsed.refresh_token.clone().or(previous_refresh),
@@ -793,13 +801,24 @@ impl AuthState {
         // Outside `inner` (a keyring round trip must not stall every reader of the
         // auth state) but inside `persist_lock`, so a sign-out cannot slip between
         // the session check above and this write.
-        if let Some(ref rt) = parsed.refresh_token
-            && let Err(e) = save_keyring(&started.tenant.entry(KEYRING_REFRESH_PREFIX), rt)
-        {
-            warn!(
-                error = %e,
-                "could not persist the refresh token; this session stays signed in but a restart will require signing in again"
-            );
+        let entry = started.tenant.entry(KEYRING_REFRESH_PREFIX);
+        match parsed.refresh_token {
+            Some(ref rt) => {
+                if let Err(e) = save_keyring(&entry, rt) {
+                    warn!(
+                        error = %e,
+                        "could not persist the refresh token; this session stays signed in but a restart will require signing in again"
+                    );
+                }
+            }
+            // A new sign-in that issued no refresh token must not leave the previous
+            // session's on disk, or the next launch restores it.
+            None if new_session => {
+                if let Err(e) = delete_keyring(&entry) {
+                    warn!(error = %e, "could not delete the previous session's refresh token");
+                }
+            }
+            None => {}
         }
         Ok(token_set)
     }

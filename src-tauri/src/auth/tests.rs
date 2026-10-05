@@ -216,6 +216,40 @@ fn a_non_rotating_refresh_keeps_the_existing_token() {
     );
 }
 
+/// An interactive sign-in is a new grant, possibly by another operator. Carrying
+/// the previous session's refresh token over paired the new access token with it,
+/// and the keyring kept it for the next launch.
+#[test]
+fn a_new_sign_in_does_not_inherit_the_previous_refresh_token() {
+    let auth = launched("https://new-session.example.com", "client-new-session");
+    let entry = saved_refresh_entry("https://new-session.example.com", "client-new-session");
+    auth.store_tokens_blocking(
+        token_response(Some("previous-operator")),
+        auth.grant_stamp(),
+        false,
+    )
+    .expect("previous session");
+    assert_eq!(
+        load_keyring(&entry).unwrap().as_deref(),
+        Some("previous-operator")
+    );
+
+    let set = auth
+        .store_tokens_blocking(token_response(None), auth.grant_stamp(), true)
+        .expect("interactive sign-in without a refresh token");
+
+    assert_eq!(set.refresh_token, None);
+    assert!(
+        auth.refresh_grant().unwrap().refresh_token.is_none(),
+        "the in-memory session must not keep the previous refresh token"
+    );
+    assert_eq!(
+        load_keyring(&entry).unwrap(),
+        None,
+        "the keyring must not keep it for the next launch"
+    );
+}
+
 #[test]
 fn token_set_staleness() {
     let fresh = TokenSet {
