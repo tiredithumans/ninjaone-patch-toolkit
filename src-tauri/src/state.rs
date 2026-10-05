@@ -265,18 +265,31 @@ pub struct AppState {
     pending_confirm: Mutex<Option<PendingConfirm>>,
 }
 
+/// The one HTTP client every NinjaOne call and token grant shares.
+///
+/// Redirects are **not** followed. reqwest's default (`limited(10)`) strips
+/// `Authorization` on a cross-host hop but re-sends the *body* on a 307/308, so a
+/// redirect from `/ws/oauth/token` would re-POST the client secret, refresh token
+/// or PKCE verifier to wherever `Location` pointed, and an acting POST would be
+/// dispatched again to a host we never chose. No endpoint we call redirects on
+/// success, so a 3xx surfaces as a plain non-2xx error instead.
+pub(crate) fn build_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!(
+            "ninjaone-patch-toolkit/",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .timeout(Duration::from_secs(45))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("build http client")
+}
+
 impl AppState {
     pub fn new() -> Result<Self> {
         let settings = Settings::load_or_recover();
 
-        let http = reqwest::Client::builder()
-            .user_agent(concat!(
-                "ninjaone-patch-toolkit/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .timeout(Duration::from_secs(45))
-            .build()
-            .context("build http client")?;
+        let http = build_http_client()?;
 
         let auth = AuthState::new(
             http.clone(),

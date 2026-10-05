@@ -29,6 +29,10 @@ version and start a fresh `[Unreleased]`.
   `settings.json` holding `HTTP://`, `Http://`, `http:host` or `http:/host` was logged as
   "upgrading to https" but kept in cleartext, so sign-in, token refreshes and API calls sent the
   bearer token and client secret unencrypted. The URL is now rewritten from its parsed form.
+- **HTTP redirects are no longer followed.** A 307 or 308 from the token endpoint re-sent the
+  refresh token, client secret or PKCE verifier to the redirect target, and a redirected patch
+  action was sent again to a host the app never chose. A redirect now fails the request with
+  its status.
 
 ## [0.15.1] - 2026-09-30
 

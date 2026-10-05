@@ -993,3 +993,80 @@ async fn post_429_is_still_replayed() {
         .await
         .expect("a 429 must be retried through to success");
 }
+
+/// A redirect is never followed. reqwest's default policy re-sends the body on a
+/// 307/308, so an acting POST would reach whatever host `Location` named — a
+/// second dispatch the operator never confirmed.
+#[tokio::test]
+async fn an_acting_post_is_not_replayed_to_a_redirect_target() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&elsewhere)
+        .await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("Location", format!("{}/elsewhere", elsewhere.uri())),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let http = crate::state::build_http_client().expect("build client");
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let err = NinjaApiClient::new(http, auth)
+        .post_action("/device/1/reboot/NORMAL", None)
+        .await
+        .expect_err("a redirect is an error, not a success");
+    assert!(format!("{err:#}").contains("307"), "{err:#}");
+}
+
+/// The token grant shares the client, so a 307 from `/ws/oauth/token` must not
+/// re-POST the refresh token (and, for a Web client, the secret) to `Location`.
+#[tokio::test]
+async fn a_token_grant_is_not_replayed_to_a_redirect_target() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&elsewhere)
+        .await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/ws/oauth/token"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("Location", format!("{}/ws/oauth/token", elsewhere.uri())),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let http = crate::state::build_http_client().expect("build client");
+    let auth = AuthState::seeded_refreshable(
+        http.clone(),
+        server.uri(),
+        "stale-token",
+        "refresh-abc",
+        "client-1",
+    );
+    let err = NinjaApiClient::new(http, auth)
+        .devices(None, None)
+        .await
+        .expect_err("a redirected grant is a failed refresh");
+    assert!(format!("{err:#}").contains("307"), "{err:#}");
+}
