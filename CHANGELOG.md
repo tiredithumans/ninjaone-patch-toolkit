@@ -73,6 +73,10 @@ version and start a fresh `[Unreleased]`.
   so in a batch larger than the concurrency setting the devices waiting their turn lost that wait
   from their 45-minute timeout, and their job could be matched to an activity from before the
   action was sent. The dispatch time shown in the Jobs tab is now when the request went out.
+- **Job status checks for a large patch action no longer flood NinjaOne.** Every 15 seconds the
+  app checked every device still in progress at the same moment, so a batch of hundreds of
+  devices could hit NinjaOne's rate limit, and each round of checks then waited out the limit
+  and took far longer. At most 8 checks now run at once.
 
 ### Changed
 

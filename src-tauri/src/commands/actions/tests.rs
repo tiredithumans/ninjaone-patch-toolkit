@@ -859,6 +859,7 @@ async fn a_tick_reads_each_devices_feed_once_and_resolves_every_job_on_it() {
         &mut claimed,
         &mut confirmed,
         now,
+        8,
     )
     .await;
 
@@ -900,6 +901,7 @@ async fn resolved_against_a_completed_apply(pending: Vec<JobReport>) -> Vec<JobR
         &mut HashSet::new(),
         &mut HashSet::new(),
         now,
+        8,
     )
     .await;
     assert_eq!(updates[0].state, JobState::Completed);
@@ -1045,6 +1047,7 @@ async fn two_same_kind_jobs_on_one_device_share_a_read_but_not_an_activity() {
         &mut HashSet::new(),
         &mut HashSet::new(),
         now,
+        8,
     )
     .await;
 
@@ -1115,16 +1118,99 @@ async fn a_confirmed_series_narrows_the_next_read() {
     let mut claimed = HashSet::new();
     let mut confirmed = HashSet::new();
 
-    let first = poller::resolve_pending(&api, vec![job], &mut claimed, &mut confirmed, now).await;
+    let first =
+        poller::resolve_pending(&api, vec![job], &mut claimed, &mut confirmed, now, 8).await;
     assert_eq!(first[0].state, JobState::Running);
     assert!(confirmed.contains("uid-9"));
-    poller::resolve_pending(&api, first, &mut claimed, &mut confirmed, now).await;
+    poller::resolve_pending(&api, first, &mut claimed, &mut confirmed, now, 8).await;
 
     let requests = server.received_requests().await.expect("requests");
     let urls: Vec<String> = requests.iter().map(|r| r.url.to_string()).collect();
     assert!(!urls[0].contains("seriesUid"), "{}", urls[0]);
     assert!(urls[1].contains("seriesUid=uid-9"), "{}", urls[1]);
     assert!(urls[1].contains("df=id%3D7"), "{}", urls[1]);
+}
+
+/// Records when each `/activities` read arrives; every answer takes `delay`, so a
+/// read is in flight from its arrival until `delay` later.
+struct ArrivalLog {
+    arrivals: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    delay: std::time::Duration,
+}
+
+impl wiremock::Respond for ArrivalLog {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        self.arrivals
+            .lock()
+            .expect("arrivals")
+            .push(std::time::Instant::now());
+        ResponseTemplate::new(200)
+            .set_body_json(json!([]))
+            .set_delay(self.delay)
+    }
+}
+
+/// A tick's reads are bounded like the dispatch POSTs. They were spawned all at
+/// once, so a 500-device batch put 500 GETs on the wire every 15 s, and a 429
+/// parked every one of them on its `Retry-After` together.
+#[tokio::test]
+async fn a_tick_keeps_at_most_the_cap_of_reads_in_flight() {
+    const CAP: usize = 2;
+    const DEVICES: i64 = 6;
+    let delay = std::time::Duration::from_millis(300);
+    let arrivals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/activities"))
+        .respond_with(ArrivalLog {
+            arrivals: std::sync::Arc::clone(&arrivals),
+            delay,
+        })
+        .mount(&server)
+        .await;
+
+    let now = Utc::now();
+    let pending: Vec<JobReport> = (0..DEVICES)
+        .map(|d| {
+            pending_job(
+                d as u64 + 1,
+                d + 1,
+                ActionKind::OsPatchScan,
+                now.timestamp(),
+            )
+        })
+        .collect();
+    let updates = poller::resolve_pending(
+        &mock_api(&server),
+        pending,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+        now,
+        CAP,
+    )
+    .await;
+    assert_eq!(updates.len(), DEVICES as usize);
+
+    let arrivals = arrivals.lock().expect("arrivals").clone();
+    assert_eq!(
+        arrivals.len(),
+        DEVICES as usize,
+        "still one read per device"
+    );
+    // Reads that arrived within (most of) one response delay of each other were
+    // in flight together.
+    let overlap = delay - std::time::Duration::from_millis(100);
+    let peak = arrivals
+        .iter()
+        .map(|start| {
+            arrivals
+                .iter()
+                .filter(|t| **t >= *start && t.duration_since(*start) < overlap)
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(peak <= CAP, "{peak} reads were in flight at once");
 }
 
 /// A retry is rebuilt from what the job recorded, so the job must record this

@@ -367,7 +367,11 @@ pending dispatch on it (less the 5 s skew allowance), and `resolve_pending` hand
 that device the same list. It used to be one read per *job*, so a device carrying a scan, an
 apply and a reboot was asked for the same feed three times a tick. Correlation still runs in
 `pending` order with `claimed` threaded through, so two jobs on one device never bind the same
-activity; `commands::actions::tests` pins both with wiremock.
+activity; `commands::actions::tests` pins both with wiremock. The reads themselves are bounded:
+at most `MAX_FEED_READS_IN_FLIGHT` (8) are in flight per tick. They used to be spawned all at
+once, so a 500-device batch put 500 GETs on the wire every 15 s and a 429 parked them all on
+the same `Retry-After`. The bound is a constant, not the "Dispatch concurrency" setting, so
+lowering that setting to send cautiously does not also slow every status check.
 
 That floor is only as good as `dispatched_ts`, so a job's dispatch time is taken once it holds
 its permit and has passed the session check (`dispatch::send_if_current`), as its POST goes out.
