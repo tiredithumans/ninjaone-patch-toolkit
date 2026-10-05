@@ -55,7 +55,8 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   → `docs/design/actions.md#after-a-mutating-action-invalidate-the-current-patch-cache`
 - **Jobs are tenant-stamped; the poller is single-claim** (`try_claim_job_poller` /
   `release_job_poller_if_idle`). Dispatch appends jobs before claiming. Every write-path store
-  and each send re-checks the `JobSession` sampled before the first `.await`.
+  and every send attempt (retries too, via `with_send_guard`) re-checks the `JobSession`
+  sampled before the first `.await`.
   → `docs/design/actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim`
 - **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`):
   `statusCode` is lifecycle, `activityResult` is the verdict, exit code from `data`; `newerThan`

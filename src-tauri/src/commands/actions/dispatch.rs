@@ -12,7 +12,7 @@ use tracing::warn;
 use super::{ActionProgressEvent, ActionRequest, emit_progress};
 use crate::actions::{ActionKind, JobReport, JobRequest, JobState, PlannedTarget, audit, fmt_ts};
 use crate::api::actions::{ScriptDispatch, ScriptRef};
-use crate::api::{NinjaApiClient, is_outcome_unknown};
+use crate::api::{NinjaApiClient, SendGuard, is_outcome_unknown, is_send_refused};
 use crate::model::{PatchType, RebootMode};
 use crate::state::AppState;
 
@@ -23,6 +23,8 @@ use crate::state::AppState;
 /// — which scales with fleet size on every batch for data that cannot differ
 /// within one.
 pub(super) struct DispatchContext {
+    /// Carries `still_current` as its send guard, so a retry after a 429 or 401
+    /// is stopped too — see [`NinjaApiClient::with_send_guard`].
     pub(super) api: NinjaApiClient,
     pub(super) kind: ActionKind,
     pub(super) script: Option<ScriptRef>,
@@ -50,7 +52,7 @@ pub(super) struct DispatchContext {
     /// every send, because a batch wider than the semaphore queues devices for as
     /// long as the ones ahead of them take — and a sign-out or tenant switch in that
     /// time used to leave the rest of the departed session's batch POSTing on.
-    pub(super) still_current: Box<dyn Fn() -> bool + Send + Sync>,
+    pub(super) still_current: SendGuard,
 }
 
 /// What a device that was still queued when the session ended records instead of
@@ -233,6 +235,11 @@ pub(super) fn record_dispatch(
             job.state = JobState::Running;
         }
         Err(err) if is_outcome_unknown(&err) => job.state = JobState::Unknown(err.to_string()),
+        // The guard stopped a retry after a definite rejection: nothing reached the
+        // device, so this is "not sent" rather than a failure worth retrying.
+        Err(err) if is_send_refused(&err) => {
+            job.finish(JobState::Skipped(NOT_SENT_SESSION_ENDED.into()), now);
+        }
         Err(err) => job.finish(JobState::Failed(err.to_string()), now),
     }
 }

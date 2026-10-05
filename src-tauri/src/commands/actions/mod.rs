@@ -274,8 +274,13 @@ pub async fn run_action(
     // Everything that does not vary per device is built once and shared, so a
     // 25-device batch stops re-cloning the script ref, run-as identity, parameter
     // string, detail line, instance URL and client id 25 times over.
+    let still_current: crate::api::SendGuard = {
+        let app = app.clone();
+        let session = session.clone();
+        Arc::new(move || app.state::<AppState>().job_session_is_current(&session))
+    };
     let ctx = Arc::new(DispatchContext {
-        api: state.api.clone(),
+        api: state.api.with_send_guard(Arc::clone(&still_current)),
         kind: request.kind,
         script,
         run_as,
@@ -294,11 +299,7 @@ pub async fn run_action(
         batch_id,
         id_base,
         job_requests,
-        still_current: {
-            let app = app.clone();
-            let session = session.clone();
-            Box::new(move || app.state::<AppState>().job_session_is_current(&session))
-        },
+        still_current,
     });
 
     let dispatched = dispatch_batch(

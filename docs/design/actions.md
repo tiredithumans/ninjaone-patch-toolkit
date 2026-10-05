@@ -302,6 +302,20 @@ departed session's jobs in the new one, where the poller resolved them against t
 API and invalidated its caches. The Jobs tab's Clear is `clear_job_history`: it empties the list
 without ending the session.
 
+The same check also runs **before every attempt of the POST**, retries included. The dispatch
+client is `state.api.with_send_guard(still_current)`, and `send_with_retry` asks the guard for an
+`ActOnce` request after it has the token, then fails with `api::SendRefused` (recorded as "not
+sent") if the session ended. A 429 parks a POST for up to 60 s per retry and a 401 re-sends at
+once, each time reading the token live from the shared `AuthState`. Before this, a sign-out and
+another operator's sign-in during that wait re-sent the departed session's action under the new
+operator's grant, and a tenant switch sent it to the old instance with the new grant. Every
+earlier attempt was a definite rejection, so "not sent" is accurate.
+
+**Residual window:** the guard is asked once per attempt, before `send()`. A session that ends
+after that check and before the request reaches the server still sends that one attempt. It
+uses the token and URL read under the departed session, so it acts with that session's own
+authority. Nothing can close that gap from the client side.
+
 The poller takes the session from `pending_jobs` alongside the rows, and `settle_tick` applies
 under it: `apply_job_updates` returns the ids it applied, and only those are invalidated for and
 emitted. A tick that spans a sign-out used to invalidate the next session's caches and emit the

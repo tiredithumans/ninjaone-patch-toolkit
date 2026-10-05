@@ -1148,8 +1148,10 @@ fn scan_context(
     api: crate::api::NinjaApiClient,
     live: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> dispatch::DispatchContext {
+    let still_current: crate::api::SendGuard =
+        std::sync::Arc::new(move || live.load(std::sync::atomic::Ordering::SeqCst));
     dispatch::DispatchContext {
-        api,
+        api: api.with_send_guard(std::sync::Arc::clone(&still_current)),
         kind: ActionKind::OsPatchScan,
         script: None,
         run_as: String::new(),
@@ -1165,7 +1167,7 @@ fn scan_context(
         batch_id: 1,
         id_base: 1,
         job_requests: BTreeMap::new(),
-        still_current: Box::new(move || live.load(std::sync::atomic::Ordering::SeqCst)),
+        still_current,
     }
 }
 
@@ -1217,4 +1219,56 @@ async fn a_device_queued_when_the_session_ends_is_not_sent() {
     let sent = dispatch::send_if_current(&ctx, 7, &sem).await;
     assert!(matches!(sent, Some(Ok(None))), "{sent:?}");
     assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+}
+
+/// The session check before the send is not enough on its own: a 429 parks the
+/// POST for its `Retry-After`, and every retry reads the token live. A sign-out
+/// and another operator's sign-in in that wait re-sent the departed session's
+/// action under the new operator's grant. The retry must ask the session again,
+/// and a request stopped there was rejected every time it went out — not sent.
+#[tokio::test]
+async fn a_dispatch_retry_after_the_session_ends_is_not_sent() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let live = Arc::new(AtomicBool::new(true));
+    let ctx = scan_context(mock_api(&server), Arc::clone(&live));
+    let sem = tokio::sync::Semaphore::new(1);
+
+    // The session ends while the first attempt's 429 backoff is running.
+    let ender = {
+        let live = Arc::clone(&live);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            live.store(false, Ordering::SeqCst);
+        })
+    };
+    let outcome = dispatch::send_if_current(&ctx, 7, &sem)
+        .await
+        .expect("the session was live when the permit came");
+    ender.await.expect("ender");
+
+    let mut job = pending_job(1, 7, ActionKind::OsPatchScan, Utc::now().timestamp());
+    record_dispatch(&mut job, outcome, Utc::now());
+    assert!(
+        matches!(&job.state, JobState::Skipped(why) if why.starts_with("not sent")),
+        "{:?}",
+        job.state
+    );
+    server.verify().await;
 }

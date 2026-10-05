@@ -12,6 +12,7 @@ use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -56,6 +57,29 @@ pub fn is_outcome_unknown(err: &anyhow::Error) -> bool {
     err.downcast_ref::<OutcomeUnknown>().is_some()
 }
 
+/// Asked before every attempt of an acting request; `false` stops it unsent.
+/// See [`NinjaApiClient::with_send_guard`].
+pub type SendGuard = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// An acting request its [`SendGuard`] stopped before an attempt went out. Every
+/// earlier attempt was a definite rejection (429, 401), so the action did not
+/// reach the device: the dispatch site records it as not sent, never as unknown.
+#[derive(Debug)]
+pub struct SendRefused;
+
+impl fmt::Display for SendRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("not sent: the session ended before the request went out")
+    }
+}
+
+impl std::error::Error for SendRefused {}
+
+/// Whether `err` (or anything it wraps) is a [`SendRefused`].
+pub fn is_send_refused(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<SendRefused>().is_some()
+}
+
 /// Whether a request may be replayed after a failure whose outcome is ambiguous.
 ///
 /// Reads are naturally idempotent. A POST that *acts* — reboot, script run, patch
@@ -78,11 +102,33 @@ enum ReplaySafety {
 pub struct NinjaApiClient {
     http: reqwest::Client,
     auth: AuthState,
+    send_guard: Option<SendGuard>,
 }
 
 impl NinjaApiClient {
     pub fn new(http: reqwest::Client, auth: AuthState) -> Self {
-        Self { http, auth }
+        Self {
+            http,
+            auth,
+            send_guard: None,
+        }
+    }
+
+    /// A clone whose [`ReplaySafety::ActOnce`] requests ask `guard` before every
+    /// attempt, the retries included, and fail with [`SendRefused`] once it says no.
+    ///
+    /// A dispatch checks its session before it sends, but a 429 then parks the
+    /// request for up to a minute per retry, and a 401 re-sends at once with a fresh
+    /// token. Every attempt reads the token and base URL live from the shared
+    /// `AuthState`, so a sign-out and another operator's sign-in during that wait
+    /// re-sent the departed session's reboot under the new operator's grant, and a
+    /// tenant switch sent it to the old instance with the new one's token. The guard
+    /// is asked after the token is in hand, the last point before the bytes leave.
+    pub fn with_send_guard(&self, guard: SendGuard) -> Self {
+        Self {
+            send_guard: Some(guard),
+            ..self.clone()
+        }
     }
 
     /// Issues a request against `{base}/api/v2{path}`, refreshing the bearer token
@@ -136,6 +182,13 @@ impl NinjaApiClient {
         let mut attempt = 0u8;
         loop {
             let token = self.auth.access_token().await?;
+            if replay == ReplaySafety::ActOnce
+                && let Some(guard) = &self.send_guard
+                && !guard()
+            {
+                warn!(%method, %url, attempt, "acting request stopped: its session ended");
+                return Err(anyhow::Error::new(SendRefused));
+            }
             debug!(%method, %url, "http request");
             let mut req = self
                 .http
