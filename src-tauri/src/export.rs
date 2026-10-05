@@ -195,9 +195,17 @@ fn write_workbook_split(
     // Past Excel's row limit the rows continue on "Patches (2)", "Patches (3)", …
     // rather than failing the export: a whole-fleet third-party feed can run to
     // seven figures, and the rows past the limit are as real as the ones before it.
+    //
+    // These are the only sheets that grow with the fleet, so they stream: a
+    // low-memory worksheet flushes each row to a temp file once the next one
+    // starts, instead of holding every cell until `save`. Low memory rather than
+    // constant: it keeps the shared string table, so a device name repeated on
+    // every one of its patch rows is stored once, not inlined each time. Its one
+    // rule is that rows are written in ascending order, which `fill_sheet` does
+    // and nothing else writes to these sheets (no footnotes).
     let mut chunks = rows.chunks(rows_per_sheet.max(1));
-    write_sheet(
-        &mut workbook,
+    fill_sheet(
+        workbook.add_worksheet_with_low_memory(),
         &header,
         "Patches",
         &DETAIL_COLUMNS,
@@ -206,8 +214,8 @@ fn write_workbook_split(
         true,
     )?;
     for (i, chunk) in chunks.enumerate() {
-        write_sheet(
-            &mut workbook,
+        fill_sheet(
+            workbook.add_worksheet_with_low_memory(),
             &header,
             &format!("Patches ({})", i + 2),
             &DETAIL_COLUMNS,
@@ -620,8 +628,30 @@ fn write_sheet<T, R: Borrow<T>>(
     rows: &[R],
     autofilter: bool,
 ) -> Result<()> {
+    fill_sheet(
+        workbook.add_worksheet(),
+        header,
+        name,
+        columns,
+        widths,
+        rows,
+        autofilter,
+    )
+}
+
+/// The body of [`write_sheet`] on a sheet the caller has already added, so the
+/// detail sheets can pass a low-memory one. Writes strictly row by row, header
+/// first, which is what a low-memory sheet requires.
+fn fill_sheet<T, R: Borrow<T>>(
+    sheet: &mut Worksheet,
+    header: &Format,
+    name: &str,
+    columns: &[TableColumn<T>],
+    widths: &[f64],
+    rows: &[R],
+    autofilter: bool,
+) -> Result<()> {
     let date = date_time_format();
-    let sheet = workbook.add_worksheet();
     sheet.set_name(name).context("name sheet")?;
 
     for (col, (title, _)) in columns.iter().enumerate() {
@@ -1484,7 +1514,11 @@ mod tests {
     }
 
     /// Past Excel's row limit the detail rows continue on numbered sheets instead
-    /// of failing the export; nothing is dropped and About still goes last.
+    /// of failing the export; nothing is dropped and About still goes last. The
+    /// detail sheets are low-memory (streamed) sheets, so this also pins that every
+    /// cell of every row survives that mode exactly as the column accessors produce
+    /// it: text through the shared string table (organizations repeat across rows
+    /// and sheets), counts, and dates, blank ones included.
     #[test]
     fn detail_rows_past_one_sheet_continue_on_numbered_sheets() {
         use calamine::{Reader, Xlsx, open_workbook};
@@ -1493,6 +1527,8 @@ mod tests {
             .map(|i| PatchRow {
                 device_id: i + 1,
                 device_name: format!("srv{i}").into(),
+                organization: if i % 2 == 0 { "Contoso" } else { "Fabrikam" }.into(),
+                installed_ts: (i == 3).then_some(1_777_100_000),
                 ..sample_row()
             })
             .collect();
@@ -1525,6 +1561,32 @@ mod tests {
             );
             for r in 1..range.height() as u32 {
                 seen.push(range.get_value((r, 3)).unwrap().to_string());
+                let row = &rows[seen.len() - 1];
+                for (c, (title, value)) in DETAIL_COLUMNS.iter().enumerate() {
+                    let got = range.get_value((r, c as u32));
+                    let expected = match value(row) {
+                        TableCell::Text(t) => Some(t),
+                        TableCell::Count(n) => Some(n.to_string()),
+                        TableCell::Number(n) => Some(n.to_string()),
+                        TableCell::DateTime(ts) => ts.map(|ts| {
+                            chrono::DateTime::from_timestamp(ts, 0)
+                                .unwrap()
+                                .format("%Y-%m-%d %H:%M:%S")
+                                .to_string()
+                        }),
+                    };
+                    match expected {
+                        Some(want) => assert_eq!(
+                            got.map(cell_text).as_deref(),
+                            Some(want.as_str()),
+                            "{sheet} row {r} {title}"
+                        ),
+                        None => assert!(
+                            got.is_none_or(|c| c.is_empty()),
+                            "{sheet} row {r} {title} is blank"
+                        ),
+                    }
+                }
             }
         }
         assert_eq!(seen, ["srv0", "srv1", "srv2", "srv3", "srv4"]);

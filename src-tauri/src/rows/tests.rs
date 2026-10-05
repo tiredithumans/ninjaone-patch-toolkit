@@ -478,6 +478,62 @@ fn a_current_feed_record_is_pending_unless_rejected_or_installed() {
     assert!(!is_pending(Some("INSTALLED")));
 }
 
+/// The wire and row status vocabularies are both derived from `PatchStatus`, so
+/// a status added to (or respelled in) the enum moves every reader with it. The
+/// two spellings differ for Pending only — wire `MANUAL`, row `PENDING`, which is
+/// also the enum's serialized name, the value the frontend's Status facet sends.
+#[test]
+fn row_and_wire_statuses_are_the_enums_vocabulary() {
+    use crate::model::row_status;
+    for s in PatchStatus::ALL {
+        let wire = s.api_value();
+        assert_eq!(
+            PatchStatus::from_api_value(wire),
+            Some(s),
+            "{s:?} round-trips"
+        );
+        assert_eq!(display_status(Some(wire)), s.row_status(), "{s:?} on a row");
+        assert_eq!(
+            serde_json::to_value(s).unwrap(),
+            s.row_status(),
+            "{s:?} row spelling is the enum's own"
+        );
+        assert_eq!(
+            wire == s.row_status(),
+            s != PatchStatus::Pending,
+            "{s:?}: only Pending is spelled differently on the wire"
+        );
+        assert_eq!(
+            is_pending(Some(wire)),
+            !matches!(s, PatchStatus::Rejected | PatchStatus::Installed),
+            "{s:?} pending"
+        );
+        assert_eq!(
+            approval_state(Some(wire)),
+            match s {
+                PatchStatus::Pending => Some(ApprovalState::Awaiting),
+                PatchStatus::Approved => Some(ApprovalState::Approved),
+                _ => None,
+            },
+            "{s:?} approval"
+        );
+    }
+    for (constant, s) in [
+        (row_status::REJECTED, PatchStatus::Rejected),
+        (row_status::INSTALLED, PatchStatus::Installed),
+        (row_status::FAILED, PatchStatus::Failed),
+    ] {
+        assert_eq!(constant, s.row_status());
+    }
+    assert_eq!(display_status(None), row_status::UNKNOWN);
+    assert_eq!(display_status(Some("SOMETHING_NEW")), "SOMETHING_NEW");
+    assert_eq!(
+        PatchStatus::from_api_value("PENDING"),
+        None,
+        "not a wire value"
+    );
+}
+
 /// The row join has to agree with the rollups about an untyped current-feed
 /// record: `pending_counts` counts it, so the Pending selection must show it.
 /// `assemble_result` labels the current sources MANUAL for exactly this.

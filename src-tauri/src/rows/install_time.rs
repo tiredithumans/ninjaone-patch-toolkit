@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::model::PatchRow;
+use crate::model::{PatchRow, row_status};
 
 use super::*;
 
@@ -60,7 +60,7 @@ pub fn build_time_to_install(rows: &[PatchRow], installs_queried: bool) -> TimeT
     // Keyed by label with the rank alongside, so the output can order by urgency.
     let mut by_sev: HashMap<&'static str, (u8, Vec<i64>)> = HashMap::new();
     let mut installed_records = 0;
-    for r in rows.iter().filter(|r| &*r.status == "INSTALLED") {
+    for r in rows.iter().filter(|r| &*r.status == row_status::INSTALLED) {
         installed_records += 1;
         let (Some(seen), Some(installed)) = (r.first_seen_ts, r.installed_ts) else {
             continue;

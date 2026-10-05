@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
-use crate::model::{Device, Patch, Severity};
+use crate::model::{Device, Patch, PatchStatus, Severity};
 use crate::settings::SlaPolicy;
 
 use super::join::UNKNOWN_LABEL;
@@ -230,9 +230,9 @@ struct ComplianceAcc {
 /// Compared exactly, like [`is_pending`]: `status` is free-form in the spec, and
 /// this crate has only ever seen it upper-case.
 pub(super) fn approval_state(status: Option<&str>) -> Option<ApprovalState> {
-    match status {
-        Some("MANUAL") => Some(ApprovalState::Awaiting),
-        Some("APPROVED") => Some(ApprovalState::Approved),
+    match status.and_then(PatchStatus::from_api_value) {
+        Some(PatchStatus::Pending) => Some(ApprovalState::Awaiting),
+        Some(PatchStatus::Approved) => Some(ApprovalState::Approved),
         _ => None,
     }
 }

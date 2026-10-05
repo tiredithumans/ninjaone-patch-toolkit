@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
-use crate::model::{PatchRow, PatchStatus};
+use crate::model::{PatchRow, PatchStatus, row_status};
 use crate::paths;
 use crate::rows::{PatchFamilies, TableCell, TableColumn, cmp_ci};
 
@@ -87,8 +87,8 @@ pub fn patch_key(row: &PatchRow) -> String {
 /// it as pending too would list one failure in two places.
 fn category(status: &str) -> Option<Category> {
     match status {
-        "FAILED" => Some(Category::Failed),
-        "INSTALLED" | "REJECTED" => None,
+        row_status::FAILED => Some(Category::Failed),
+        row_status::INSTALLED | row_status::REJECTED => None,
         _ => Some(Category::Pending),
     }
 }
@@ -416,43 +416,78 @@ pub fn diff(previous: Option<&RunSnapshot>, now: &RunSnapshot) -> RunChanges {
     let prev_pending = prev.identities(&prev.pending);
     let prev_failed = prev.identities(&prev.failed);
 
-    let new_pending: Vec<ChangeItem> = now_pending
+    let new_pending = now_pending
         .iter()
         .filter(|(id, _)| !prev_pending.contains_key(*id))
-        .filter_map(|(_, &ix)| now.item(ix))
-        .collect();
-    let resolved: Vec<ChangeItem> = prev_pending
+        .map(|(_, &ix)| ix);
+    let resolved = prev_pending
         .iter()
         .filter(|(id, _)| !now_pending.contains_key(*id) && !now_failed.contains_key(*id))
-        .filter_map(|(_, &ix)| prev.item(ix))
-        .collect();
-    let newly_failed: Vec<ChangeItem> = now_failed
+        .map(|(_, &ix)| ix);
+    let newly_failed = now_failed
         .iter()
         .filter(|(id, _)| !prev_failed.contains_key(*id))
-        .filter_map(|(_, &ix)| now.item(ix))
-        .collect();
+        .map(|(_, &ix)| ix);
 
-    out.new_pending = new_pending.len();
-    out.resolved = resolved.len();
-    out.newly_failed = newly_failed.len();
-    out.new_pending_items = capped(new_pending);
-    out.resolved_items = capped(resolved);
-    out.newly_failed_items = capped(newly_failed);
+    (out.new_pending, out.new_pending_items) = capped(now, new_pending);
+    (out.resolved, out.resolved_items) = capped(prev, resolved);
+    (out.newly_failed, out.newly_failed_items) = capped(now, newly_failed);
     out
 }
 
+/// One change, borrowed from its snapshot, for ordering before anything is cloned.
+struct Pick<'a> {
+    device: &'a SnapDevice,
+    patch: &'a SnapPatch,
+    /// Position in the set's iteration order: the tiebreak a stable full sort gave
+    /// implicitly, so selecting the top entries keeps exactly the ones — in exactly
+    /// the order — that sorting everything and truncating did.
+    pos: usize,
+    ix: (u32, u32),
+}
+
 /// Worst severity first, then device and patch name, so identical diffs list
-/// identically (the sets iterate in hash order).
-fn capped(mut items: Vec<ChangeItem>) -> Vec<ChangeItem> {
-    items.sort_by(|a, b| {
-        b.severity_rank
-            .cmp(&a.severity_rank)
-            .then_with(|| cmp_ci(&a.device_name, &b.device_name))
-            .then_with(|| cmp_ci(&a.name, &b.name))
-            .then_with(|| a.device_id.cmp(&b.device_id))
-    });
-    items.truncate(CHANGE_LIST_LIMIT);
-    items
+/// identically (the sets iterate in hash order). Returns the exact count and the
+/// first [`CHANGE_LIST_LIMIT`] entries.
+///
+/// Orders borrowed keys and builds a [`ChangeItem`] (four `String` clones) only
+/// for the listed entries: a whole-fleet first diff can be six figures of
+/// changes, and all but 200 of them were cloned only to be sorted and dropped.
+fn capped(snap: &RunSnapshot, picks: impl Iterator<Item = (u32, u32)>) -> (usize, Vec<ChangeItem>) {
+    let mut picks: Vec<Pick<'_>> = picks
+        .filter_map(|ix @ (d, p)| {
+            Some((
+                snap.devices.get(d as usize)?,
+                snap.patches.get(p as usize)?,
+                ix,
+            ))
+        })
+        .enumerate()
+        .map(|(pos, (device, patch, ix))| Pick {
+            device,
+            patch,
+            pos,
+            ix,
+        })
+        .collect();
+    let total = picks.len();
+    let order = |a: &Pick<'_>, b: &Pick<'_>| {
+        b.patch
+            .rank
+            .cmp(&a.patch.rank)
+            .then_with(|| cmp_ci(&a.device.1, &b.device.1))
+            .then_with(|| cmp_ci(&a.patch.name, &b.patch.name))
+            .then_with(|| a.device.0.cmp(&b.device.0))
+            .then_with(|| a.pos.cmp(&b.pos))
+    };
+    if picks.len() > CHANGE_LIST_LIMIT {
+        picks.select_nth_unstable_by(CHANGE_LIST_LIMIT, order);
+        picks.truncate(CHANGE_LIST_LIMIT);
+    }
+    // `pos` makes the order total, so an unstable sort is deterministic here.
+    picks.sort_unstable_by(order);
+    let items = picks.iter().filter_map(|p| snap.item(p.ix)).collect();
+    (total, items)
 }
 
 /// `run-snapshots/<hash>.json`. Hashed because the scope key is free text (search
