@@ -491,6 +491,14 @@ pub(crate) fn can_confirm_action(
     !blocked && !dispatching && !token_spent && (!needs_typed || typed.trim() == expected)
 }
 
+/// Whether a failed dispatch's error stays in the confirmation dialog, whose way
+/// forward is Re-plan. A partial dispatch does not: some devices may already have
+/// acted, so a re-plan would send to them again, and the session that opened the
+/// dialog has ended anyway. That one closes the dialog and is shown as a toast.
+pub(crate) fn dispatch_error_keeps_dialog(code: Option<&str>) -> bool {
+    code != Some(crate::types::ERR_PARTIAL_DISPATCH)
+}
+
 /// The toast after ticking a group whose members were never on screen: how many
 /// rows the click took, and whether the group had more than one click may take.
 pub(crate) fn group_selection_note(label: &str, rows: usize, capped: bool) -> String {

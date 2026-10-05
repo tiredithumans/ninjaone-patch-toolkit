@@ -301,7 +301,10 @@ after the dispatch, so a sign-out mid-batch kept POSTing the queued devices and 
 departed session's jobs in the new one, where the poller resolved them against the new session's
 API and invalidated its caches. The per-device `action:progress` emit is gated the same way
 (`dispatch::device_progress`): the frontend merges each event's rows into a Jobs list that
-`clear_session()` has already handed to the next session. The Jobs tab's Clear is `clear_job_history`: it empties the list
+`clear_session()` has already handed to the next session. The refusal is
+`UiError::coded(ERR_PARTIAL_DISPATCH, …)`. The frontend closes the confirmation and shows it as
+a toast. It never keeps it in the dialog, because the dialog's Re-plan would send to devices
+that already acted, and `clear_session()` has usually closed the dialog anyway. The Jobs tab's Clear is `clear_job_history`: it empties the list
 without ending the session.
 
 The same check also runs **before every attempt of the POST**, retries included. The dispatch

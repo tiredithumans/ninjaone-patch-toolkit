@@ -326,11 +326,14 @@ pub async fn run_action(
         );
         // No poller will settle these now, so their opening records are closed here.
         audit::record_off_runtime(session.unresolved_closings(&jobs)).await;
-        return Err(UiError::new(format!(
-            "You signed in again or switched instance while this batch was dispatching. {live} \
+        return Err(UiError::coded(
+            crate::error::ERR_PARTIAL_DISPATCH,
+            format!(
+                "You signed in again or switched instance while this batch was dispatching. {live} \
              device(s) had already been sent the action; any still queued were not. The action \
              audit log records each one."
-        )));
+            ),
+        ));
     }
 
     if live > 0 {

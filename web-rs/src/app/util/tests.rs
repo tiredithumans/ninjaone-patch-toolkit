@@ -50,6 +50,20 @@ fn only_a_forced_reboot_demands_a_typed_confirmation() {
     ));
 }
 
+/// A partial dispatch (its session ended mid-batch) must not land in the dialog,
+/// whose way forward is Re-plan: that would send again to devices that already
+/// acted. Every other dispatch failure stays in the dialog as before.
+#[test]
+fn only_a_partial_dispatch_leaves_the_confirmation_dialog() {
+    assert!(dispatch_error_keeps_dialog(None));
+    assert!(dispatch_error_keeps_dialog(Some("somethingElse")));
+    assert!(!dispatch_error_keeps_dialog(Some(
+        crate::types::ERR_PARTIAL_DISPATCH
+    )));
+    // The wire value the backend's `error::ERR_PARTIAL_DISPATCH` sends.
+    assert_eq!(crate::types::ERR_PARTIAL_DISPATCH, "partialDispatch");
+}
+
 #[test]
 fn confirm_is_refused_until_the_device_count_is_typed_exactly() {
     // No typed count required: a click is enough.

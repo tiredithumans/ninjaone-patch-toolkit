@@ -1039,6 +1039,11 @@ impl ActionPlan {
     }
 }
 
+/// Mirror of the backend's `error::ERR_PARTIAL_DISPATCH`: `run_action` refused to
+/// record a batch whose session ended mid-dispatch, after some devices may already
+/// have acted. Re-planning it would send to them again.
+pub const ERR_PARTIAL_DISPATCH: &str = "partialDispatch";
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionBatch {

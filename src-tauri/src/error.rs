@@ -5,21 +5,38 @@ use serde::Serialize;
 #[derive(Debug, Serialize)]
 pub struct UiError {
     pub message: String,
+    /// Set only on an error the frontend must handle differently from "show the
+    /// message", so it never has to match on message text. Omitted otherwise, so the
+    /// shape of every other error is unchanged. Mirrored in `web-rs/src/types.rs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
 }
+
+/// `run_action` refused to record a batch whose session ended mid-dispatch. Some
+/// devices may already have acted, so the frontend must not offer to re-plan it —
+/// a re-plan would send to them again.
+pub const ERR_PARTIAL_DISPATCH: &str = "partialDispatch";
 
 impl UiError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            code: None,
+        }
+    }
+
+    /// An error carrying one of the `ERR_*` codes above.
+    pub fn coded(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            code: Some(code),
         }
     }
 }
 
 impl From<anyhow::Error> for UiError {
     fn from(err: anyhow::Error) -> Self {
-        Self {
-            message: format!("{err:#}"),
-        }
+        Self::new(format!("{err:#}"))
     }
 }
 
@@ -75,4 +92,24 @@ pub(crate) fn redirect_hint(resp: &reqwest::Response) -> Option<String> {
         ),
         None => "NinjaOne answered with a redirect; check Instance in Settings".to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frontend's `ErrShape` reads `message` and an optional `code`. A plain
+    /// error keeps the `{ message }` shape every handler has always returned; a coded
+    /// one adds the key the frontend branches on instead of matching message text.
+    #[test]
+    fn only_a_coded_error_carries_a_code_over_ipc() {
+        assert_eq!(
+            serde_json::to_value(UiError::new("nope")).unwrap(),
+            serde_json::json!({ "message": "nope" })
+        );
+        assert_eq!(
+            serde_json::to_value(UiError::coded(ERR_PARTIAL_DISPATCH, "sent some")).unwrap(),
+            serde_json::json!({ "message": "sent some", "code": "partialDispatch" })
+        );
+    }
 }

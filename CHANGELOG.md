@@ -53,10 +53,10 @@ version and start a fresh `[Unreleased]`.
 - **Signing out during a patch action stops the devices still waiting to be sent.** A batch
   larger than the concurrency setting kept sending to its queued devices after you signed out,
   signed in again or switched instance, and its jobs then appeared in the new session's Jobs tab.
-  Devices still queued are now recorded as not sent, the batch reports an error saying how many
-  had already been sent, and none of its jobs carry over to the new session. This includes a
-  request waiting to retry after NinjaOne rate-limited it, which used to retry under the next
-  sign-in.
+  Devices still queued are now recorded as not sent, a notification says how many had already
+  been sent (the confirmation closes rather than offering to re-plan and send again), and none
+  of its jobs carry over to the new session. This includes a request waiting to retry after
+  NinjaOne rate-limited it, which used to retry under the next sign-in.
 - **Job status checks that span a sign-out no longer leak into the next session.** A status
   check still running when you signed out, signed in again or switched instance sent the
   previous session's jobs to the new session's Jobs tab, cleared the new instance's cached patch

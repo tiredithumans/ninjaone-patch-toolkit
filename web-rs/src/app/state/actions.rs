@@ -345,7 +345,19 @@ impl AppState {
                 // Kept in the dialog, which stays open: a toast behind the overlay
                 // vanished after a few seconds and left a Run button that could
                 // only fail again, its single-use token already spent.
-                Err(e) => self.actions.dispatch_error.set(Some(e)),
+                Err(e) if util::dispatch_error_keeps_dialog(e.code.as_deref()) => {
+                    self.actions.dispatch_error.set(Some(e.message));
+                }
+                // A partial dispatch from an ended session: `clear_session` has
+                // usually closed the dialog already, so an error set there would never
+                // be seen, and the dialog's Re-plan would re-send to devices that
+                // already acted. Close it and say what happened where it is seen.
+                Err(e) => {
+                    self.actions.pending.set(None);
+                    self.actions.confirm_input.set(String::new());
+                    self.actions.dispatch_error.set(None);
+                    self.notify(Toast::err(e.message));
+                }
             }
             self.actions.dispatching.set(false);
             self.actions.dispatch_progress.set(None);
