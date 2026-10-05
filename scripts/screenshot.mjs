@@ -73,7 +73,9 @@ export async function collectAssets(dir, root = dir, out = new Map()) {
 // falling back to index.html (the allowlist above resolves every other path) so the
 // single-page app loads. TLS uses a throwaway self-signed cert (regenerated per run)
 // so the transport is never cleartext, even on 127.0.0.1; Chromium is told to accept
-// the self-signed cert below. Skipped when SCREENSHOT_URL is set.
+// the self-signed cert below. `fn` also gets the cert PEM so a Node client (the
+// tests) can trust it explicitly rather than turning verification off. Skipped when
+// SCREENSHOT_URL is set.
 export async function withServer(fn, distRoot = DIST_ROOT) {
   if (REMOTE) return fn(REMOTE);
   const assets = await collectAssets(distRoot);
@@ -119,7 +121,7 @@ export async function withServer(fn, distRoot = DIST_ROOT) {
   await new Promise((ready) => server.listen(0, "127.0.0.1", ready));
   const { port } = server.address();
   try {
-    return await fn(`https://127.0.0.1:${port}`);
+    return await fn(`https://127.0.0.1:${port}`, cert);
   } finally {
     server.close();
   }
