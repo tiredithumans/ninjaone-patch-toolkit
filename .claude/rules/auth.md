@@ -22,5 +22,6 @@ paths:
   warning.** `invalidate_access_token(&stale)` no-ops unless the token is still current.
   → `docs/design/auth.md#in-memory-before-keyring-and-only-the-token-that-got-the-401-is-invalidated`
 - **The refresh is single-flight under `refresh_lock`, and only `invalid_grant` clears the
-  credential** (`refresh_grant_is_dead`). Not "any 4xx": 429 is retry-later.
+  credential** (`refresh_grant_is_dead`). Not "any 4xx": 429 is retry-later. Callers queued
+  behind a transient failure for the same `GrantStamp` return it rather than re-POSTing.
   → `docs/design/auth.md#the-refresh-is-single-flight-and-only-invalid_grant-clears-the-credential`

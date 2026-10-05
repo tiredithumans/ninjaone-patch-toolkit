@@ -4,7 +4,10 @@ use chrono::{DateTime, Duration, Utc};
 use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{
+    Arc, Mutex, PoisonError, RwLock,
+    atomic::{AtomicU64, Ordering},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -154,6 +157,13 @@ struct RefreshGrant {
     refresh_token: Option<String>,
 }
 
+/// The last refresh that failed transiently, kept under `refresh_lock` so the
+/// callers queued behind it can share its outcome — see [`AuthState::access_token`].
+struct RefreshFailure {
+    stamp: GrantStamp,
+    message: String,
+}
+
 #[derive(Clone)]
 pub struct TokenSet {
     pub access_token: String,
@@ -246,13 +256,34 @@ fn refresh_grant_is_dead(status: reqwest::StatusCode, body: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("invalid_grant"))
 }
 
+/// How a refresh failed. Only a transient failure is shared with the callers
+/// queued behind it: a dead grant has already cleared the credential, so they find
+/// nothing to refresh and report "not authenticated" exactly as before.
+enum RefreshError {
+    /// The network, a timeout, or a non-2xx that is not `invalid_grant`.
+    Transient(anyhow::Error),
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for RefreshError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Other(e)
+    }
+}
+
 /// Shared auth state used by the API client and the Tauri commands.
 #[derive(Clone)]
 pub struct AuthState {
     inner: Arc<RwLock<Inner>>,
     http: reqwest::Client,
-    /// Serializes the refresh grant. See `access_token`.
-    refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the refresh grant, and holds the last transient failure so
+    /// callers that queued behind it return it instead of POSTing again. See
+    /// `access_token`.
+    refresh_lock: Arc<tokio::sync::Mutex<Option<RefreshFailure>>>,
+    /// Counts the transient failures recorded under `refresh_lock`. Readable
+    /// without the lock, so a caller can note it *before* queueing and tell
+    /// afterwards whether an attempt failed while it waited.
+    refresh_failures: Arc<AtomicU64>,
     /// Held for the duration of an interactive sign-in, so a second one is refused
     /// with an explanation instead of failing at `bind` with "Is another instance of
     /// this app running?" — which blames the wrong thing, since the port is in fact
@@ -323,7 +354,8 @@ impl AuthState {
                 session: 0,
             })),
             http,
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(None)),
+            refresh_failures: Arc::new(AtomicU64::new(0)),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
             persist_lock: Arc::new(Mutex::new(())),
         }
@@ -516,12 +548,20 @@ impl AuthState {
     /// set, and under refresh-token rotation every loser presents an
     /// already-consumed token and gets `invalid_grant` back — which used to
     /// delete the credential the winner had just stored.
+    ///
+    /// A *failed* refresh is shared the same way. Only a success used to
+    /// short-circuit the queue, so after a 429, a 5xx or a timeout every waiter
+    /// POSTed again in turn — a fan-out piling serial retries onto a rate limit.
+    /// A caller that queued while an attempt for the same grant failed now
+    /// returns that failure; one that arrives afterwards still tries afresh, so
+    /// there is no cooldown to outlast a blip.
     pub async fn access_token(&self) -> Result<String> {
         if let Some(token) = self.fresh_access_token()? {
             return Ok(token);
         }
 
-        let _guard = self.refresh_lock.lock().await;
+        let failures_before = self.refresh_failures.load(Ordering::Acquire);
+        let mut last_failure = self.refresh_lock.lock().await;
 
         // Re-check under the lock: whoever held it before us may have already
         // refreshed, in which case this call is a cache hit rather than a
@@ -531,11 +571,32 @@ impl AuthState {
         }
 
         let mut grant = self.refresh_grant()?;
+        // Scoped to the grant: a failure from before a sign-out, a new sign-in or
+        // a tenant switch says nothing about the credential now in effect.
+        if self.refresh_failures.load(Ordering::Acquire) != failures_before
+            && let Some(failure) = last_failure.as_ref()
+            && failure.stamp == grant.stamp
+        {
+            bail!("{}", failure.message);
+        }
         let refresh_token = match grant.refresh_token.take() {
             Some(token) => token,
             None => self.load_saved_refresh(&grant.stamp.tenant).await?,
         };
-        self.refresh(grant, &refresh_token).await
+        let stamp = grant.stamp.clone();
+        self.refresh(grant, &refresh_token)
+            .await
+            .map_err(|failure| match failure {
+                RefreshError::Transient(e) => {
+                    *last_failure = Some(RefreshFailure {
+                        stamp,
+                        message: format!("{e:#}"),
+                    });
+                    self.refresh_failures.fetch_add(1, Ordering::AcqRel);
+                    e
+                }
+                RefreshError::Other(e) => e,
+            })
     }
 
     /// One consistent read of everything a refresh needs. Sampling the host, the
@@ -602,7 +663,11 @@ impl AuthState {
             .map(|t| t.access_token.clone()))
     }
 
-    async fn refresh(&self, grant: RefreshGrant, refresh_token: &str) -> Result<String> {
+    async fn refresh(
+        &self,
+        grant: RefreshGrant,
+        refresh_token: &str,
+    ) -> Result<String, RefreshError> {
         let RefreshGrant {
             stamp,
             client_id,
@@ -624,7 +689,8 @@ impl AuthState {
             .form(&body)
             .send()
             .await
-            .context("refresh token request failed")?;
+            .context("refresh token request failed")
+            .map_err(RefreshError::Transient)?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -638,10 +704,12 @@ impl AuthState {
                 tauri::async_runtime::spawn_blocking(move || this.discard_dead_grant(&stamp))
                     .await
                     .context("keyring delete task failed")?;
-            } else {
-                debug!(%status, "refresh failed transiently; keeping stored credential");
+                return Err(anyhow!("refresh failed ({status}): {text}").into());
             }
-            bail!("refresh failed ({status}): {text}");
+            debug!(%status, "refresh failed transiently; keeping stored credential");
+            return Err(RefreshError::Transient(anyhow!(
+                "refresh failed ({status}): {text}"
+            )));
         }
 
         let parsed: TokenResponse = resp.json().await.context("refresh token body")?;
@@ -739,12 +807,21 @@ impl AuthState {
                 bail!("you were signed out while this sign-in was in progress; sign in again");
             }
             // Prefer what the server said it granted; fall back to the token's own
-            // claim when the response omits `scope`.
+            // claim when the response omits `scope`, and on a refresh to what this
+            // session was already granted. RFC 6749 §5.1 lets a refresh response
+            // omit `scope` when it is unchanged, so with an opaque token reading the
+            // omission as "unknowable" flipped `management_grant()` to `None` and
+            // blocked writes mid-session. An interactive sign-in never inherits: it
+            // may be a different operator, and its grant is the one just consented.
+            let previous_scope = (!new_session)
+                .then(|| inner.tokens.as_ref().and_then(|t| t.granted_scope.clone()))
+                .flatten();
             let granted_scope = parsed
                 .scope
                 .clone()
                 .filter(|s| !s.trim().is_empty())
-                .or_else(|| scope_claim_from_jwt(&parsed.access_token));
+                .or_else(|| scope_claim_from_jwt(&parsed.access_token))
+                .or(previous_scope);
             // RFC 6749 §6 lets the server omit `refresh_token` when it does not rotate
             // the grant, in which case the existing one stays valid. Taking the
             // response at face value dropped it, leaving the session dependent on the
@@ -753,7 +830,15 @@ impl AuthState {
             // turned a non-rotating server plus a locked keychain into "not
             // authenticated" mid-session, which is exactly the forced re-login this
             // function exists to prevent.
-            let previous_refresh = inner.tokens.as_ref().and_then(|t| t.refresh_token.clone());
+            //
+            // Only a refresh carries it over. An interactive sign-in is a new grant,
+            // possibly by a different operator (`sign_in` runs it after a failed
+            // restore that can leave the previous session's tokens in memory), and
+            // pairing its access token with the previous refresh token would revive
+            // that operator's session on the next refresh.
+            let previous_refresh = (!new_session)
+                .then(|| inner.tokens.as_ref().and_then(|t| t.refresh_token.clone()))
+                .flatten();
             let token_set = TokenSet {
                 access_token: parsed.access_token.clone(),
                 refresh_token: parsed.refresh_token.clone().or(previous_refresh),
@@ -784,13 +869,28 @@ impl AuthState {
         // Outside `inner` (a keyring round trip must not stall every reader of the
         // auth state) but inside `persist_lock`, so a sign-out cannot slip between
         // the session check above and this write.
-        if let Some(ref rt) = parsed.refresh_token
-            && let Err(e) = save_keyring(&started.tenant.entry(KEYRING_REFRESH_PREFIX), rt)
-        {
-            warn!(
-                error = %e,
-                "could not persist the refresh token; this session stays signed in but a restart will require signing in again"
-            );
+        let entry = started.tenant.entry(KEYRING_REFRESH_PREFIX);
+        match parsed.refresh_token {
+            Some(ref rt) => {
+                if let Err(e) = save_keyring(&entry, rt) {
+                    warn!(
+                        error = %e,
+                        "could not persist the refresh token; this session stays signed in but a restart will require signing in again"
+                    );
+                }
+            }
+            // A new sign-in that issued no refresh token must not leave the previous
+            // session's on disk, or the next launch restores it. That includes the
+            // pre-tenant-scoping entry, as `logout` does: a migration whose write
+            // failed leaves it in place, and the next keyring read adopts it.
+            None if new_session => {
+                for stale in [entry.as_str(), LEGACY_KEYRING_USER_REFRESH] {
+                    if let Err(e) = delete_keyring(stale) {
+                        warn!(error = %e, "could not delete the previous session's refresh token");
+                    }
+                }
+            }
+            None => {}
         }
         Ok(token_set)
     }
@@ -1069,7 +1169,8 @@ impl AuthState {
         Self {
             inner: Arc::new(RwLock::new(inner)),
             http,
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(None)),
+            refresh_failures: Arc::new(AtomicU64::new(0)),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
             persist_lock: Arc::new(Mutex::new(())),
         }
@@ -1101,7 +1202,8 @@ impl AuthState {
         Self {
             inner: Arc::new(RwLock::new(inner)),
             http,
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(None)),
+            refresh_failures: Arc::new(AtomicU64::new(0)),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
             persist_lock: Arc::new(Mutex::new(())),
         }

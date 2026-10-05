@@ -11,6 +11,21 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Patch actions no longer lock mid-session after a token refresh.** A refresh response may
+  leave out the granted scope when it has not changed; with an opaque access token the app read
+  that as "can't tell" and blocked every write until the next sign-in. A refresh now keeps the
+  scope the session was already granted.
+- **Signing in no longer reuses the previous operator's saved sign-in.** When a sign-in that
+  issued no refresh token followed an earlier session on the same instance, the app kept the
+  earlier session's refresh token, in memory and in the OS keyring, so a later refresh or the
+  next launch signed in as the earlier operator. A new sign-in now drops it.
+- **A failed token refresh no longer retries once per waiting request.** When NinjaOne's token
+  endpoint was rate-limiting or down, every request a query had queued behind the refresh tried
+  it again in turn, piling onto the rate limit and stretching the wait. Requests that were waiting
+  on a failed refresh now report its error, and the next query tries again.
+
 ## [0.15.1] - 2026-09-30
 
 ### Fixed

@@ -216,6 +216,42 @@ fn a_non_rotating_refresh_keeps_the_existing_token() {
     );
 }
 
+/// An interactive sign-in is a new grant, possibly by another operator. Carrying
+/// the previous session's refresh token over paired the new access token with it,
+/// and the keyring kept it for the next launch.
+#[test]
+fn a_new_sign_in_does_not_inherit_the_previous_refresh_token() {
+    // The store below also clears the legacy entry.
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
+    let auth = launched("https://new-session.example.com", "client-new-session");
+    let entry = saved_refresh_entry("https://new-session.example.com", "client-new-session");
+    auth.store_tokens_blocking(
+        token_response(Some("previous-operator")),
+        auth.grant_stamp(),
+        false,
+    )
+    .expect("previous session");
+    assert_eq!(
+        load_keyring(&entry).unwrap().as_deref(),
+        Some("previous-operator")
+    );
+
+    let set = auth
+        .store_tokens_blocking(token_response(None), auth.grant_stamp(), true)
+        .expect("interactive sign-in without a refresh token");
+
+    assert_eq!(set.refresh_token, None);
+    assert!(
+        auth.refresh_grant().unwrap().refresh_token.is_none(),
+        "the in-memory session must not keep the previous refresh token"
+    );
+    assert_eq!(
+        load_keyring(&entry).unwrap(),
+        None,
+        "the keyring must not keep it for the next launch"
+    );
+}
+
 #[test]
 fn token_set_staleness() {
     let fresh = TokenSet {
@@ -540,6 +576,71 @@ fn a_keyring_failure_keeps_the_session_it_just_obtained() {
         "the session must survive a keyring write that did not land"
     );
     assert_eq!(auth.management_grant(), Some(true));
+}
+
+/// RFC 6749 §5.1 lets a refresh response omit `scope` when it is unchanged. With
+/// an opaque token that read as "unknowable", so `management_grant()` flipped to
+/// `None` mid-session and `require_actions_enabled` blocked every write.
+#[test]
+fn a_refresh_that_omits_scope_keeps_the_granted_scope() {
+    let auth = launched("https://scope-keep.example.com", "client-scope-keep");
+    auth.store_tokens_blocking(
+        TokenResponse {
+            access_token: "opaque-1".into(),
+            refresh_token: Some("refresh-1".into()),
+            expires_in: 3600,
+            scope: Some("monitoring management offline_access".into()),
+        },
+        auth.grant_stamp(),
+        true,
+    )
+    .expect("interactive sign-in");
+
+    auth.store_tokens_blocking(
+        TokenResponse {
+            access_token: "opaque-2".into(),
+            refresh_token: Some("refresh-2".into()),
+            expires_in: 3600,
+            scope: None,
+        },
+        auth.grant_stamp(),
+        false,
+    )
+    .expect("refresh that omits scope");
+
+    assert_eq!(auth.management_grant(), Some(true));
+}
+
+/// The fallback is for a refresh only: an interactive sign-in may be another
+/// operator, and must not inherit the previous session's scope.
+#[test]
+fn a_new_sign_in_does_not_inherit_the_previous_scope() {
+    let auth = launched("https://scope-new.example.com", "client-scope-new");
+    auth.store_tokens_blocking(
+        TokenResponse {
+            access_token: "opaque-1".into(),
+            refresh_token: Some("refresh-1".into()),
+            expires_in: 3600,
+            scope: Some("monitoring management offline_access".into()),
+        },
+        auth.grant_stamp(),
+        false,
+    )
+    .expect("first session");
+
+    auth.store_tokens_blocking(
+        TokenResponse {
+            access_token: "opaque-2".into(),
+            refresh_token: Some("refresh-2".into()),
+            expires_in: 3600,
+            scope: None,
+        },
+        auth.grant_stamp(),
+        true,
+    )
+    .expect("interactive sign-in");
+
+    assert_eq!(auth.management_grant(), None);
 }
 
 /// A query fans out many concurrent requests, so a 401 answering the *old*
@@ -1061,4 +1162,136 @@ async fn a_dead_grant_deletes_the_tenant_it_started_under() {
         Some("live-refresh"),
         "the tenant switched to keeps its sign-in"
     );
+}
+
+/// A failed refresh used to record nothing, so after a 503 every caller queued
+/// behind `refresh_lock` POSTed again in turn — a query's fan-out turned one
+/// outage (or one 429) into a serial retry storm against the token endpoint.
+#[tokio::test]
+async fn callers_queued_behind_a_failed_refresh_share_its_failure() {
+    let server = wiremock::MockServer::start().await;
+    token_endpoint(
+        &server,
+        wiremock::ResponseTemplate::new(503).set_delay(std::time::Duration::from_millis(200)),
+        1,
+    )
+    .await;
+    let auth = AuthState::seeded_refreshable(
+        reqwest::Client::new(),
+        server.uri(),
+        "expired-access",
+        "live-refresh",
+        "client-queued",
+    );
+    auth.invalidate_access_token("expired-access");
+
+    let (a, b, c, d) = tokio::join!(
+        auth.access_token(),
+        auth.access_token(),
+        auth.access_token(),
+        auth.access_token(),
+    );
+
+    for result in [a, b, c, d] {
+        let err = result.expect_err("every queued caller sees the failure");
+        assert!(err.to_string().contains("503"), "{err}");
+    }
+    assert_eq!(
+        auth.refresh_grant().unwrap().refresh_token.as_deref(),
+        Some("live-refresh"),
+        "a transient failure keeps the credential"
+    );
+}
+
+/// The shared failure is for the callers that waited on it. One that arrives
+/// afterwards tries again, so a blip is not stretched into an outage.
+#[tokio::test]
+async fn a_caller_after_a_failed_refresh_tries_again() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/ws/oauth/token"))
+        .respond_with(wiremock::ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    token_endpoint(&server, granted("recovered-access", "rotated-refresh"), 1).await;
+    let auth = AuthState::seeded_refreshable(
+        reqwest::Client::new(),
+        server.uri(),
+        "expired-access",
+        "live-refresh",
+        "client-retry",
+    );
+    auth.invalidate_access_token("expired-access");
+
+    assert!(auth.access_token().await.is_err());
+    assert_eq!(auth.access_token().await.unwrap(), "recovered-access");
+}
+
+/// A recorded failure belongs to the grant it was recorded for. A caller that
+/// queued before a sign-out and a fresh sign-in must refresh the *new* grant, not
+/// hand back the previous session's error.
+#[tokio::test]
+async fn a_failure_from_a_previous_session_is_not_shared() {
+    let server = wiremock::MockServer::start().await;
+    token_endpoint(&server, granted("new-session-access", "rotated-refresh"), 1).await;
+    let auth = AuthState::seeded_refreshable(
+        reqwest::Client::new(),
+        server.uri(),
+        "expired-access",
+        "old-refresh",
+        "client-stamp-scope",
+    );
+    auth.invalidate_access_token("expired-access");
+
+    // Hold the lock as an in-flight refresh would, so the caller queues behind it
+    // having noted the failure count.
+    let mut held = auth.refresh_lock.lock().await;
+    let queued = {
+        let auth = auth.clone();
+        tokio::spawn(async move { auth.access_token().await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // The held attempt fails transiently for the old session...
+    *held = Some(RefreshFailure {
+        stamp: auth.grant_stamp(),
+        message: "refresh failed (503 Service Unavailable): ".into(),
+    });
+    auth.refresh_failures.fetch_add(1, Ordering::AcqRel);
+    // ...and before the caller runs, the operator signs in afresh, with a token
+    // that is already due for refresh.
+    auth.store_tokens_blocking(
+        token_response(Some("new-refresh")),
+        auth.grant_stamp(),
+        true,
+    )
+    .expect("interactive sign-in");
+    auth.invalidate_access_token("access");
+    drop(held);
+
+    assert_eq!(
+        queued
+            .await
+            .expect("join")
+            .expect("the new grant is refreshed"),
+        "new-session-access"
+    );
+}
+
+/// A legacy migration whose scoped write failed leaves the pre-tenant-scoping
+/// entry in place, and the next keyring read adopts it. A new sign-in that issued
+/// no refresh token clears it, as `logout` does, so the next launch cannot restore
+/// the previous operator's grant from it.
+#[test]
+fn a_new_sign_in_clears_a_leftover_legacy_refresh_token() {
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
+    save_keyring(LEGACY_KEYRING_USER_REFRESH, "previous-operator").expect("seed legacy");
+    let auth = launched("https://legacy-left.example.com", "client-legacy-left");
+
+    auth.store_tokens_blocking(token_response(None), auth.grant_stamp(), true)
+        .expect("interactive sign-in without a refresh token");
+
+    assert_eq!(load_keyring(LEGACY_KEYRING_USER_REFRESH).unwrap(), None);
 }

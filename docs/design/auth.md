@@ -66,7 +66,9 @@ flips it, which is why adding the write path didn't break existing installs. The
 does **not** send `scope`, so an install that signed in before actions were enabled keeps its
 read-only grant silently and every write 403s. `AuthState::management_grant()` detects this from
 the token response's `scope` (RFC 6749 §5.1, self-healing on each refresh) with a JWT-claim
-fallback; `None` means *unknowable*, not *denied*, and the UI words the two differently.
+fallback; a refresh that omits both keeps the session's previous scope (§5.1 allows omitting an
+unchanged scope), while an interactive sign-in never inherits one. `None` means *unknowable*, not
+*denied*, and the UI words the two differently.
 `commands::auth::reauthorize` drops the keyring refresh token **first** so the browser flow must
 issue a fresh grant.
 
@@ -97,7 +99,11 @@ A query deliberately fans out many concurrent API calls and each one calls `acce
 first, so without a guard they all observe the same stale token and each POSTs the same
 `refresh_token` — last-writer-wins on both the keyring and the in-memory set. `access_token()`
 therefore takes `refresh_lock` (a `tokio::Mutex`) and re-checks under it, so concurrent callers
-await one grant.
+await one grant. A transient failure is shared the same way: the lock holds the last one (stamped
+with its `GrantStamp`) and a counter readable outside it, so a caller that queued while an attempt
+for the same grant failed returns that error instead of POSTing again. Without it a 429 or a 5xx
+became one serial retry per queued caller. A caller arriving after the failure still retries;
+there is deliberately no cooldown, which would stretch a blip into an outage.
 
 That composes with the error arm: `refresh_grant_is_dead` clears the stored refresh token **only**
 on a 400/401 whose OAuth `error` is `invalid_grant`. Clearing on any non-2xx meant a 429, a 5xx or
