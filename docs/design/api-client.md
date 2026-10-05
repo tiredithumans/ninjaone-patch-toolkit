@@ -60,6 +60,15 @@ compliance rollups, both exports and the charts at once, since all of them read 
 vector. Every cursor fixture in the suite changed the name per page, which is why CI could not see
 it; `a_stable_cursor_name_with_an_advancing_offset_is_progress_not_a_stall` pins the real shape.
 
+**"Advances" means "never seen before in this scan", not "differs from the last one".** The guard
+used to compare only with the previous cursor, so one that oscillated A → B → A passed every check
+and re-fetched the same pages forever, growing the row vector without bound. Every cursor the scan
+has been handed is now kept, and a revisited one bails like an echo
+(`a_cursor_that_oscillates_is_an_error_not_an_endless_scan`). Behind both guards sits `MAX_PAGES`
+(10,000): a cursor that keeps genuinely changing forever still ends, as an error. It is sized for a
+999,999-row feed under a server that silently caps pages at 100 rows, so reaching it means the
+endpoint is misbehaving, not that the fleet is large.
+
 **A stall is an error, not a short read.** When the cursor genuinely does not advance, the loop
 bails rather than returning `Ok(all)`. The rows in hand are a partial fleet, and handing them back
 as success is indistinguishable from a complete fetch at every call site above — the same reasoning

@@ -51,3 +51,28 @@ pub(crate) fn truncate_body(s: &str) -> String {
     }
     out
 }
+
+/// The operator-facing reason for a 3xx, or `None` for any other status.
+///
+/// The shared client does not follow redirects (see `state::build_http_client`), so
+/// an Instance that redirects — `http`→`https`, an old regional host — would
+/// otherwise fail as a bare "301 Moved Permanently" with an empty body. Only the
+/// target's scheme and host are shown: the path and query can carry anything the
+/// server chose to put there, and the host is all the operator needs to fix it.
+pub(crate) fn redirect_hint(resp: &reqwest::Response) -> Option<String> {
+    if !resp.status().is_redirection() {
+        return None;
+    }
+    let target = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|loc| resp.url().join(loc).ok());
+    Some(match target {
+        Some(t) => format!(
+            "NinjaOne redirected to {}; set Instance in Settings to that address",
+            t.origin().ascii_serialization()
+        ),
+        None => "NinjaOne answered with a redirect; check Instance in Settings".to_string(),
+    })
+}

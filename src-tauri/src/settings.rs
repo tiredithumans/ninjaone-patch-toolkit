@@ -24,10 +24,18 @@ pub const DEFAULT_SLA_DAYS: i64 = 30;
 pub const MAX_WINDOW_DAYS: i64 = 3650;
 
 /// Whether `host` (as `url::Url::host_str` spells it) is the local machine — the
-/// one place a plaintext `http://` instance is allowed, for a mock server. Shared
-/// by the load-time upgrade and the save-time check so the two cannot disagree.
+/// one place a plaintext `http://` instance is allowed, for a mock server.
 pub fn is_loopback_host(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1")
+}
+
+/// Whether `url` would send credentials in cleartext: `http` to anything but
+/// loopback. Judged on the *parsed* URL — `url` lowercases the scheme and accepts
+/// `HTTP://host`, `http:host` and `http:/host` — so the load-time upgrade and the
+/// save-time check cannot be sidestepped by a spelling the raw string misses.
+/// Shared by both so the two cannot disagree.
+pub fn is_cleartext_remote(url: &url::Url) -> bool {
+    url.scheme() == "http" && !is_loopback_host(url.host_str().unwrap_or_default())
 }
 
 /// A named, reusable filter combination. The device/OS/search/severity facets live
@@ -369,16 +377,21 @@ impl Settings {
     /// alone — it is what a local mock server uses, and `require_https_instance`
     /// permits it for the same reason.
     fn enforce_https_instance(&mut self) {
-        let Ok(parsed) = url::Url::parse(&self.instance_base_url) else {
+        let Ok(mut parsed) = url::Url::parse(&self.instance_base_url) else {
             return;
         };
-        if parsed.scheme() != "http" {
+        if !is_cleartext_remote(&parsed) {
             return;
         }
-        if is_loopback_host(parsed.host_str().unwrap_or_default()) {
+        // Rewritten from the parsed URL, not by string substitution: a
+        // case-sensitive `replacen("http://", …)` missed `HTTP://host`, `http:host`
+        // and `http:/host` — all of which parse as `http` — so the warning claimed an
+        // upgrade while every request still went out in the clear. The trailing `/`
+        // `Url` adds to an empty path is trimmed to match what `save_settings` stores.
+        if parsed.set_scheme("https").is_err() {
             return;
         }
-        let upgraded = self.instance_base_url.replacen("http://", "https://", 1);
+        let upgraded = parsed.as_str().trim_end_matches('/').to_string();
         tracing::warn!(
             from = %self.instance_base_url,
             to = %upgraded,
@@ -675,6 +688,30 @@ mod tests {
         };
         cfg.enforce_https_instance();
         assert_eq!(cfg.instance_base_url, "https://app.ninjarmm.com");
+    }
+
+    /// The upgrade used to be a case-sensitive `replacen("http://", …)` while the
+    /// check read the parsed (lowercased, lenient) scheme, so these spellings were
+    /// detected, logged as "upgrading", and then left in cleartext.
+    #[test]
+    fn every_spelling_of_a_plaintext_instance_url_is_upgraded_on_load() {
+        for url in [
+            "HTTP://eu.ninjarmm.com",
+            "Http://eu.ninjarmm.com",
+            "http:eu.ninjarmm.com",
+            "http:/eu.ninjarmm.com",
+            "http://eu.ninjarmm.com/",
+        ] {
+            let mut cfg = Settings {
+                instance_base_url: url.into(),
+                ..Settings::default()
+            };
+            cfg.enforce_https_instance();
+            assert_eq!(
+                cfg.instance_base_url, "https://eu.ninjarmm.com",
+                "{url} must be upgraded"
+            );
+        }
     }
 
     /// Loopback is what a local mock server uses, and `require_https_instance`

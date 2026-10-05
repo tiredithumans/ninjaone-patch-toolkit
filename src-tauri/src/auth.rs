@@ -15,7 +15,7 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
-use crate::error::truncate_body;
+use crate::error::{redirect_hint, truncate_body};
 
 /// Read-only scope, and the default. `offline_access` is required to receive a
 /// refresh token so the operator does not re-authenticate hourly.
@@ -694,6 +694,12 @@ impl AuthState {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            // A redirect is never `invalid_grant`, so the credential stays put.
+            if let Some(hint) = redirect_hint(&resp) {
+                return Err(RefreshError::Transient(anyhow!(
+                    "refresh failed ({status}): {hint}"
+                )));
+            }
             let raw = resp.text().await.unwrap_or_default();
             let text = truncate_body(&raw);
             // Only drop the stored credential when the server says the grant is
@@ -1136,6 +1142,9 @@ impl AuthState {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            if let Some(hint) = redirect_hint(&resp) {
+                bail!("token exchange failed ({status}): {hint}");
+            }
             let text = truncate_body(&resp.text().await.unwrap_or_default());
             bail!("token exchange failed ({status}): {text}");
         }

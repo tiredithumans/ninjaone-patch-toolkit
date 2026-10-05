@@ -522,6 +522,63 @@ async fn a_cursor_that_never_advances_is_an_error_not_a_short_read() {
     );
 }
 
+/// The echo check compared only with the previous cursor, so one that oscillates
+/// A -> B -> A never matched it and the scan re-fetched the same two pages forever,
+/// growing the row vector without bound. A revisited cursor is the same stall.
+#[tokio::test]
+async fn a_cursor_that_oscillates_is_an_error_not_an_endless_scan() {
+    use crate::auth::AuthState;
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    // Each page answers once, so a loop that re-requests `scan-a` hits a 404 and
+    // fails this test instead of hanging it.
+    let page = |next: &str| {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{ "deviceId": 1, "title": "7-Zip 24.09" }],
+            "cursor": next,
+        }))
+    };
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .and(query_param_is_missing("cursor"))
+        .respond_with(page("scan-a"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .and(query_param("cursor", "scan-a"))
+        .respond_with(page("scan-b"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .and(query_param("cursor", "scan-b"))
+        .respond_with(page("scan-a"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let client = NinjaApiClient::new(http, auth);
+
+    let err = client
+        .fleet_software_patches(None, None, None)
+        .await
+        .expect_err("a revisited cursor must be reported, not paged forever");
+    assert!(
+        err.to_string().contains("already handed out"),
+        "unexpected error: {err}"
+    );
+}
+
 #[tokio::test]
 async fn retries_with_refreshed_token_after_401() {
     use crate::auth::AuthState;
@@ -992,4 +1049,102 @@ async fn post_429_is_still_replayed() {
         .device_patch_scan(2, crate::model::PatchType::Os)
         .await
         .expect("a 429 must be retried through to success");
+}
+
+/// A redirect is never followed. reqwest's default policy re-sends the body on a
+/// 307/308, so an acting POST would reach whatever host `Location` named — a
+/// second dispatch the operator never confirmed.
+#[tokio::test]
+async fn an_acting_post_is_not_replayed_to_a_redirect_target() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&elsewhere)
+        .await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(307).insert_header(
+            "Location",
+            format!("{}/elsewhere?sig=secret", elsewhere.uri()),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let http = crate::state::build_http_client().expect("build client");
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let err = NinjaApiClient::new(http, auth)
+        .post_action("/device/1/reboot/NORMAL", None)
+        .await
+        .expect_err("a redirect is an error, not a success");
+    assert_redirect_named(&format!("{err:#}"), &elsewhere.uri());
+}
+
+/// The token grant shares the client, so a 307 from `/ws/oauth/token` must not
+/// re-POST the refresh token (and, for a Web client, the secret) to `Location`.
+#[tokio::test]
+async fn a_token_grant_is_not_replayed_to_a_redirect_target() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&elsewhere)
+        .await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/ws/oauth/token"))
+        .respond_with(ResponseTemplate::new(307).insert_header(
+            "Location",
+            format!("{}/ws/oauth/token?sig=secret", elsewhere.uri()),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let http = crate::state::build_http_client().expect("build client");
+    let auth = AuthState::seeded_refreshable(
+        http.clone(),
+        server.uri(),
+        "stale-token",
+        "refresh-abc",
+        "client-1",
+    );
+    let err = NinjaApiClient::new(http, auth)
+        .devices(None, None)
+        .await
+        .expect_err("a redirected grant is a failed refresh");
+    assert_redirect_named(&format!("{err:#}"), &elsewhere.uri());
+}
+
+/// Without redirects followed, an Instance that redirects (an old regional host,
+/// `http` -> `https`) would fail as a bare 3xx with an empty body. The error names
+/// the target's scheme and host and what to change — and never its path or query.
+fn assert_redirect_named(err: &str, origin: &str) {
+    assert!(err.contains("307"), "{err}");
+    assert!(
+        err.contains(&format!(
+            "NinjaOne redirected to {origin}; set Instance in Settings to that address"
+        )),
+        "{err}"
+    );
+    assert!(
+        !err.contains("sig=secret"),
+        "the Location query leaked: {err}"
+    );
+    assert!(
+        !err.contains("/elsewhere"),
+        "the Location path leaked: {err}"
+    );
 }

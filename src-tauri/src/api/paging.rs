@@ -30,6 +30,17 @@ pub(super) const DEFAULT_PAGE_SIZE: u32 = 500;
 /// the rest of the fleet.
 pub(super) const REPORTING_PAGE_SIZE: u32 = 5000;
 
+/// Hard ceiling on the pages one paginated fetch may request, so an endpoint whose
+/// cursor keeps "advancing" forever (an ever-growing offset, ids that never run
+/// out) still ends — as an error — instead of growing `all` without bound.
+///
+/// Sized for the worst honest case, not the typical one: a six-figure feed (up to
+/// 999,999 rows) under a server that silently caps every page at 100 rows needs
+/// 10,000 pages. At the page sizes actually requested that is 5M rows at
+/// [`DEFAULT_PAGE_SIZE`] and 50M at [`REPORTING_PAGE_SIZE`] — far beyond any fleet,
+/// so reaching it means the endpoint is misbehaving, not that the fleet is large.
+const MAX_PAGES: u32 = 10_000;
+
 /// Sink for incremental pagination progress: invoked with the cumulative row
 /// count after each page is accumulated. Callers that don't stream progress to
 /// the UI pass `None`.
@@ -92,6 +103,10 @@ impl NinjaApiClient {
         let mut all: Vec<T> = Vec::new();
         let mut seen_ids: HashSet<i64> = HashSet::new();
         let mut cursor: Option<PageCursor> = None;
+        // Every cursor handed out so far. Comparing with the previous one only caught
+        // an echo; a cursor that oscillates A -> B -> A defeated it and re-fetched the
+        // same rows forever.
+        let mut seen_cursors: HashSet<PageCursor> = HashSet::new();
         let mut after: Option<i64> = None;
         // Reported at every exit. A short read is otherwise indistinguishable from a
         // complete one at every call site above this function, and a whole-fleet feed
@@ -111,6 +126,13 @@ impl NinjaApiClient {
                 query.push(("after", a.to_string()));
             }
 
+            if pages == MAX_PAGES {
+                bail!(
+                    "{path} was still paging after {MAX_PAGES} pages ({} rows); stopping rather \
+                     than reporting a partial fleet as complete",
+                    all.len()
+                );
+            }
             pages += 1;
             match self.request_page::<T>(path, &query).await? {
                 PageBody::Array(items) => {
@@ -193,7 +215,18 @@ impl NinjaApiClient {
                              reporting a partial fleet as complete",
                             all.len()
                         ),
-                        Some(c) => cursor = Some(c),
+                        // The same stall one step removed: a cursor this scan already
+                        // visited re-fetches rows already in `all`, and then cycles.
+                        Some(c) if seen_cursors.contains(&c) => bail!(
+                            "{path} returned a cursor it had already handed out on an earlier \
+                             page ({c:?}); stopping at {} rows rather than reporting a partial \
+                             fleet as complete",
+                            all.len()
+                        ),
+                        Some(c) => {
+                            seen_cursors.insert(c.clone());
+                            cursor = Some(c);
+                        }
                         None => {
                             info!(
                                 path,
@@ -364,7 +397,7 @@ pub(super) fn parse_page<T: DeserializeOwned>(bytes: &[u8]) -> Result<PageBody<T
 /// second page and handed back 2 × `pageSize` rows as if they were the whole feed —
 /// invisible on a short OS feed, and a ~10x undercount on a six-figure third-party
 /// one, on every surface that reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PageCursor {
     /// Echoed back as `cursor`; the only paging parameter these endpoints take.
     pub(super) name: String,

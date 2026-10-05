@@ -4,7 +4,7 @@ use tauri::State;
 use crate::error::UiError;
 use crate::settings::{
     ActionSettings, MAX_ACTION_CONCURRENCY, MAX_DEVICES_PER_ACTION_CEILING, MAX_WINDOW_DAYS,
-    Preset, Settings, SlaBySeverity, is_loopback_host,
+    Preset, Settings, SlaBySeverity, is_cleartext_remote,
 };
 use crate::state::AppState;
 
@@ -111,10 +111,9 @@ fn default_auto_check() -> bool {
 fn require_https_instance(url: &str) -> Result<(), UiError> {
     let parsed = url::Url::parse(url)
         .map_err(|_| UiError::new(format!("instance URL is not a valid URL: {url}")))?;
-    let is_loopback = is_loopback_host(parsed.host_str().unwrap_or_default());
     match parsed.scheme() {
         "https" => Ok(()),
-        "http" if is_loopback => Ok(()),
+        "http" if !is_cleartext_remote(&parsed) => Ok(()),
         _ => Err(UiError::new(
             "instance URL must use https:// (http is allowed only for localhost)",
         )),
@@ -403,6 +402,15 @@ mod tests {
         assert!(require_https_instance("http://localhost").is_ok());
         // Cleartext to a real host, a non-http scheme, and a non-URL are rejected.
         assert!(require_https_instance("http://eu.ninjarmm.com").is_err());
+        // The scheme is judged parsed, so no spelling of http slips past.
+        for url in [
+            "HTTP://eu.ninjarmm.com",
+            "Http://eu.ninjarmm.com",
+            "http:eu.ninjarmm.com",
+            "http:/eu.ninjarmm.com",
+        ] {
+            assert!(require_https_instance(url).is_err(), "{url}");
+        }
         assert!(require_https_instance("ftp://us2.ninjarmm.com").is_err());
         assert!(require_https_instance("not a url").is_err());
     }
