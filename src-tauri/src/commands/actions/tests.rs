@@ -929,8 +929,8 @@ async fn a_tick_within_one_session_settles_its_jobs() {
 /// A tick awaits the feed reads, and a sign-out and sign-in (same instance) can
 /// land in that time. `apply_job_updates` refused the departed session's rows, but
 /// the tick still emitted them, and the frontend merged them into the next
-/// operator's Jobs tab. The device did act, so the closing audit record is still
-/// written, labelled with the session the job was dispatched in.
+/// operator's Jobs tab. The clear came first here, so it wrote the job's one close
+/// (unresolved) and the tick writes none.
 #[tokio::test]
 async fn a_tick_that_spans_a_sign_out_emits_nothing_to_the_next_session() {
     let state = AppState::new().expect("build state");
@@ -941,7 +941,9 @@ async fn a_tick_that_spans_a_sign_out_emits_nothing_to_the_next_session() {
     let updates = resolved_against_a_completed_apply(pending).await;
 
     // Sign-out and sign-in while the tick was reading; the next operator dispatches.
-    let _closings = state.clear_jobs();
+    let closings = state.clear_jobs();
+    assert_eq!(closings.len(), 1);
+    assert_eq!(closings[0].outcome, audit::UNRESOLVED_SESSION_ENDED);
     let theirs = pending_job(2, 8, ActionKind::OsPatchApply, ts);
     assert!(state.append_jobs(&state.job_session(), vec![theirs]));
 
@@ -958,8 +960,28 @@ async fn a_tick_that_spans_a_sign_out_emits_nothing_to_the_next_session() {
         "a same-tenant apply still invalidates"
     );
     assert_eq!(state.jobs_snapshot()[0].state, JobState::Running);
-    assert_eq!(tick.closing.len(), 1, "the device acted; the trail says so");
+    assert!(tick.closing.is_empty(), "clear_jobs already closed it");
+}
+
+/// The other order: the tick settles the job before the sign-out. The tick writes
+/// the verdict close, the row is terminal, and `clear_jobs` writes nothing more.
+#[tokio::test]
+async fn a_tick_that_settles_before_the_sign_out_closes_the_job_once() {
+    let state = AppState::new().expect("build state");
+    let ts = Utc::now().timestamp();
+    let apply = pending_job(1, 7, ActionKind::OsPatchApply, ts - 30);
+    assert!(state.append_jobs(&state.job_session(), vec![apply]));
+    let (session, pending) = state.pending_jobs();
+    let updates = resolved_against_a_completed_apply(pending).await;
+
+    let tick = poller::settle_tick(&state, &session, updates);
+    assert_eq!(tick.closing.len(), 1);
     assert_eq!(tick.closing[0].instance, session.instance());
+
+    assert!(
+        state.clear_jobs().is_empty(),
+        "a settled row is not closed again"
+    );
 }
 
 /// Across a tenant switch the feed was read through the *new* instance's client,

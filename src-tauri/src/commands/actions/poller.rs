@@ -131,12 +131,12 @@ pub(super) struct SettledTick {
 /// data, so they are dropped for it; after a tenant switch the verdict came from
 /// the other instance and the caches belong to it, so nothing is dropped.
 ///
-/// A settled job still gets its closing record when its row is gone — the device
-/// acted, and the trail should say how — labelled with the session it was
-/// dispatched in. The exception is a tenant change: the feed was then read through
-/// the new instance's client, so its verdict says nothing about this device, and
-/// nothing is written — the switch ran `clear_jobs`, which already closed this row
-/// as unresolved, and a second line would only repeat it.
+/// The closing audit record is written only for an applied row, labelled with the
+/// session it was dispatched in. A row that was not applied is one the session's
+/// end removed (the Jobs tab's Clear keeps unsettled rows), and `clear_jobs`
+/// already closed it as unresolved, so a verdict here would be a second close.
+/// Either the tick applies first (the row is terminal and `clear_jobs` skips it) or
+/// the clear does (the tick writes nothing): one close per job.
 pub(super) fn settle_tick(
     state: &AppState,
     session: &JobSession,
@@ -163,7 +163,7 @@ pub(super) fn settle_tick(
                     invalidate_after(job.kind, job.dry_run, state);
                 }
             }
-            if was_applied || read_on_this_tenant {
+            if was_applied {
                 closing.push(audit::AuditEntry::closing(
                     &job,
                     session.instance().to_string(),

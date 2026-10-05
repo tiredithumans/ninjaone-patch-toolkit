@@ -327,19 +327,20 @@ spans a sign-out used to emit the old rows, which the frontend merged into the n
 tab. Invalidation follows the *read*, not the row. It happens when the row was applied or the
 tenant is unchanged: after a same-instance sign-in the device really did change, and the next
 session's caches hold that same fleet. It never happens across a tenant switch, where the verdict
-came from the other instance and the caches belong to it. A settled job still gets
-its closing audit record, labelled with the session's instance and client id (not Settings read
-now), unless the tenant changed. The feed was then read from the other instance, and the switch's
-`clear_jobs` has already closed the row as unresolved, so the tick writes nothing.
+came from the other instance and the caches belong to it. The tick writes a closing audit record
+only for an **applied** row, labelled with the session's instance and client id (not Settings
+read now). The Jobs tab's Clear keeps unsettled rows, so a row that is not applied after its
+append was removed by the session ending. That means `clear_jobs` already closed it as
+unresolved.
 
 **Every opening "dispatching" audit record gets a close**, even when the session ends first. The
 close is `AuditEntry::unresolved` ("unresolved: session ended before the outcome was known", with
 no activity id or exit code) in two places, so each job gets at most one. `clear_jobs` returns one
 for each unsettled row it drops, and the async callers write it off the runtime. Every tenant
 switch runs `clear_jobs`, so this also covers a tick that spans a switch. `run_action` writes one
-for each unsettled row of a batch refused at `append_jobs`. A
-same-tenant tick that settles a row `clear_jobs` already closed adds its real verdict after the
-unresolved line. The log is append-only, so the later line is the more informed one.
+for each unsettled row of a batch refused at `append_jobs`. A tick racing a sign-out closes the
+job exactly once either way. If the tick applies first, the row is terminal and `clear_jobs` skips
+it. If the clear runs first, the row is not applied and the tick writes nothing.
 
 **NinjaOne v2 has no script-output endpoint.** A job resolves from `/activities` only, so surface
 the exit code plus the activity/series correlator.
