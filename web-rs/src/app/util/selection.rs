@@ -2,7 +2,9 @@
 //! `ActionRequest`: per-device targets, remediation summaries, the disabled /
 //! blocked reasons the action bar shows, and the confirm-dialog gate.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::types::{
     ActionKind, ActionRequest, AuthStatus, DeviceSummary, PatchRow, RebootChoice, RebootMode,
@@ -109,6 +111,50 @@ pub(crate) fn patch_key(row: &PatchRow) -> String {
         row.kb.as_deref().unwrap_or(""),
         row.name
     )
+}
+
+/// `(all, some)` ticked state of a set of rows against the selection — the
+/// checked/indeterminate pair a header checkbox (the page's, or a group's) shows.
+/// `None` and an empty set are `(false, false)`: there is nothing to tick.
+///
+/// Takes borrows so a caller can evaluate it inside nested `.with` reads instead of
+/// cloning up to `GROUP_MEMBER_LIMIT` rows and the whole selection map per tick.
+/// Generic over `Borrow` because the page holds `Arc<PatchRow>`s and a group's
+/// members plain rows.
+pub(crate) fn rows_selection_state<R: Borrow<PatchRow>>(
+    rows: Option<&[R]>,
+    selected: &BTreeMap<i64, DeviceSelection>,
+) -> (bool, bool) {
+    let Some(rows) = rows.filter(|r| !r.is_empty()) else {
+        return (false, false);
+    };
+    // Counts ticked *rows*, not devices: with per-row selection a device can be
+    // partly ticked, and the header box must read indeterminate for that.
+    let ticked = rows
+        .iter()
+        .map(Borrow::borrow)
+        .filter(|r: &&PatchRow| {
+            selected
+                .get(&r.device_id)
+                .is_some_and(|d| d.patches.contains_key(&patch_key(r)))
+        })
+        .count();
+    (ticked == rows.len(), ticked > 0 && ticked < rows.len())
+}
+
+/// The `Memo` comparator for one group's slot in the members map: changed only
+/// when the slot appears, disappears, or holds a different `Arc`. Entries are
+/// replaced, never mutated in place, so pointer identity is the whole story —
+/// and `PatchRow` has no `PartialEq` to compare by value anyway.
+pub(crate) fn member_entry_changed<T>(
+    old: Option<&Option<Arc<T>>>,
+    new: Option<&Option<Arc<T>>>,
+) -> bool {
+    match (old, new) {
+        (Some(Some(a)), Some(Some(b))) => !Arc::ptr_eq(a, b),
+        (Some(None), Some(None)) => false,
+        _ => true,
+    }
 }
 
 /// The per-device target list a script dispatch would send, keyed by device id.

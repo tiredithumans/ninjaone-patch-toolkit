@@ -455,6 +455,68 @@ fn unticking_an_unselected_row_is_a_no_op() {
     assert!(sel.is_empty());
 }
 
+/// The header checkbox state counts ticked *rows*: a device with one of its two
+/// rows ticked reads indeterminate, and nothing to tick reads unticked.
+#[test]
+fn rows_selection_state_covers_all_some_none_and_empty() {
+    let a = sel_row(1, "web-01", Some("KB1"), "Cumulative Update", "OS");
+    let b = sel_row(1, "web-01", Some("KB2"), "Security Update", "OS");
+    let rows = vec![a.clone(), b.clone()];
+    let mut sel = BTreeMap::new();
+
+    assert_eq!(
+        rows_selection_state(Some(rows.as_slice()), &sel),
+        (false, false),
+        "none"
+    );
+    apply_row_selection(&mut sel, &a, true);
+    assert_eq!(
+        rows_selection_state(Some(rows.as_slice()), &sel),
+        (false, true),
+        "some"
+    );
+    apply_row_selection(&mut sel, &b, true);
+    assert_eq!(
+        rows_selection_state(Some(rows.as_slice()), &sel),
+        (true, false),
+        "all"
+    );
+
+    assert_eq!(
+        rows_selection_state(Some::<&[PatchRow]>(&[]), &sel),
+        (false, false),
+        "empty"
+    );
+    assert_eq!(
+        rows_selection_state::<PatchRow>(None, &sel),
+        (false, false),
+        "not loaded"
+    );
+    // The page holds its rows behind `Arc`s; the count must not care.
+    let shared: Vec<_> = rows.into_iter().map(std::sync::Arc::new).collect();
+    assert_eq!(
+        rows_selection_state(Some(shared.as_slice()), &sel),
+        (true, false)
+    );
+}
+
+/// An open group's body re-renders only when its own slot changes: same `Arc` is
+/// unchanged however the rest of the map moved, a fresh `Arc` (even with equal
+/// rows) or a slot appearing/disappearing is a change.
+#[test]
+fn member_entry_changes_only_by_pointer_or_presence() {
+    use std::sync::Arc;
+    let a = Some(Arc::new(vec![1]));
+    let a_again = a.clone();
+    let b = Some(Arc::new(vec![1]));
+    assert!(!member_entry_changed(Some(&a), Some(&a_again)));
+    assert!(member_entry_changed(Some(&a), Some(&b)));
+    assert!(!member_entry_changed::<i32>(Some(&None), Some(&None)));
+    assert!(member_entry_changed(Some(&None), Some(&a)));
+    assert!(member_entry_changed(Some(&a), Some(&None)));
+    assert!(member_entry_changed(None, Some(&a)), "first evaluation");
+}
+
 /// `days_from_civil` normalises rather than fails, so 2026-02-31 silently became
 /// a day in March and reached the query as a bound the operator never chose.
 #[test]
@@ -1915,6 +1977,47 @@ fn merge_jobs_upserts_by_id_and_never_duplicates() {
     merge_jobs(&mut jobs, vec![job_with(1, JobState::Completed)]);
     assert_eq!(jobs[0].state, JobState::Completed);
     assert_eq!(jobs.len(), 3);
+}
+
+/// The Jobs table builds a row's cells once per key, so the key must move with
+/// every field a later report can change — or the row would show stale status.
+#[test]
+fn job_row_key_moves_with_every_mutable_column() {
+    let base = job_with(1, JobState::Running);
+    assert_eq!(job_row_key(&base), job_row_key(&base.clone()), "stable");
+    let changed = [
+        job_with(1, JobState::Completed),
+        job_with(1, JobState::Failed("boom".into())),
+        JobReport {
+            exit_code: Some(1),
+            ..base.clone()
+        },
+        JobReport {
+            duration_seconds: Some(5),
+            ..base.clone()
+        },
+        JobReport {
+            activity_id: Some(9),
+            ..base.clone()
+        },
+        JobReport {
+            series_uid: Some("u".into()),
+            ..base.clone()
+        },
+        JobReport {
+            request: Some(JobRequest::default()),
+            ..base.clone()
+        },
+        job_with(2, JobState::Running),
+    ];
+    for job in &changed {
+        assert_ne!(job_row_key(job), job_row_key(&base), "{job:?}");
+    }
+    assert_ne!(
+        job_row_key(&job_with(1, JobState::Failed("a".into()))),
+        job_row_key(&job_with(1, JobState::Failed("b".into()))),
+        "a new failure message is a new row"
+    );
 }
 
 /// `Unknown` is an ambiguous dispatch still being polled, so it holds the update

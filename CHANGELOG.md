@@ -52,6 +52,10 @@ version and start a fresh `[Unreleased]`.
 - **Excel export uses less memory on large fleets.** The Patches sheets now stream their rows to
   a temporary file as they are written instead of holding the whole table in memory until the
   workbook is saved. The workbook's contents are unchanged.
+- **Keyboard focus is no longer lost in the Jobs table or an open patch group on refresh.** A
+  job status update now redraws only the rows it changed, so focus on another row's Retry
+  stays put; loading or ticking one group no longer rebuilds every other open group's rows.
+  The select-all checkboxes also stop copying up to 500 rows on every selection change.
 
 ## [0.15.1] - 2026-09-30
 

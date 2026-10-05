@@ -61,6 +61,9 @@ pub(super) fn PatchesTable() -> impl IntoView {
     let page_count = move || util::page_count(total(), PATCHES_PAGE_SIZE);
     let page = move || util::clamp_page(state.query.patches_page.get(), page_count());
     let rows = move || state.query.page_rows.get();
+    // One evaluation per change, shared by both checkbox props; it only notifies
+    // when the (all, some) pair actually flips.
+    let page_selection = Memo::new(move |_| state.page_selection_state());
     let pager_summary = move || {
         util::pager_summary(
             if grouped() { "Groups" } else { "Rows" },
@@ -138,8 +141,8 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                 <input
                                     type="checkbox"
                                     aria-label="Select every patch row on this page"
-                                    prop:checked=move || state.page_selection_state().0
-                                    prop:indeterminate=move || state.page_selection_state().1
+                                    prop:checked=move || page_selection.get().0
+                                    prop:indeterminate=move || page_selection.get().1
                                     on:change=move |ev| {
                                         state.toggle_page_selection(event_target_checked(&ev))
                                     }
@@ -177,28 +180,30 @@ pub(super) fn PatchesTable() -> impl IntoView {
                             rows()
                                 .into_iter()
                                 .map(|r| {
+                                    // `r` is an `Arc` from the page signal: the
+                                    // checkbox shares it, and each cell copies
+                                    // only its own field.
                                     let sev = sev_class(&r.severity);
                                     let stat = status_class(&r.status);
-                                    let row = Arc::new(r.clone());
                                     view! {
                                         <tr>
-                                            <RowCheckbox row=row/>
-                                            <td>{r.organization}</td>
-                                            <td>{r.location.unwrap_or_default()}</td>
-                                            <td>{r.device_role.unwrap_or_default()}</td>
-                                            <td><DeviceLink device_id=r.device_id name=r.device_name/></td>
-                                            <td>{r.os_name.unwrap_or_default()}</td>
-                                            <td>{r.patch_type}</td>
-                                            <td>{r.kb.unwrap_or_default()}</td>
-                                            <td class="patch-name">{r.name}</td>
+                                            <RowCheckbox row=Arc::clone(&r)/>
+                                            <td>{r.organization.clone()}</td>
+                                            <td>{r.location.clone().unwrap_or_default()}</td>
+                                            <td>{r.device_role.clone().unwrap_or_default()}</td>
+                                            <td><DeviceLink device_id=r.device_id name=r.device_name.clone()/></td>
+                                            <td>{r.os_name.clone().unwrap_or_default()}</td>
+                                            <td>{r.patch_type.clone()}</td>
+                                            <td>{r.kb.clone().unwrap_or_default()}</td>
+                                            <td class="patch-name">{r.name.clone()}</td>
                                             <td>
-                                                <span class=sev>{r.severity}</span>
+                                                <span class=sev>{r.severity.clone()}</span>
                                             </td>
                                             <td>
-                                                <span class=stat>{r.status}</span>
+                                                <span class=stat>{r.status.clone()}</span>
                                             </td>
-                                            <td>{r.first_seen_date.unwrap_or_default()}</td>
-                                            <td>{r.installed_date.unwrap_or_default()}</td>
+                                            <td>{r.first_seen_date.clone().unwrap_or_default()}</td>
+                                            <td>{r.installed_date.clone().unwrap_or_default()}</td>
                                         </tr>
                                     }
                                 })
@@ -321,18 +326,25 @@ fn GroupedPatches() -> impl IntoView {
                             let key = g.key.clone();
                             // Each closure below outlives the others, so every one
                             // takes its own clone of the key.
-                            let (k_all, k_some, k_tick, tog_key, mem_key) = (
-                                key.clone(),
-                                key.clone(),
-                                key.clone(),
-                                key.clone(),
-                                key.clone(),
-                            );
+                            let (k_sel, k_tick, tog_key, mem_key) =
+                                (key.clone(), key.clone(), key.clone(), key.clone());
                             // Signal::derive is Copy, so the caret and the
                             // aria-expanded attribute can both read it.
                             let open = Signal::derive(move || {
                                 state.query.expanded.with(|e| e.contains(&key))
                             });
+                            // One evaluation per change for both checkbox props,
+                            // notifying only when (all, some) flips.
+                            let selection =
+                                Memo::new(move |_| state.group_selection_state(&k_sel));
+                            // This group's own entry, compared by pointer: another
+                            // group loading or being ticked rewrites the map but
+                            // not this `Arc`, so this body's table — and any
+                            // focus inside it — is left alone.
+                            let members = Memo::new_with_compare(
+                                move |_| state.query.members.with(|m| m.get(&mem_key).cloned()),
+                                util::member_entry_changed,
+                            );
                             let sev = sev_class(&g.severity);
                             let count = util::group_count_label(by_device(), g.rows, g.devices);
                             let sub = g.sublabel.clone().unwrap_or_default();
@@ -345,12 +357,8 @@ fn GroupedPatches() -> impl IntoView {
                                         <input
                                             type="checkbox"
                                             aria-label=aria
-                                            prop:checked=move || {
-                                                state.group_selection_state(&k_all).0
-                                            }
-                                            prop:indeterminate=move || {
-                                                state.group_selection_state(&k_some).1
-                                            }
+                                            prop:checked=move || selection.get().0
+                                            prop:indeterminate=move || selection.get().1
                                             on:change=move |ev| {
                                                 state
                                                     .toggle_group_selection(
@@ -382,13 +390,8 @@ fn GroupedPatches() -> impl IntoView {
                                     </div>
                                     <Show when=move || open.get()>
                                         {
-                                            let mem_key = mem_key.clone();
                                             move || {
-                                                let rows = state
-                                                    .query
-                                                    .members
-                                                    .with(|m| m.get(&mem_key).cloned());
-                                                match rows {
+                                                match members.get() {
                                                     None => {
                                                         view! {
                                                             <p class="empty">"Loading…"</p>
@@ -472,7 +475,7 @@ fn RowCheckbox(row: Arc<PatchRow>) -> impl IntoView {
 /// The member rows inside an expanded group. Deliberately a compact table rather
 /// than the full detail grid — the group header already carries the shared columns.
 #[component]
-fn GroupMembers(rows: Vec<PatchRow>) -> impl IntoView {
+fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
     let state = expect_context::<AppState>();
     let by_device = move || state.query.group_by.get() == Some(GroupBy::Device);
     view! {
@@ -480,31 +483,34 @@ fn GroupMembers(rows: Vec<PatchRow>) -> impl IntoView {
             <table class="group-members">
                 <tbody>
                     {rows
-                        .into_iter()
+                        .iter()
                         .map(|r| {
                             let sev = sev_class(&r.severity);
                             let stat = status_class(&r.status);
-                            let row = Arc::new(r.clone());
+                            // The one copy of the row: the checkbox and the cell
+                            // closures below all share it.
+                            let r = Arc::new(r.clone());
+                            let (first, second) = (Arc::clone(&r), Arc::clone(&r));
                             view! {
                                 <tr>
-                                    <RowCheckbox row=row/>
+                                    <RowCheckbox row=Arc::clone(&r)/>
                                     // In a device group the members are patches; in a
                                     // patch group they are the devices it's missing on.
                                     <td>
                                         {move || {
                                             if by_device() {
-                                                r.kb.clone().unwrap_or_default()
+                                                first.kb.clone().unwrap_or_default()
                                             } else {
-                                                r.device_name.clone()
+                                                first.device_name.clone()
                                             }
                                         }}
                                     </td>
                                     <td class="patch-name">
                                         {move || {
                                             if by_device() {
-                                                r.name.clone()
+                                                second.name.clone()
                                             } else {
-                                                r.organization.clone()
+                                                second.organization.clone()
                                             }
                                         }}
                                     </td>

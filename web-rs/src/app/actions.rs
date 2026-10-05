@@ -1018,17 +1018,20 @@ pub(crate) fn JobsTable() -> impl IntoView {
 
             <h3 class="jobs-heading">"This session"</h3>
 
-            {move || {
-                let jobs = state.actions.jobs.get();
-                if jobs.is_empty() {
-                    return view! {
+            // Keyed rather than rebuilt: an `action:progress` event re-renders only
+            // the rows it advanced (see `util::job_row_key`), so focus on another
+            // row's Retry survives it. The empty check is a `Show`, so a progress
+            // tick never re-creates the table either.
+            <Show
+                when=move || state.actions.jobs.with(|jobs| !jobs.is_empty())
+                fallback=|| {
+                    view! {
                         <p class="empty">
                             "No actions dispatched yet. Select patch rows on the Patches tab (or devices on the Needs Reboot tab), then choose an action from the bar above the table."
                         </p>
                     }
-                        .into_any();
                 }
-                view! {
+            >
                     <div class="table-wrap">
                         <table class="data-table">
                             <thead>
@@ -1045,10 +1048,11 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                 </tr>
                             </thead>
                             <tbody>
-                                {jobs
-                                    .into_iter()
-                                    .rev()
-                                    .map(|j| {
+                                // Newest first, as before.
+                                <For
+                                    each=move || state.actions.jobs.get().into_iter().rev()
+                                    key=util::job_row_key
+                                    children=move |j| {
                                         // Only a definite failure gets a Retry;
                                         // an Unknown one may already have acted.
                                         let retry = util::retry_blocked_reason(&j)
@@ -1101,14 +1105,12 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                                 <td>{retry}</td>
                                             </tr>
                                         }
-                                    })
-                                    .collect_view()}
+                                    }
+                                />
                             </tbody>
                         </table>
                     </div>
-                }
-                    .into_any()
-            }}
+            </Show>
 
             <AuditTrail/>
         </div>
