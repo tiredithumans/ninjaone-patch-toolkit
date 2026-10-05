@@ -59,7 +59,7 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   sampled before the first `.await`.
   → `docs/design/actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim`
 - **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`,
-  at most `MAX_FEED_READS_IN_FLIGHT` in flight): `statusCode` is lifecycle, `activityResult` is the verdict, exit code from `data`; `newerThan`
-  is an activity **id**, so the time floor is applied client-side; `is_action_activity(kind,
-  type)` accepts only the types that kind emits.
+  at most `MAX_FEED_READS_IN_FLIGHT` in flight): `statusCode` is lifecycle, `activityResult` is
+  the verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is
+  applied client-side; `is_action_activity(kind, type)` accepts only the types that kind emits.
   → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`

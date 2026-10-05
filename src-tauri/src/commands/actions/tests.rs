@@ -1379,6 +1379,55 @@ async fn a_queued_device_is_stamped_when_its_turn_comes() {
     );
 }
 
+/// The same, one level up: the job a queued device records carries the time its
+/// turn came, not the time its task started. The delay is over a second because
+/// `dispatched_ts` has one-second resolution.
+#[tokio::test]
+async fn a_queued_devices_job_records_when_it_was_sent() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204).set_delay(std::time::Duration::from_millis(1100)))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/8/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let ctx = scan_context(mock_api(&server), Arc::new(AtomicBool::new(true)));
+    let sem = tokio::sync::Semaphore::new(1);
+    let target = |device_id: i64| PlannedTarget {
+        device_id,
+        device_name: format!("srv-{device_id}"),
+        organization: "Contoso".into(),
+        offline: false,
+    };
+    let (seven, eight) = (target(7), target(8));
+
+    // Device 7 is polled first and takes the only permit; device 8 queues.
+    let first = async {
+        let job = dispatch::send_and_record(&ctx, &seven, 1, &sem).await;
+        (job, Utc::now())
+    };
+    let ((first, first_done), second) =
+        tokio::join!(first, dispatch::send_and_record(&ctx, &eight, 2, &sem));
+
+    assert_eq!(first.state, JobState::Running);
+    assert_eq!(second.state, JobState::Running);
+    assert!(
+        second.dispatched_ts >= first_done.timestamp(),
+        "device 8's job says it was sent at {} ({}), but it could only send after {}",
+        second.dispatched_ts,
+        second.dispatched_at,
+        first_done
+    );
+}
+
 /// The session check before the send is not enough on its own: a 429 parks the
 /// POST for its `Retry-After`, and every retry reads the token live. A sign-out
 /// and another operator's sign-in in that wait re-sent the departed session's

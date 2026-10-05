@@ -171,6 +171,35 @@ async fn dispatch_one(
     }])
     .await;
 
+    let job = send_and_record(ctx, target, job_id, sem).await;
+
+    // A job settled at dispatch (NinjaOne rejected the request outright) never
+    // reaches the poller, which writes every other closing record — so without this
+    // the trail could not tell "rejected at send time" from "sent, and never
+    // reported back".
+    if job.state.is_terminal() {
+        audit::record_off_runtime(vec![audit::AuditEntry::closing(
+            &job,
+            ctx.instance.clone(),
+            ctx.client_id.clone(),
+        )])
+        .await;
+    }
+    job
+}
+
+/// Waits for a permit, sends, and builds the device's job from that turn — the
+/// part of [`dispatch_one`] between its two audit writes.
+///
+/// Separate so a test can drive it without writing to the operator's audit log or
+/// needing an `AppHandle`: the job's dispatch time must come from the turn, and
+/// nothing else pins that.
+pub(super) async fn send_and_record(
+    ctx: &DispatchContext,
+    target: &PlannedTarget,
+    job_id: u64,
+    sem: &Semaphore,
+) -> JobReport {
     let turn = send_if_current(ctx, target.device_id, sem).await;
     let dispatched_at = turn.at;
     let mut job = JobReport {
@@ -195,21 +224,8 @@ async fn dispatch_one(
 
     match turn.outcome {
         Some(outcome) => record_dispatch(&mut job, outcome, Utc::now()),
-        // Terminal, so the closing record below says it never went out.
+        // Terminal, so `dispatch_one`'s closing record says it never went out.
         None => job.finish(JobState::Skipped(NOT_SENT_SESSION_ENDED.into()), Utc::now()),
-    }
-
-    // A job settled at dispatch (NinjaOne rejected the request outright) never
-    // reaches the poller, which writes every other closing record — so without this
-    // the trail could not tell "rejected at send time" from "sent, and never
-    // reported back".
-    if job.state.is_terminal() {
-        audit::record_off_runtime(vec![audit::AuditEntry::closing(
-            &job,
-            ctx.instance.clone(),
-            ctx.client_id.clone(),
-        )])
-        .await;
     }
     job
 }
