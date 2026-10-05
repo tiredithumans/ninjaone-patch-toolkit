@@ -10,7 +10,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::model::{Device, Patch, PatchRow, Severity};
+use crate::model::{Device, Patch, PatchRow, PatchStatus, Severity, row_status};
 
 use super::compliance::{ApprovalState, approval_state, rollup_device};
 use super::join::{ORPHAN_DEVICE_ID, fmt_dt};
@@ -206,7 +206,10 @@ pub struct AgeBucket {
 /// is pending for the same reason: the feed is defined as the patches with no
 /// installation attempt, so absence of a status cannot mean "done".
 pub(super) fn is_pending(status: Option<&str>) -> bool {
-    !matches!(status, Some("REJECTED") | Some("INSTALLED"))
+    !matches!(
+        status.and_then(PatchStatus::from_api_value),
+        Some(PatchStatus::Rejected | PatchStatus::Installed)
+    )
 }
 
 /// Groups the FAILED detail rows by patch (`patch_type` + `kb` + `name`), counting
@@ -232,7 +235,7 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
     type FailureKey = (&'static str, Option<Arc<str>>, Arc<str>);
     let mut groups: HashMap<FailureKey, Acc> = HashMap::new();
     for r in rows {
-        if &*r.status != "FAILED" {
+        if &*r.status != row_status::FAILED {
             continue;
         }
         let seq = groups.len();

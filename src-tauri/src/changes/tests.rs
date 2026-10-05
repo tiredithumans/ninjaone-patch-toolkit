@@ -110,6 +110,22 @@ fn installed_and_rejected_rows_are_not_pending() {
     assert_eq!((c.new_pending, c.resolved), (0, 1));
 }
 
+/// `category` reads the row vocabulary, derived from `PatchStatus`: every state
+/// lands where `rows::is_pending` puts it, except FAILED, its own category.
+#[test]
+fn every_row_status_has_the_category_the_enum_implies() {
+    for s in PatchStatus::ALL {
+        let got = category(s.row_status());
+        match s {
+            PatchStatus::Pending | PatchStatus::Approved => {
+                assert!(matches!(got, Some(Category::Pending)), "{s:?}")
+            }
+            PatchStatus::Failed => assert!(matches!(got, Some(Category::Failed)), "{s:?}"),
+            PatchStatus::Rejected | PatchStatus::Installed => assert!(got.is_none(), "{s:?}"),
+        }
+    }
+}
+
 #[test]
 fn the_patch_identity_normalizes_the_kb_and_the_title() {
     assert_eq!(

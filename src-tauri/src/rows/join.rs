@@ -8,7 +8,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use crate::filter::PreparedFilter;
-use crate::model::{Device, Location, Organization, Patch, PatchRow, Role, Severity};
+use crate::model::{
+    Device, Location, Organization, Patch, PatchRow, PatchStatus, Role, Severity, row_status,
+};
 
 /// Placeholder for a name the join could not resolve — an orphan device, a device
 /// reporting no OS, or a patch whose organization is not in the lookups.
@@ -166,12 +168,11 @@ impl DeviceLabels {
 /// Maps a raw NinjaOne patch status to the operator-facing label. NinjaOne uses
 /// `MANUAL` for patches pending approval; show that as `PENDING` so the table
 /// matches the Status filter (and NinjaOne's own UI, which labels them "Pending").
-fn display_status(raw: Option<&str>) -> &str {
+pub(super) fn display_status(raw: Option<&str>) -> &str {
     match raw {
-        Some("MANUAL") => "PENDING",
-        Some(other) => other,
-        // A record carrying no status of its own and no source-level override.
-        None => "UNKNOWN",
+        // A status this crate does not know passes through verbatim.
+        Some(raw) => PatchStatus::from_api_value(raw).map_or(raw, |s| s.row_status()),
+        None => row_status::UNKNOWN,
     }
 }
 

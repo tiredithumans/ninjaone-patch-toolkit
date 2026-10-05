@@ -655,7 +655,9 @@ fn assemble_result(
             // and the wiremock fixtures always set an explicit status, so nothing
             // caught it. With both statuses requested nothing has been narrowed, so
             // INSTALLED stays the default.
-            let install_label = plan.install_status.unwrap_or("INSTALLED");
+            let install_label = plan
+                .install_status
+                .unwrap_or(PatchStatus::Installed.api_value());
             sources.push(PatchSource {
                 patches: &os_install_refs,
                 type_label: "OS",
@@ -699,14 +701,18 @@ fn assemble_result(
     // history endpoints; otherwise the per-device count stays unknown (`None`), not
     // zero. Labelled the way the row join labels them — an untyped record takes the
     // pushed-down status — and over the same lookback-filtered records.
-    let failed_installs: Option<Vec<&Patch>> =
-        plan.install_status_set.contains("FAILED").then(|| {
-            let label = plan.install_status.unwrap_or("INSTALLED");
+    let failed_installs: Option<Vec<&Patch>> = plan
+        .install_status_set
+        .contains(PatchStatus::Failed.api_value())
+        .then(|| {
+            let label = plan
+                .install_status
+                .unwrap_or(PatchStatus::Installed.api_value());
             os_install_refs
                 .iter()
                 .chain(&sw_install_refs)
                 .copied()
-                .filter(|p| p.status.as_deref().unwrap_or(label) == "FAILED")
+                .filter(|p| p.status.as_deref().unwrap_or(label) == PatchStatus::Failed.api_value())
                 .collect()
         });
     apply_device_health(

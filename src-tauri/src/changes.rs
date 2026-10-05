@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
-use crate::model::{PatchRow, PatchStatus};
+use crate::model::{PatchRow, PatchStatus, row_status};
 use crate::paths;
 use crate::rows::{PatchFamilies, TableCell, TableColumn, cmp_ci};
 
@@ -87,8 +87,8 @@ pub fn patch_key(row: &PatchRow) -> String {
 /// it as pending too would list one failure in two places.
 fn category(status: &str) -> Option<Category> {
     match status {
-        "FAILED" => Some(Category::Failed),
-        "INSTALLED" | "REJECTED" => None,
+        row_status::FAILED => Some(Category::Failed),
+        row_status::INSTALLED | row_status::REJECTED => None,
         _ => Some(Category::Pending),
     }
 }

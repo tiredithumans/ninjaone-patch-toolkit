@@ -426,17 +426,51 @@ pub enum PatchStatus {
 }
 
 impl PatchStatus {
+    /// Every variant, for the tests that pin the two status vocabularies to the enum.
+    #[cfg(test)]
+    pub const ALL: [Self; 5] = [
+        Self::Pending,
+        Self::Approved,
+        Self::Rejected,
+        Self::Installed,
+        Self::Failed,
+    ];
+
     /// The status string NinjaOne returns/accepts for this state. NinjaOne's
     /// `/queries/{os,software}-patches` use `MANUAL` for patches pending approval
     /// (its UI labels them "Pending"), so the operator-facing "Pending" maps to
     /// `MANUAL` — not the literal `PENDING`, which the API never returns.
-    pub fn api_value(self) -> &'static str {
+    pub const fn api_value(self) -> &'static str {
         match self {
             Self::Pending => "MANUAL",
             Self::Approved => "APPROVED",
             Self::Rejected => "REJECTED",
             Self::Installed => "INSTALLED",
             Self::Failed => "FAILED",
+        }
+    }
+
+    /// The inverse of [`api_value`](Self::api_value): which state a raw NinjaOne
+    /// status names, or `None` for one this crate does not know (`status` has no
+    /// enum in the spec). Exact match — the API has only ever spelled it upper-case.
+    pub fn from_api_value(raw: &str) -> Option<Self> {
+        match raw {
+            "MANUAL" => Some(Self::Pending),
+            "APPROVED" => Some(Self::Approved),
+            "REJECTED" => Some(Self::Rejected),
+            "INSTALLED" => Some(Self::Installed),
+            "FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    /// The spelling a [`PatchRow::status`] carries for this state — the
+    /// [`row_status`] vocabulary. It is the wire value except for `Pending`, which
+    /// the rows show as `PENDING` (NinjaOne's own UI label) rather than `MANUAL`.
+    pub const fn row_status(self) -> &'static str {
+        match self {
+            Self::Pending => "PENDING",
+            other => other.api_value(),
         }
     }
 
@@ -466,6 +500,22 @@ impl PatchStatus {
     pub fn is_install_history(self) -> bool {
         matches!(self, Self::Installed | Self::Failed)
     }
+}
+
+/// The [`PatchRow::status`] vocabulary, as constants so it can be matched on.
+/// Every row status code compares against these rather than a literal: the row
+/// spelling and the wire spelling differ for `Pending` (`PENDING` vs `MANUAL`), and
+/// a hand-typed literal is how one site ends up reading the other vocabulary.
+/// Only the states some site matches on are spelled out (an unused constant fails
+/// the lint); add one from [`PatchStatus::row_status`] when a site needs it.
+pub mod row_status {
+    use super::PatchStatus;
+
+    pub const REJECTED: &str = PatchStatus::Rejected.row_status();
+    pub const INSTALLED: &str = PatchStatus::Installed.row_status();
+    pub const FAILED: &str = PatchStatus::Failed.row_status();
+    /// A record carrying no status of its own and no source-level override.
+    pub const UNKNOWN: &str = "UNKNOWN";
 }
 
 /// One joined detail row: a single patch on a single device, enriched with the
@@ -795,6 +845,22 @@ mod tests {
         assert!(!PatchStatus::Approved.is_install_history());
         assert!(!PatchStatus::Pending.is_install_history());
         assert!(!PatchStatus::Rejected.is_install_history());
+    }
+
+    /// `PatchStatus::ALL` drives the vocabulary tests, so it must list every
+    /// variant: a new one breaks this match until it is given a slot in `ALL`.
+    #[test]
+    fn all_lists_every_status_once() {
+        let slot = |s: PatchStatus| match s {
+            PatchStatus::Pending => 0,
+            PatchStatus::Approved => 1,
+            PatchStatus::Rejected => 2,
+            PatchStatus::Installed => 3,
+            PatchStatus::Failed => 4,
+        };
+        for (i, s) in PatchStatus::ALL.into_iter().enumerate() {
+            assert_eq!(slot(s), i, "{s:?}");
+        }
     }
 
     #[test]
