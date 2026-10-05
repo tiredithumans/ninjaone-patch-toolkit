@@ -138,6 +138,110 @@ fn lists_are_capped_but_counts_are_exact() {
     assert_eq!(c.new_pending_items.len(), CHANGE_LIST_LIMIT);
 }
 
+/// `capped` selects the listed entries over borrowed keys instead of building
+/// every `ChangeItem` and sorting them all. Pinned against that original
+/// build-everything / stable-sort / truncate, on lists well past the cap whose
+/// keys collide on every field but the last (case-insensitive device and patch
+/// names, shared severities).
+#[test]
+fn the_capped_lists_match_a_full_sort_and_the_counts_stay_exact() {
+    fn reference<'a>(
+        snap: &RunSnapshot,
+        ixs: impl Iterator<Item = &'a (u32, u32)>,
+    ) -> (usize, Vec<ChangeItem>) {
+        let mut items: Vec<ChangeItem> = ixs.filter_map(|&ix| snap.item(ix)).collect();
+        let total = items.len();
+        items.sort_by(|a, b| {
+            b.severity_rank
+                .cmp(&a.severity_rank)
+                .then_with(|| cmp_ci(&a.device_name, &b.device_name))
+                .then_with(|| cmp_ci(&a.name, &b.name))
+                .then_with(|| a.device_id.cmp(&b.device_id))
+        });
+        items.truncate(CHANGE_LIST_LIMIT);
+        (total, items)
+    }
+
+    const BANDS: [(&str, u8); 4] = [
+        ("Critical", 5),
+        ("Important", 4),
+        ("Moderate", 2),
+        ("Low", 1),
+    ];
+    let fleet = |status: fn(i64) -> Option<&'static str>| -> Vec<PatchRow> {
+        (1..=120i64)
+            .filter_map(|d| status(d).map(|s| (d, s)))
+            .flat_map(|(d, s)| {
+                (0..8usize).map(move |j| {
+                    let (severity, rank) = BANDS[j % 4];
+                    let kb = format!("KB{}", 1000 + j);
+                    let case = if j % 2 == 0 {
+                        "Cumulative"
+                    } else {
+                        "cumulative"
+                    };
+                    PatchRow {
+                        device_name: if d % 3 == 0 {
+                            format!("SRV{:03}", d / 2)
+                        } else {
+                            format!("srv{:03}", d / 2)
+                        }
+                        .into(),
+                        severity,
+                        severity_rank: rank,
+                        ..row(d, Some(&kb), &format!("{case} Update {}", j % 3), s)
+                    }
+                })
+            })
+            .collect()
+    };
+    let before = snap(&fleet(|d| (d % 2 == 0).then_some("PENDING")), "t1");
+    let after = snap(
+        &fleet(|d| match d % 4 {
+            1 | 3 => Some("PENDING"),
+            0 => Some("FAILED"),
+            _ => None,
+        }),
+        "t2",
+    );
+    let c = diff(Some(&before), &after);
+
+    let now_pending = after.identities(&after.pending);
+    let now_failed = after.identities(&after.failed);
+    let prev_pending = before.identities(&before.pending);
+    let prev_failed = before.identities(&before.failed);
+    let new_pending = reference(
+        &after,
+        now_pending
+            .iter()
+            .filter(|(id, _)| !prev_pending.contains_key(*id))
+            .map(|(_, ix)| ix),
+    );
+    let resolved = reference(
+        &before,
+        prev_pending
+            .iter()
+            .filter(|(id, _)| !now_pending.contains_key(*id) && !now_failed.contains_key(*id))
+            .map(|(_, ix)| ix),
+    );
+    let newly_failed = reference(
+        &after,
+        now_failed
+            .iter()
+            .filter(|(id, _)| !prev_failed.contains_key(*id))
+            .map(|(_, ix)| ix),
+    );
+
+    assert_eq!(
+        (c.new_pending, c.resolved, c.newly_failed),
+        (480, 240, 240),
+        "every count is exact, past the cap"
+    );
+    assert_eq!((c.new_pending, c.new_pending_items), new_pending);
+    assert_eq!((c.resolved, c.resolved_items), resolved);
+    assert_eq!((c.newly_failed, c.newly_failed_items), newly_failed);
+}
+
 #[test]
 fn a_snapshot_of_another_tenant_or_scope_is_never_diffed() {
     let now = snap(&[row(1, Some("KB1"), "CU", "PENDING")], "t2");
