@@ -46,6 +46,11 @@ version and start a fresh `[Unreleased]`.
   password in a URL (`https://user:…@host`) and a SAS `sig=` in a query string are now redacted,
   through the closing quote when the value is quoted. Ordinary flags such as `-PassThru`,
   `-KeyPath` and `-RegistryKey` keep their values in the log instead of showing `<redacted>`.
+- **A patch-action plan prepared before a sign-out can no longer be confirmed after it.** If you
+  signed out and back in, or switched instance, while the confirmation dialog was still being
+  prepared, the plan's approval was issued to the new session, and confirming it could dispatch
+  under a sign-in that never reviewed it. Planning now fails with "Plan the action again".
+
 ### Changed
 
 - **Selecting rows, opening patch groups and job status updates do less work.** The select-all

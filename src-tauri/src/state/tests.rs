@@ -789,7 +789,7 @@ fn job_history_evicts_terminal_rows_before_in_flight_ones() {
 #[test]
 fn confirm_token_is_single_use_and_bound_to_the_request() {
     let state = AppState::new().expect("build state");
-    state.store_pending_confirm("tok".into(), "hash-a".into());
+    assert!(state.store_pending_confirm(&state.job_session(), "tok".into(), "hash-a".into()));
 
     // A token that doesn't match the request it was issued for is refused.
     assert!(!state.consume_confirm_token("tok", "hash-b"));
@@ -797,7 +797,7 @@ fn confirm_token_is_single_use_and_bound_to_the_request() {
     // fails too. Failing closed is the right direction for a dispatch gate.
     assert!(!state.consume_confirm_token("tok", "hash-a"));
 
-    state.store_pending_confirm("tok2".into(), "hash-a".into());
+    assert!(state.store_pending_confirm(&state.job_session(), "tok2".into(), "hash-a".into()));
     assert!(state.consume_confirm_token("tok2", "hash-a"));
     // Single use: a double-click can't dispatch twice.
     assert!(!state.consume_confirm_token("tok2", "hash-a"));
@@ -813,7 +813,7 @@ fn confirm_token_is_single_use_and_bound_to_the_request() {
 #[test]
 fn a_confirm_token_does_not_survive_an_instance_switch() {
     let state = AppState::new().expect("build state");
-    state.store_pending_confirm("tok".into(), "hash-a".into());
+    assert!(state.store_pending_confirm(&state.job_session(), "tok".into(), "hash-a".into()));
 
     // The operator changes instance while the confirmation dialog is open.
     if let Ok(mut settings) = state.settings.lock() {
@@ -824,6 +824,53 @@ fn a_confirm_token_does_not_survive_an_instance_switch() {
         !state.consume_confirm_token("tok", "hash-a"),
         "an approval granted against one instance must not dispatch against another"
     );
+}
+
+/// `plan_action` awaits the device inventory and org names before it stores its
+/// token. A sign-out and sign-in in that gap — a different operator on the same
+/// instance, so the same tenant — used to leave a token stamped for the *new*
+/// session, and `run_action`'s re-plan under that session would match its hash.
+#[test]
+fn a_plan_in_flight_at_sign_out_cannot_store_a_confirm_token() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+
+    // The operator signs out (and the next one signs in) while the plan is fetching.
+    state.clear_jobs();
+
+    assert!(
+        !state.store_pending_confirm(&session, "tok".into(), "hash-a".into()),
+        "a plan built in the departed session must not be approvable in the next one"
+    );
+    assert!(!state.consume_confirm_token("tok", "hash-a"));
+}
+
+/// The tenant-switch path of the same race: Save replaces the settings, then clears.
+/// A plan that started before the switch must not store, even though the stamp it
+/// would have read at store time is the new tenant.
+#[test]
+fn a_plan_in_flight_across_an_instance_switch_cannot_store_a_confirm_token() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+
+    state.settings.lock().unwrap().instance_base_url = "https://other.ninjarmm.com".into();
+    state.clear_jobs();
+
+    assert!(!state.store_pending_confirm(&session, "tok".into(), "hash-a".into()));
+    assert!(!state.consume_confirm_token("tok", "hash-a"));
+}
+
+/// The epoch only refuses what started before the clear: a plan begun afterwards
+/// stores and confirms normally, and the Jobs tab's Clear does not end the session.
+#[test]
+fn a_plan_started_after_the_clear_is_approvable() {
+    let state = AppState::new().expect("build state");
+    state.clear_jobs();
+    let session = state.job_session();
+    state.clear_job_history();
+
+    assert!(state.store_pending_confirm(&session, "tok".into(), "hash-a".into()));
+    assert!(state.consume_confirm_token("tok", "hash-a"));
 }
 
 #[test]

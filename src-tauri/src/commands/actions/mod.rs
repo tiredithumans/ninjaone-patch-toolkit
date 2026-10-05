@@ -128,6 +128,9 @@ struct ActionProgressEvent {
     jobs: Vec<JobReport>,
 }
 
+const SESSION_CHANGED_WHILE_PLANNING: &str = "You signed in again or switched instance while this \
+     plan was being prepared, so it was not approved. Plan the action again.";
+
 fn emit_progress(app: &AppHandle, ev: ActionProgressEvent) {
     let _ = app.emit("action:progress", ev);
 }
@@ -161,6 +164,9 @@ pub async fn plan_action(
     request: ActionRequest,
 ) -> Result<ActionPlan, UiError> {
     require_actions_enabled(&state)?;
+    // Before the plan's fetches: the token must be stamped for the session the plan
+    // was built in, not whichever one is current when they return.
+    let session = state.job_session();
     let planned = build_plan(&state, &request).await?;
     let hash = planned.hash(&request);
     let mut plan = planned.plan;
@@ -169,7 +175,9 @@ pub async fn plan_action(
     // mutating and skip confirmation entirely.
     if !plan.is_blocked() && request.kind.is_mutating() {
         let token = random_token();
-        state.store_pending_confirm(token.clone(), hash);
+        if !state.store_pending_confirm(&session, token.clone(), hash) {
+            return Err(UiError::new(SESSION_CHANGED_WHILE_PLANNING));
+        }
         plan.confirm_token = Some(token);
     }
     Ok(plan)
@@ -383,7 +391,9 @@ pub fn list_jobs(state: State<'_, AppState>) -> Vec<JobReport> {
 
 #[tauri::command]
 pub fn clear_jobs(state: State<'_, AppState>) -> Vec<JobReport> {
-    state.clear_jobs();
+    // History only — the session-ending `AppState::clear_jobs` would also cancel a
+    // batch still dispatching.
+    state.clear_job_history();
     Vec::new()
 }
 

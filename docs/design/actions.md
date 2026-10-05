@@ -172,6 +172,12 @@ dry_run — into a 5-minute token; `run_action` re-plans from scratch and re-che
   `override_window` and `run_as` came to be missing (the first two gate `plan()`'s offline warning
   and maintenance-window blocker; the third is the execution identity).
 - Fields are separated by `0x1f` so two different requests can't concatenate to one hash input.
+- The token is stamped with the `JobSession` (tenant + jobs epoch) taken **before** `build_plan`,
+  and `store_pending_confirm` re-checks it under the slot lock. It used to read the tenant at
+  store time, after the plan's fetches, so a sign-out and sign-in (same tenant, different
+  operator) or a tenant switch in that gap left a token stamped for the new session, which
+  `run_action`'s re-plan under that session then matched. `clear_jobs` bumps the epoch before it
+  clears, so the late store is refused and `plan_action` says to plan again.
 
 ## There is one dispatch surface, and the run options are shared
 

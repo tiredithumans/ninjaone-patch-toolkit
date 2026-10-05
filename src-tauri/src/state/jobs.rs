@@ -23,7 +23,7 @@ pub struct PendingConfirm {
     pub token: String,
     pub request_hash: String,
     pub issued_at: Instant,
-    /// The tenant the plan was approved against.
+    /// The session (tenant + jobs epoch) the plan was built and approved under.
     ///
     /// `request_hash` destructures `ActionRequest` exhaustively — a new field there
     /// is a compile error — but `ActionRequest` carries no instance or client id, so
@@ -33,7 +33,28 @@ pub struct PendingConfirm {
     /// inside the 5-minute window. Every other cache in `AppState` is tenant-stamped
     /// for exactly this reason; the one slot that authorizes writes to real devices
     /// was not. It has to live on the slot rather than in the hash for that reason.
+    ///
+    /// The epoch half covers what the tenant cannot: a sign-out and sign-in as a
+    /// different operator on the same instance is the same tenant.
+    session: JobSession,
+}
+
+/// The session a write-path call started under: the tenant plus the jobs epoch,
+/// sampled by [`AppState::job_session`] before the call's first `.await`.
+///
+/// `plan_action`, `run_action` and each poll tick await the network for seconds to
+/// minutes, and a sign-out, sign-in, re-authorization or tenant switch can land in
+/// that gap. Every store at the end of such a call used to read `tenant_key()` at
+/// *store* time, so whatever the departed session had computed — a confirmation
+/// token, a dispatched batch, a poll tick's updates — was written into the new
+/// session as if it belonged there. Carrying the session from the start, and
+/// re-checking it under the slot lock, is the same protocol as [`QueryToken`].
+///
+/// [`QueryToken`]: super::QueryToken
+#[derive(Clone)]
+pub struct JobSession {
     tenant: TenantKey,
+    epoch: u64,
 }
 
 /// RAII claim on the single job-poller slot, issued by
@@ -67,6 +88,27 @@ impl AppState {
         let batch = self.job_seq.fetch_add(1, Ordering::Relaxed);
         let base = self.job_seq.fetch_add(count as u64, Ordering::Relaxed);
         (batch, base)
+    }
+
+    /// The session a write-path call is starting under. Take it before the first
+    /// `.await` and hand it to every store the call makes.
+    pub fn job_session(&self) -> JobSession {
+        // The epoch is read first. A tenant switch replaces the settings and *then*
+        // bumps, so this order can pair an old epoch with a new tenant (stale either
+        // way) but never a new epoch with the old tenant.
+        let epoch = self.job_epoch.load(Ordering::SeqCst);
+        JobSession {
+            tenant: self.tenant_key(),
+            epoch,
+        }
+    }
+
+    /// Whether `session` is still the live one: no clear since it was taken, and the
+    /// same tenant. Stores call this under their slot lock; the dispatch loop calls
+    /// it before each send.
+    pub fn job_session_is_current(&self, session: &JobSession) -> bool {
+        self.job_epoch.load(Ordering::SeqCst) == session.epoch
+            && self.tenant_key() == session.tenant
     }
 
     /// Appends newly dispatched rows for the current tenant, trimming history to
@@ -143,8 +185,22 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// Drops dispatch history on sign-out or an instance change.
+    /// Ends the job session on sign-out, sign-in, re-authorization or an instance
+    /// change: dispatch history and any pending confirmation are dropped, and every
+    /// plan, dispatch or poll tick still in flight is refused at its store.
     pub fn clear_jobs(&self) {
+        // Bumped *before* the slots are cleared, as `clear_last_result` does: each
+        // store re-reads the epoch under its slot lock, so whichever order the two
+        // interleave, the departed session's write loses.
+        self.job_epoch.fetch_add(1, Ordering::SeqCst);
+        self.clear_job_history();
+    }
+
+    /// The Jobs tab's Clear: drops the history and any pending confirmation without
+    /// ending the session. A batch still dispatching keeps sending and records its
+    /// rows when it finishes, as it always has — the operator asked to tidy a list,
+    /// not to cancel the devices queued behind the semaphore.
+    pub fn clear_job_history(&self) {
         if let Ok(mut guard) = self.jobs.lock() {
             *guard = None;
         }
@@ -205,16 +261,33 @@ impl AppState {
 
     /// Records the plan the operator is being asked to confirm, replacing any
     /// earlier one — only one dialog is open at a time.
-    pub fn store_pending_confirm(&self, token: String, request_hash: String) {
-        let tenant = self.tenant_key();
-        if let Ok(mut guard) = self.pending_confirm.lock() {
-            *guard = Some(PendingConfirm {
-                token,
-                request_hash,
-                issued_at: Instant::now(),
-                tenant,
-            });
+    ///
+    /// `session` is the one taken before the plan was built. Returns `false`, storing
+    /// nothing, when it has ended since: building a plan awaits the device inventory
+    /// and the org names, and a sign-out or tenant switch in that gap used to leave a
+    /// token stamped for the *new* session — which `run_action`'s re-plan, now under
+    /// the new tenant, would then match.
+    #[must_use]
+    pub fn store_pending_confirm(
+        &self,
+        session: &JobSession,
+        token: String,
+        request_hash: String,
+    ) -> bool {
+        let Ok(mut guard) = self.pending_confirm.lock() else {
+            return false;
+        };
+        // Under the slot lock, for the same reason as `append_jobs`.
+        if !self.job_session_is_current(session) {
+            return false;
         }
+        *guard = Some(PendingConfirm {
+            token,
+            request_hash,
+            issued_at: Instant::now(),
+            session: session.clone(),
+        });
+        true
     }
 
     /// Consumes a confirmation token, returning whether it authorizes this exact
@@ -242,7 +315,7 @@ impl AppState {
         // An approval is for one instance; the operator can change instance in
         // Settings while the dialog is open.
         token_ok & hash_ok
-            && pending.tenant == self.tenant_key()
+            && self.job_session_is_current(&pending.session)
             && pending.issued_at.elapsed() < CONFIRM_TTL
     }
 }

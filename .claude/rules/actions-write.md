@@ -39,7 +39,8 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **Confirm tokens are payload-bound and single-use.** `request_hash` destructures `ActionRequest`
   exhaustively, hashes the *resolved* script and run-as and length-prefixed per-device
   parameters; ids are not de-duplicated (a repeated id is a `plan()` blocker); `run_action`
-  re-plans and re-checks. → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
+  re-plans and re-checks. The token carries the `JobSession` sampled before `build_plan`.
+  → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
 - **Guardrails go in `actions::plan` (`blockers`/`warnings`), not in a dialog.** The `dry_run`
   check is also asserted at the dispatch site. → `docs/design/actions.md#guardrails-live-in-actionsplan`
 - **Dry run requires a script declaring `dryRun`** (`DryRunSupport::Declared`); the window

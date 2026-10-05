@@ -235,6 +235,14 @@ pub struct AppState {
     jobs: Mutex<Option<(TenantKey, Vec<JobReport>)>>,
     /// Monotonic source of `JobReport.id` / `batch_id`.
     job_seq: AtomicU64,
+    /// Bumped by [`AppState::clear_jobs`] — every sign-out, sign-in, re-authorization
+    /// and tenant switch — *before* it clears. The write path samples it with the
+    /// tenant as a [`JobSession`] before its first `.await` and re-checks it under the
+    /// slot lock at every store, exactly as `result_epoch` gates the result cache:
+    /// the tenant stamp alone cannot see a second operator on the same instance, and
+    /// the clear alone cannot stop a plan, dispatch or poll tick already in flight
+    /// from writing the departed session's state back afterwards.
+    job_epoch: AtomicU64,
     /// Monotonic query generation, bumped by [`AppState::begin_query`]. Queries
     /// overlap routinely — an auto-refresh tick fires while a manual Run is still
     /// paging the fleet — and whichever *finished* last used to win the cache
@@ -320,6 +328,7 @@ impl AppState {
             fleet_current_sw: TenantCache::default(),
             jobs: Mutex::new(None),
             job_seq: AtomicU64::new(1),
+            job_epoch: AtomicU64::new(0),
             query_generation: AtomicU64::new(0),
             result_epoch: AtomicU64::new(0),
             job_poller_running: Arc::new(AtomicBool::new(false)),
