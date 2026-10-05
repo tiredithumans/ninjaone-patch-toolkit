@@ -66,7 +66,9 @@ flips it, which is why adding the write path didn't break existing installs. The
 does **not** send `scope`, so an install that signed in before actions were enabled keeps its
 read-only grant silently and every write 403s. `AuthState::management_grant()` detects this from
 the token response's `scope` (RFC 6749 §5.1, self-healing on each refresh) with a JWT-claim
-fallback; `None` means *unknowable*, not *denied*, and the UI words the two differently.
+fallback; a refresh that omits both keeps the session's previous scope (§5.1 allows omitting an
+unchanged scope), while an interactive sign-in never inherits one. `None` means *unknowable*, not
+*denied*, and the UI words the two differently.
 `commands::auth::reauthorize` drops the keyring refresh token **first** so the browser flow must
 issue a fresh grant.
 

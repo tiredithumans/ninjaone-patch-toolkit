@@ -11,6 +11,13 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Patch actions no longer lock mid-session after a token refresh.** A refresh response may
+  leave out the granted scope when it has not changed; with an opaque access token the app read
+  that as "can't tell" and blocked every write until the next sign-in. A refresh now keeps the
+  scope the session was already granted.
+
 ## [0.15.1] - 2026-09-30
 
 ### Fixed

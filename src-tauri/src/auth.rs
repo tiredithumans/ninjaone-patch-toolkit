@@ -739,12 +739,21 @@ impl AuthState {
                 bail!("you were signed out while this sign-in was in progress; sign in again");
             }
             // Prefer what the server said it granted; fall back to the token's own
-            // claim when the response omits `scope`.
+            // claim when the response omits `scope`, and on a refresh to what this
+            // session was already granted. RFC 6749 §5.1 lets a refresh response
+            // omit `scope` when it is unchanged, so with an opaque token reading the
+            // omission as "unknowable" flipped `management_grant()` to `None` and
+            // blocked writes mid-session. An interactive sign-in never inherits: it
+            // may be a different operator, and its grant is the one just consented.
+            let previous_scope = (!new_session)
+                .then(|| inner.tokens.as_ref().and_then(|t| t.granted_scope.clone()))
+                .flatten();
             let granted_scope = parsed
                 .scope
                 .clone()
                 .filter(|s| !s.trim().is_empty())
-                .or_else(|| scope_claim_from_jwt(&parsed.access_token));
+                .or_else(|| scope_claim_from_jwt(&parsed.access_token))
+                .or(previous_scope);
             // RFC 6749 §6 lets the server omit `refresh_token` when it does not rotate
             // the grant, in which case the existing one stays valid. Taking the
             // response at face value dropped it, leaving the session dependent on the

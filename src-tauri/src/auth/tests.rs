@@ -542,6 +542,71 @@ fn a_keyring_failure_keeps_the_session_it_just_obtained() {
     assert_eq!(auth.management_grant(), Some(true));
 }
 
+/// RFC 6749 §5.1 lets a refresh response omit `scope` when it is unchanged. With
+/// an opaque token that read as "unknowable", so `management_grant()` flipped to
+/// `None` mid-session and `require_actions_enabled` blocked every write.
+#[test]
+fn a_refresh_that_omits_scope_keeps_the_granted_scope() {
+    let auth = launched("https://scope-keep.example.com", "client-scope-keep");
+    auth.store_tokens_blocking(
+        TokenResponse {
+            access_token: "opaque-1".into(),
+            refresh_token: Some("refresh-1".into()),
+            expires_in: 3600,
+            scope: Some("monitoring management offline_access".into()),
+        },
+        auth.grant_stamp(),
+        true,
+    )
+    .expect("interactive sign-in");
+
+    auth.store_tokens_blocking(
+        TokenResponse {
+            access_token: "opaque-2".into(),
+            refresh_token: Some("refresh-2".into()),
+            expires_in: 3600,
+            scope: None,
+        },
+        auth.grant_stamp(),
+        false,
+    )
+    .expect("refresh that omits scope");
+
+    assert_eq!(auth.management_grant(), Some(true));
+}
+
+/// The fallback is for a refresh only: an interactive sign-in may be another
+/// operator, and must not inherit the previous session's scope.
+#[test]
+fn a_new_sign_in_does_not_inherit_the_previous_scope() {
+    let auth = launched("https://scope-new.example.com", "client-scope-new");
+    auth.store_tokens_blocking(
+        TokenResponse {
+            access_token: "opaque-1".into(),
+            refresh_token: Some("refresh-1".into()),
+            expires_in: 3600,
+            scope: Some("monitoring management offline_access".into()),
+        },
+        auth.grant_stamp(),
+        false,
+    )
+    .expect("first session");
+
+    auth.store_tokens_blocking(
+        TokenResponse {
+            access_token: "opaque-2".into(),
+            refresh_token: Some("refresh-2".into()),
+            expires_in: 3600,
+            scope: None,
+        },
+        auth.grant_stamp(),
+        true,
+    )
+    .expect("interactive sign-in");
+
+    assert_eq!(auth.management_grant(), None);
+}
+
 /// A query fans out many concurrent requests, so a 401 answering the *old*
 /// token routinely lands after the single-flight refresh stored a new one.
 /// Stamping unconditionally marked the fresh token stale and turned a burst of
