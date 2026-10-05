@@ -50,6 +50,11 @@ version and start a fresh `[Unreleased]`.
   signed out and back in, or switched instance, while the confirmation dialog was still being
   prepared, the plan's approval was issued to the new session, and confirming it could dispatch
   under a sign-in that never reviewed it. Planning now fails with "Plan the action again".
+- **Signing out during a patch action stops the devices still waiting to be sent.** A batch
+  larger than the concurrency setting kept sending to its queued devices after you signed out,
+  signed in again or switched instance, and its jobs then appeared in the new session's Jobs tab.
+  Devices still queued are now recorded as not sent, the batch reports an error saying how many
+  had already been sent, and none of its jobs carry over to the new session.
 
 ### Changed
 

@@ -741,7 +741,7 @@ fn sample_job(id: u64, state: JobState) -> JobReport {
 #[test]
 fn jobs_are_invisible_after_an_instance_switch() {
     let state = AppState::new().expect("build state");
-    state.append_jobs(vec![sample_job(1, JobState::Running)]);
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(1, JobState::Running)]));
     assert_eq!(state.jobs_snapshot().len(), 1);
 
     // Same guarantee as `last_result`: switching tenant WITHOUT calling clear_*
@@ -752,14 +752,40 @@ fn jobs_are_invisible_after_an_instance_switch() {
     assert!(state.pending_jobs().is_empty());
 }
 
+/// `run_action` awaits the whole dispatch before it records the batch. A sign-out
+/// and sign-in in that time used to land the departed operator's jobs in the new
+/// session: shown in its Jobs tab, polled against its API, and invalidating its
+/// caches when they settled.
+#[test]
+fn a_batch_dispatching_at_sign_out_is_not_recorded_in_the_next_session() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+
+    // The operator signs out while the batch is still dispatching.
+    state.clear_jobs();
+
+    assert!(
+        !state.append_jobs(&session, vec![sample_job(1, JobState::Running)]),
+        "the dispatch must learn its session ended"
+    );
+    assert!(state.jobs_snapshot().is_empty());
+    assert!(!state.job_session_is_current(&session));
+    // A batch begun in the new session records normally.
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(2, JobState::Running)]));
+    assert_eq!(state.jobs_snapshot().len(), 1);
+}
+
 #[test]
 fn job_updates_key_on_job_id_not_device_id() {
     let state = AppState::new().expect("build state");
     // Two rows for the SAME device, as happens when batches overlap.
-    state.append_jobs(vec![
-        sample_job(1, JobState::Running),
-        sample_job(2, JobState::Running),
-    ]);
+    assert!(state.append_jobs(
+        &state.job_session(),
+        vec![
+            sample_job(1, JobState::Running),
+            sample_job(2, JobState::Running),
+        ]
+    ));
 
     state.apply_job_updates(vec![sample_job(2, JobState::Completed)]);
     let jobs = state.jobs_snapshot();
@@ -772,11 +798,11 @@ fn job_updates_key_on_job_id_not_device_id() {
 fn job_history_evicts_terminal_rows_before_in_flight_ones() {
     let state = AppState::new().expect("build state");
     // One in-flight row, then enough terminal rows to overflow the cap.
-    state.append_jobs(vec![sample_job(0, JobState::Running)]);
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(0, JobState::Running)]));
     let filler: Vec<JobReport> = (1..=MAX_JOBS as u64)
         .map(|i| sample_job(i, JobState::Completed))
         .collect();
-    state.append_jobs(filler);
+    assert!(state.append_jobs(&state.job_session(), filler));
 
     let jobs = state.jobs_snapshot();
     assert_eq!(jobs.len(), MAX_JOBS);
@@ -930,7 +956,7 @@ fn the_poller_keeps_its_claim_when_work_arrives_during_release() {
     let claim = state.try_claim_job_poller().expect("first claim");
 
     // A batch lands: its jobs are recorded before it tries to claim.
-    state.append_jobs(vec![sample_job(1, JobState::Running)]);
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(1, JobState::Running)]));
     assert!(
         state.try_claim_job_poller().is_none(),
         "the running poller still holds the claim"

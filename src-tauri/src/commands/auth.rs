@@ -182,7 +182,7 @@ mod tests {
     fn signing_out_drops_the_cached_result_and_the_job_history() {
         let state = AppState::new().expect("build state");
         state.store_last_result_if_current(state.begin_query(), sample_result());
-        state.append_jobs(vec![sample_job()]);
+        assert!(state.append_jobs(&state.job_session(), vec![sample_job()]));
 
         assert!(state.with_current_result(|_| ()).unwrap().is_some());
         assert_eq!(state.jobs_snapshot().len(), 1);

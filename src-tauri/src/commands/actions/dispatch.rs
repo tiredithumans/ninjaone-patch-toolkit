@@ -45,7 +45,18 @@ pub(super) struct DispatchContext {
     /// Device id → what its job records for a retry. Per device only because the
     /// targets are.
     pub(super) job_requests: BTreeMap<i64, JobRequest>,
+    /// Whether the session `run_action` started in is still the live one
+    /// (`AppState::job_session_is_current` on the session it sampled). Asked before
+    /// every send, because a batch wider than the semaphore queues devices for as
+    /// long as the ones ahead of them take — and a sign-out or tenant switch in that
+    /// time used to leave the rest of the departed session's batch POSTing on.
+    pub(super) still_current: Box<dyn Fn() -> bool + Send + Sync>,
 }
+
+/// What a device that was still queued when the session ended records instead of
+/// a send.
+pub(super) const NOT_SENT_SESSION_ENDED: &str =
+    "not sent: you signed in again or switched instance while the batch was dispatching";
 
 /// Dispatches every eligible target concurrently (bounded by `permits`), emitting
 /// progress as each completes, and returns the jobs in the plan's order.
@@ -162,11 +173,11 @@ async fn dispatch_one(
     }])
     .await;
 
-    let outcome = {
-        let _permit = sem.acquire().await;
-        send_action(ctx, target.device_id).await
-    };
-    record_dispatch(&mut job, outcome, Utc::now());
+    match send_if_current(ctx, target.device_id, sem).await {
+        Some(outcome) => record_dispatch(&mut job, outcome, Utc::now()),
+        // Terminal, so the closing record below says it never went out.
+        None => job.finish(JobState::Skipped(NOT_SENT_SESSION_ENDED.into()), Utc::now()),
+    }
 
     // A job settled at dispatch (NinjaOne rejected the request outright) never
     // reaches the poller, which writes every other closing record — so without this
@@ -181,6 +192,22 @@ async fn dispatch_one(
         .await;
     }
     job
+}
+
+/// Sends to one device once a permit is free — unless the session ended while it
+/// waited, in which case nothing is sent and the result is `None`.
+///
+/// The check sits after the permit on purpose: that wait is the long one.
+pub(super) async fn send_if_current(
+    ctx: &DispatchContext,
+    device_id: i64,
+    sem: &Semaphore,
+) -> Option<anyhow::Result<Option<ScriptDispatch>>> {
+    let _permit = sem.acquire().await;
+    if !(ctx.still_current)() {
+        return None;
+    }
+    Some(send_action(ctx, device_id).await)
 }
 
 /// Records what the dispatch POST said on the job.

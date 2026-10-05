@@ -1034,3 +1034,78 @@ fn a_job_records_what_a_retry_needs_for_its_own_device() {
     assert_eq!(rec.reason.as_deref(), Some("July cycle"));
     assert_eq!(rec.run_as, None, "the native endpoints run as the agent");
 }
+
+fn scan_context(
+    api: crate::api::NinjaApiClient,
+    live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> dispatch::DispatchContext {
+    dispatch::DispatchContext {
+        api,
+        kind: ActionKind::OsPatchScan,
+        script: None,
+        run_as: String::new(),
+        parameters: BTreeMap::new(),
+        reason: String::new(),
+        reboot_mode: RebootMode::Normal,
+        dry_run: false,
+        window_overridden: false,
+        detail: "scan".into(),
+        instance: "https://a.example".into(),
+        client_id: None,
+        confirm_prefix: None,
+        batch_id: 1,
+        id_base: 1,
+        job_requests: BTreeMap::new(),
+        still_current: Box::new(move || live.load(std::sync::atomic::Ordering::SeqCst)),
+    }
+}
+
+/// A batch wider than the semaphore queues devices behind the ones being sent. A
+/// sign-out or tenant switch while they waited used to let every one of them POST
+/// anyway, under a session that never confirmed the action. The session is checked
+/// after the permit — the long wait — so a device queued across the change is not
+/// sent at all.
+#[tokio::test]
+async fn a_device_queued_when_the_session_ends_is_not_sent() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Poll;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let live = Arc::new(AtomicBool::new(true));
+    let ctx = scan_context(mock_api(&server), Arc::clone(&live));
+    let sem = tokio::sync::Semaphore::new(1);
+
+    // Another device holds the only permit; ours queues behind it.
+    let ahead = sem.acquire().await.expect("permit");
+    let queued = dispatch::send_if_current(&ctx, 7, &sem);
+    tokio::pin!(queued);
+    let waiting =
+        std::future::poll_fn(|cx| Poll::Ready(queued.as_mut().poll(cx).is_pending())).await;
+    assert!(waiting, "still waiting for a permit");
+
+    // The session ends while it waits.
+    live.store(false, Ordering::SeqCst);
+    drop(ahead);
+
+    assert!(queued.await.is_none(), "a queued device must not be sent");
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+
+    // A live session sends as before.
+    live.store(true, Ordering::SeqCst);
+    let sent = dispatch::send_if_current(&ctx, 7, &sem).await;
+    assert!(matches!(sent, Some(Ok(None))), "{sent:?}");
+    assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+}

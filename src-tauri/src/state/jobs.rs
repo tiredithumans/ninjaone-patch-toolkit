@@ -111,15 +111,32 @@ impl AppState {
             && self.tenant_key() == session.tenant
     }
 
-    /// Appends newly dispatched rows for the current tenant, trimming history to
+    /// Appends newly dispatched rows for `session`, trimming history to
     /// [`MAX_JOBS`] by dropping the oldest **terminal** rows first — an in-flight
     /// job must never be evicted out from under the poller.
-    pub fn append_jobs(&self, new_jobs: Vec<JobReport>) {
-        let key = self.tenant_key();
+    ///
+    /// Returns `false`, storing nothing, when the session ended while the batch was
+    /// dispatching. The rows belong to the operator or tenant that left: stored, the
+    /// poller would resolve their device ids against the new session's API, the
+    /// invalidation would hit the new session's caches, and the Jobs tab would show
+    /// them to whoever signed in next.
+    #[must_use]
+    pub fn append_jobs(&self, session: &JobSession, new_jobs: Vec<JobReport>) -> bool {
         let Ok(mut guard) = self.jobs.lock() else {
             warn!("job store poisoned; dispatched jobs will not appear in the Jobs tab");
-            return;
+            // Not a session change: the caller still reports the batch it sent.
+            return true;
         };
+        // Under the jobs lock: `clear_jobs` bumps before it takes this lock, so an
+        // append either lands before the clear (and is wiped by it) or sees the bump.
+        if !self.job_session_is_current(session) {
+            warn!(
+                count = new_jobs.len(),
+                "session changed while the batch was dispatching; its jobs were not recorded"
+            );
+            return false;
+        }
+        let key = session.tenant.clone();
         // `insert` hands back the `&mut` directly, so the re-lookup that needed an
         // `expect` is gone. That expect was the only one in production code, and it
         // sat inside a held guard — a panic there would have poisoned the job store
@@ -141,6 +158,7 @@ impl AppState {
                 true
             });
         }
+        true
     }
 
     /// Applies polled updates, matching on `JobReport.id`. Rows the caller no

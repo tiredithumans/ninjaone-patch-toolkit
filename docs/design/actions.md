@@ -291,6 +291,17 @@ appends its jobs before calling `try_claim_job_poller`, so a batch landing durin
 either seen (the poller keeps going) or strictly after the release (its own claim succeeds).
 Releasing unconditionally left jobs dispatched in that gap with no poller at all.
 
+The tenant stamp cannot see a sign-out and sign-in on the same instance, so the write path also
+carries a **`JobSession`** (tenant + jobs epoch; `clear_jobs` bumps the epoch before clearing).
+`run_action` samples it before `build_plan`; `dispatch_one` checks it after acquiring its permit
+and records a device still queued when the session ended as `Skipped` ("not sent") instead of
+POSTing it; and `append_jobs` re-checks it under the jobs lock, refusing the batch so `run_action`
+returns an error instead of the batch. All of these used to read the tenant only at store time,
+after the dispatch, so a sign-out mid-batch kept POSTing the queued devices and landed the
+departed session's jobs in the new one, where the poller resolved them against the new session's
+API and invalidated its caches. The Jobs tab's Clear is `clear_job_history`: it empties the list
+without ending the session.
+
 **NinjaOne v2 has no script-output endpoint.** A job resolves from `/activities` only, so surface
 the exit code plus the activity/series correlator.
 
