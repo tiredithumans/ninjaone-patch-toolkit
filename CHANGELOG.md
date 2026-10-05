@@ -25,6 +25,10 @@ version and start a fresh `[Unreleased]`.
   endpoint was rate-limiting or down, every request a query had queued behind the refresh tried
   it again in turn, piling onto the rate limit and stretching the wait. Requests that were waiting
   on a failed refresh now report its error, and the next query tries again.
+- **A plaintext instance URL is upgraded to https however it is spelled.** A hand-edited
+  `settings.json` holding `HTTP://`, `Http://`, `http:host` or `http:/host` was logged as
+  "upgrading to https" but kept in cleartext, so sign-in, token refreshes and API calls sent the
+  bearer token and client secret unencrypted. The URL is now rewritten from its parsed form.
 
 ## [0.15.1] - 2026-09-30
 
