@@ -339,8 +339,8 @@ fn GroupedPatches() -> impl IntoView {
                                 Memo::new(move |_| state.group_selection_state(&k_sel));
                             // This group's own entry, compared by pointer: another
                             // group loading or being ticked rewrites the map but
-                            // not this `Arc`, so this body's table — and any
-                            // focus inside it — is left alone.
+                            // not this `Arc`, so this body's table is not
+                            // re-cloned or re-rendered.
                             let members = Memo::new_with_compare(
                                 move |_| state.query.members.with(|m| m.get(&mem_key).cloned()),
                                 util::member_entry_changed,

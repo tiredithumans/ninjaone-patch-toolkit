@@ -300,7 +300,7 @@ pub(crate) struct QueryState {
     ///
     /// Each entry sits behind an `Arc` that is replaced, never mutated, so an open
     /// group's body can tell by pointer whether *its* entry changed: loading or
-    /// ticking another group must not rebuild this one's table (and drop focus).
+    /// ticking another group must not re-render this one's table.
     pub(super) members: RwSignal<BTreeMap<String, Arc<Vec<PatchRow>>>>,
     /// Stamp of the newest page/group-header request. A response carrying an older
     /// stamp is dropped: requests overlap (Next clicked twice, a sort change while

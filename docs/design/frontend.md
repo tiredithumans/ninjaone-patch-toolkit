@@ -89,8 +89,9 @@ reloading it) re-ran the outer closure, the new trap would record the outgoing d
 opener and return focus to a detached node on close. Escape closes it; it has no action buttons
 (dispatch stays on the one `ActionBar`).
 
-**A table re-renders only the rows whose data changed, so focus inside it survives updates.**
-Rebuilding a list re-creates its DOM and drops keyboard focus. An open group's body reads its
+**A table re-renders only the rows whose data changed.** Leptos rebuilds a re-run list in
+place, so focus already survived a full re-render; the cost is the clone and the diff of every
+row on every tick, which grows with open groups and batch size. An open group's body reads its
 own `query.members` slot through a `Memo` compared by `Arc::ptr_eq`
 (`util::member_entry_changed`), so a slot is always replaced with a fresh `Arc` and never
 mutated in place — an in-place edit would never be seen. The Jobs table is a keyed `<For>`

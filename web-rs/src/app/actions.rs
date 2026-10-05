@@ -1019,9 +1019,9 @@ pub(crate) fn JobsTable() -> impl IntoView {
             <h3 class="jobs-heading">"This session"</h3>
 
             // Keyed rather than rebuilt: an `action:progress` event re-renders only
-            // the rows it advanced (see `util::job_row_key`), so focus on another
-            // row's Retry survives it. The empty check is a `Show`, so a progress
-            // tick never re-creates the table either.
+            // the rows it advanced (see `util::job_row_key`) instead of cloning and
+            // diffing all of them. The empty check is a `Show`, so a progress tick
+            // never re-runs the table either.
             <Show
                 when=move || state.actions.jobs.with(|jobs| !jobs.is_empty())
                 fallback=|| {
