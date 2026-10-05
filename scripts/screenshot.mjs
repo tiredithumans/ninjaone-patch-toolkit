@@ -145,6 +145,9 @@ export async function capture(url) {
     const page = await browser.newPage({
       viewport: { width: WIDTH, height: HEIGHT },
       deviceScaleFactor: DSF,
+      // The app's theme defaults to `system`, so this is what renders it dark — the
+      // README image uses the dark theme.
+      colorScheme: "dark",
       // Accept the throwaway self-signed cert from the local HTTPS server above.
       ignoreHTTPSErrors: true,
     });
