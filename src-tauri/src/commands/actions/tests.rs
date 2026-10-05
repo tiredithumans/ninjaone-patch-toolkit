@@ -859,6 +859,7 @@ async fn a_tick_reads_each_devices_feed_once_and_resolves_every_job_on_it() {
         &mut claimed,
         &mut confirmed,
         now,
+        8,
     )
     .await;
 
@@ -900,6 +901,7 @@ async fn resolved_against_a_completed_apply(pending: Vec<JobReport>) -> Vec<JobR
         &mut HashSet::new(),
         &mut HashSet::new(),
         now,
+        8,
     )
     .await;
     assert_eq!(updates[0].state, JobState::Completed);
@@ -1045,6 +1047,7 @@ async fn two_same_kind_jobs_on_one_device_share_a_read_but_not_an_activity() {
         &mut HashSet::new(),
         &mut HashSet::new(),
         now,
+        8,
     )
     .await;
 
@@ -1115,16 +1118,99 @@ async fn a_confirmed_series_narrows_the_next_read() {
     let mut claimed = HashSet::new();
     let mut confirmed = HashSet::new();
 
-    let first = poller::resolve_pending(&api, vec![job], &mut claimed, &mut confirmed, now).await;
+    let first =
+        poller::resolve_pending(&api, vec![job], &mut claimed, &mut confirmed, now, 8).await;
     assert_eq!(first[0].state, JobState::Running);
     assert!(confirmed.contains("uid-9"));
-    poller::resolve_pending(&api, first, &mut claimed, &mut confirmed, now).await;
+    poller::resolve_pending(&api, first, &mut claimed, &mut confirmed, now, 8).await;
 
     let requests = server.received_requests().await.expect("requests");
     let urls: Vec<String> = requests.iter().map(|r| r.url.to_string()).collect();
     assert!(!urls[0].contains("seriesUid"), "{}", urls[0]);
     assert!(urls[1].contains("seriesUid=uid-9"), "{}", urls[1]);
     assert!(urls[1].contains("df=id%3D7"), "{}", urls[1]);
+}
+
+/// Records when each `/activities` read arrives; every answer takes `delay`, so a
+/// read is in flight from its arrival until `delay` later.
+struct ArrivalLog {
+    arrivals: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    delay: std::time::Duration,
+}
+
+impl wiremock::Respond for ArrivalLog {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        self.arrivals
+            .lock()
+            .expect("arrivals")
+            .push(std::time::Instant::now());
+        ResponseTemplate::new(200)
+            .set_body_json(json!([]))
+            .set_delay(self.delay)
+    }
+}
+
+/// A tick's reads are bounded like the dispatch POSTs. They were spawned all at
+/// once, so a 500-device batch put 500 GETs on the wire every 15 s, and a 429
+/// parked every one of them on its `Retry-After` together.
+#[tokio::test]
+async fn a_tick_keeps_at_most_the_cap_of_reads_in_flight() {
+    const CAP: usize = 2;
+    const DEVICES: i64 = 6;
+    let delay = std::time::Duration::from_millis(300);
+    let arrivals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/activities"))
+        .respond_with(ArrivalLog {
+            arrivals: std::sync::Arc::clone(&arrivals),
+            delay,
+        })
+        .mount(&server)
+        .await;
+
+    let now = Utc::now();
+    let pending: Vec<JobReport> = (0..DEVICES)
+        .map(|d| {
+            pending_job(
+                d as u64 + 1,
+                d + 1,
+                ActionKind::OsPatchScan,
+                now.timestamp(),
+            )
+        })
+        .collect();
+    let updates = poller::resolve_pending(
+        &mock_api(&server),
+        pending,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+        now,
+        CAP,
+    )
+    .await;
+    assert_eq!(updates.len(), DEVICES as usize);
+
+    let arrivals = arrivals.lock().expect("arrivals").clone();
+    assert_eq!(
+        arrivals.len(),
+        DEVICES as usize,
+        "still one read per device"
+    );
+    // Reads that arrived within (most of) one response delay of each other were
+    // in flight together.
+    let overlap = delay - std::time::Duration::from_millis(100);
+    let peak = arrivals
+        .iter()
+        .map(|start| {
+            arrivals
+                .iter()
+                .filter(|t| **t >= *start && t.duration_since(*start) < overlap)
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(peak <= CAP, "{peak} reads were in flight at once");
 }
 
 /// A retry is rebuilt from what the job recorded, so the job must record this
@@ -1232,7 +1318,10 @@ async fn a_device_queued_when_the_session_ends_is_not_sent() {
     live.store(false, Ordering::SeqCst);
     drop(ahead);
 
-    assert!(queued.await.is_none(), "a queued device must not be sent");
+    assert!(
+        queued.await.outcome.is_none(),
+        "a queued device must not be sent"
+    );
     assert!(
         server
             .received_requests()
@@ -1243,9 +1332,100 @@ async fn a_device_queued_when_the_session_ends_is_not_sent() {
 
     // A live session sends as before.
     live.store(true, Ordering::SeqCst);
-    let sent = dispatch::send_if_current(&ctx, 7, &sem).await;
+    let sent = dispatch::send_if_current(&ctx, 7, &sem).await.outcome;
     assert!(matches!(sent, Some(Ok(None))), "{sent:?}");
     assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+}
+
+/// A device's dispatch time is when its POST goes out, not when its batch began.
+/// It was stamped before the permit, so a device queued behind slow sends carried
+/// a dispatch time minutes before its request: the wait came off its job timeout
+/// and lowered the poller's activity floor below the send.
+#[tokio::test]
+async fn a_queued_device_is_stamped_when_its_turn_comes() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204).set_delay(std::time::Duration::from_millis(400)))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/8/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let ctx = scan_context(mock_api(&server), Arc::new(AtomicBool::new(true)));
+    let sem = tokio::sync::Semaphore::new(1);
+
+    // Device 7 is polled first and takes the only permit; device 8 queues.
+    let first = async {
+        let turn = dispatch::send_if_current(&ctx, 7, &sem).await;
+        (turn, Utc::now())
+    };
+    let ((first, first_done), second) =
+        tokio::join!(first, dispatch::send_if_current(&ctx, 8, &sem));
+
+    assert!(matches!(first.outcome, Some(Ok(None))));
+    assert!(matches!(second.outcome, Some(Ok(None))));
+    assert!(
+        second.at >= first_done - chrono::Duration::milliseconds(50),
+        "device 8 was stamped at {} but could only send after {}",
+        second.at,
+        first_done
+    );
+}
+
+/// The same, one level up: the job a queued device records carries the time its
+/// turn came, not the time its task started. The delay is over a second because
+/// `dispatched_ts` has one-second resolution.
+#[tokio::test]
+async fn a_queued_devices_job_records_when_it_was_sent() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204).set_delay(std::time::Duration::from_millis(1100)))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/8/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let ctx = scan_context(mock_api(&server), Arc::new(AtomicBool::new(true)));
+    let sem = tokio::sync::Semaphore::new(1);
+    let target = |device_id: i64| PlannedTarget {
+        device_id,
+        device_name: format!("srv-{device_id}"),
+        organization: "Contoso".into(),
+        offline: false,
+    };
+    let (seven, eight) = (target(7), target(8));
+
+    // Device 7 is polled first and takes the only permit; device 8 queues.
+    let first = async {
+        let job = dispatch::send_and_record(&ctx, &seven, 1, &sem).await;
+        (job, Utc::now())
+    };
+    let ((first, first_done), second) =
+        tokio::join!(first, dispatch::send_and_record(&ctx, &eight, 2, &sem));
+
+    assert_eq!(first.state, JobState::Running);
+    assert_eq!(second.state, JobState::Running);
+    assert!(
+        second.dispatched_ts >= first_done.timestamp(),
+        "device 8's job says it was sent at {} ({}), but it could only send after {}",
+        second.dispatched_ts,
+        second.dispatched_at,
+        first_done
+    );
 }
 
 /// The session check before the send is not enough on its own: a 429 parks the
@@ -1287,6 +1467,7 @@ async fn a_dispatch_retry_after_the_session_ends_is_not_sent() {
     };
     let outcome = dispatch::send_if_current(&ctx, 7, &sem)
         .await
+        .outcome
         .expect("the session was live when the permit came");
     ender.await.expect("ender");
 

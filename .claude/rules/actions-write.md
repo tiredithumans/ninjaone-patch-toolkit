@@ -58,8 +58,8 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   and every send attempt (retries too, via `with_send_guard`) re-checks the `JobSession`
   sampled before the first `.await`.
   → `docs/design/actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim`
-- **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`):
-  `statusCode` is lifecycle, `activityResult` is the verdict, exit code from `data`; `newerThan`
-  is an activity **id**, so the time floor is applied client-side; `is_action_activity(kind,
-  type)` accepts only the types that kind emits.
+- **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`,
+  at most `MAX_FEED_READS_IN_FLIGHT` in flight): `statusCode` is lifecycle, `activityResult` is
+  the verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is
+  applied client-side; `is_action_activity(kind, type)` accepts only the types that kind emits.
   → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`

@@ -1,9 +1,11 @@
 //! The background job poller that walks dispatched jobs to a terminal state.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use tauri::{AppHandle, Manager};
+use tokio::sync::Semaphore;
 use tracing::warn;
 
 use super::dispatch::invalidate_after;
@@ -15,6 +17,12 @@ use crate::state::{AppState, JobSession};
 
 /// How often the poller re-reads the activity feed for unresolved jobs.
 const POLL_INTERVAL_SECS: u64 = 15;
+
+/// How many `/activities` reads one tick keeps in flight. The default dispatch
+/// concurrency, but not that setting: an operator who lowers "Dispatch
+/// concurrency" to send cautiously would otherwise also slow every status check of
+/// a large batch to one read at a time. Reads change nothing on a device.
+const MAX_FEED_READS_IN_FLIGHT: usize = 8;
 
 /// Background poller that walks unresolved jobs to a terminal state.
 ///
@@ -81,7 +89,15 @@ async fn poll_tick(
         .iter()
         .filter_map(|j| j.activity_id)
         .collect();
-    let updates = resolve_pending(&api, pending, &mut claimed, confirmed_series, now).await;
+    let updates = resolve_pending(
+        &api,
+        pending,
+        &mut claimed,
+        confirmed_series,
+        now,
+        MAX_FEED_READS_IN_FLIGHT,
+    )
+    .await;
 
     let tick = settle_tick(&app.state::<AppState>(), session, updates);
     // Close out the audit records opened at dispatch, now that the outcome and exit
@@ -246,18 +262,28 @@ pub(super) fn feed_reads(
 ///
 /// `confirmed_series` gains every pending job's series uid that its device's feed
 /// shows on a real activity, so later ticks may narrow to it (see [`feed_reads`]).
+///
+/// At most `max_reads` reads are in flight at once, as `dispatch_batch` bounds the
+/// POSTs. They were all spawned at once, so a 500-device batch put 500 GETs on the
+/// wire every tick, and when NinjaOne answered with 429s every read parked on its
+/// `Retry-After` and retried together, so each tick ran long and hit the limit
+/// again.
 pub(super) async fn resolve_pending(
     api: &NinjaApiClient,
     pending: Vec<JobReport>,
     claimed: &mut HashSet<i64>,
     confirmed_series: &mut HashSet<String>,
     now: DateTime<Utc>,
+    max_reads: usize,
 ) -> Vec<JobReport> {
     let mut feeds: HashMap<i64, anyhow::Result<Vec<Activity>>> = HashMap::new();
+    let sem = Arc::new(Semaphore::new(max_reads.max(1)));
     let mut set = tokio::task::JoinSet::new();
     for read in feed_reads(&pending, confirmed_series) {
         let api = api.clone();
+        let sem = Arc::clone(&sem);
         set.spawn(async move {
+            let _permit = sem.acquire().await;
             let result = api
                 .activities(
                     Some(read.device_id),

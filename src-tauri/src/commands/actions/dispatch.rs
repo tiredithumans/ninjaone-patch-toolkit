@@ -139,26 +139,7 @@ async fn dispatch_one(
     index: usize,
     sem: &Semaphore,
 ) -> JobReport {
-    let dispatched_at = Utc::now();
-    let mut job = JobReport {
-        id: ctx.id_base + index as u64,
-        batch_id: ctx.batch_id,
-        device_id: target.device_id,
-        device_name: target.device_name.clone(),
-        organization: target.organization.clone(),
-        kind: ctx.kind,
-        detail: ctx.detail.clone(),
-        dry_run: ctx.dry_run,
-        state: JobState::Queued,
-        dispatched_at: fmt_ts(dispatched_at),
-        dispatched_ts: dispatched_at.timestamp(),
-        finished_at: None,
-        duration_seconds: None,
-        activity_id: None,
-        series_uid: None,
-        exit_code: None,
-        request: ctx.job_requests.get(&target.device_id).cloned(),
-    };
+    let job_id = ctx.id_base + index as u64;
 
     // Written before the request goes out, so a crash mid-batch still leaves
     // evidence of what was attempted.
@@ -167,7 +148,7 @@ async fn dispatch_one(
         instance: ctx.instance.clone(),
         client_id: ctx.client_id.clone(),
         batch_id: ctx.batch_id,
-        job_id: job.id,
+        job_id,
         kind: ctx.kind,
         device_id: target.device_id,
         device_name: target.device_name.clone(),
@@ -190,11 +171,7 @@ async fn dispatch_one(
     }])
     .await;
 
-    match send_if_current(ctx, target.device_id, sem).await {
-        Some(outcome) => record_dispatch(&mut job, outcome, Utc::now()),
-        // Terminal, so the closing record below says it never went out.
-        None => job.finish(JobState::Skipped(NOT_SENT_SESSION_ENDED.into()), Utc::now()),
-    }
+    let job = send_and_record(ctx, target, job_id, sem).await;
 
     // A job settled at dispatch (NinjaOne rejected the request outright) never
     // reaches the poller, which writes every other closing record — so without this
@@ -211,20 +188,81 @@ async fn dispatch_one(
     job
 }
 
-/// Sends to one device once a permit is free — unless the session ended while it
-/// waited, in which case nothing is sent and the result is `None`.
+/// Waits for a permit, sends, and builds the device's job from that turn — the
+/// part of [`dispatch_one`] between its two audit writes.
 ///
-/// The check sits after the permit on purpose: that wait is the long one.
+/// Separate so a test can drive it without writing to the operator's audit log or
+/// needing an `AppHandle`: the job's dispatch time must come from the turn, and
+/// nothing else pins that.
+pub(super) async fn send_and_record(
+    ctx: &DispatchContext,
+    target: &PlannedTarget,
+    job_id: u64,
+    sem: &Semaphore,
+) -> JobReport {
+    let turn = send_if_current(ctx, target.device_id, sem).await;
+    let dispatched_at = turn.at;
+    let mut job = JobReport {
+        id: job_id,
+        batch_id: ctx.batch_id,
+        device_id: target.device_id,
+        device_name: target.device_name.clone(),
+        organization: target.organization.clone(),
+        kind: ctx.kind,
+        detail: ctx.detail.clone(),
+        dry_run: ctx.dry_run,
+        state: JobState::Queued,
+        dispatched_at: fmt_ts(dispatched_at),
+        dispatched_ts: dispatched_at.timestamp(),
+        finished_at: None,
+        duration_seconds: None,
+        activity_id: None,
+        series_uid: None,
+        exit_code: None,
+        request: ctx.job_requests.get(&target.device_id).cloned(),
+    };
+
+    match turn.outcome {
+        Some(outcome) => record_dispatch(&mut job, outcome, Utc::now()),
+        // Terminal, so `dispatch_one`'s closing record says it never went out.
+        None => job.finish(JobState::Skipped(NOT_SENT_SESSION_ENDED.into()), Utc::now()),
+    }
+    job
+}
+
+/// One device's turn at the semaphore: when it came, and what the send said.
+pub(super) struct SendTurn {
+    /// Taken once the permit is held and the session re-checked, i.e. as the POST
+    /// goes out (for a device not sent, as its turn came). It is the job's
+    /// `dispatched_at`.
+    pub(super) at: chrono::DateTime<Utc>,
+    /// `None` when the session ended while the device waited: nothing was sent.
+    pub(super) outcome: Option<anyhow::Result<Option<ScriptDispatch>>>,
+}
+
+/// Sends to one device once a permit is free — unless the session ended while it
+/// waited, in which case nothing is sent and the outcome is `None`.
+///
+/// The check sits after the permit on purpose: that wait is the long one. So does
+/// the dispatch time. It used to be taken before the wait, and with 8 permits, a
+/// 45 s request timeout and up to 500 devices, the last devices of a batch could
+/// queue for many minutes. That time came off their 45-minute job timeout, and the
+/// poller's activity floor (`dispatched_ts` less 5 s) reached back far enough for
+/// the third-tier heuristic to bind an activity older than the send.
 pub(super) async fn send_if_current(
     ctx: &DispatchContext,
     device_id: i64,
     sem: &Semaphore,
-) -> Option<anyhow::Result<Option<ScriptDispatch>>> {
+) -> SendTurn {
     let _permit = sem.acquire().await;
-    if !(ctx.still_current)() {
-        return None;
-    }
-    Some(send_action(ctx, device_id).await)
+    let current = (ctx.still_current)();
+    let at = Utc::now();
+    let outcome = if current {
+        Some(send_action(ctx, device_id).await)
+    } else {
+        None
+    };
+    SendTurn { at, outcome }
 }
 
 /// Records what the dispatch POST said on the job.
