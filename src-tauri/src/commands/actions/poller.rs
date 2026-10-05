@@ -135,7 +135,8 @@ pub(super) struct SettledTick {
 /// acted, and the trail should say how — labelled with the session it was
 /// dispatched in. The exception is a tenant change: the feed was then read through
 /// the new instance's client, so its verdict says nothing about this device, and
-/// the record is closed as unresolved instead ([`audit::AuditEntry::unresolved`]).
+/// nothing is written — the switch ran `clear_jobs`, which already closed this row
+/// as unresolved, and a second line would only repeat it.
 pub(super) fn settle_tick(
     state: &AppState,
     session: &JobSession,
@@ -162,15 +163,13 @@ pub(super) fn settle_tick(
                     invalidate_after(job.kind, job.dry_run, state);
                 }
             }
-            let (instance, client_id) = (
-                session.instance().to_string(),
-                session.client_id().map(str::to_string),
-            );
-            closing.push(if was_applied || read_on_this_tenant {
-                audit::AuditEntry::closing(&job, instance, client_id)
-            } else {
-                audit::AuditEntry::unresolved(&job, instance, client_id)
-            });
+            if was_applied || read_on_this_tenant {
+                closing.push(audit::AuditEntry::closing(
+                    &job,
+                    session.instance().to_string(),
+                    session.client_id().map(str::to_string),
+                ));
+            }
         }
         if was_applied {
             applied.push(job);

@@ -131,13 +131,13 @@ impl AuditEntry {
     }
 
     /// The closing record for a job whose session ended before its outcome was
-    /// known — refused at `append_jobs`, wiped by `clear_jobs`, or polled across a
-    /// tenant switch. Without it the trail held a "dispatching" record with no close,
+    /// known — refused at `append_jobs` or wiped by `clear_jobs` (which every tenant
+    /// switch runs). Without it the trail held a "dispatching" record with no close,
     /// which reads the same as a crash mid-batch.
     ///
-    /// No activity id or exit code: across a tenant switch they were read from the
-    /// other instance's feed. The series uid came from the dispatch response, so it
-    /// stays as the correlator.
+    /// No activity id or exit code: an unresolved close claims no outcome, so it
+    /// carries nothing that reads like one. The series uid came from the dispatch
+    /// response, so it stays as the correlator.
     pub fn unresolved(job: &JobReport, instance: String, client_id: Option<String>) -> Self {
         Self {
             outcome: UNRESOLVED_SESSION_ENDED.into(),

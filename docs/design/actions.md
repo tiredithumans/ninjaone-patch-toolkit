@@ -329,14 +329,15 @@ tenant is unchanged: after a same-instance sign-in the device really did change,
 session's caches hold that same fleet. It never happens across a tenant switch, where the verdict
 came from the other instance and the caches belong to it. A settled job still gets
 its closing audit record, labelled with the session's instance and client id (not Settings read
-now), unless the tenant changed: the feed was then read from the other instance, so the record is
-closed as unresolved instead.
+now), unless the tenant changed. The feed was then read from the other instance, and the switch's
+`clear_jobs` has already closed the row as unresolved, so the tick writes nothing.
 
 **Every opening "dispatching" audit record gets a close**, even when the session ends first. The
 close is `AuditEntry::unresolved` ("unresolved: session ended before the outcome was known", with
-no activity id or exit code) in three places. `clear_jobs` returns one for each unsettled row it
-drops, and the async callers write it off the runtime. `run_action` writes one for each unsettled
-row of a batch refused at `append_jobs`. `settle_tick` writes one across a tenant change. A
+no activity id or exit code) in two places, so each job gets at most one. `clear_jobs` returns one
+for each unsettled row it drops, and the async callers write it off the runtime. Every tenant
+switch runs `clear_jobs`, so this also covers a tick that spans a switch. `run_action` writes one
+for each unsettled row of a batch refused at `append_jobs`. A
 same-tenant tick that settles a row `clear_jobs` already closed adds its real verdict after the
 unresolved line. The log is append-only, so the later line is the more informed one.
 
