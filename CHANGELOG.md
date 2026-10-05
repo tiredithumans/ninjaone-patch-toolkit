@@ -33,6 +33,10 @@ version and start a fresh `[Unreleased]`.
   refresh token, client secret or PKCE verifier to the redirect target, and a redirected patch
   action was sent again to a host the app never chose. A redirect now fails the request with
   its status.
+- **A patch feed whose paging cursor loops now fails instead of running forever.** A server
+  that alternated between two cursors kept the query fetching the same pages until the app ran
+  out of memory. A cursor seen earlier in the same fetch is now an error, and a fetch stops with
+  an error after 10,000 pages.
 
 ## [0.15.1] - 2026-09-30
 
