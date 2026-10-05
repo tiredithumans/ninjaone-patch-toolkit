@@ -46,6 +46,29 @@ version and start a fresh `[Unreleased]`.
   password in a URL (`https://user:…@host`) and a SAS `sig=` in a query string are now redacted,
   through the closing quote when the value is quoted. Ordinary flags such as `-PassThru`,
   `-KeyPath` and `-RegistryKey` keep their values in the log instead of showing `<redacted>`.
+- **A patch-action plan prepared before a sign-out can no longer be confirmed after it.** If you
+  signed out and back in, or switched instance, while the confirmation dialog was still being
+  prepared, the plan's approval was issued to the new session, and confirming it could dispatch
+  under a sign-in that never reviewed it. Planning now fails with "Plan the action again".
+- **Signing out during a patch action stops the devices still waiting to be sent.** A batch
+  larger than the concurrency setting kept sending to its queued devices after you signed out,
+  signed in again or switched instance, and its jobs then appeared in the new session's Jobs tab.
+  Devices still queued are now recorded as not sent, a notification says how many had already
+  been sent (the confirmation closes rather than offering to re-plan and send again), and none
+  of its jobs carry over to the new session. This includes a request waiting to retry after
+  NinjaOne rate-limited it, which used to retry under the next sign-in.
+- **Job status checks that span a sign-out no longer leak into the next session.** A status
+  check still running when you signed out, signed in again or switched instance sent the
+  previous session's jobs to the new session's Jobs tab, cleared the new instance's cached patch
+  data, and wrote the closing audit record under the new instance's name. Its results are now
+  kept out of the new session, and the audit record names the instance the action was sent to.
+  A job whose outcome was still unknown when the session ended is closed in the audit log as
+  unresolved instead of being left open.
+- **Clearing the Jobs list no longer stops tracking jobs that are still running.** **Clear
+  history** emptied the whole list, so a job still in progress was never checked again: its
+  outcome never appeared and the audit log never recorded one. The button is now **Clear
+  finished**, and it removes only jobs that have finished.
+
 ### Changed
 
 - **Selecting rows, opening patch groups and job status updates do less work.** The select-all

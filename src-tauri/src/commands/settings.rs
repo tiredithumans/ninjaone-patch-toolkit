@@ -325,7 +325,7 @@ pub async fn save_settings(
     if effects.tenant_changed {
         state.clear_lookups_cache();
         state.clear_last_result();
-        state.clear_jobs();
+        crate::actions::audit::record_off_runtime(state.clear_jobs()).await;
     }
     auth_applied?;
     // Toggling actions changes the OAuth scope the next sign-in requests, but the

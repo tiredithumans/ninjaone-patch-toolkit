@@ -95,7 +95,9 @@ A reporting pull is dozens of *sequential* cursor pages, so a gateway 502 on a l
 discard every page already accumulated — 5xx is the most common transient failure on that path,
 far more so than 429. But a 5xx on an acting POST is exactly the ambiguity
 `ReplaySafety::ActOnce` exists for (the gateway may have failed *after* the job reached the device
-queue), so writes are never replayed. 429/401 stay replayable for both.
+queue), so writes are never replayed. 429/401 stay replayable for both, but an `ActOnce` request
+on a client built with `with_send_guard` asks the guard before every attempt (see
+[actions.md](./actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim)).
 
 ## An ambiguous write fails with the `OutcomeUnknown` type, never a phrase
 

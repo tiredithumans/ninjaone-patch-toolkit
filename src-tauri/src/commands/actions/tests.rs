@@ -879,6 +879,142 @@ async fn a_tick_reads_each_devices_feed_once_and_resolves_every_job_on_it() {
     assert_eq!(claimed, HashSet::from([901, 902]));
 }
 
+/// Resolves `pending` against a device-7 feed holding one completed patch run —
+/// the async half of a tick, ahead of `settle_tick`.
+async fn resolved_against_a_completed_apply(pending: Vec<JobReport>) -> Vec<JobReport> {
+    let server = MockServer::start().await;
+    let now = Utc::now();
+    Mock::given(method("GET"))
+        .and(path("/api/v2/activities"))
+        .and(query_param("df", "id=7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 901, "activityType": "PATCH_MANAGEMENT",
+              "activityTime": (now.timestamp() - 2) as f64,
+              "statusCode": "COMPLETED", "activityResult": "SUCCESS" },
+        ])))
+        .mount(&server)
+        .await;
+    let updates = poller::resolve_pending(
+        &mock_api(&server),
+        pending,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+        now,
+    )
+    .await;
+    assert_eq!(updates[0].state, JobState::Completed);
+    updates
+}
+
+/// The control for the two tests below: a tick within one session applies,
+/// invalidates, emits and audits as it always has.
+#[tokio::test]
+async fn a_tick_within_one_session_settles_its_jobs() {
+    let state = AppState::new().expect("build state");
+    let ts = Utc::now().timestamp();
+    let apply = pending_job(1, 7, ActionKind::OsPatchApply, ts - 30);
+    assert!(state.append_jobs(&state.job_session(), vec![apply]));
+    let (session, pending) = state.pending_jobs();
+    let updates = resolved_against_a_completed_apply(pending).await;
+
+    let before = state.cache_epochs();
+    let tick = poller::settle_tick(&state, &session, updates);
+
+    assert_eq!(tick.applied.len(), 1);
+    assert!(tick.settled_any);
+    assert_ne!(state.cache_epochs(), before, "a settled apply invalidates");
+    assert_eq!(tick.closing.len(), 1);
+}
+
+/// A tick awaits the feed reads, and a sign-out and sign-in (same instance) can
+/// land in that time. `apply_job_updates` refused the departed session's rows, but
+/// the tick still emitted them, and the frontend merged them into the next
+/// operator's Jobs tab. The clear came first here, so it wrote the job's one close
+/// (unresolved) and the tick writes none.
+#[tokio::test]
+async fn a_tick_that_spans_a_sign_out_emits_nothing_to_the_next_session() {
+    let state = AppState::new().expect("build state");
+    let ts = Utc::now().timestamp();
+    let apply = pending_job(1, 7, ActionKind::OsPatchApply, ts - 30);
+    assert!(state.append_jobs(&state.job_session(), vec![apply]));
+    let (session, pending) = state.pending_jobs();
+    let updates = resolved_against_a_completed_apply(pending).await;
+
+    // Sign-out and sign-in while the tick was reading; the next operator dispatches.
+    let closings = state.clear_jobs();
+    assert_eq!(closings.len(), 1);
+    assert_eq!(closings[0].outcome, audit::UNRESOLVED_SESSION_ENDED);
+    let theirs = pending_job(2, 8, ActionKind::OsPatchApply, ts);
+    assert!(state.append_jobs(&state.job_session(), vec![theirs]));
+
+    let before = state.cache_epochs();
+    let tick = poller::settle_tick(&state, &session, updates);
+
+    assert!(tick.applied.is_empty(), "the old rows must not be emitted");
+    assert!(!tick.settled_any);
+    // Same instance: the device really changed and the next session's caches hold
+    // that same fleet, so they are still dropped for it.
+    assert_ne!(
+        state.cache_epochs(),
+        before,
+        "a same-tenant apply still invalidates"
+    );
+    assert_eq!(state.jobs_snapshot()[0].state, JobState::Running);
+    assert!(tick.closing.is_empty(), "clear_jobs already closed it");
+}
+
+/// The other order: the tick settles the job before the sign-out. The tick writes
+/// the verdict close, the row is terminal, and `clear_jobs` writes nothing more.
+#[tokio::test]
+async fn a_tick_that_settles_before_the_sign_out_closes_the_job_once() {
+    let state = AppState::new().expect("build state");
+    let ts = Utc::now().timestamp();
+    let apply = pending_job(1, 7, ActionKind::OsPatchApply, ts - 30);
+    assert!(state.append_jobs(&state.job_session(), vec![apply]));
+    let (session, pending) = state.pending_jobs();
+    let updates = resolved_against_a_completed_apply(pending).await;
+
+    let tick = poller::settle_tick(&state, &session, updates);
+    assert_eq!(tick.closing.len(), 1);
+    assert_eq!(tick.closing[0].instance, session.instance());
+
+    assert!(
+        state.clear_jobs().is_empty(),
+        "a settled row is not closed again"
+    );
+}
+
+/// Across a tenant switch the feed was read through the *new* instance's client,
+/// so a device id there is another machine and its verdict means nothing for this
+/// job. The switch's `clear_jobs` already closed it as unresolved, labelled with the
+/// instance it was sent to; the tick adds no second line, and no verdict read from
+/// the wrong tenant.
+#[tokio::test]
+async fn a_tick_that_spans_an_instance_switch_writes_no_verdict() {
+    let state = AppState::new().expect("build state");
+    let ts = Utc::now().timestamp();
+    let apply = pending_job(1, 7, ActionKind::OsPatchApply, ts - 30);
+    assert!(state.append_jobs(&state.job_session(), vec![apply]));
+    let (session, pending) = state.pending_jobs();
+    let updates = resolved_against_a_completed_apply(pending).await;
+
+    state.replace_settings(crate::settings::Settings {
+        instance_base_url: "https://other.ninjarmm.com".into(),
+        ..state.settings_snapshot()
+    });
+    let closings = state.clear_jobs();
+    assert_eq!(closings.len(), 1, "the switch closes the row once");
+    assert_eq!(closings[0].outcome, audit::UNRESOLVED_SESSION_ENDED);
+    assert_eq!(closings[0].instance, session.instance());
+
+    let before = state.cache_epochs();
+    let tick = poller::settle_tick(&state, &session, updates);
+
+    assert!(tick.applied.is_empty());
+    assert_eq!(state.cache_epochs(), before);
+    assert!(tick.closing.is_empty(), "no second record for the same job");
+}
+
 /// Two jobs of the *same* kind on one device share one read, and the claimed-id
 /// exclusion still hands each its own activity rather than both the newest.
 #[tokio::test]
@@ -1033,4 +1169,153 @@ fn a_job_records_what_a_retry_needs_for_its_own_device() {
     assert_eq!(rec.reboot_mode, Some(RebootMode::Forced));
     assert_eq!(rec.reason.as_deref(), Some("July cycle"));
     assert_eq!(rec.run_as, None, "the native endpoints run as the agent");
+}
+
+fn scan_context(
+    api: crate::api::NinjaApiClient,
+    live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> dispatch::DispatchContext {
+    let still_current: crate::api::SendGuard =
+        std::sync::Arc::new(move || live.load(std::sync::atomic::Ordering::SeqCst));
+    dispatch::DispatchContext {
+        api: api.with_send_guard(std::sync::Arc::clone(&still_current)),
+        kind: ActionKind::OsPatchScan,
+        script: None,
+        run_as: String::new(),
+        parameters: BTreeMap::new(),
+        reason: String::new(),
+        reboot_mode: RebootMode::Normal,
+        dry_run: false,
+        window_overridden: false,
+        detail: "scan".into(),
+        instance: "https://a.example".into(),
+        client_id: None,
+        confirm_prefix: None,
+        batch_id: 1,
+        id_base: 1,
+        job_requests: BTreeMap::new(),
+        still_current,
+    }
+}
+
+/// A batch wider than the semaphore queues devices behind the ones being sent. A
+/// sign-out or tenant switch while they waited used to let every one of them POST
+/// anyway, under a session that never confirmed the action. The session is checked
+/// after the permit — the long wait — so a device queued across the change is not
+/// sent at all.
+#[tokio::test]
+async fn a_device_queued_when_the_session_ends_is_not_sent() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Poll;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let live = Arc::new(AtomicBool::new(true));
+    let ctx = scan_context(mock_api(&server), Arc::clone(&live));
+    let sem = tokio::sync::Semaphore::new(1);
+
+    // Another device holds the only permit; ours queues behind it.
+    let ahead = sem.acquire().await.expect("permit");
+    let queued = dispatch::send_if_current(&ctx, 7, &sem);
+    tokio::pin!(queued);
+    let waiting =
+        std::future::poll_fn(|cx| Poll::Ready(queued.as_mut().poll(cx).is_pending())).await;
+    assert!(waiting, "still waiting for a permit");
+
+    // The session ends while it waits.
+    live.store(false, Ordering::SeqCst);
+    drop(ahead);
+
+    assert!(queued.await.is_none(), "a queued device must not be sent");
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+
+    // A live session sends as before.
+    live.store(true, Ordering::SeqCst);
+    let sent = dispatch::send_if_current(&ctx, 7, &sem).await;
+    assert!(matches!(sent, Some(Ok(None))), "{sent:?}");
+    assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+}
+
+/// The session check before the send is not enough on its own: a 429 parks the
+/// POST for its `Retry-After`, and every retry reads the token live. A sign-out
+/// and another operator's sign-in in that wait re-sent the departed session's
+/// action under the new operator's grant. The retry must ask the session again,
+/// and a request stopped there was rejected every time it went out — not sent.
+#[tokio::test]
+async fn a_dispatch_retry_after_the_session_ends_is_not_sent() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let live = Arc::new(AtomicBool::new(true));
+    let ctx = scan_context(mock_api(&server), Arc::clone(&live));
+    let sem = tokio::sync::Semaphore::new(1);
+
+    // The session ends while the first attempt's 429 backoff is running.
+    let ender = {
+        let live = Arc::clone(&live);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            live.store(false, Ordering::SeqCst);
+        })
+    };
+    let outcome = dispatch::send_if_current(&ctx, 7, &sem)
+        .await
+        .expect("the session was live when the permit came");
+    ender.await.expect("ender");
+
+    let mut job = pending_job(1, 7, ActionKind::OsPatchScan, Utc::now().timestamp());
+    record_dispatch(&mut job, outcome, Utc::now());
+    assert!(
+        matches!(&job.state, JobState::Skipped(why) if why.starts_with("not sent")),
+        "{:?}",
+        job.state
+    );
+    server.verify().await;
+}
+
+/// A device's progress event carries its row, and the frontend merges it into the
+/// Jobs list. Once the session has ended that list belongs to the next one, so an
+/// outcome landing after the sign-out must not be emitted at all.
+#[tokio::test]
+async fn a_dispatch_outcome_after_the_session_ends_is_not_emitted() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let server = MockServer::start().await;
+    let live = Arc::new(AtomicBool::new(true));
+    let ctx = scan_context(mock_api(&server), Arc::clone(&live));
+    let job = pending_job(1, 7, ActionKind::OsPatchScan, 0);
+
+    let ev = dispatch::device_progress(&ctx, 1, 2, &job).expect("live session emits");
+    assert_eq!(ev.jobs.len(), 1);
+
+    live.store(false, Ordering::SeqCst);
+    assert!(dispatch::device_progress(&ctx, 2, 2, &job).is_none());
 }

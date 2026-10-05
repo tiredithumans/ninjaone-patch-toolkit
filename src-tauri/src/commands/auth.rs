@@ -42,7 +42,7 @@ pub struct AuthStatus {
 /// path that must not reuse it, and does not.
 #[tauri::command]
 pub async fn sign_in(state: State<'_, AppState>) -> Result<(), UiError> {
-    clear_session_state(&state);
+    clear_session_state(&state).await;
     if state.auth.restore_session().await {
         return Ok(());
     }
@@ -59,14 +59,14 @@ pub async fn sign_in(state: State<'_, AppState>) -> Result<(), UiError> {
 pub async fn reauthorize(state: State<'_, AppState>) -> Result<(), UiError> {
     // Same reason as `sign_in`: re-consent runs the full browser flow, so the
     // operator who comes back may not be the one who left.
-    clear_session_state(&state);
+    clear_session_state(&state).await;
     state.auth.logout_async().await.map_err(UiError::from)?;
     state.auth.login_pkce().await.map_err(UiError::from)
 }
 
 #[tauri::command]
 pub async fn sign_out(state: State<'_, AppState>) -> Result<(), UiError> {
-    clear_session_state(&state);
+    clear_session_state(&state).await;
     state.auth.logout_async().await.map_err(UiError::from)
 }
 
@@ -84,12 +84,14 @@ pub async fn sign_out(state: State<'_, AppState>) -> Result<(), UiError> {
 ///
 /// `clear_last_result` also bumps the result-cache epoch, so a whole-fleet query
 /// still in flight cannot store the departing operator's rows after this returns.
-fn clear_session_state(state: &AppState) {
+///
+/// Async only to write the closing audit records for jobs it drops unsettled.
+async fn clear_session_state(state: &AppState) {
     // Also drops the whole-fleet device and current-patch caches.
     state.clear_lookups_cache();
     state.clear_last_result();
     // Also clears any pending confirmation token.
-    state.clear_jobs();
+    crate::actions::audit::record_off_runtime(state.clear_jobs()).await;
 }
 
 /// The session as the UI should render it.
@@ -178,16 +180,16 @@ mod tests {
     /// cover this case — a second operator signing in on the same instance is the
     /// same tenant — so a dropped clear here means their predecessor's patch rows
     /// and dispatch history stay on screen.
-    #[test]
-    fn signing_out_drops_the_cached_result_and_the_job_history() {
+    #[tokio::test]
+    async fn signing_out_drops_the_cached_result_and_the_job_history() {
         let state = AppState::new().expect("build state");
         state.store_last_result_if_current(state.begin_query(), sample_result());
-        state.append_jobs(vec![sample_job()]);
+        assert!(state.append_jobs(&state.job_session(), vec![sample_job()]));
 
         assert!(state.with_current_result(|_| ()).unwrap().is_some());
         assert_eq!(state.jobs_snapshot().len(), 1);
 
-        clear_session_state(&state);
+        clear_session_state(&state).await;
 
         assert!(
             state.with_current_result(|_| ()).unwrap().is_none(),

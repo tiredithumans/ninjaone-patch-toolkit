@@ -1,6 +1,7 @@
 //! The dispatched-job store, the single-claim poller slot and the confirm-token
 //! slot — the mutable action state `AppState` carries between IPC calls.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 
 use super::{AppState, TenantKey};
+use crate::actions::audit::AuditEntry;
 use crate::actions::{JobReport, MAX_JOBS};
 
 /// How long a confirmation token issued by `plan_action` stays usable. Short
@@ -23,7 +25,7 @@ pub struct PendingConfirm {
     pub token: String,
     pub request_hash: String,
     pub issued_at: Instant,
-    /// The tenant the plan was approved against.
+    /// The session (tenant + jobs epoch) the plan was built and approved under.
     ///
     /// `request_hash` destructures `ActionRequest` exhaustively — a new field there
     /// is a compile error — but `ActionRequest` carries no instance or client id, so
@@ -33,7 +35,60 @@ pub struct PendingConfirm {
     /// inside the 5-minute window. Every other cache in `AppState` is tenant-stamped
     /// for exactly this reason; the one slot that authorizes writes to real devices
     /// was not. It has to live on the slot rather than in the hash for that reason.
+    ///
+    /// The epoch half covers what the tenant cannot: a sign-out and sign-in as a
+    /// different operator on the same instance is the same tenant.
+    session: JobSession,
+}
+
+/// The session a write-path call started under: the tenant plus the jobs epoch,
+/// sampled by [`AppState::job_session`] before the call's first `.await`.
+///
+/// `plan_action`, `run_action` and each poll tick await the network for seconds to
+/// minutes, and a sign-out, sign-in, re-authorization or tenant switch can land in
+/// that gap. Every store at the end of such a call used to read `tenant_key()` at
+/// *store* time, so whatever the departed session had computed — a confirmation
+/// token, a dispatched batch, a poll tick's updates — was written into the new
+/// session as if it belonged there. Carrying the session from the start, and
+/// re-checking it under the slot lock, is the same protocol as [`QueryToken`].
+///
+/// [`QueryToken`]: super::QueryToken
+#[derive(Clone)]
+pub struct JobSession {
     tenant: TenantKey,
+    epoch: u64,
+}
+
+impl JobSession {
+    /// The instance this session acted on, for labelling an audit record written
+    /// after the session may have ended — never the settings read at write time.
+    pub fn instance(&self) -> &str {
+        &self.tenant.instance_base_url
+    }
+
+    /// The client-id half of the same label.
+    pub fn client_id(&self) -> Option<&str> {
+        self.tenant.client_id.as_deref()
+    }
+
+    /// The "unresolved" closing records for every job in `jobs` that has no outcome
+    /// yet, labelled with this session.
+    pub fn unresolved_closings(&self, jobs: &[JobReport]) -> Vec<AuditEntry> {
+        unresolved_closings(&self.tenant, jobs)
+    }
+}
+
+fn unresolved_closings(tenant: &TenantKey, jobs: &[JobReport]) -> Vec<AuditEntry> {
+    jobs.iter()
+        .filter(|j| !j.state.is_terminal())
+        .map(|j| {
+            AuditEntry::unresolved(
+                j,
+                tenant.instance_base_url.clone(),
+                tenant.client_id.clone(),
+            )
+        })
+        .collect()
 }
 
 /// RAII claim on the single job-poller slot, issued by
@@ -69,15 +124,60 @@ impl AppState {
         (batch, base)
     }
 
-    /// Appends newly dispatched rows for the current tenant, trimming history to
+    /// The session a write-path call is starting under. Take it before the first
+    /// `.await` and hand it to every store the call makes.
+    pub fn job_session(&self) -> JobSession {
+        // The epoch is read first. A tenant switch replaces the settings and *then*
+        // bumps, so this order can pair an old epoch with a new tenant (stale either
+        // way) but never a new epoch with the old tenant.
+        let epoch = self.job_epoch.load(Ordering::SeqCst);
+        JobSession {
+            tenant: self.tenant_key(),
+            epoch,
+        }
+    }
+
+    /// Whether `session` is still the live one: no clear since it was taken, and the
+    /// same tenant. Stores call this under their slot lock; the dispatch loop calls
+    /// it before each send.
+    pub fn job_session_is_current(&self, session: &JobSession) -> bool {
+        self.job_epoch.load(Ordering::SeqCst) == session.epoch
+            && self.tenant_key() == session.tenant
+    }
+
+    /// Whether the tenant is still the one `session` was taken under, whatever has
+    /// happened to the epoch. The poller asks this to decide whether a feed it read
+    /// came from the instance its jobs were dispatched to.
+    pub fn is_session_tenant(&self, session: &JobSession) -> bool {
+        self.tenant_key() == session.tenant
+    }
+
+    /// Appends newly dispatched rows for `session`, trimming history to
     /// [`MAX_JOBS`] by dropping the oldest **terminal** rows first — an in-flight
     /// job must never be evicted out from under the poller.
-    pub fn append_jobs(&self, new_jobs: Vec<JobReport>) {
-        let key = self.tenant_key();
+    ///
+    /// Returns `false`, storing nothing, when the session ended while the batch was
+    /// dispatching. The rows belong to the operator or tenant that left: stored, the
+    /// poller would resolve their device ids against the new session's API, the
+    /// invalidation would hit the new session's caches, and the Jobs tab would show
+    /// them to whoever signed in next.
+    #[must_use]
+    pub fn append_jobs(&self, session: &JobSession, new_jobs: Vec<JobReport>) -> bool {
         let Ok(mut guard) = self.jobs.lock() else {
             warn!("job store poisoned; dispatched jobs will not appear in the Jobs tab");
-            return;
+            // Not a session change: the caller still reports the batch it sent.
+            return true;
         };
+        // Under the jobs lock: `clear_jobs` bumps before it takes this lock, so an
+        // append either lands before the clear (and is wiped by it) or sees the bump.
+        if !self.job_session_is_current(session) {
+            warn!(
+                count = new_jobs.len(),
+                "session changed while the batch was dispatching; its jobs were not recorded"
+            );
+            return false;
+        }
+        let key = session.tenant.clone();
         // `insert` hands back the `&mut` directly, so the re-lookup that needed an
         // `expect` is gone. That expect was the only one in production code, and it
         // sat inside a held guard — a panic there would have poisoned the job store
@@ -99,35 +199,58 @@ impl AppState {
                 true
             });
         }
+        true
     }
 
-    /// Applies polled updates, matching on `JobReport.id`. Rows the caller no
-    /// longer knows about are left untouched.
-    pub fn apply_job_updates(&self, updates: Vec<JobReport>) {
-        let key = self.tenant_key();
+    /// Applies polled updates, matching on `JobReport.id`, and returns the ids it
+    /// actually applied. Rows the store no longer holds are left out, and nothing
+    /// applies when `session` — the one [`Self::pending_jobs`] handed the poller —
+    /// has ended since: the caller invalidates and emits only for what is returned.
+    pub fn apply_job_updates(&self, session: &JobSession, updates: Vec<JobReport>) -> HashSet<u64> {
+        let mut applied = HashSet::new();
         let Ok(mut guard) = self.jobs.lock() else {
-            return;
+            return applied;
         };
+        if !self.job_session_is_current(session) {
+            return applied;
+        }
         let Some((t, jobs)) = guard.as_mut() else {
-            return;
+            return applied;
         };
-        if *t != key {
-            return;
+        if *t != session.tenant {
+            return applied;
         }
         for update in updates {
             if let Some(slot) = jobs.iter_mut().find(|j| j.id == update.id) {
+                applied.insert(update.id);
                 *slot = update;
             }
         }
+        applied
     }
 
-    /// Clone-out of the jobs still awaiting a terminal state. Returns owned rows so
-    /// the lock is released before the poller's `.await`s.
-    pub fn pending_jobs(&self) -> Vec<JobReport> {
-        self.jobs_snapshot()
-            .into_iter()
-            .filter(|j| !j.state.is_terminal())
-            .collect()
+    /// Clone-out of the jobs still awaiting a terminal state, with the session they
+    /// were read under. Returns owned rows so the lock is released before the
+    /// poller's `.await`s; the session goes back to [`Self::apply_job_updates`].
+    pub fn pending_jobs(&self) -> (JobSession, Vec<JobReport>) {
+        // Sampled before the read, so a clear landing between the two leaves the
+        // session stale (and the tick's writes refused) rather than the rows unowned.
+        let session = self.job_session();
+        let pending = self
+            .jobs
+            .lock()
+            .ok()
+            .and_then(|g| match g.as_ref() {
+                Some((t, jobs)) if *t == session.tenant => Some(
+                    jobs.iter()
+                        .filter(|j| !j.state.is_terminal())
+                        .cloned()
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        (session, pending)
     }
 
     /// All jobs for the current tenant, newest last. Empty after a tenant switch.
@@ -143,10 +266,47 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// Drops dispatch history on sign-out or an instance change.
-    pub fn clear_jobs(&self) {
-        if let Ok(mut guard) = self.jobs.lock() {
+    /// Ends the job session on sign-out, sign-in, re-authorization or an instance
+    /// change: dispatch history and any pending confirmation are dropped, and every
+    /// plan, dispatch or poll tick still in flight is refused at its store.
+    ///
+    /// Returns the "unresolved" closing records for the jobs it dropped unsettled —
+    /// their poller will never settle them now. The caller writes them off the
+    /// runtime (`audit::record_off_runtime`); this runs under the jobs lock.
+    #[must_use]
+    pub fn clear_jobs(&self) -> Vec<AuditEntry> {
+        // Bumped *before* the slots are cleared, as `clear_last_result` does: each
+        // store re-reads the epoch under its slot lock, so whichever order the two
+        // interleave, the departed session's write loses.
+        self.job_epoch.fetch_add(1, Ordering::SeqCst);
+        let closings = match self.jobs.lock() {
+            Ok(mut guard) => match guard.take() {
+                Some((tenant, jobs)) => unresolved_closings(&tenant, &jobs),
+                None => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+        if let Ok(mut guard) = self.pending_confirm.lock() {
             *guard = None;
+        }
+        closings
+    }
+
+    /// The Jobs tab's "Clear finished": drops the *settled* rows and any pending
+    /// confirmation without ending the session. A batch still dispatching keeps
+    /// sending and records its rows when it finishes — the operator asked to tidy a
+    /// list, not to cancel the devices queued behind the semaphore.
+    ///
+    /// Unsettled rows stay. This used to drop them too, and since the poller reads
+    /// its work from this store, they were never polled again: no outcome on screen
+    /// and no closing audit record, ever. Keeping them also means a row the poller
+    /// finds missing was removed by the session's end, which `clear_jobs` already
+    /// closed; `settle_tick` relies on that to close each job once.
+    pub fn clear_job_history(&self) {
+        if let Ok(mut guard) = self.jobs.lock()
+            && let Some((_, jobs)) = guard.as_mut()
+        {
+            jobs.retain(|j| !j.state.is_terminal());
         }
         if let Ok(mut guard) = self.pending_confirm.lock() {
             *guard = None;
@@ -205,16 +365,33 @@ impl AppState {
 
     /// Records the plan the operator is being asked to confirm, replacing any
     /// earlier one — only one dialog is open at a time.
-    pub fn store_pending_confirm(&self, token: String, request_hash: String) {
-        let tenant = self.tenant_key();
-        if let Ok(mut guard) = self.pending_confirm.lock() {
-            *guard = Some(PendingConfirm {
-                token,
-                request_hash,
-                issued_at: Instant::now(),
-                tenant,
-            });
+    ///
+    /// `session` is the one taken before the plan was built. Returns `false`, storing
+    /// nothing, when it has ended since: building a plan awaits the device inventory
+    /// and the org names, and a sign-out or tenant switch in that gap used to leave a
+    /// token stamped for the *new* session — which `run_action`'s re-plan, now under
+    /// the new tenant, would then match.
+    #[must_use]
+    pub fn store_pending_confirm(
+        &self,
+        session: &JobSession,
+        token: String,
+        request_hash: String,
+    ) -> bool {
+        let Ok(mut guard) = self.pending_confirm.lock() else {
+            return false;
+        };
+        // Under the slot lock, for the same reason as `append_jobs`.
+        if !self.job_session_is_current(session) {
+            return false;
         }
+        *guard = Some(PendingConfirm {
+            token,
+            request_hash,
+            issued_at: Instant::now(),
+            session: session.clone(),
+        });
+        true
     }
 
     /// Consumes a confirmation token, returning whether it authorizes this exact
@@ -242,7 +419,7 @@ impl AppState {
         // An approval is for one instance; the operator can change instance in
         // Settings while the dialog is open.
         token_ok & hash_ok
-            && pending.tenant == self.tenant_key()
+            && self.job_session_is_current(&pending.session)
             && pending.issued_at.elapsed() < CONFIRM_TTL
     }
 }

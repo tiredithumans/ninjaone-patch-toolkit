@@ -9,7 +9,10 @@ Code: `src-tauri/src/lib.rs`, `src-tauri/src/commands/`, `src-tauri/src/error.rs
 
 `#[tauri::command] fn` → `State<'_, AppState>` first → `Result<T, UiError>`. `UiError`
 serializes to `{ message }`, which the frontend renders in a toast (map errors with
-`.map_err(UiError::from)`). Must be in `generate_handler![]` **and** have an `invoke(...)`
+`.map_err(UiError::from)`). An error the frontend must *branch* on adds a `code` with
+`UiError::coded(error::ERR_*, …)`, mirrored as a `types.rs` constant. Its wrapper is declared
+`coded` in `ipc!` and returns `api::IpcError { message, code }`. Never match on message text.
+The one code today is `ERR_PARTIAL_DISPATCH` (see [actions.md](./actions.md)). Must be in `generate_handler![]` **and** have an `invoke(...)`
 wrapper in `web-rs/src/api.rs`.
 
 **`async` is the default, not a requirement.** A handler that only reads or writes in-process

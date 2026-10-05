@@ -172,6 +172,12 @@ dry_run — into a 5-minute token; `run_action` re-plans from scratch and re-che
   `override_window` and `run_as` came to be missing (the first two gate `plan()`'s offline warning
   and maintenance-window blocker; the third is the execution identity).
 - Fields are separated by `0x1f` so two different requests can't concatenate to one hash input.
+- The token is stamped with the `JobSession` (tenant + jobs epoch) taken **before** `build_plan`,
+  and `store_pending_confirm` re-checks it under the slot lock. It used to read the tenant at
+  store time, after the plan's fetches, so a sign-out and sign-in (same tenant, different
+  operator) or a tenant switch in that gap left a token stamped for the new session, which
+  `run_action`'s re-plan under that session then matched. `clear_jobs` bumps the epoch before it
+  clears, so the late store is refused and `plan_action` says to plan again.
 
 ## There is one dispatch surface, and the run options are shared
 
@@ -284,6 +290,61 @@ which re-checks for pending jobs **and** clears the claim flag under the jobs lo
 appends its jobs before calling `try_claim_job_poller`, so a batch landing during shutdown is
 either seen (the poller keeps going) or strictly after the release (its own claim succeeds).
 Releasing unconditionally left jobs dispatched in that gap with no poller at all.
+
+The tenant stamp cannot see a sign-out and sign-in on the same instance, so the write path also
+carries a **`JobSession`** (tenant + jobs epoch; `clear_jobs` bumps the epoch before clearing).
+`run_action` samples it before `build_plan`; `dispatch_one` checks it after acquiring its permit
+and records a device still queued when the session ended as `Skipped` ("not sent") instead of
+POSTing it; and `append_jobs` re-checks it under the jobs lock, refusing the batch so `run_action`
+returns an error instead of the batch. All of these used to read the tenant only at store time,
+after the dispatch, so a sign-out mid-batch kept POSTing the queued devices and landed the
+departed session's jobs in the new one, where the poller resolved them against the new session's
+API and invalidated its caches. The per-device `action:progress` emit is gated the same way
+(`dispatch::device_progress`): the frontend merges each event's rows into a Jobs list that
+`clear_session()` has already handed to the next session. The refusal is
+`UiError::coded(ERR_PARTIAL_DISPATCH, …)`. The frontend closes the confirmation and shows it as
+a toast. It never keeps it in the dialog, because the dialog's Re-plan would send to devices
+that already acted, and `clear_session()` has usually closed the dialog anyway. The Jobs tab's
+**Clear finished** is `clear_job_history`. It drops only settled rows and does not end the
+session. It used to empty the whole list, and since the poller reads its work from that store,
+in-flight jobs were never polled or closed in the audit log again. Keeping them makes "not
+applied" in `settle_tick` mean exactly "removed by the session's end", which is what makes its
+close exactly-once (below).
+
+The same check also runs **before every attempt of the POST**, retries included. The dispatch
+client is `state.api.with_send_guard(still_current)`, and `send_with_retry` asks the guard for an
+`ActOnce` request after it has the token, then fails with `api::SendRefused` (recorded as "not
+sent") if the session ended. A 429 parks a POST for up to 60 s per retry and a 401 re-sends at
+once, each time reading the token live from the shared `AuthState`. Before this, a sign-out and
+another operator's sign-in during that wait re-sent the departed session's action under the new
+operator's grant, and a tenant switch sent it to the old instance with the new grant. Every
+earlier attempt was a definite rejection, so "not sent" is accurate.
+
+**Residual window:** the guard is asked once per attempt, before `send()`. A session that ends
+after that check and before the request reaches the server still sends that one attempt. It
+uses the token and URL read under the departed session, so it acts with that session's own
+authority. Nothing can close that gap from the client side.
+
+The poller takes the session from `pending_jobs` alongside the rows, and `settle_tick` applies
+under it: `apply_job_updates` returns the ids it applied, and only those are emitted. A tick that
+spans a sign-out used to emit the old rows, which the frontend merged into the next operator's Jobs
+tab. Invalidation follows the *read*, not the row. It happens when the row was applied or the
+tenant is unchanged: after a same-instance sign-in the device really did change, and the next
+session's caches hold that same fleet. It never happens across a tenant switch, where the verdict
+came from the other instance and the caches belong to it. The tick writes a closing audit record
+only for an **applied** row, labelled with the session's instance and client id (not Settings
+read now). The Jobs tab's Clear keeps unsettled rows, so a row that is not applied after its
+append was removed by the session ending. That means `clear_jobs` already closed it as
+unresolved.
+
+**Every opening "dispatching" audit record gets a close**, even when the session ends first. The
+close is `AuditEntry::unresolved` ("unresolved: session ended before the outcome was known", with
+no activity id or exit code) in two places, so each job gets at most one. `clear_jobs` returns one
+for each unsettled row it drops, and the async callers write it off the runtime. Every tenant
+switch runs `clear_jobs`, so this also covers a tick that spans a switch. `run_action` writes one
+for each unsettled row of a batch refused at `append_jobs`. A tick racing a sign-out closes the
+job exactly once either way. If the tick applies first, the row is terminal and `clear_jobs` skips
+it. If the clear runs first, the row is not applied and the tick writes nothing.
 
 **NinjaOne v2 has no script-output endpoint.** A job resolves from `/activities` only, so surface
 the exit code plus the activity/series correlator.

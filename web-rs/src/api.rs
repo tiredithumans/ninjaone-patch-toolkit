@@ -189,29 +189,56 @@ pub fn replace_fragment(fragment: &str) {
 #[derive(serde::Deserialize)]
 struct ErrShape {
     message: Option<String>,
+    code: Option<String>,
 }
 
-fn error_message(err: JsValue) -> String {
+/// A command's error with the backend's optional `code` (`UiError::code`) kept, for
+/// the few callers that must branch on *which* error it was. Every other wrapper
+/// returns only the message.
+#[derive(Clone, Debug)]
+pub struct IpcError {
+    pub message: String,
+    pub code: Option<String>,
+}
+
+fn ipc_error(err: JsValue) -> IpcError {
     if let Ok(shape) = serde_wasm_bindgen::from_value::<ErrShape>(err.clone())
         && let Some(message) = shape.message
     {
-        return message;
+        return IpcError {
+            message,
+            code: shape.code,
+        };
     }
-    err.as_string()
-        .unwrap_or_else(|| "unknown error".to_string())
+    IpcError {
+        message: err
+            .as_string()
+            .unwrap_or_else(|| "unknown error".to_string()),
+        code: None,
+    }
 }
 
 async fn invoke<R: DeserializeOwned>(cmd: &str, args: JsValue) -> Result<R, String> {
+    invoke_coded(cmd, args).await.map_err(|e| e.message)
+}
+
+async fn invoke_coded<R: DeserializeOwned>(cmd: &str, args: JsValue) -> Result<R, IpcError> {
+    let plain = |message: String| IpcError {
+        message,
+        code: None,
+    };
     // In a plain browser there is no backend; calling the undefined global would
     // throw. Fail cleanly so callers degrade to demo mode instead.
     if !is_tauri() {
-        return Err(format!("\"{cmd}\" is only available in the desktop app"));
+        return Err(plain(format!(
+            "\"{cmd}\" is only available in the desktop app"
+        )));
     }
     match tauri_invoke(cmd, args).await {
         Ok(value) => {
-            serde_wasm_bindgen::from_value(value).map_err(|e| format!("decode {cmd}: {e}"))
+            serde_wasm_bindgen::from_value(value).map_err(|e| plain(format!("decode {cmd}: {e}")))
         }
-        Err(err) => Err(error_message(err)),
+        Err(err) => Err(ipc_error(err)),
     }
 }
 
@@ -268,6 +295,21 @@ macro_rules! ipc {
     // Command taking one or more arguments, named after the wrapper.
     ($(#[$meta:meta])* $name:ident($($arg:ident: $ty:ty),+ $(,)?) -> $ret:ty) => {
         ipc!($(#[$meta])* $name as stringify!($name), ($($arg: $ty),+) -> $ret);
+    };
+    // `coded`: the same, but the error keeps the backend's `code` ([`IpcError`]).
+    ($(#[$meta:meta])* coded $name:ident($($arg:ident: $ty:ty),+ $(,)?) -> $ret:ty) => {
+        $(#[$meta])*
+        pub async fn $name($($arg: $ty),+) -> Result<$ret, IpcError> {
+            #[derive(Serialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args { $($arg: $ty),+ }
+            let cmd = stringify!($name);
+            let args = args_of(cmd, &Args { $($arg),+ }).map_err(|message| IpcError {
+                message,
+                code: None,
+            })?;
+            invoke_coded(cmd, args).await
+        }
     };
 }
 
@@ -376,7 +418,8 @@ ipc!(
 ipc!(
     /// Dispatches the action. The backend re-plans and re-checks every guardrail, so a
     /// request that skipped `plan_action` (or whose selection changed since) is
-    /// refused rather than trusted.
+    /// refused rather than trusted. `coded`: a partial dispatch must not be re-planned.
+    coded
     run_action(request: ActionRequest) -> ActionBatch
 );
 

@@ -741,7 +741,7 @@ fn sample_job(id: u64, state: JobState) -> JobReport {
 #[test]
 fn jobs_are_invisible_after_an_instance_switch() {
     let state = AppState::new().expect("build state");
-    state.append_jobs(vec![sample_job(1, JobState::Running)]);
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(1, JobState::Running)]));
     assert_eq!(state.jobs_snapshot().len(), 1);
 
     // Same guarantee as `last_result`: switching tenant WITHOUT calling clear_*
@@ -749,34 +749,159 @@ fn jobs_are_invisible_after_an_instance_switch() {
     // tenant's dispatch history.
     state.settings.lock().unwrap().instance_base_url = "https://other.example.com".into();
     assert!(state.jobs_snapshot().is_empty());
-    assert!(state.pending_jobs().is_empty());
+    assert!(state.pending_jobs().1.is_empty());
+}
+
+/// A poll tick applies its updates under the session `pending_jobs` read them in,
+/// and reports nothing applied once that session has ended — the poller emits and
+/// invalidates only for what this returns. Re-reading the tenant at apply time
+/// could not tell a same-instance sign-in from no change at all. (Job ids never
+/// repeat in practice; the shared id here makes the refusal observable.)
+#[test]
+fn a_poll_tick_from_the_previous_session_applies_nothing() {
+    let state = AppState::new().expect("build state");
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(1, JobState::Running)]));
+    let (session, pending) = state.pending_jobs();
+    assert_eq!(pending.len(), 1);
+
+    // Sign-out and sign-in mid-tick; the next session dispatches a job with an id
+    // the old tick also holds.
+    let _closings = state.clear_jobs();
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(1, JobState::Running)]));
+
+    let applied = state.apply_job_updates(&session, vec![sample_job(1, JobState::Completed)]);
+    assert!(applied.is_empty());
+    assert_eq!(state.jobs_snapshot()[0].state, JobState::Running);
+}
+
+/// `run_action` awaits the whole dispatch before it records the batch. A sign-out
+/// and sign-in in that time used to land the departed operator's jobs in the new
+/// session: shown in its Jobs tab, polled against its API, and invalidating its
+/// caches when they settled.
+#[test]
+fn a_batch_dispatching_at_sign_out_is_not_recorded_in_the_next_session() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+
+    // The operator signs out while the batch is still dispatching.
+    let _closings = state.clear_jobs();
+
+    assert!(
+        !state.append_jobs(&session, vec![sample_job(1, JobState::Running)]),
+        "the dispatch must learn its session ended"
+    );
+    assert!(state.jobs_snapshot().is_empty());
+    assert!(!state.job_session_is_current(&session));
+    // A batch begun in the new session records normally.
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(2, JobState::Running)]));
+    assert_eq!(state.jobs_snapshot().len(), 1);
+}
+
+/// The Jobs tab's Clear used to empty the store, and the poller reads its work
+/// from there, so an in-flight job was never polled or audited again. It now drops
+/// only settled rows and leaves the session (and its in-flight jobs) alone.
+#[test]
+fn clearing_the_job_list_keeps_the_jobs_still_in_flight() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+    assert!(state.append_jobs(
+        &session,
+        vec![
+            sample_job(1, JobState::Running),
+            sample_job(2, JobState::Completed),
+            sample_job(3, JobState::Unknown("timed out".into())),
+        ]
+    ));
+
+    state.clear_job_history();
+
+    let ids: Vec<u64> = state.jobs_snapshot().iter().map(|j| j.id).collect();
+    assert_eq!(ids, vec![1, 3]);
+    assert_eq!(
+        state.pending_jobs().1.len(),
+        2,
+        "the poller still sees them"
+    );
+    assert!(state.job_session_is_current(&session));
+}
+
+/// Ending the session drops jobs no poller will now settle, so their "dispatching"
+/// audit records need a close. `clear_jobs` hands back one "unresolved" record per
+/// unsettled job, labelled with the tenant the jobs were stored under; a job that
+/// already settled was closed when it did.
+#[test]
+fn ending_the_session_closes_the_audit_record_of_every_unsettled_job() {
+    let state = AppState::new().expect("build state");
+    let instance = state.settings_snapshot().instance_base_url;
+    assert!(state.append_jobs(
+        &state.job_session(),
+        vec![
+            sample_job(1, JobState::Running),
+            sample_job(2, JobState::Completed),
+        ]
+    ));
+
+    let closings = state.clear_jobs();
+
+    assert_eq!(closings.len(), 1);
+    assert_eq!(closings[0].job_id, 1);
+    assert_eq!(
+        closings[0].outcome,
+        crate::actions::audit::UNRESOLVED_SESSION_ENDED
+    );
+    assert_eq!(closings[0].instance, instance);
+    assert!(state.clear_jobs().is_empty(), "nothing left to close");
+}
+
+/// A batch refused at `append_jobs` is never polled either, so `run_action` closes
+/// its unsettled rows from the session it dispatched in. Rows already terminal (a
+/// rejection, a device not sent) were closed at dispatch.
+#[test]
+fn a_refused_batch_closes_only_its_unsettled_jobs() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+    let closings = session.unresolved_closings(&[
+        sample_job(1, JobState::Running),
+        sample_job(2, JobState::Unknown("timed out".into())),
+        sample_job(3, JobState::Skipped("not sent".into())),
+    ]);
+    let ids: Vec<u64> = closings.iter().map(|c| c.job_id).collect();
+    assert_eq!(ids, vec![1, 2]);
+    assert_eq!(closings[0].instance, session.instance());
 }
 
 #[test]
 fn job_updates_key_on_job_id_not_device_id() {
     let state = AppState::new().expect("build state");
     // Two rows for the SAME device, as happens when batches overlap.
-    state.append_jobs(vec![
-        sample_job(1, JobState::Running),
-        sample_job(2, JobState::Running),
-    ]);
+    assert!(state.append_jobs(
+        &state.job_session(),
+        vec![
+            sample_job(1, JobState::Running),
+            sample_job(2, JobState::Running),
+        ]
+    ));
 
-    state.apply_job_updates(vec![sample_job(2, JobState::Completed)]);
+    let applied = state.apply_job_updates(
+        &state.job_session(),
+        vec![sample_job(2, JobState::Completed)],
+    );
+    assert!(applied.contains(&2));
     let jobs = state.jobs_snapshot();
     assert_eq!(jobs[0].state, JobState::Running, "row 1 must be untouched");
     assert_eq!(jobs[1].state, JobState::Completed);
-    assert_eq!(state.pending_jobs().len(), 1);
+    assert_eq!(state.pending_jobs().1.len(), 1);
 }
 
 #[test]
 fn job_history_evicts_terminal_rows_before_in_flight_ones() {
     let state = AppState::new().expect("build state");
     // One in-flight row, then enough terminal rows to overflow the cap.
-    state.append_jobs(vec![sample_job(0, JobState::Running)]);
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(0, JobState::Running)]));
     let filler: Vec<JobReport> = (1..=MAX_JOBS as u64)
         .map(|i| sample_job(i, JobState::Completed))
         .collect();
-    state.append_jobs(filler);
+    assert!(state.append_jobs(&state.job_session(), filler));
 
     let jobs = state.jobs_snapshot();
     assert_eq!(jobs.len(), MAX_JOBS);
@@ -789,7 +914,7 @@ fn job_history_evicts_terminal_rows_before_in_flight_ones() {
 #[test]
 fn confirm_token_is_single_use_and_bound_to_the_request() {
     let state = AppState::new().expect("build state");
-    state.store_pending_confirm("tok".into(), "hash-a".into());
+    assert!(state.store_pending_confirm(&state.job_session(), "tok".into(), "hash-a".into()));
 
     // A token that doesn't match the request it was issued for is refused.
     assert!(!state.consume_confirm_token("tok", "hash-b"));
@@ -797,7 +922,7 @@ fn confirm_token_is_single_use_and_bound_to_the_request() {
     // fails too. Failing closed is the right direction for a dispatch gate.
     assert!(!state.consume_confirm_token("tok", "hash-a"));
 
-    state.store_pending_confirm("tok2".into(), "hash-a".into());
+    assert!(state.store_pending_confirm(&state.job_session(), "tok2".into(), "hash-a".into()));
     assert!(state.consume_confirm_token("tok2", "hash-a"));
     // Single use: a double-click can't dispatch twice.
     assert!(!state.consume_confirm_token("tok2", "hash-a"));
@@ -813,7 +938,7 @@ fn confirm_token_is_single_use_and_bound_to_the_request() {
 #[test]
 fn a_confirm_token_does_not_survive_an_instance_switch() {
     let state = AppState::new().expect("build state");
-    state.store_pending_confirm("tok".into(), "hash-a".into());
+    assert!(state.store_pending_confirm(&state.job_session(), "tok".into(), "hash-a".into()));
 
     // The operator changes instance while the confirmation dialog is open.
     if let Ok(mut settings) = state.settings.lock() {
@@ -824,6 +949,53 @@ fn a_confirm_token_does_not_survive_an_instance_switch() {
         !state.consume_confirm_token("tok", "hash-a"),
         "an approval granted against one instance must not dispatch against another"
     );
+}
+
+/// `plan_action` awaits the device inventory and org names before it stores its
+/// token. A sign-out and sign-in in that gap — a different operator on the same
+/// instance, so the same tenant — used to leave a token stamped for the *new*
+/// session, and `run_action`'s re-plan under that session would match its hash.
+#[test]
+fn a_plan_in_flight_at_sign_out_cannot_store_a_confirm_token() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+
+    // The operator signs out (and the next one signs in) while the plan is fetching.
+    let _closings = state.clear_jobs();
+
+    assert!(
+        !state.store_pending_confirm(&session, "tok".into(), "hash-a".into()),
+        "a plan built in the departed session must not be approvable in the next one"
+    );
+    assert!(!state.consume_confirm_token("tok", "hash-a"));
+}
+
+/// The tenant-switch path of the same race: Save replaces the settings, then clears.
+/// A plan that started before the switch must not store, even though the stamp it
+/// would have read at store time is the new tenant.
+#[test]
+fn a_plan_in_flight_across_an_instance_switch_cannot_store_a_confirm_token() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+
+    state.settings.lock().unwrap().instance_base_url = "https://other.ninjarmm.com".into();
+    let _closings = state.clear_jobs();
+
+    assert!(!state.store_pending_confirm(&session, "tok".into(), "hash-a".into()));
+    assert!(!state.consume_confirm_token("tok", "hash-a"));
+}
+
+/// The epoch only refuses what started before the clear: a plan begun afterwards
+/// stores and confirms normally, and the Jobs tab's Clear does not end the session.
+#[test]
+fn a_plan_started_after_the_clear_is_approvable() {
+    let state = AppState::new().expect("build state");
+    let _closings = state.clear_jobs();
+    let session = state.job_session();
+    state.clear_job_history();
+
+    assert!(state.store_pending_confirm(&session, "tok".into(), "hash-a".into()));
+    assert!(state.consume_confirm_token("tok", "hash-a"));
 }
 
 #[test]
@@ -883,7 +1055,7 @@ fn the_poller_keeps_its_claim_when_work_arrives_during_release() {
     let claim = state.try_claim_job_poller().expect("first claim");
 
     // A batch lands: its jobs are recorded before it tries to claim.
-    state.append_jobs(vec![sample_job(1, JobState::Running)]);
+    assert!(state.append_jobs(&state.job_session(), vec![sample_job(1, JobState::Running)]));
     assert!(
         state.try_claim_job_poller().is_none(),
         "the running poller still holds the claim"
@@ -898,7 +1070,11 @@ fn the_poller_keeps_its_claim_when_work_arrives_during_release() {
     );
 
     // Once the job settles, the poller may retire.
-    state.apply_job_updates(vec![sample_job(1, JobState::Completed)]);
+    let applied = state.apply_job_updates(
+        &state.job_session(),
+        vec![sample_job(1, JobState::Completed)],
+    );
+    assert!(applied.contains(&1));
     assert!(state.release_job_poller_if_idle(claim).is_none());
     assert!(state.try_claim_job_poller().is_some());
 }

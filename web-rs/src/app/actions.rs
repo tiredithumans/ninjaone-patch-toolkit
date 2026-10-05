@@ -979,10 +979,10 @@ pub(crate) fn JobsTable() -> impl IntoView {
                 <button
                     class="btn btn-sm"
                     prop:disabled=move || state.actions.jobs.with(Vec::is_empty)
-                    title="Clears this session's live job list. The audit trail below is permanent and is not affected."
+                    title="Removes finished jobs from this session's list. Jobs still running stay until they finish. The audit trail below is permanent and is not affected."
                     on:click=move |_| state.clear_job_history()
                 >
-                    "Clear history"
+                    "Clear finished"
                 </button>
                 // One button per batch with several definite failures. It re-opens
                 // the same plan → confirm dialog as any dispatch — never a direct
@@ -1166,7 +1166,7 @@ fn AuditTrail() -> impl IntoView {
         <p class="chips-label">
             "Every dispatch this install has ever made, newest first. Written before the request "
             "goes out, so an action that never reported back still appears. Not affected by "
-            "\"Clear history\"."
+            "\"Clear finished\"."
         </p>
         {move || {
             if !loaded.get() {

@@ -39,7 +39,8 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **Confirm tokens are payload-bound and single-use.** `request_hash` destructures `ActionRequest`
   exhaustively, hashes the *resolved* script and run-as and length-prefixed per-device
   parameters; ids are not de-duplicated (a repeated id is a `plan()` blocker); `run_action`
-  re-plans and re-checks. → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
+  re-plans and re-checks. The token carries the `JobSession` sampled before `build_plan`.
+  → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
 - **Guardrails go in `actions::plan` (`blockers`/`warnings`), not in a dialog.** The `dry_run`
   check is also asserted at the dispatch site. → `docs/design/actions.md#guardrails-live-in-actionsplan`
 - **Dry run requires a script declaring `dryRun`** (`DryRunSupport::Declared`); the window
@@ -53,7 +54,9 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   `last_result`. A dry run invalidates nothing and raises no stale banner.
   → `docs/design/actions.md#after-a-mutating-action-invalidate-the-current-patch-cache`
 - **Jobs are tenant-stamped; the poller is single-claim** (`try_claim_job_poller` /
-  `release_job_poller_if_idle`). Dispatch appends jobs before claiming.
+  `release_job_poller_if_idle`). Dispatch appends jobs before claiming. Every write-path store
+  and every send attempt (retries too, via `with_send_guard`) re-checks the `JobSession`
+  sampled before the first `.await`.
   → `docs/design/actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim`
 - **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`):
   `statusCode` is lifecycle, `activityResult` is the verdict, exit code from `data`; `newerThan`

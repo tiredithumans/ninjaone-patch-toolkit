@@ -17,6 +17,9 @@ paths:
 3. `ipc!(name(arg: T, …) -> Ret)` in `web-rs/src/api.rs` (+ mirror types in `web-rs/src/types.rs`).
    Arg keys and the command string are derived from the wrapper, so they cannot drift.
 
+- **Errors are `UiError { message }`; one the frontend branches on adds a `code`**
+  (`UiError::coded(error::ERR_*)` + the `types.rs` mirror + a `coded` `ipc!` wrapper), never
+  message matching. → `docs/design/frontend.md#tauri-commands`
 - **IPC arg keys equal the handler's parameter names, camelCase.** Renaming a parameter is a
   wire-format change; update both sides. → `docs/design/frontend.md#ipc-arg-shape--keys-match-rust-fn-parameter-names-camelcase`
 - **Compact aggregates (`failures`, `approvals`, `changes`, `worst_devices`, …) ride on both

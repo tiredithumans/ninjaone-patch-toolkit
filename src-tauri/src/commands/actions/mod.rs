@@ -16,11 +16,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
-use tracing::info;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tracing::{info, warn};
 
 use crate::actions::{
-    ActionKind, ActionPlan, JobReport, JobRequest, JobState, RebootChoice, fmt_ts,
+    ActionKind, ActionPlan, JobReport, JobRequest, JobState, RebootChoice, audit, fmt_ts,
 };
 use crate::error::UiError;
 use crate::model::{AutomationScript, RebootMode};
@@ -128,6 +128,9 @@ struct ActionProgressEvent {
     jobs: Vec<JobReport>,
 }
 
+const SESSION_CHANGED_WHILE_PLANNING: &str = "You signed in again or switched instance while this \
+     plan was being prepared, so it was not approved. Plan the action again.";
+
 fn emit_progress(app: &AppHandle, ev: ActionProgressEvent) {
     let _ = app.emit("action:progress", ev);
 }
@@ -161,6 +164,9 @@ pub async fn plan_action(
     request: ActionRequest,
 ) -> Result<ActionPlan, UiError> {
     require_actions_enabled(&state)?;
+    // Before the plan's fetches: the token must be stamped for the session the plan
+    // was built in, not whichever one is current when they return.
+    let session = state.job_session();
     let planned = build_plan(&state, &request).await?;
     let hash = planned.hash(&request);
     let mut plan = planned.plan;
@@ -169,7 +175,9 @@ pub async fn plan_action(
     // mutating and skip confirmation entirely.
     if !plan.is_blocked() && request.kind.is_mutating() {
         let token = random_token();
-        state.store_pending_confirm(token.clone(), hash);
+        if !state.store_pending_confirm(&session, token.clone(), hash) {
+            return Err(UiError::new(SESSION_CHANGED_WHILE_PLANNING));
+        }
         plan.confirm_token = Some(token);
     }
     Ok(plan)
@@ -183,6 +191,9 @@ pub async fn run_action(
     request: ActionRequest,
 ) -> Result<ActionBatch, UiError> {
     require_actions_enabled(&state)?;
+    // Before the re-plan's fetches, for the reason `plan_action` gives: every store
+    // this dispatch makes, and every send, belongs to the session it started in.
+    let session = state.job_session();
 
     // Re-plan rather than trusting anything the frontend computed.
     let planned = build_plan(&state, &request).await?;
@@ -263,8 +274,13 @@ pub async fn run_action(
     // Everything that does not vary per device is built once and shared, so a
     // 25-device batch stops re-cloning the script ref, run-as identity, parameter
     // string, detail line, instance URL and client id 25 times over.
+    let still_current: crate::api::SendGuard = {
+        let app = app.clone();
+        let session = session.clone();
+        Arc::new(move || app.state::<AppState>().job_session_is_current(&session))
+    };
     let ctx = Arc::new(DispatchContext {
-        api: state.api.clone(),
+        api: state.api.with_send_guard(Arc::clone(&still_current)),
         kind: request.kind,
         script,
         run_as,
@@ -283,6 +299,7 @@ pub async fn run_action(
         batch_id,
         id_base,
         job_requests,
+        still_current,
     });
 
     let dispatched = dispatch_batch(
@@ -298,7 +315,26 @@ pub async fn run_action(
         .iter()
         .filter(|j| !matches!(j.state, JobState::Skipped(_)))
         .count();
-    state.append_jobs(jobs.clone());
+    if !state.append_jobs(&session, jobs.clone()) {
+        // Nothing of this batch is recorded, invalidated or polled in the session
+        // that replaced it. The devices that were sent it still did act, which is
+        // what the opening audit records already say.
+        warn!(
+            batch_id,
+            sent = live,
+            "session ended mid-dispatch; batch not recorded"
+        );
+        // No poller will settle these now, so their opening records are closed here.
+        audit::record_off_runtime(session.unresolved_closings(&jobs)).await;
+        return Err(UiError::coded(
+            crate::error::ERR_PARTIAL_DISPATCH,
+            format!(
+                "You signed in again or switched instance while this batch was dispatching. {live} \
+             device(s) had already been sent the action; any still queued were not. The action \
+             audit log records each one."
+            ),
+        ));
+    }
 
     if live > 0 {
         invalidate_after(request.kind, request.dry_run, &state);
@@ -383,8 +419,10 @@ pub fn list_jobs(state: State<'_, AppState>) -> Vec<JobReport> {
 
 #[tauri::command]
 pub fn clear_jobs(state: State<'_, AppState>) -> Vec<JobReport> {
-    state.clear_jobs();
-    Vec::new()
+    // Settled rows only — the session-ending `AppState::clear_jobs` would also cancel
+    // a batch still dispatching. Returns what is left, the jobs still in flight.
+    state.clear_job_history();
+    state.jobs_snapshot()
 }
 
 /// The tenant's automation-script library, projected for the picker.
