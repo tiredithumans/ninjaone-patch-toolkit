@@ -1161,3 +1161,68 @@ async fn a_dead_grant_deletes_the_tenant_it_started_under() {
         "the tenant switched to keeps its sign-in"
     );
 }
+
+/// A failed refresh used to record nothing, so after a 503 every caller queued
+/// behind `refresh_lock` POSTed again in turn — a query's fan-out turned one
+/// outage (or one 429) into a serial retry storm against the token endpoint.
+#[tokio::test]
+async fn callers_queued_behind_a_failed_refresh_share_its_failure() {
+    let server = wiremock::MockServer::start().await;
+    token_endpoint(
+        &server,
+        wiremock::ResponseTemplate::new(503).set_delay(std::time::Duration::from_millis(200)),
+        1,
+    )
+    .await;
+    let auth = AuthState::seeded_refreshable(
+        reqwest::Client::new(),
+        server.uri(),
+        "expired-access",
+        "live-refresh",
+        "client-queued",
+    );
+    auth.invalidate_access_token("expired-access");
+
+    let (a, b, c, d) = tokio::join!(
+        auth.access_token(),
+        auth.access_token(),
+        auth.access_token(),
+        auth.access_token(),
+    );
+
+    for result in [a, b, c, d] {
+        let err = result.expect_err("every queued caller sees the failure");
+        assert!(err.to_string().contains("503"), "{err}");
+    }
+    assert_eq!(
+        auth.refresh_grant().unwrap().refresh_token.as_deref(),
+        Some("live-refresh"),
+        "a transient failure keeps the credential"
+    );
+}
+
+/// The shared failure is for the callers that waited on it. One that arrives
+/// afterwards tries again, so a blip is not stretched into an outage.
+#[tokio::test]
+async fn a_caller_after_a_failed_refresh_tries_again() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/ws/oauth/token"))
+        .respond_with(wiremock::ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    token_endpoint(&server, granted("recovered-access", "rotated-refresh"), 1).await;
+    let auth = AuthState::seeded_refreshable(
+        reqwest::Client::new(),
+        server.uri(),
+        "expired-access",
+        "live-refresh",
+        "client-retry",
+    );
+    auth.invalidate_access_token("expired-access");
+
+    assert!(auth.access_token().await.is_err());
+    assert_eq!(auth.access_token().await.unwrap(), "recovered-access");
+}
