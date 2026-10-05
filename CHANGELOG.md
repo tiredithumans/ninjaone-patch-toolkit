@@ -64,6 +64,10 @@ version and start a fresh `[Unreleased]`.
   kept out of the new session, and the audit record names the instance the action was sent to.
   A job whose outcome was still unknown when the session ended is closed in the audit log as
   unresolved instead of being left open.
+- **Clearing the Jobs list no longer stops tracking jobs that are still running.** **Clear
+  history** emptied the whole list, so a job still in progress was never checked again: its
+  outcome never appeared and the audit log never recorded one. The button is now **Clear
+  finished**, and it removes only jobs that have finished.
 
 ### Changed
 

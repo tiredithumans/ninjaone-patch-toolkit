@@ -292,13 +292,21 @@ impl AppState {
         closings
     }
 
-    /// The Jobs tab's Clear: drops the history and any pending confirmation without
-    /// ending the session. A batch still dispatching keeps sending and records its
-    /// rows when it finishes, as it always has — the operator asked to tidy a list,
-    /// not to cancel the devices queued behind the semaphore.
+    /// The Jobs tab's "Clear finished": drops the *settled* rows and any pending
+    /// confirmation without ending the session. A batch still dispatching keeps
+    /// sending and records its rows when it finishes — the operator asked to tidy a
+    /// list, not to cancel the devices queued behind the semaphore.
+    ///
+    /// Unsettled rows stay. This used to drop them too, and since the poller reads
+    /// its work from this store, they were never polled again: no outcome on screen
+    /// and no closing audit record, ever. Keeping them also means a row the poller
+    /// finds missing was removed by the session's end, which `clear_jobs` already
+    /// closed; `settle_tick` relies on that to close each job once.
     pub fn clear_job_history(&self) {
-        if let Ok(mut guard) = self.jobs.lock() {
-            *guard = None;
+        if let Ok(mut guard) = self.jobs.lock()
+            && let Some((_, jobs)) = guard.as_mut()
+        {
+            jobs.retain(|j| !j.state.is_terminal());
         }
         if let Ok(mut guard) = self.pending_confirm.lock() {
             *guard = None;

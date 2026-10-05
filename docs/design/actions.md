@@ -304,8 +304,12 @@ API and invalidated its caches. The per-device `action:progress` emit is gated t
 `clear_session()` has already handed to the next session. The refusal is
 `UiError::coded(ERR_PARTIAL_DISPATCH, …)`. The frontend closes the confirmation and shows it as
 a toast. It never keeps it in the dialog, because the dialog's Re-plan would send to devices
-that already acted, and `clear_session()` has usually closed the dialog anyway. The Jobs tab's Clear is `clear_job_history`: it empties the list
-without ending the session.
+that already acted, and `clear_session()` has usually closed the dialog anyway. The Jobs tab's
+**Clear finished** is `clear_job_history`. It drops only settled rows and does not end the
+session. It used to empty the whole list, and since the poller reads its work from that store,
+in-flight jobs were never polled or closed in the audit log again. Keeping them makes "not
+applied" in `settle_tick` mean exactly "removed by the session's end", which is what makes its
+close exactly-once (below).
 
 The same check also runs **before every attempt of the POST**, retries included. The dispatch
 client is `state.api.with_send_guard(still_current)`, and `send_with_retry` asks the guard for an

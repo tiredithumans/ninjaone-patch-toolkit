@@ -797,6 +797,34 @@ fn a_batch_dispatching_at_sign_out_is_not_recorded_in_the_next_session() {
     assert_eq!(state.jobs_snapshot().len(), 1);
 }
 
+/// The Jobs tab's Clear used to empty the store, and the poller reads its work
+/// from there, so an in-flight job was never polled or audited again. It now drops
+/// only settled rows and leaves the session (and its in-flight jobs) alone.
+#[test]
+fn clearing_the_job_list_keeps_the_jobs_still_in_flight() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+    assert!(state.append_jobs(
+        &session,
+        vec![
+            sample_job(1, JobState::Running),
+            sample_job(2, JobState::Completed),
+            sample_job(3, JobState::Unknown("timed out".into())),
+        ]
+    ));
+
+    state.clear_job_history();
+
+    let ids: Vec<u64> = state.jobs_snapshot().iter().map(|j| j.id).collect();
+    assert_eq!(ids, vec![1, 3]);
+    assert_eq!(
+        state.pending_jobs().1.len(),
+        2,
+        "the poller still sees them"
+    );
+    assert!(state.job_session_is_current(&session));
+}
+
 /// Ending the session drops jobs no poller will now settle, so their "dispatching"
 /// audit records need a close. `clear_jobs` hands back one "unresolved" record per
 /// unsettled job, labelled with the tenant the jobs were stored under; a job that

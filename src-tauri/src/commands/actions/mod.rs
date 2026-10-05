@@ -419,10 +419,10 @@ pub fn list_jobs(state: State<'_, AppState>) -> Vec<JobReport> {
 
 #[tauri::command]
 pub fn clear_jobs(state: State<'_, AppState>) -> Vec<JobReport> {
-    // History only — the session-ending `AppState::clear_jobs` would also cancel a
-    // batch still dispatching.
+    // Settled rows only — the session-ending `AppState::clear_jobs` would also cancel
+    // a batch still dispatching. Returns what is left, the jobs still in flight.
     state.clear_job_history();
-    Vec::new()
+    state.jobs_snapshot()
 }
 
 /// The tenant's automation-script library, projected for the picker.
