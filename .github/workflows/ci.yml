@@ -116,7 +116,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just
       - name: Install system deps (Linux)
@@ -185,7 +185,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: web-rs
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just,trunk
       # web-rs is a separate wasm32 crate the backend `rust` job's clippy never
@@ -220,7 +220,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just,cargo-llvm-cov
       - name: Install system deps (Linux)
@@ -362,7 +362,7 @@ jobs:
       # before the notice is regenerated.
       - name: License policy lists agree
         run: ./scripts/check-license-lists.sh
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just,cargo-about
       - name: THIRD-PARTY-LICENSES.md is current
@@ -428,7 +428,7 @@ jobs:
       # RustSec advisory scan via the same `just` recipe run locally. The recipe
       # covers BOTH lockfiles: src-tauri/Cargo.lock and the frontend's own
       # web-rs/Cargo.lock (the two crates carry independent lockfiles).
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just,cargo-audit
       - name: audit (both lockfiles)
@@ -444,7 +444,7 @@ jobs:
       # crates' trees, via the same `just` recipes used locally. RustSec
       # advisories are NOT re-checked here — the `audit` job (cargo-audit) owns
       # those, so the two gates don't overlap.
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just,cargo-deny
       - name: deny (backend)
