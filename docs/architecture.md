@@ -13,8 +13,15 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/state/cache.rs           # TenantCache<T>: tenant-stamped, TTL'd, epoch-gated, single-flight slot
 ├── src/state/jobs.rs            # job store, single-claim poller slot, confirm-token slot
 ├── src/auth.rs                  # OAuth2 PKCE (S256, loopback), keyring, single-flight refresh, conditional scope + management grant
-├── src/actions.rs               # device-action domain: ActionKind/JobState/JobReport, pure plan() guardrails, build_parameters
-├── src/actions/audit.rs         # append-only action-audit.jsonl (parameters redacted)
+├── src/actions/                 # device-action domain, re-exported flat as `crate::actions::*`
+│   ├── mod.rs                   # JOB_TIMEOUT_MINUTES / MAX_JOBS, the submodule re-exports
+│   ├── kind.rs                  # ActionKind + its guardrail predicates, RebootChoice, remediation_script_id
+│   ├── job.rs                   # JobState / JobReport / JobRequest, fmt_ts
+│   ├── planning.rs              # pure plan() guardrails, the plan types, the "Apply all" preview
+│   ├── parameters.rs            # build_parameters: the per-kind `parameters` string a script is sent
+│   ├── activity.rs              # match_activity / advance_job: resolving a job from /activities
+│   ├── audit.rs                 # append-only action-audit.jsonl (parameters redacted by type)
+│   └── tests.rs
 ├── src/api/                     # NinjaOne Public API client
 │   ├── mod.rs                   # NinjaApiClient: /api/v2, bearer, retry policy (retry_for), ReplaySafety/OutcomeUnknown, df_query
 │   ├── paging.rs                # get_paginated, parse_page/PagedRow, cursor forward-progress
