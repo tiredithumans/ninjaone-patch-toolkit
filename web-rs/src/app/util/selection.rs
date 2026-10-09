@@ -13,6 +13,10 @@ use crate::types::{
 use super::super::state::{DeviceSelection, SelectedPatch};
 use super::*;
 
+/// Mirrors `rows::join::ORPHAN_DEVICE_ID`: the device id of a patch row whose
+/// record named no device.
+pub(crate) const ORPHAN_DEVICE_ID: i64 = 0;
+
 /// Applies one row's checkbox to the selection map.
 ///
 /// Pure map surgery, lifted out of the signal closure so it can be tested: this is
@@ -21,10 +25,6 @@ use super::*;
 /// **only** that row — an earlier shape swept every KB on the device into the
 /// selection, which made the one path capable of per-patch targeting unable to
 /// receive a subset.
-/// Mirrors `rows::join::ORPHAN_DEVICE_ID`: the device id of a patch row whose
-/// record named no device.
-pub(crate) const ORPHAN_DEVICE_ID: i64 = 0;
-
 pub(crate) fn apply_row_selection(
     sel: &mut BTreeMap<i64, DeviceSelection>,
     row: &PatchRow,
@@ -60,6 +60,22 @@ pub(crate) fn apply_row_selection(
         if entry.patches.is_empty() {
             sel.remove(&row.device_id);
         }
+    }
+}
+
+/// Applies one checkbox to every row of a page or group in one pass over the map.
+///
+/// Row by row this is [`apply_row_selection`]; the point of the batch is at the
+/// call site, where the whole slice lands in a single signal update. A select-all
+/// that ticked rows one update at a time notified every subscriber (the action
+/// bar, the header and group memos, each row's checkbox) once per row.
+pub(crate) fn apply_rows_selection<R: Borrow<PatchRow>>(
+    sel: &mut BTreeMap<i64, DeviceSelection>,
+    rows: &[R],
+    checked: bool,
+) {
+    for row in rows {
+        apply_row_selection(sel, row.borrow(), checked);
     }
 }
 

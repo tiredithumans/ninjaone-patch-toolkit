@@ -195,9 +195,7 @@ impl AppState {
     /// collapsed header left the only trace in the action bar's running total.
     pub(in crate::app) fn toggle_group_selection(self, key: &str, label: String, checked: bool) {
         if let Some(rows) = self.query.members.with_untracked(|m| m.get(key).cloned()) {
-            for row in rows.iter() {
-                self.toggle_row_selection(row, checked);
-            }
+            self.toggle_rows_selection(&rows, checked);
             return;
         }
         let Some(group_by) = self.query.group_by.get_untracked() else {
@@ -210,9 +208,7 @@ impl AppState {
             };
             match outcome {
                 Ok(rows) => {
-                    for row in &rows {
-                        self.toggle_row_selection(row, checked);
-                    }
+                    self.toggle_rows_selection(&rows, checked);
                     if checked {
                         self.notify(Toast::ok(util::group_selection_note(
                             &label,
