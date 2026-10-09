@@ -585,10 +585,13 @@ fn a_keyring_failure_keeps_the_session_it_just_obtained() {
 /// closed for a grant that issued no refresh token.
 #[test]
 fn a_new_sign_in_whose_token_cannot_be_saved_drops_the_previous_operators_token() {
+    // The store below also clears the legacy entry.
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
     let base_url = "https://keyring-refuses.example.com";
     let client_id = "client-keyring-refuses";
     let entry = saved_refresh_entry(base_url, client_id);
     save_keyring(&entry, "previous-operator-refresh").expect("seed the previous session");
+    save_keyring(LEGACY_KEYRING_USER_REFRESH, "legacy-refresh").expect("seed the legacy entry");
     test_keyring::refuse_writes_to(&entry);
 
     let auth = launched(base_url, client_id);
@@ -613,6 +616,11 @@ fn a_new_sign_in_whose_token_cannot_be_saved_drops_the_previous_operators_token(
         None,
         "the previous operator's token must not outlive a sign-in that could not save its own"
     );
+    assert_eq!(
+        load_keyring(LEGACY_KEYRING_USER_REFRESH).expect("read legacy"),
+        None,
+        "nor the pre-tenant-scoping entry, which the next read would otherwise adopt"
+    );
 }
 
 /// A keyring read fault was not recorded, so every caller queued behind the
@@ -620,6 +628,8 @@ fn a_new_sign_in_whose_token_cannot_be_saved_drops_the_previous_operators_token(
 /// stalled a query's fan-out once per request instead of once.
 #[tokio::test]
 async fn callers_queued_behind_a_failed_keyring_read_share_its_failure() {
+    // Nothing scoped is saved, so the read falls through to the legacy entry.
+    let _legacy = LEGACY_REFRESH_ENTRY.lock().await;
     let base_url = "https://keyring-shared-read.example.com";
     let client_id = "client-keyring-shared-read";
     let entry = saved_refresh_entry(base_url, client_id);

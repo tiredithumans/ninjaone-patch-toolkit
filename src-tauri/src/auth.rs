@@ -276,11 +276,12 @@ impl From<anyhow::Error> for RefreshError {
 pub struct AuthState {
     inner: Arc<RwLock<Inner>>,
     http: reqwest::Client,
-    /// Serializes the refresh grant, and holds the last transient failure so
-    /// callers that queued behind it return it instead of POSTing again. See
-    /// `access_token`.
+    /// Serializes the refresh grant, and holds the last shared failure — a
+    /// transient one from the token endpoint, or a keyring read that could not
+    /// produce the grant — so callers that queued behind it return it instead of
+    /// POSTing (or reading the keyring) again. See `access_token`.
     refresh_lock: Arc<tokio::sync::Mutex<Option<RefreshFailure>>>,
-    /// Counts the transient failures recorded under `refresh_lock`. Readable
+    /// Counts the failures recorded under `refresh_lock`. Readable
     /// without the lock, so a caller can note it *before* queueing and tell
     /// afterwards whether an attempt failed while it waited.
     refresh_failures: Arc<AtomicU64>,
@@ -734,7 +735,14 @@ impl AuthState {
             )));
         }
 
-        let parsed: TokenResponse = resp.json().await.context("refresh token body")?;
+        // A 2xx whose body is not a token response is the server's fault, not the
+        // grant's — and under rotation the token just presented is spent, so a
+        // queued caller re-POSTing it would hit `invalid_grant` and clear the
+        // credential. Shared with the queue like any other transient failure.
+        let parsed: TokenResponse = resp
+            .json()
+            .await
+            .map_err(|e| RefreshError::Transient(anyhow!(e).context("refresh token body")))?;
         let token_set = self.store_tokens(parsed, stamp, false).await?;
         Ok(token_set.access_token)
     }

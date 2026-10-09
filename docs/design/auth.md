@@ -99,11 +99,15 @@ A query deliberately fans out many concurrent API calls and each one calls `acce
 first, so without a guard they all observe the same stale token and each POSTs the same
 `refresh_token` — last-writer-wins on both the keyring and the in-memory set. `access_token()`
 therefore takes `refresh_lock` (a `tokio::Mutex`) and re-checks under it, so concurrent callers
-await one grant. A transient failure is shared the same way: the lock holds the last one (stamped
-with its `GrantStamp`) and a counter readable outside it, so a caller that queued while an attempt
-for the same grant failed returns that error instead of POSTing again. Without it a 429 or a 5xx
-became one serial retry per queued caller. A caller arriving after the failure still retries;
-there is deliberately no cooldown, which would stretch a blip into an outage.
+await one grant. A failure is shared the same way: the lock holds the last one (stamped with its
+`GrantStamp`) and a counter readable outside it, so a caller that queued while an attempt for the
+same grant failed returns that error instead of POSTing again. Without it a 429 or a 5xx became
+one serial retry per queued caller. The same record covers a keyring read that could not produce
+the grant (a locked keychain, no Secret Service, nothing saved), which was otherwise one blocking
+keyring round trip per queued caller, and a 2xx whose body is not a token response, which under
+rotation would have had every queued caller re-POST a spent token into `invalid_grant`. A caller
+arriving after the failure still retries; there is deliberately no cooldown, which would stretch
+a blip into an outage.
 
 That composes with the error arm: `refresh_grant_is_dead` clears the stored refresh token **only**
 on a 400/401 whose OAuth `error` is `invalid_grant`. Clearing on any non-2xx meant a 429, a 5xx or
