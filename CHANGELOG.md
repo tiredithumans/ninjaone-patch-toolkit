@@ -29,6 +29,11 @@ version and start a fresh `[Unreleased]`.
 
 ### Changed
 
+- **Jobs and audit records name a script by its library id as well as its name.** A script job's
+  detail (and its audit line) carried only the name the window sent along, which nothing checks
+  against the script the plan resolved and the device ran. It now reads `Name (#42)`, and an
+  "Apply selected" remediation records the id of the script configured in Settings
+  (`Apply selected OS patches (#7)`), so the trail names what ran.
 - **Dispatching a batch opens the audit log once, and job polling sends only what changed.** The
   opening audit record for every device in a batch is written in one pass before any request
   goes out, instead of one write per device; and each 15-second poll now passes the Jobs tab only

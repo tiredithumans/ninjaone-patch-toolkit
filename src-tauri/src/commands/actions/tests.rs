@@ -541,28 +541,59 @@ fn the_preview_shows_each_devices_own_parameters() {
     assert_eq!(parameters_preview(&BTreeMap::new(), &eligible), None);
 }
 
+/// The detail line names what ran: the resolved script reference rides beside the
+/// webview's display name, because the name is bound by nothing while the id is
+/// what the confirmation hashed and the device received.
 #[test]
 fn action_detail_names_what_was_dispatched() {
+    let script = ScriptRef::Script { id: 42 };
     let mut req = request(ActionKind::Script, vec![1]);
     req.script_name = Some("Install-CriticalSecurityUpdates".into());
-    assert_eq!(action_detail(&req), "Install-CriticalSecurityUpdates");
+    assert_eq!(
+        action_detail(&req, Some(&script)),
+        "Install-CriticalSecurityUpdates (#42)"
+    );
+    assert_eq!(action_detail(&req, None), "Install-CriticalSecurityUpdates");
+
+    // The request's own id is not the label's source: the resolved reference is.
+    req.script_id = Some(99);
+    assert_eq!(
+        action_detail(&req, Some(&script)),
+        "Install-CriticalSecurityUpdates (#42)"
+    );
 
     req.script_name = None;
-    req.script_id = Some(42);
-    assert_eq!(action_detail(&req), "Script #42");
+    assert_eq!(action_detail(&req, Some(&script)), "Script #42");
+    assert_eq!(
+        action_detail(
+            &req,
+            Some(&ScriptRef::Action {
+                uid: "ab-12".into()
+            })
+        ),
+        "Script action ab-12"
+    );
+    assert_eq!(action_detail(&req, None), "Script");
 
     let mut reboot = request(ActionKind::Reboot, vec![1]);
     reboot.reboot_mode = Some(RebootMode::Forced);
-    assert_eq!(action_detail(&reboot), "Reboot (FORCED)");
+    assert_eq!(action_detail(&reboot, None), "Reboot (FORCED)");
     // The Jobs tab and the audit log must record which of the two applies ran —
     // "Apply OS patches" was ambiguous between them.
     assert_eq!(
-        action_detail(&request(ActionKind::OsPatchApply, vec![1])),
+        action_detail(&request(ActionKind::OsPatchApply, vec![1]), None),
         "Apply all OS patches"
     );
     assert_eq!(
-        action_detail(&request(ActionKind::OsPatchRemediate, vec![1])),
+        action_detail(&request(ActionKind::OsPatchRemediate, vec![1]), None),
         "Apply selected OS patches"
+    );
+    assert_eq!(
+        action_detail(
+            &request(ActionKind::OsPatchRemediate, vec![1]),
+            Some(&script)
+        ),
+        "Apply selected OS patches (#42)"
     );
 }
 /// Every mutating `#[tauri::command]` in `mod.rs` must call
@@ -668,27 +699,28 @@ fn a_dry_run_invalidates_nothing() {
     assert_ne!(state.cache_epochs(), (devices_before, current_before));
 }
 
-/// A remediation runs a library script chosen in Settings, so the job report and
-/// the audit trail have to name it. It used to fall through to the bare kind
-/// label, which said what was attempted but never which script did it.
+/// A remediation runs the script configured in Settings, so its detail names that
+/// script by the id the plan resolved — never by a name the request carried. The
+/// real UI sends no name for a remediation; a caller that did would otherwise get
+/// its own choice of name printed beside a Settings id it had nothing to do with.
 #[test]
 fn a_remediation_detail_names_the_script_it_ran() {
     let mut req = request(ActionKind::OsPatchRemediate, vec![1]);
     req.script_name = Some("Install-Approved-KBs".into());
-    let detail = action_detail(&req);
-    assert!(
-        detail.contains("Install-Approved-KBs"),
-        "the remediation script must be named: {detail}"
-    );
-    assert!(
-        detail.contains(ActionKind::OsPatchRemediate.label()),
-        "and the kind must still be there: {detail}"
+    req.script_id = Some(99);
+    let script = ScriptRef::Script { id: 7 };
+    let detail = action_detail(&req, Some(&script));
+    assert_eq!(
+        detail,
+        format!("{} (#7)", ActionKind::OsPatchRemediate.label()),
+        "the kind, and the id Settings resolved — not the request's name or id"
     );
 
-    // With no script name resolved it still degrades to the label rather than
-    // inventing one.
-    req.script_name = None;
-    assert_eq!(action_detail(&req), ActionKind::OsPatchRemediate.label());
+    // With nothing resolved it degrades to the label rather than inventing one.
+    assert_eq!(
+        action_detail(&req, None),
+        ActionKind::OsPatchRemediate.label()
+    );
 }
 
 fn library_script(id: i64, name: &str, variables: &[&str]) -> crate::model::AutomationScript {

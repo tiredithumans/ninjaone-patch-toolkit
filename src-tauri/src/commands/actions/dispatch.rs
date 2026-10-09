@@ -476,24 +476,40 @@ pub(super) fn invalidate_after(kind: ActionKind, dry_run: bool, state: &AppState
     }
 }
 
-pub(super) fn action_detail(req: &ActionRequest) -> String {
+/// The one-line description a job and its audit records carry.
+///
+/// `script` is the reference the plan resolved and the confirmation hashed — the
+/// thing that actually runs. `script_name` is display text the webview supplied
+/// and nothing binds, so a detail built from the name alone could label a job and
+/// its audit trail with a different script than the one dispatched; the resolved
+/// id (or built-in action uid) rides beside the name so the record names what ran.
+pub(super) fn action_detail(req: &ActionRequest, script: Option<&ScriptRef>) -> String {
+    let resolved = script.map(|s| match s {
+        ScriptRef::Script { id } => format!("#{id}"),
+        ScriptRef::Action { uid } => format!("action {uid}"),
+    });
     match req.kind {
-        ActionKind::Script => req
-            .script_name
-            .clone()
-            .or_else(|| req.script_id.map(|id| format!("Script #{id}")))
-            .unwrap_or_else(|| "Script".into()),
+        ActionKind::Script => match (req.script_name.as_deref(), resolved) {
+            (Some(name), Some(id)) => format!("{name} ({id})"),
+            (Some(name), None) => name.to_string(),
+            (None, Some(id)) => format!("Script {id}"),
+            (None, None) => "Script".into(),
+        },
         ActionKind::Reboot => format!(
             "Reboot ({})",
             req.reboot_mode.unwrap_or(RebootMode::Normal).api_value()
         ),
-        // A remediation runs a library script, so name it the way the `Script` arm
-        // does. This fell through to the bare label, which meant the Jobs tab and
-        // the audit log recorded "Apply selected OS patches" for every remediation
-        // without ever saying *which* script did it — and the script is configured
-        // in Settings, so the operator cannot infer it from the request either.
-        kind if kind.is_remediation() => match req.script_name.as_deref() {
-            Some(name) => format!("{} — {name}", kind.label()),
+        // A remediation runs a library script, so name it. This fell through to the
+        // bare label, which meant the Jobs tab and the audit log recorded "Apply
+        // selected OS patches" for every remediation without ever saying *which*
+        // script did it — and the script is configured in Settings, so the operator
+        // cannot infer it from the request either...
+        // ...but by the id Settings resolved, never a name from the request: the UI
+        // sends none for a remediation, and a caller that did would otherwise have
+        // its own choice of name printed beside a Settings id it had nothing to do
+        // with. The operator reads the id against the library.
+        kind if kind.is_remediation() => match resolved {
+            Some(id) => format!("{} ({id})", kind.label()),
             None => kind.label().to_string(),
         },
         other => other.label().to_string(),

@@ -230,7 +230,7 @@ pub async fn run_action(
     // The identity the approval was bound to — never re-read from Settings here. The
     // native endpoints take none.
     let run_as = run_as.unwrap_or_default();
-    let detail = action_detail(&request);
+    let detail = action_detail(&request, script.as_ref());
 
     let (batch_id, id_base) = state.next_job_ids(p.eligible.len() + p.skipped.len());
     let now = Utc::now();
