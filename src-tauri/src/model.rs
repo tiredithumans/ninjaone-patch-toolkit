@@ -232,6 +232,21 @@ impl Severity {
             Self::Unknown => 0,
         }
     }
+
+    /// Every variant, at the index its [`rank`](Self::rank) names. The one list the
+    /// rank-indexed tables are sized from and filled by (`SlaCutoffs` is
+    /// `[_; Severity::ALL.len()]`), so a new variant cannot compile with a slot it
+    /// never fills: `every_severity_is_in_all_at_its_rank` matches exhaustively.
+    pub const ALL: [Self; 8] = [
+        Self::Unknown,
+        Self::Optional,
+        Self::Low,
+        Self::Recommended,
+        Self::Moderate,
+        Self::Security,
+        Self::Important,
+        Self::Critical,
+    ];
 }
 
 /// One patch record, from either family's feed.
@@ -861,6 +876,36 @@ mod tests {
         for (i, s) in PatchStatus::ALL.into_iter().enumerate() {
             assert_eq!(slot(s), i, "{s:?}");
         }
+    }
+
+    /// `ALL` is what every rank-indexed table is sized from, so it must hold each
+    /// variant exactly once, at its rank. The match is exhaustive on purpose: a new
+    /// variant fails to compile here until it is placed in `ALL`.
+    #[test]
+    fn every_severity_is_in_all_at_its_rank() {
+        for (index, severity) in Severity::ALL.iter().enumerate() {
+            assert_eq!(
+                severity.rank() as usize,
+                index,
+                "{severity:?} sits at its rank"
+            );
+            match severity {
+                Severity::Critical
+                | Severity::Important
+                | Severity::Security
+                | Severity::Moderate
+                | Severity::Recommended
+                | Severity::Low
+                | Severity::Optional
+                | Severity::Unknown => {}
+            }
+        }
+        let distinct: std::collections::HashSet<Severity> = Severity::ALL.into_iter().collect();
+        assert_eq!(
+            distinct.len(),
+            Severity::ALL.len(),
+            "no variant listed twice"
+        );
     }
 
     #[test]

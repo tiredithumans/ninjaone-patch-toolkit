@@ -264,9 +264,9 @@ async fn blocking<T: Send + 'static>(
 /// one that pumps the window — and did a keyring round trip and a file write there
 /// while holding the settings mutex every query reads, so a slow Secret Service
 /// froze the UI and stalled in-flight work at once. Writers are serialized by
-/// `settings_write` instead, and the new value is published in memory only once it
-/// is on disk: a failed write no longer leaves memory and `settings.json`
-/// disagreeing.
+/// `AppState::write_settings` instead, and the new value is published in memory
+/// only once it is on disk: a failed write no longer leaves memory and
+/// `settings.json` disagreeing.
 #[tauri::command]
 pub async fn save_settings(
     state: State<'_, AppState>,
@@ -286,12 +286,19 @@ pub async fn save_settings(
         _ => None,
     };
 
-    let _writer = state.settings_write.lock().await;
-    let (next, effects) = merge_settings(&state.settings_snapshot(), instance_base_url, args);
-
-    let to_disk = next.clone();
-    blocking(move || to_disk.save()).await?;
-    state.replace_settings(next.clone());
+    let written = state
+        .write_settings(|current| {
+            let (next, effects) = merge_settings(current, instance_base_url, args);
+            *current = next;
+            effects
+        })
+        .await
+        .map_err(UiError::from)?;
+    // Held through the effects below: a second save must not re-point auth or
+    // clear the caches between this write's publish and its own effects.
+    let _writer = written.writer;
+    let effects = written.out;
+    let next = written.settings;
 
     // Drops the previous tenant's grant when the tenant actually changed — see
     // `AuthState::apply_settings` for why leaving it in place destroyed the
@@ -344,21 +351,20 @@ pub async fn save_settings(
     })
 }
 
-/// Applies `edit` to the presets and persists the result, the same way
-/// `save_settings` persists: serialized by `settings_write`, written on a blocking
-/// thread, published in memory once on disk.
+/// Applies `edit` to the presets and persists the result the same way
+/// `save_settings` does: through `AppState::write_settings`.
 async fn update_presets(
     state: &AppState,
     edit: impl FnOnce(&mut Vec<Preset>),
 ) -> Result<Vec<Preset>, UiError> {
-    let _writer = state.settings_write.lock().await;
-    let mut next = state.settings_snapshot();
-    edit(&mut next.presets);
-    let to_disk = next.clone();
-    blocking(move || to_disk.save()).await?;
-    let presets = next.presets.clone();
-    state.replace_settings(next);
-    Ok(presets)
+    let written = state
+        .write_settings(|next| {
+            edit(&mut next.presets);
+            next.presets.clone()
+        })
+        .await
+        .map_err(UiError::from)?;
+    Ok(written.out)
 }
 
 /// Upserts a preset by name.
