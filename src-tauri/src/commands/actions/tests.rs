@@ -543,26 +543,49 @@ fn the_preview_shows_each_devices_own_parameters() {
 
 #[test]
 fn action_detail_names_what_was_dispatched() {
+    let script = ScriptRef::Script { id: 42 };
     let mut req = request(ActionKind::Script, vec![1]);
     req.script_name = Some("Install-CriticalSecurityUpdates".into());
-    assert_eq!(action_detail(&req), "Install-CriticalSecurityUpdates");
+    // The resolved id rides beside the webview's display name: the name is bound
+    // by nothing, the id is what the confirmation hashed and the device ran.
+    assert_eq!(
+        action_detail(&req, Some(&script)),
+        "Install-CriticalSecurityUpdates (#42)"
+    );
+    assert_eq!(action_detail(&req, None), "Install-CriticalSecurityUpdates");
 
     req.script_name = None;
-    req.script_id = Some(42);
-    assert_eq!(action_detail(&req), "Script #42");
+    assert_eq!(action_detail(&req, Some(&script)), "Script #42");
+    assert_eq!(
+        action_detail(
+            &req,
+            Some(&ScriptRef::Action {
+                uid: "ab-12".into()
+            })
+        ),
+        "Script action ab-12"
+    );
+    assert_eq!(action_detail(&req, None), "Script");
 
     let mut reboot = request(ActionKind::Reboot, vec![1]);
     reboot.reboot_mode = Some(RebootMode::Forced);
-    assert_eq!(action_detail(&reboot), "Reboot (FORCED)");
+    assert_eq!(action_detail(&reboot, None), "Reboot (FORCED)");
     // The Jobs tab and the audit log must record which of the two applies ran —
     // "Apply OS patches" was ambiguous between them.
     assert_eq!(
-        action_detail(&request(ActionKind::OsPatchApply, vec![1])),
+        action_detail(&request(ActionKind::OsPatchApply, vec![1]), None),
         "Apply all OS patches"
     );
     assert_eq!(
-        action_detail(&request(ActionKind::OsPatchRemediate, vec![1])),
+        action_detail(&request(ActionKind::OsPatchRemediate, vec![1]), None),
         "Apply selected OS patches"
+    );
+    assert_eq!(
+        action_detail(
+            &request(ActionKind::OsPatchRemediate, vec![1]),
+            Some(&script)
+        ),
+        "Apply selected OS patches (#42)"
     );
 }
 /// Every mutating `#[tauri::command]` in `mod.rs` must call
@@ -675,7 +698,8 @@ fn a_dry_run_invalidates_nothing() {
 fn a_remediation_detail_names_the_script_it_ran() {
     let mut req = request(ActionKind::OsPatchRemediate, vec![1]);
     req.script_name = Some("Install-Approved-KBs".into());
-    let detail = action_detail(&req);
+    let script = ScriptRef::Script { id: 7 };
+    let detail = action_detail(&req, Some(&script));
     assert!(
         detail.contains("Install-Approved-KBs"),
         "the remediation script must be named: {detail}"
@@ -684,11 +708,18 @@ fn a_remediation_detail_names_the_script_it_ran() {
         detail.contains(ActionKind::OsPatchRemediate.label()),
         "and the kind must still be there: {detail}"
     );
+    assert!(
+        detail.ends_with("(#7)"),
+        "and the id Settings resolved, which is what ran: {detail}"
+    );
 
     // With no script name resolved it still degrades to the label rather than
     // inventing one.
     req.script_name = None;
-    assert_eq!(action_detail(&req), ActionKind::OsPatchRemediate.label());
+    assert_eq!(
+        action_detail(&req, None),
+        ActionKind::OsPatchRemediate.label()
+    );
 }
 
 fn library_script(id: i64, name: &str, variables: &[&str]) -> crate::model::AutomationScript {
