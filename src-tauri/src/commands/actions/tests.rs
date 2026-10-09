@@ -1000,7 +1000,7 @@ async fn a_tick_that_spans_an_instance_switch_writes_no_verdict() {
     let (session, pending) = state.pending_jobs();
     let updates = resolved_against_a_completed_apply(pending).await;
 
-    state.replace_settings(crate::settings::Settings {
+    state.seed_settings(crate::settings::Settings {
         instance_base_url: "https://other.ninjarmm.com".into(),
         ..state.settings_snapshot()
     });

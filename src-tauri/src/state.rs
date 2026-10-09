@@ -359,9 +359,16 @@ impl AppState {
         })
     }
 
+    /// Seeds the in-memory settings without a disk write. Tests only: production
+    /// writers go through [`Self::write_settings`].
+    #[cfg(test)]
+    pub fn seed_settings(&self, next: Settings) {
+        self.replace_settings(next);
+    }
+
     /// Replaces the in-memory settings. Only [`Self::write_settings`], once the new
-    /// value is safely on disk, and a test seeding state call this.
-    pub fn replace_settings(&self, next: Settings) {
+    /// value is safely on disk, calls this.
+    fn replace_settings(&self, next: Settings) {
         *self
             .settings
             .lock()

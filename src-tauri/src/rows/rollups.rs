@@ -90,7 +90,7 @@ impl SeverityCounts {
     ///
     /// The labels come from [`Severity::label`] rather than being restated here, so
     /// the chart legend cannot drift from the label the table and exports print.
-    pub const BANDS: [SeverityBand; 8] = [
+    pub const BANDS: [SeverityBand; Severity::ALL.len()] = [
         (Severity::Critical.label(), |c| c.critical),
         (Severity::Important.label(), |c| c.important),
         (Severity::Security.label(), |c| c.security),
