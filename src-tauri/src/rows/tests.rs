@@ -1119,6 +1119,11 @@ fn serialized_shapes_carry_every_frontend_required_key() {
         &["device", "rows", "rowsTotal"],
         "DeviceDetail",
     );
+    assert_keys_present(
+        &serde_json::to_value(&rows_by_device(&result.rows, &[1], 10)[0]).unwrap(),
+        &["deviceId", "rows", "truncated"],
+        "DeviceRows",
+    );
 
     let compliance = build_compliance(&summaries, &refs(&patches), &by_id, &maps, &sla30());
     assert_keys_present(
