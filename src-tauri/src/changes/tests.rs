@@ -273,6 +273,34 @@ fn a_snapshot_of_another_tenant_or_scope_is_never_diffed() {
     assert_eq!(diff(Some(&other_scope), &now).previous_at, None);
 }
 
+/// The in-memory baseline stands in for the file only for the scope it holds, and
+/// it is one slot: the newest write replaces whatever was there.
+#[test]
+fn the_remembered_snapshot_serves_only_its_own_scope() {
+    let slot = LastSaved::new();
+    assert!(slot.get(TENANT, "scope").is_none());
+
+    let first = snap(&[row(1, Some("KB1"), "CU", "PENDING")], "t1");
+    slot.remember(Arc::new(first.clone()));
+    assert_eq!(slot.get(TENANT, "scope").as_deref(), Some(&first));
+    assert!(
+        slot.get(TENANT, "other").is_none(),
+        "another scope reads its file"
+    );
+    assert!(
+        slot.get("https://other\nclient", "scope").is_none(),
+        "never across tenants"
+    );
+
+    let second = snap(&[row(2, None, "Chrome", "FAILED")], "t2");
+    slot.remember(Arc::new(second.clone()));
+    assert_eq!(
+        slot.get(TENANT, "scope").as_deref(),
+        Some(&second),
+        "one slot: the newest write"
+    );
+}
+
 #[test]
 fn a_snapshot_round_trips_and_stays_per_tenant() {
     let dir = temp_dir("roundtrip");
@@ -283,7 +311,7 @@ fn a_snapshot_round_trips_and_stays_per_tenant() {
         ],
         "t1",
     );
-    save_to(&dir, &s);
+    assert!(save_to(&dir, &s), "written");
     assert_eq!(load_from(&dir, TENANT, "scope"), Some(s.clone()));
     assert_eq!(
         load_from(&dir, "https://eu.ninjarmm.com\nclient-a", "scope"),

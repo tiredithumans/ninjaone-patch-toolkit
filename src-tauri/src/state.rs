@@ -605,6 +605,16 @@ impl AppState {
         }
     }
 
+    /// Whether `token`'s run would still be stored if it finished now: no newer
+    /// query, same tenant, same session. Advisory — the store re-adjudicates under
+    /// its lock — so it is for skipping work a superseded run would do for nobody,
+    /// never for deciding the write.
+    pub fn query_is_current(&self, token: &QueryToken) -> bool {
+        self.query_generation.load(Ordering::SeqCst) == token.generation
+            && self.result_epoch.load(Ordering::SeqCst) == token.result_epoch
+            && self.tenant_key() == token.tenant
+    }
+
     /// Stores a query result for paging and export, **unless** a newer query has
     /// started or the tenant changed while this one was in flight. Returns whether
     /// the write happened.

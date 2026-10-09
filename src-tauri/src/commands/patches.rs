@@ -178,8 +178,18 @@ pub async fn query_patches(
     .await
     .map_err(UiError::from)?;
 
-    let (result, snapshot) =
-        diff_against_previous_run(result, token.tenant_label(), statuses, install_days).await?;
+    // A run already superseded (or whose tenant or session moved on) is dropped at
+    // the store, and the frontend ignores its response, so its diff — a baseline
+    // load and a walk of every row — would be work for nobody. Advisory only: the
+    // store still adjudicates under its lock, and a run that passes here and loses
+    // there has merely diffed for nothing, as every run used to.
+    let (result, snapshot) = if state.query_is_current(&token) {
+        let (result, snapshot) =
+            diff_against_previous_run(result, token.tenant_label(), statuses, install_days).await?;
+        (result, Some(snapshot))
+    } else {
+        (result, None)
+    };
 
     // Hand the frontend a lightweight summary (first page + rollups) and keep the
     // full result in the tenant-stamped cache for paging (`get_patch_rows`) and
@@ -194,7 +204,11 @@ pub async fn query_patches(
     tokio::task::spawn_blocking(move || crate::history::record(&entry));
 
     let outcome = state.store_last_result_if_current(token, result);
-    save_baseline_if_stored(&outcome, move || changes::save(&snapshot)).await;
+    // `snapshot` is `None` only when the advisory check failed, and the generation
+    // never moves backwards, so a stored result always has one.
+    if let Some(snapshot) = snapshot {
+        save_baseline_if_stored(&outcome, move || changes::save(snapshot)).await;
+    }
     summary_for(outcome, summary, qid)
 }
 
@@ -250,7 +264,7 @@ async fn diff_against_previous_run(
             &result.generated_at,
             &statuses,
         );
-        result.changes = changes::diff(previous.as_ref(), &snapshot);
+        result.changes = changes::diff(previous.as_deref(), &snapshot);
         (result, snapshot)
     })
     .await
