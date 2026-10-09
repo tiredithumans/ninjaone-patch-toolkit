@@ -311,8 +311,13 @@ pub(super) async fn resolve_pending(
         }
     }
 
-    let mut updates = Vec::with_capacity(pending.len());
+    // Only the rows this tick changed. Every pending job used to come back, so a
+    // 500-device batch still in progress was cloned, written back under the jobs
+    // lock and pushed over IPC for the frontend to merge, once per tick, for up to
+    // the 45-minute timeout — for rows the feed had not moved at all.
+    let mut updates = Vec::new();
     for mut job in pending {
+        let before = job.clone();
         match feeds.get(&job.device_id) {
             Some(Ok(list)) => crate::actions::advance_job(&mut job, list, now, claimed),
             Some(Err(err)) => {
@@ -332,7 +337,9 @@ pub(super) async fn resolve_pending(
                 }
             }
         }
-        updates.push(job);
+        if job != before {
+            updates.push(job);
+        }
     }
     updates
 }

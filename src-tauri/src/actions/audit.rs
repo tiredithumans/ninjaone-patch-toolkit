@@ -67,6 +67,24 @@ const BENIGN_KEY_NAMES: [&str; 6] = [
 /// parameter name: `sig` is an Azure SAS signature.
 const SENSITIVE_QUERY_NAMES: [&str; 1] = ["sig"];
 
+/// Script parameters as the audit log stores them: through [`redact_parameters`]
+/// by construction, since the only way to make one is [`Redacted::of`].
+///
+/// This was a plain `Option<String>` that the one dispatch site remembered to
+/// redact, so a second construction site that forgot would have written a
+/// credential to disk with nothing to stop it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub struct Redacted(String);
+
+impl Redacted {
+    /// `None` for an empty string: a device with nothing to pass records no
+    /// parameters rather than an empty one.
+    pub fn of(raw: &str) -> Option<Self> {
+        (!raw.is_empty()).then(|| Self(redact_parameters(raw)))
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditEntry {
@@ -80,8 +98,8 @@ pub struct AuditEntry {
     pub device_name: String,
     pub organization: String,
     pub detail: String,
-    /// Redacted copy of what was sent — see [`redact_parameters`].
-    pub parameters: Option<String>,
+    /// What was sent, redacted — the type sees to that.
+    pub parameters: Option<Redacted>,
     pub dry_run: bool,
     /// True when this dispatch went out only because the operator overrode a closed
     /// maintenance window. Omitted otherwise, so the log's shape is unchanged for

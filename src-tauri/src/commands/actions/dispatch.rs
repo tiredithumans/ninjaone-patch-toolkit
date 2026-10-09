@@ -84,6 +84,20 @@ pub(super) async fn dispatch_batch(
         },
     );
 
+    // Opening records for the whole batch in one write, before anything is sent, so
+    // a crash mid-batch still leaves evidence of what was attempted. This was one
+    // record per device, written by its own task before it waited for a permit: a
+    // 500-device batch opened the log 500 times at once on the blocking pool.
+    let started = Utc::now();
+    audit::record_off_runtime(
+        eligible
+            .iter()
+            .enumerate()
+            .map(|(index, target)| opening_record(&ctx, target, ctx.id_base + index as u64))
+            .collect(),
+    )
+    .await;
+
     let sem = Arc::new(Semaphore::new(permits));
     let mut set: JoinSet<(usize, JobReport)> = JoinSet::new();
     for (index, target) in eligible.iter().enumerate() {
@@ -107,7 +121,84 @@ pub(super) async fn dispatch_batch(
             Err(err) => warn!(?err, "a dispatch task panicked"),
         }
     }
-    dispatched.into_iter().flatten().collect()
+    fill_unreported(&ctx, eligible, dispatched, started)
+}
+
+/// The batch's jobs in plan order, with every slot a panicked task left empty
+/// filled in.
+///
+/// Such a device's POST may already have gone out, so it gets a job all the same —
+/// `Unknown`, polled like any other ambiguous send — rather than vanishing with no
+/// row, no poller entry, and an opening audit record that nothing ever closes.
+/// `slots` is indexed like `eligible`, so the filled job carries the id its task
+/// would have used.
+pub(super) fn fill_unreported(
+    ctx: &DispatchContext,
+    eligible: &[PlannedTarget],
+    slots: Vec<Option<JobReport>>,
+    started: chrono::DateTime<Utc>,
+) -> Vec<JobReport> {
+    slots
+        .into_iter()
+        .zip(eligible)
+        .enumerate()
+        .map(|(index, (slot, target))| {
+            slot.unwrap_or_else(|| unrecorded_job(ctx, target, ctx.id_base + index as u64, started))
+        })
+        .collect()
+}
+
+/// What a device whose dispatch task failed before reporting records as its state.
+pub(super) const DISPATCH_TASK_PANICKED: &str =
+    "the dispatch task failed before recording an outcome; the request may have been sent";
+
+/// The job for a device whose dispatch task panicked before it reported.
+///
+/// Dated from the batch start rather than from now: the poller's activity floor is
+/// `dispatched_ts` less a skew, and the send — if it happened — came after the
+/// batch began, so this floor cannot exclude it.
+pub(super) fn unrecorded_job(
+    ctx: &DispatchContext,
+    target: &PlannedTarget,
+    job_id: u64,
+    started: chrono::DateTime<Utc>,
+) -> JobReport {
+    let mut job = queued_job(ctx, target, job_id, started);
+    job.state = JobState::Unknown(DISPATCH_TASK_PANICKED.into());
+    job
+}
+
+/// The audit record written before a device's request goes out.
+pub(super) fn opening_record(
+    ctx: &DispatchContext,
+    target: &PlannedTarget,
+    job_id: u64,
+) -> audit::AuditEntry {
+    audit::AuditEntry {
+        timestamp: audit::now_stamp(),
+        instance: ctx.instance.clone(),
+        client_id: ctx.client_id.clone(),
+        batch_id: ctx.batch_id,
+        job_id,
+        kind: ctx.kind,
+        device_id: target.device_id,
+        device_name: target.device_name.clone(),
+        organization: target.organization.clone(),
+        detail: ctx.detail.clone(),
+        // This device's own parameters, so the audit trail records what each device
+        // was actually told to install rather than a batch-wide approximation.
+        parameters: ctx
+            .parameters
+            .get(&target.device_id)
+            .and_then(|p| audit::Redacted::of(p)),
+        dry_run: ctx.dry_run,
+        window_override: ctx.window_overridden,
+        confirm_token_prefix: ctx.confirm_prefix.clone(),
+        outcome: "dispatching".into(),
+        activity_id: None,
+        series_uid: None,
+        exit_code: None,
+    }
 }
 
 /// The progress event for one device's outcome — `None` once the session that
@@ -132,7 +223,9 @@ pub(super) fn device_progress(
     })
 }
 
-/// Audits, dispatches and records the outcome for a single device.
+/// Dispatches to a single device and records the outcome. Its opening audit record
+/// was written by [`dispatch_batch`], with the rest of the batch's, before any task
+/// was spawned.
 async fn dispatch_one(
     ctx: &DispatchContext,
     target: &PlannedTarget,
@@ -140,37 +233,6 @@ async fn dispatch_one(
     sem: &Semaphore,
 ) -> JobReport {
     let job_id = ctx.id_base + index as u64;
-
-    // Written before the request goes out, so a crash mid-batch still leaves
-    // evidence of what was attempted.
-    audit::record_off_runtime(vec![audit::AuditEntry {
-        timestamp: audit::now_stamp(),
-        instance: ctx.instance.clone(),
-        client_id: ctx.client_id.clone(),
-        batch_id: ctx.batch_id,
-        job_id,
-        kind: ctx.kind,
-        device_id: target.device_id,
-        device_name: target.device_name.clone(),
-        organization: target.organization.clone(),
-        detail: ctx.detail.clone(),
-        // This device's own parameters, so the audit trail records what each device
-        // was actually told to install rather than a batch-wide approximation.
-        parameters: ctx
-            .parameters
-            .get(&target.device_id)
-            .filter(|p| !p.is_empty())
-            .map(|p| audit::redact_parameters(p)),
-        dry_run: ctx.dry_run,
-        window_override: ctx.window_overridden,
-        confirm_token_prefix: ctx.confirm_prefix.clone(),
-        outcome: "dispatching".into(),
-        activity_id: None,
-        series_uid: None,
-        exit_code: None,
-    }])
-    .await;
-
     let job = send_and_record(ctx, target, job_id, sem).await;
 
     // A job settled at dispatch (NinjaOne rejected the request outright) never
@@ -201,8 +263,24 @@ pub(super) async fn send_and_record(
     sem: &Semaphore,
 ) -> JobReport {
     let turn = send_if_current(ctx, target.device_id, sem).await;
-    let dispatched_at = turn.at;
-    let mut job = JobReport {
+    let mut job = queued_job(ctx, target, job_id, turn.at);
+
+    match turn.outcome {
+        Some(outcome) => record_dispatch(&mut job, outcome, Utc::now()),
+        // Terminal, so `dispatch_one`'s closing record says it never went out.
+        None => job.finish(JobState::Skipped(NOT_SENT_SESSION_ENDED.into()), Utc::now()),
+    }
+    job
+}
+
+/// A device's job as dispatch first records it: queued, dated `dispatched_at`.
+fn queued_job(
+    ctx: &DispatchContext,
+    target: &PlannedTarget,
+    job_id: u64,
+    dispatched_at: chrono::DateTime<Utc>,
+) -> JobReport {
+    JobReport {
         id: job_id,
         batch_id: ctx.batch_id,
         device_id: target.device_id,
@@ -220,14 +298,7 @@ pub(super) async fn send_and_record(
         series_uid: None,
         exit_code: None,
         request: ctx.job_requests.get(&target.device_id).cloned(),
-    };
-
-    match turn.outcome {
-        Some(outcome) => record_dispatch(&mut job, outcome, Utc::now()),
-        // Terminal, so `dispatch_one`'s closing record says it never went out.
-        None => job.finish(JobState::Skipped(NOT_SENT_SESSION_ENDED.into()), Utc::now()),
     }
-    job
 }
 
 /// One device's turn at the semaphore: when it came, and what the send said.

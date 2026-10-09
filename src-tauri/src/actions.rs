@@ -225,7 +225,7 @@ impl JobState {
 ///
 /// Dates carry both a formatted label and a raw epoch, the same convention
 /// `PatchRow` uses, so the UI can display and sort without re-parsing.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobReport {
     /// Unique per dispatched *row*, not per device: batches accumulate in the Jobs
