@@ -23,5 +23,6 @@ paths:
   → `docs/design/auth.md#in-memory-before-keyring-and-only-the-token-that-got-the-401-is-invalidated`
 - **The refresh is single-flight under `refresh_lock`, and only `invalid_grant` clears the
   credential** (`refresh_grant_is_dead`). Not "any 4xx": 429 is retry-later. Callers queued
-  behind a transient failure for the same `GrantStamp` return it rather than re-POSTing.
+  behind a failure for the same `GrantStamp` — transient from the endpoint, an unreadable token
+  body, or a keyring read fault — return it rather than re-POSTing or re-reading.
   → `docs/design/auth.md#the-refresh-is-single-flight-and-only-invalid_grant-clears-the-credential`
