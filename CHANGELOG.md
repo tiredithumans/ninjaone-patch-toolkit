@@ -36,8 +36,7 @@ version and start a fresh `[Unreleased]`.
 - **A refresh of the same query no longer re-reads the previous run from disk.** The "changes
   since the previous run" diff loaded and parsed that run's snapshot file on every query, even
   an auto-refresh tick over the same scope; the snapshot this app wrote last is now kept in
-  memory for the next run of that scope, and a run that another query has already superseded
-  skips the diff altogether.
+  memory for the next run of that scope.
 - **Select-all and group checkboxes update the selection once.** Ticking a page or a group's
   members applied the change one row at a time, so the action bar, the header checkbox and every
   row checkbox re-ran once per row; a 500-row group tick now runs them once.

@@ -290,7 +290,11 @@ superseded run is older than the one that won, and writing it would roll the bas
 write is atomic (temp + rename, 0600) on a blocking thread, and `query_patches` awaits it before
 returning (`save_baseline_if_stored`). It used to be detached, so a query started right after
 (an auto-refresh tick, a quick re-run) could load the baseline before the save landed and diff
-against the run before last. The directory keeps the 20 most
+against the run before last. The snapshot that write landed is also kept in memory
+(`changes::LastSaved`, one slot) as the next baseline for the same tenant and scope, so a refresh
+cadence over one scope never re-reads and re-parses the file; another scope reads its file. Only a
+snapshot that reached disk is remembered, so memory never names a baseline the next launch cannot
+find. The directory keeps the 20 most
 recently written scopes within 64 MB, always keeping the newest. A run past a million items is
 not written and says so (`too_large`). Consequence worth knowing: every stored run is the next
 baseline, so re-running the same scope over a warm cache reports "no changes since" the run

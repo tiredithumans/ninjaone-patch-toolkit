@@ -42,7 +42,8 @@ Violating these silently misreports a fleet.
   → `docs/design/compliance.md#installedfailed-vs-current-patches-status-routing`
 - **Changes since last run:** identity is `changes::patch_key`, scope is tenant +
   `changes::scope_key`, snapshot saved only on `StoreOutcome::Stored`, and awaited before the
-  query returns (never detached).
+  query returns (never detached); the baseline is served from the last snapshot this process
+  saved when the scope matches, remembered only once it is on disk.
   → `docs/design/compliance.md#changes-since-the-previous-comparable-run`
 - **SLA aging is per band** (`SlaCutoffs` from the result's `SlaPolicy`).
   → `docs/design/compliance.md#the-sla-is-per-severity-band`
