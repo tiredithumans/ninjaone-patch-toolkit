@@ -11,6 +11,18 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A sign-in whose token could not be saved no longer leaves the previous operator's.** When
+  the OS keyring refused to store a new sign-in's refresh token, the earlier session's token
+  stayed on disk, so the next launch restored it and signed the earlier operator back in. The
+  stale entry is now removed; the new session stays signed in and a restart asks you to sign in
+  again.
+- **A keyring fault during a token refresh no longer stalls every waiting request.** When the
+  saved sign-in could not be read (a locked keychain, no Secret Service), every request a query
+  had queued behind the refresh repeated the read in turn. The waiting requests now report the
+  same error, and the next query tries again.
+
 ### Changed
 
 - **Select-all and group checkboxes update the selection once.** Ticking a page or a group's

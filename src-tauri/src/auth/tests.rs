@@ -578,6 +578,72 @@ fn a_keyring_failure_keeps_the_session_it_just_obtained() {
     assert_eq!(auth.management_grant(), Some(true));
 }
 
+/// The keyring failure above must not leave the *previous* operator's token behind
+/// either. A new sign-in whose own refresh token could not be saved kept the
+/// earlier session's entry on disk, so the next launch restored it and signed the
+/// earlier operator back in — the shared-workstation case the `None` arm already
+/// closed for a grant that issued no refresh token.
+#[test]
+fn a_new_sign_in_whose_token_cannot_be_saved_drops_the_previous_operators_token() {
+    let base_url = "https://keyring-refuses.example.com";
+    let client_id = "client-keyring-refuses";
+    let entry = saved_refresh_entry(base_url, client_id);
+    save_keyring(&entry, "previous-operator-refresh").expect("seed the previous session");
+    test_keyring::refuse_writes_to(&entry);
+
+    let auth = launched(base_url, client_id);
+    auth.store_tokens_blocking(
+        TokenResponse {
+            access_token: "fresh-access".into(),
+            refresh_token: Some("fresh-refresh".into()),
+            expires_in: 3600,
+            scope: Some("monitoring offline_access".into()),
+        },
+        auth.grant_stamp(),
+        true,
+    )
+    .expect("a keyring problem must not fail the store");
+
+    assert!(
+        auth.is_authenticated(),
+        "the session it just obtained survives"
+    );
+    assert_eq!(
+        load_keyring(&entry).expect("read"),
+        None,
+        "the previous operator's token must not outlive a sign-in that could not save its own"
+    );
+}
+
+/// A keyring read fault was not recorded, so every caller queued behind the
+/// refresh lock repeated the blocking keyring read in turn: a locked keychain
+/// stalled a query's fan-out once per request instead of once.
+#[tokio::test]
+async fn callers_queued_behind_a_failed_keyring_read_share_its_failure() {
+    let base_url = "https://keyring-shared-read.example.com";
+    let client_id = "client-keyring-shared-read";
+    let entry = saved_refresh_entry(base_url, client_id);
+    // Nothing saved for this tenant, so the read ends in "not authenticated".
+    let auth = launched(base_url, client_id);
+
+    let (a, b, c, d) = tokio::join!(
+        auth.access_token(),
+        auth.access_token(),
+        auth.access_token(),
+        auth.access_token(),
+    );
+
+    for result in [a, b, c, d] {
+        let err = result.expect_err("every queued caller sees the failure");
+        assert!(err.to_string().contains("not authenticated"), "{err}");
+    }
+    assert_eq!(
+        test_keyring::reads_of(&entry),
+        1,
+        "the queued callers share the one read instead of repeating it"
+    );
+}
+
 /// RFC 6749 §5.1 lets a refresh response omit `scope` when it is unchanged. With
 /// an opaque token that read as "unknowable", so `management_grant()` flipped to
 /// `None` mid-session and `require_actions_enabled` blocked every write.

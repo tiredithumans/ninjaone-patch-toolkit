@@ -581,7 +581,23 @@ impl AuthState {
         }
         let refresh_token = match grant.refresh_token.take() {
             Some(token) => token,
-            None => self.load_saved_refresh(&grant.stamp.tenant).await?,
+            None => match self.load_saved_refresh(&grant.stamp.tenant).await {
+                Ok(token) => token,
+                // Shared with the callers queued behind this one, exactly like a
+                // transient refresh failure below. Returning before the record was
+                // written meant a locked keychain, an absent Secret Service or a
+                // plain "not signed in" was re-read once per queued request — each a
+                // blocking keyring round trip, so one fault stalled a query's whole
+                // fan-out N times over.
+                Err(e) => {
+                    *last_failure = Some(RefreshFailure {
+                        stamp: grant.stamp.clone(),
+                        message: format!("{e:#}"),
+                    });
+                    self.refresh_failures.fetch_add(1, Ordering::AcqRel);
+                    return Err(e);
+                }
+            },
         };
         let stamp = grant.stamp.clone();
         self.refresh(grant, &refresh_token)
@@ -883,22 +899,34 @@ impl AuthState {
                         error = %e,
                         "could not persist the refresh token; this session stays signed in but a restart will require signing in again"
                     );
+                    // The warning above is only true if nothing older is left behind.
+                    // A new sign-in whose own token did not land used to keep the
+                    // previous session's entry, so the next launch restored it and
+                    // silently signed the earlier operator back in — on a shared
+                    // workstation, the exact door the `None` arm below closes.
+                    if new_session {
+                        Self::delete_previous_refresh_entries(&entry);
+                    }
                 }
             }
             // A new sign-in that issued no refresh token must not leave the previous
             // session's on disk, or the next launch restores it. That includes the
             // pre-tenant-scoping entry, as `logout` does: a migration whose write
             // failed leaves it in place, and the next keyring read adopts it.
-            None if new_session => {
-                for stale in [entry.as_str(), LEGACY_KEYRING_USER_REFRESH] {
-                    if let Err(e) = delete_keyring(stale) {
-                        warn!(error = %e, "could not delete the previous session's refresh token");
-                    }
-                }
-            }
+            None if new_session => Self::delete_previous_refresh_entries(&entry),
             None => {}
         }
         Ok(token_set)
+    }
+
+    /// Best-effort removal of the saved refresh tokens a new sign-in must not leave
+    /// behind: the tenant's own entry and the pre-tenant-scoping one.
+    fn delete_previous_refresh_entries(entry: &str) {
+        for stale in [entry, LEGACY_KEYRING_USER_REFRESH] {
+            if let Err(e) = delete_keyring(stale) {
+                warn!(error = %e, "could not delete the previous session's refresh token");
+            }
+        }
     }
 
     fn clear_tokens_locked(&self) {
@@ -1556,17 +1584,47 @@ fn delete_keyring(user: &str) -> Result<()> {
 /// "may or may not have been accepted".
 #[cfg(test)]
 mod test_keyring {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Mutex, OnceLock};
 
     pub(super) fn store() -> &'static Mutex<HashMap<String, String>> {
         static STORE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
         STORE.get_or_init(|| Mutex::new(HashMap::new()))
     }
+
+    /// Entries whose writes fail, standing in for a locked keychain. Per entry
+    /// rather than a global switch: tests share this keyring and run in parallel,
+    /// so a fault must only reach the tenant that asked for it.
+    pub(super) fn refusing() -> &'static Mutex<HashSet<String>> {
+        static REFUSING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+        REFUSING.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    pub(super) fn refuse_writes_to(user: &str) {
+        refusing().lock().unwrap().insert(user.to_string());
+    }
+
+    /// How many times each entry has been read, so a test can prove a read was
+    /// shared rather than repeated.
+    pub(super) fn reads() -> &'static Mutex<HashMap<String, usize>> {
+        static READS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+        READS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn reads_of(user: &str) -> usize {
+        reads().lock().unwrap().get(user).copied().unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
 fn save_keyring(user: &str, value: &str) -> Result<()> {
+    if test_keyring::refusing()
+        .lock()
+        .map_err(|_| anyhow!("test keyring poisoned"))?
+        .contains(user)
+    {
+        bail!("test keyring refuses to store {user}");
+    }
     test_keyring::store()
         .lock()
         .map_err(|_| anyhow!("test keyring poisoned"))?
@@ -1576,6 +1634,11 @@ fn save_keyring(user: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 fn load_keyring(user: &str) -> Result<Option<String>> {
+    *test_keyring::reads()
+        .lock()
+        .map_err(|_| anyhow!("test keyring poisoned"))?
+        .entry(user.to_string())
+        .or_default() += 1;
     Ok(test_keyring::store()
         .lock()
         .map_err(|_| anyhow!("test keyring poisoned"))?
