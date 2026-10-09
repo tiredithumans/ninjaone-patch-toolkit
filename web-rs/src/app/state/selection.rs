@@ -1,5 +1,7 @@
 //! The per-patch-row selection the action bar dispatches against.
 
+use std::borrow::Borrow;
+
 use super::*;
 
 impl AppState {
@@ -37,13 +39,28 @@ impl AppState {
         })
     }
 
+    /// Ticks or unticks a whole slice of rows (a page, a group's members) as one
+    /// selection update, so the subscribers re-run once rather than once per row.
+    pub(in crate::app) fn toggle_rows_selection<R: Borrow<PatchRow>>(
+        self,
+        rows: &[R],
+        checked: bool,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        self.actions
+            .selected
+            .update(|sel| util::apply_rows_selection(sel, rows, checked));
+    }
+
     /// Ticks or clears every patch row on the current page. Idempotent per row, so
     /// re-running it never double-counts.
     pub(in crate::app) fn toggle_page_selection(self, checked: bool) {
+        // One copy of the page, taken before the update rather than borrowed across
+        // it: the subscribers `selected` notifies read `page_rows` themselves.
         let rows = self.query.page_rows.get_untracked();
-        for row in &rows {
-            self.toggle_row_selection(row, checked);
-        }
+        self.toggle_rows_selection(&rows, checked);
     }
 
     /// Drops both selections — the patch rows and the Needs Reboot tab's devices.

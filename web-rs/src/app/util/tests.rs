@@ -400,6 +400,41 @@ fn ticking_one_row_does_not_tick_the_devices_other_rows() {
     assert!(!device.patches.contains_key(&patch_key(&b)));
 }
 
+/// The batched form is the row-by-row form applied in order: a slice that mixes
+/// two devices and an orphan lands exactly what ticking each row would, and
+/// unticking the same slice empties the map again.
+#[test]
+fn applying_a_slice_matches_applying_each_row() {
+    let rows = [
+        sel_row(1, "web-01", Some("KB1"), "Cumulative Update", "OS"),
+        sel_row(1, "web-01", Some("KB2"), "Security Update", "OS"),
+        sel_row(2, "web-02", None, "7-Zip", "SOFTWARE"),
+        sel_row(ORPHAN_DEVICE_ID, "", Some("KB9"), "Orphan", "OS"),
+    ];
+
+    let mut batched = BTreeMap::new();
+    apply_rows_selection(&mut batched, &rows, true);
+    let mut one_by_one = BTreeMap::new();
+    for row in &rows {
+        apply_row_selection(&mut one_by_one, row, true);
+    }
+    assert_eq!(batched.len(), 2, "two devices, no orphan");
+    assert_eq!(
+        batched.keys().collect::<Vec<_>>(),
+        one_by_one.keys().collect::<Vec<_>>()
+    );
+    for (id, device) in &batched {
+        assert_eq!(
+            device.patches.keys().collect::<Vec<_>>(),
+            one_by_one[id].patches.keys().collect::<Vec<_>>(),
+            "device {id}"
+        );
+    }
+
+    apply_rows_selection(&mut batched, &rows, false);
+    assert!(batched.is_empty(), "unticking the slice empties the map");
+}
+
 /// A patch row with no device id is never a dispatch target.
 #[test]
 fn an_orphan_row_cannot_enter_the_selection() {

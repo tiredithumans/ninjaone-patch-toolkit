@@ -11,6 +11,12 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Select-all and group checkboxes update the selection once.** Ticking a page or a group's
+  members applied the change one row at a time, so the action bar, the header checkbox and every
+  row checkbox re-ran once per row; a 500-row group tick now runs them once.
+
 ## [0.15.2] - 2026-10-05
 
 ### Fixed
