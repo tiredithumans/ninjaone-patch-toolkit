@@ -223,7 +223,7 @@ leaks a dark pastel onto white. Charts read the same tokens through classes, so 
 `prefers-reduced-motion` stops transitions and the indeterminate progress slide.
 
 **Window geometry** (backend, `src-tauri/src/window_state.rs`). Its own `window-state.json`, not a
-`Settings` field, so a drag never goes through `replace_settings`. Saved debounced on
+`Settings` field, so a drag never goes through `AppState::write_settings`. Saved debounced on
 move/resize (on a blocking thread) and synchronously on close; restored in `setup` before the
 hidden-at-launch window is shown. `window_state::placement` keeps a saved position only when a
 grab-able strip of the title bar lands on a current monitor's work area, otherwise lets the OS

@@ -273,15 +273,16 @@ fn counts_toward_backlog(p: &Patch) -> bool {
 /// before its band's cutoff is past SLA.
 ///
 /// Computed once per query rather than once per patch, indexed by
-/// [`Severity::rank`] (unique per variant, `0..=7`). Each band's window comes from
+/// [`Severity::rank`] and sized from [`Severity::ALL`], which lists every variant at
+/// its rank, so every slot is filled. Each band's window comes from
 /// [`SlaPolicy::days_for`] — its override, else the default; `Unknown` always takes
 /// the default.
-pub struct SlaCutoffs([DateTime<Utc>; 8]);
+pub struct SlaCutoffs([DateTime<Utc>; Severity::ALL.len()]);
 
 impl SlaCutoffs {
     pub fn new(policy: &SlaPolicy, now: DateTime<Utc>) -> Self {
-        let mut cutoffs = [now; 8];
-        for severity in SEVERITIES {
+        let mut cutoffs = [now; Severity::ALL.len()];
+        for severity in Severity::ALL {
             cutoffs[severity.rank() as usize] = now - Duration::days(policy.days_for(severity));
         }
         Self(cutoffs)
@@ -301,18 +302,6 @@ impl SlaCutoffs {
         p.first_seen_at().map(|r| r < cutoff).unwrap_or(true)
     }
 }
-
-/// Every variant, so [`SlaCutoffs::new`] fills each slot of its rank-indexed array.
-const SEVERITIES: [Severity; 8] = [
-    Severity::Critical,
-    Severity::Important,
-    Severity::Security,
-    Severity::Moderate,
-    Severity::Recommended,
-    Severity::Low,
-    Severity::Optional,
-    Severity::Unknown,
-];
 
 /// The device a fleet-health rollup should attribute a patch to, or `None` when the
 /// patch falls outside the population every one of those rollups describes: the

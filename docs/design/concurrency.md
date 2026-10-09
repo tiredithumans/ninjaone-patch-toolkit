@@ -39,6 +39,15 @@ code against the rule, not against the examples.
 `settings`/`last_result` are `std::sync::Mutex`. Take a `settings_snapshot()` (clone) before any
 `.await`; don't hold a guard across an API call.
 
+The one deliberate exception is the settings *writer* lock, a `tokio` mutex that only
+`AppState::write_settings` takes: it snapshots, applies the edit, saves on a blocking thread and
+publishes in memory only once the file is written, so two saves cannot interleave and lose one
+another's change, and a failed write never leaves memory and `settings.json` disagreeing. Readers
+never take it. `write_settings` hands its guard back so a writer with follow-up effects (a tenant
+switch re-pointing auth and clearing caches) keeps later writers out until those have landed too.
+The lock and `replace_settings` are private precisely so no second writer can hand-roll the
+sequence without them.
+
 ## The Windows main thread has a 1 MiB stack
 
 Windows MSVC gives the main thread 1 MiB; macOS and Linux give 8 MiB. v0.15.0's optimized build

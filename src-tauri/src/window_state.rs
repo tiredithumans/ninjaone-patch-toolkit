@@ -1,9 +1,9 @@
 //! Remembers the main window's size, position and maximized state across launches.
 //!
 //! A small file of its own (`window-state.json` beside `settings.json`), not a
-//! `Settings` field: settings writes go through `replace_settings`, which takes the
-//! settings lock and publishes a new snapshot, and a window being dragged emits
-//! dozens of move events a second. Geometry is a per-machine convenience with no
+//! `Settings` field: settings writes go through `AppState::write_settings`, which
+//! serializes writers across a disk write before publishing a new snapshot, and a
+//! window being dragged emits dozens of move events a second. Geometry is a per-machine convenience with no
 //! bearing on any query, so it never touches that path.
 //!
 //! Written on move/resize after the events settle (debounced, then on a blocking

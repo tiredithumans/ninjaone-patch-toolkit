@@ -232,6 +232,22 @@ impl Severity {
             Self::Unknown => 0,
         }
     }
+
+    /// Every variant, at the index its [`rank`](Self::rank) names. The one list the
+    /// rank-indexed tables are sized from and filled by (`SlaCutoffs` and
+    /// `SeverityCounts::BANDS` are `[_; Severity::ALL.len()]`). A new variant goes
+    /// here too, at its rank: `every_severity_the_feed_can_produce_is_in_all` fails
+    /// until it does, because its rank would index past the array.
+    pub const ALL: [Self; 8] = [
+        Self::Unknown,
+        Self::Optional,
+        Self::Low,
+        Self::Recommended,
+        Self::Moderate,
+        Self::Security,
+        Self::Important,
+        Self::Critical,
+    ];
 }
 
 /// One patch record, from either family's feed.
@@ -860,6 +876,30 @@ mod tests {
         };
         for (i, s) in PatchStatus::ALL.into_iter().enumerate() {
             assert_eq!(slot(s), i, "{s:?}");
+        }
+    }
+
+    /// `ALL` is what every rank-indexed table is sized from, so it must hold each
+    /// variant at its rank. Driven from `SPELLINGS` rather than from `ALL` itself:
+    /// a variant `from_raw` can produce is one a rollup will index with, so a new
+    /// variant that is spelled but not listed fails here (its rank has no slot)
+    /// instead of at `SlaCutoffs::cutoff_for` on the first patch that carries it.
+    #[test]
+    fn every_severity_the_feed_can_produce_is_in_all() {
+        for (index, severity) in Severity::ALL.iter().enumerate() {
+            assert_eq!(
+                severity.rank() as usize,
+                index,
+                "{severity:?} sits at its rank"
+            );
+        }
+        for (raw, severity) in Severity::SPELLINGS {
+            let rank = severity.rank() as usize;
+            assert!(
+                rank < Severity::ALL.len(),
+                "{raw} maps to {severity:?}, whose rank {rank} has no slot in ALL"
+            );
+            assert_eq!(Severity::ALL[rank], severity, "{raw} at its rank");
         }
     }
 

@@ -201,6 +201,16 @@ pub struct CurrentPatches {
     pub fetched_at: DateTime<Utc>,
 }
 
+/// What [`AppState::write_settings`] hands back once the write is on disk.
+pub struct SettingsWrite<'a, R> {
+    /// What the edit returned.
+    pub out: R,
+    /// The settings now on disk and published in memory.
+    pub settings: Settings,
+    /// The writer lock, still held: drop it once any follow-up effects have landed.
+    pub writer: tokio::sync::MutexGuard<'a, ()>,
+}
+
 /// Process-wide application state injected into every Tauri command.
 pub struct AppState {
     pub auth: AuthState,
@@ -212,7 +222,8 @@ pub struct AppState {
     /// under `settings` — that would block every reader, on whatever thread, for the
     /// duration. Held across `.await` (it is a `tokio` mutex, for exactly that),
     /// so two saves cannot interleave and lose one's change. Readers never take it.
-    pub settings_write: tokio::sync::Mutex<()>,
+    /// Private: the only path to it is [`Self::write_settings`].
+    settings_write: tokio::sync::Mutex<()>,
     /// Last query result, stamped with the tenant it belongs to and cached so export
     /// and row paging read it without the frontend round-tripping all rows over IPC.
     /// Private on purpose: all access goes through `store_last_result` /
@@ -348,13 +359,47 @@ impl AppState {
         })
     }
 
-    /// Replaces the in-memory settings. Only a writer holding `settings_write`, and
-    /// only after the new value is safely on disk, calls this.
-    pub fn replace_settings(&self, next: Settings) {
+    /// Seeds the in-memory settings without a disk write. Tests only: production
+    /// writers go through [`Self::write_settings`].
+    #[cfg(test)]
+    pub fn seed_settings(&self, next: Settings) {
+        self.replace_settings(next);
+    }
+
+    /// Replaces the in-memory settings. Only [`Self::write_settings`], once the new
+    /// value is safely on disk, calls this.
+    fn replace_settings(&self, next: Settings) {
         *self
             .settings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+    }
+
+    /// The one settings write: takes the writer lock, edits a snapshot, saves it on
+    /// a blocking thread and publishes it in memory only once it is on disk.
+    ///
+    /// `save_settings` and the preset commands each hand-rolled that sequence
+    /// against a `pub` lock, so a third writer that skipped the lock would have
+    /// silently lost a concurrent save's change. The guard comes back in the result:
+    /// a writer with follow-up effects (re-pointing auth at a new tenant, a keyring
+    /// write) keeps later writers out until those have landed too.
+    pub async fn write_settings<R>(
+        &self,
+        edit: impl FnOnce(&mut Settings) -> R,
+    ) -> Result<SettingsWrite<'_, R>> {
+        let writer = self.settings_write.lock().await;
+        let mut next = self.settings_snapshot();
+        let out = edit(&mut next);
+        let to_disk = next.clone();
+        tauri::async_runtime::spawn_blocking(move || to_disk.save())
+            .await
+            .context("saving settings")??;
+        self.replace_settings(next.clone());
+        Ok(SettingsWrite {
+            out,
+            settings: next,
+            writer,
+        })
     }
 
     /// The tenant (instance + client id) that owns freshly cached data. Cheap — a
