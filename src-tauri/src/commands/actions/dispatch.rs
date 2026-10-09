@@ -499,16 +499,18 @@ pub(super) fn action_detail(req: &ActionRequest, script: Option<&ScriptRef>) -> 
             "Reboot ({})",
             req.reboot_mode.unwrap_or(RebootMode::Normal).api_value()
         ),
-        // A remediation runs a library script, so name it the way the `Script` arm
-        // does. This fell through to the bare label, which meant the Jobs tab and
-        // the audit log recorded "Apply selected OS patches" for every remediation
-        // without ever saying *which* script did it — and the script is configured
-        // in Settings, so the operator cannot infer it from the request either.
-        kind if kind.is_remediation() => match (req.script_name.as_deref(), resolved) {
-            (Some(name), Some(id)) => format!("{} — {name} ({id})", kind.label()),
-            (Some(name), None) => format!("{} — {name}", kind.label()),
-            (None, Some(id)) => format!("{} ({id})", kind.label()),
-            (None, None) => kind.label().to_string(),
+        // A remediation runs a library script, so name it. This fell through to the
+        // bare label, which meant the Jobs tab and the audit log recorded "Apply
+        // selected OS patches" for every remediation without ever saying *which*
+        // script did it — and the script is configured in Settings, so the operator
+        // cannot infer it from the request either...
+        // ...but by the id Settings resolved, never a name from the request: the UI
+        // sends none for a remediation, and a caller that did would otherwise have
+        // its own choice of name printed beside a Settings id it had nothing to do
+        // with. The operator reads the id against the library.
+        kind if kind.is_remediation() => match resolved {
+            Some(id) => format!("{} ({id})", kind.label()),
+            None => kind.label().to_string(),
         },
         other => other.label().to_string(),
     }

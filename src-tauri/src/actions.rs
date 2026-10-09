@@ -237,8 +237,9 @@ pub struct JobReport {
     pub device_name: String,
     pub organization: String,
     pub kind: ActionKind,
-    /// What was dispatched, in operator terms — the script name, "Apply OS
-    /// patches", "Reboot (FORCED)".
+    /// What was dispatched, in operator terms — the script name with the id the plan
+    /// resolved ("Name (#42)"), "Apply all OS patches", "Apply selected OS patches
+    /// (#7)", "Reboot (FORCED)". See `dispatch::action_detail`.
     pub detail: String,
     pub dry_run: bool,
     pub state: JobState,
