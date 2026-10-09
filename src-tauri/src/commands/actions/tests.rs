@@ -875,8 +875,9 @@ async fn a_tick_reads_each_devices_feed_once_and_resolves_every_job_on_it() {
         by_id(2).state
     );
     assert_eq!(by_id(2).activity_id, Some(902));
-    // An empty feed is lag, not failure.
-    assert_eq!(by_id(3).state, JobState::Running);
+    // An empty feed is lag, not failure — and a row the tick did not move is not
+    // returned, so the store and the frontend are not handed it again.
+    assert!(updates.iter().all(|j| j.id != 3), "{updates:?}");
     assert_eq!(claimed, HashSet::from([901, 902]));
 }
 
@@ -1189,7 +1190,10 @@ async fn a_tick_keeps_at_most_the_cap_of_reads_in_flight() {
         CAP,
     )
     .await;
-    assert_eq!(updates.len(), DEVICES as usize);
+    assert!(
+        updates.is_empty(),
+        "an empty feed moves no job, so none comes back: {updates:?}"
+    );
 
     let arrivals = arrivals.lock().expect("arrivals").clone();
     assert_eq!(
@@ -1282,6 +1286,75 @@ fn scan_context(
         job_requests: BTreeMap::new(),
         still_current,
     }
+}
+
+/// A dispatch task that panicked used to be logged and dropped: the device had no
+/// job row, no poller entry and an opening audit record nothing ever closed, while
+/// its POST may already have gone out. It now gets an `Unknown` job — not terminal,
+/// so the poller resolves it like any other ambiguous send — dated from the batch
+/// start so the poller's activity floor cannot exclude a send that did happen.
+#[tokio::test]
+async fn a_device_whose_dispatch_task_panicked_still_gets_an_unknown_job() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let server = MockServer::start().await;
+    let ctx = scan_context(mock_api(&server), Arc::new(AtomicBool::new(true)));
+    let target = PlannedTarget {
+        device_id: 7,
+        device_name: "srv-7".into(),
+        organization: "Contoso".into(),
+        offline: false,
+    };
+    let started = Utc::now() - chrono::Duration::seconds(90);
+
+    let job = dispatch::unrecorded_job(&ctx, &target, 3, started);
+
+    assert_eq!((job.id, job.device_id, job.batch_id), (3, 7, ctx.batch_id));
+    assert!(
+        matches!(&job.state, JobState::Unknown(why) if why == dispatch::DISPATCH_TASK_PANICKED),
+        "{:?}",
+        job.state
+    );
+    assert!(
+        !job.state.is_terminal(),
+        "an unknown send is polled, not closed"
+    );
+    assert_eq!(job.dispatched_ts, started.timestamp());
+    assert_eq!(job.finished_at, None);
+}
+
+/// The opening audit record redacts by construction: `parameters` can only be made
+/// through `Redacted::of`, so a second construction site cannot forget to.
+#[tokio::test]
+async fn an_opening_audit_record_cannot_carry_an_unredacted_parameter() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let server = MockServer::start().await;
+    let mut ctx = scan_context(mock_api(&server), Arc::new(AtomicBool::new(true)));
+    ctx.parameters
+        .insert(7, "-Server db01 -Password hunter2".into());
+    ctx.parameters.insert(8, String::new());
+    let target = |device_id: i64| PlannedTarget {
+        device_id,
+        device_name: format!("srv-{device_id}"),
+        organization: "Contoso".into(),
+        offline: false,
+    };
+
+    let seven = serde_json::to_value(dispatch::opening_record(&ctx, &target(7), 1)).unwrap();
+    assert_eq!(seven["outcome"], "dispatching");
+    assert_eq!(seven["jobId"], 1);
+    let written = seven["parameters"].as_str().expect("parameters recorded");
+    assert!(!written.contains("hunter2"), "{written}");
+    assert!(written.contains("-Server db01"), "{written}");
+
+    let eight = serde_json::to_value(dispatch::opening_record(&ctx, &target(8), 2)).unwrap();
+    assert!(
+        eight["parameters"].is_null(),
+        "nothing to pass records nothing"
+    );
 }
 
 /// A batch wider than the semaphore queues devices behind the ones being sent. A

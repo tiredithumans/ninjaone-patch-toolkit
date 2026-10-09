@@ -22,9 +22,17 @@ version and start a fresh `[Unreleased]`.
   saved sign-in could not be read (a locked keychain, no Secret Service), every request a query
   had queued behind the refresh repeated the read in turn. The waiting requests now report the
   same error, and the next query tries again.
+- **A device whose dispatch failed inside the app no longer vanishes from the Jobs tab.** If the
+  task sending one device's request crashed, that device had no job row and nothing to poll,
+  while its request may already have reached NinjaOne. It now shows as **Unknown** and the
+  poller resolves it from the activity feed like any other ambiguous send.
 
 ### Changed
 
+- **Dispatching a batch opens the audit log once, and job polling sends only what changed.** The
+  opening audit record for every device in a batch is written in one pass before any request
+  goes out, instead of one write per device; and each 15-second poll now passes the Jobs tab only
+  the rows the activity feed moved, instead of every pending row.
 - **Select-all and group checkboxes update the selection once.** Ticking a page or a group's
   members applied the change one row at a time, so the action bar, the header checkbox and every
   row checkbox re-ran once per row; a 500-row group tick now runs them once.

@@ -378,7 +378,13 @@ its permit and has passed the session check (`dispatch::send_if_current`), as it
 It used to be taken before the wait. With 8 permits, a 45 s request timeout and up to 500
 devices, the tail of a batch could queue for minutes, and that time came off the 45-minute job
 timeout and pulled the floor back far enough for the third-tier heuristic to bind an activity
-older than the send. The opening "dispatching" audit record is still written before the wait.
+older than the send. The opening "dispatching" audit record is still written before the wait —
+by `dispatch_batch`, for every device in one pass, before any task is spawned: one write per
+device before its own wait used to open the log up to 500 times at once on the blocking pool.
+A task that panics before reporting leaves its device an `Unknown` job dated from the batch
+start (`dispatch::unrecorded_job`), so the row exists, the poller resolves it like any other
+ambiguous send, and its opening record gets its close. `resolve_pending` hands back only the
+rows a tick moved; every pending row used to be re-applied and re-emitted each 15 s.
 
 A read is narrowed with the documented `seriesUid` parameter only when the device has exactly one
 pending job **and** that job's series uid has already been seen on an activity in its feed
