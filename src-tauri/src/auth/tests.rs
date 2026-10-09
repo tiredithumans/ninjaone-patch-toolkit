@@ -634,6 +634,10 @@ async fn callers_queued_behind_a_failed_keyring_read_share_its_failure() {
     let client_id = "client-keyring-shared-read";
     let entry = saved_refresh_entry(base_url, client_id);
     // Nothing saved for this tenant, so the read ends in "not authenticated".
+    // Held open long enough for every caller to queue behind it: the in-process
+    // keyring otherwise answers before `join!` has polled the second caller, and
+    // a caller that arrives after the failure is meant to read for itself.
+    test_keyring::slow_reads_of(&entry, std::time::Duration::from_millis(200));
     let auth = launched(base_url, client_id);
 
     let (a, b, c, d) = tokio::join!(

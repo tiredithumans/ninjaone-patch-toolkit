@@ -1622,6 +1622,18 @@ mod test_keyring {
     pub(super) fn reads_of(user: &str) -> usize {
         reads().lock().unwrap().get(user).copied().unwrap_or(0)
     }
+
+    /// Entries whose reads stall, standing in for a slow keychain. A sharing test
+    /// needs the first read still in flight while the other callers queue behind
+    /// it; a HashMap read otherwise finishes before `join!` has polled them.
+    pub(super) fn slow() -> &'static Mutex<HashMap<String, std::time::Duration>> {
+        static SLOW: OnceLock<Mutex<HashMap<String, std::time::Duration>>> = OnceLock::new();
+        SLOW.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn slow_reads_of(user: &str, delay: std::time::Duration) {
+        slow().lock().unwrap().insert(user.to_string(), delay);
+    }
 }
 
 #[cfg(test)]
@@ -1647,6 +1659,16 @@ fn load_keyring(user: &str) -> Result<Option<String>> {
         .map_err(|_| anyhow!("test keyring poisoned"))?
         .entry(user.to_string())
         .or_default() += 1;
+    // On the blocking thread the real keyring call would occupy, so a sleep is
+    // what a slow Secret Service looks like to the runtime.
+    let stall = test_keyring::slow()
+        .lock()
+        .map_err(|_| anyhow!("test keyring poisoned"))?
+        .get(user)
+        .copied();
+    if let Some(delay) = stall {
+        std::thread::sleep(delay);
+    }
     Ok(test_keyring::store()
         .lock()
         .map_err(|_| anyhow!("test keyring poisoned"))?
