@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     The toolkit dispatches this script through NinjaOne's POST /device/{id}/script/run with a
-    parameter string built by src-tauri/src/actions.rs::build_parameters:
+    parameter string built by src-tauri/src/actions/parameters.rs::build_parameters:
 
         productAllowListB64=R29vZ2xlIENocm9tZSAxNDEuMC43MzkwLjU1fDctWmlw rebootBehavior=Never dryRun=true
 
@@ -148,7 +148,7 @@ function ConvertTo-ToolkitBoolean {
 }
 
 function ConvertTo-ToolkitRebootBehavior {
-    # The toolkit's vocabulary is RebootChoice::script_value in src-tauri/src/actions.rs.
+    # The toolkit's vocabulary is RebootChoice::script_value in src-tauri/src/actions/kind.rs.
     param([AllowNull()][string]$Value)
     switch -Regex (([string]$Value).Trim()) {
         '^(?i:never)$' { return 'Never' }

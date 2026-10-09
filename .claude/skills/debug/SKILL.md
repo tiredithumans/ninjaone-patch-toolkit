@@ -61,7 +61,7 @@ may already name the cause. `docs/architecture.md` is the file-by-file layer map
   stored credential; a 429/5xx must not.
 - **Native vs Web client:** Native has no secret; "secret required" means Settings is mismatched.
 
-## 4. Patch actions + jobs (`src-tauri/src/actions.rs`, `commands/actions/` (plan, confirm, dispatch, poller), `docs/design/actions.md`)
+## 4. Patch actions + jobs (`src-tauri/src/actions/`, `commands/actions/` (plan, confirm, dispatch, poller), `docs/design/actions.md`)
 
 - **Buttons greyed out:** `settings.actions.enabled` is false, no management grant
   (`AuthState::management_grant()` — `None` is *unknown*, not denied), nothing selected, or a

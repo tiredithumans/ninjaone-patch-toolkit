@@ -55,7 +55,7 @@ request.
 ## The parameter contract
 
 The toolkit composes one parameter string per device in
-[`src-tauri/src/actions.rs::build_parameters`](../src-tauri/src/actions.rs) and sends it as the
+[`src-tauri/src/actions/parameters.rs::build_parameters`](../src-tauri/src/actions/parameters.rs) and sends it as the
 `parameters` of `POST /device/{id}/script/run`:
 
 ```text
