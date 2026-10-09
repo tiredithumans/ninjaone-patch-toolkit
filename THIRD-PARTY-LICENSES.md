@@ -11,7 +11,7 @@ Regenerate with `just licenses`. Do not edit by hand.
 
 ## Desktop app (src-tauri)
 
-- MIT License (532 crates)
+- MIT License (529 crates)
 - ISC License (20 crates)
 - Unicode License v3 (19 crates)
 - Apache License 2.0 (9 crates)
@@ -4607,7 +4607,6 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [dirs-sys 0.5.0](https://github.com/dirs-dev/dirs-sys-rs)
-- [dirs 6.0.0](https://github.com/soc/dirs-rs)
 - [dirs 7.0.0](https://codeberg.org/dirs/dirs-rs)
 
 ```
@@ -6390,13 +6389,13 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [tauri-build 2.7.0](https://github.com/tauri-apps/tauri)
-- [tauri-codegen 2.7.0](https://github.com/tauri-apps/tauri)
-- [tauri-macros 2.7.0](https://github.com/tauri-apps/tauri)
-- [tauri-runtime-wry 2.12.0](https://github.com/tauri-apps/tauri)
-- [tauri-runtime 2.12.0](https://github.com/tauri-apps/tauri)
-- [tauri-utils 2.10.0](https://github.com/tauri-apps/tauri)
-- [tauri 2.12.0](https://github.com/tauri-apps/tauri)
+- [tauri-build 2.7.1](https://github.com/tauri-apps/tauri)
+- [tauri-codegen 2.7.1](https://github.com/tauri-apps/tauri)
+- [tauri-macros 2.7.1](https://github.com/tauri-apps/tauri)
+- [tauri-runtime-wry 2.12.1](https://github.com/tauri-apps/tauri)
+- [tauri-runtime 2.12.1](https://github.com/tauri-apps/tauri)
+- [tauri-utils 2.10.1](https://github.com/tauri-apps/tauri)
+- [tauri 2.12.1](https://github.com/tauri-apps/tauri)
 
 ```
 MIT License
@@ -6517,7 +6516,6 @@ SOFTWARE.
 
 Used by:
 - [cfb 0.14.0](https://github.com/mdsteele/rust-cfb)
-- [cfb 0.7.3](https://github.com/mdsteele/rust-cfb)
 
 ```
 MIT License
@@ -6639,7 +6637,6 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [infer 0.19.0](https://github.com/bojand/infer)
 - [infer 0.22.0](https://github.com/bojand/infer)
 
 ```
@@ -7312,10 +7309,10 @@ Used by:
 - [r-efi 6.0.0](https://github.com/r-efi/r-efi)
 - [rust_xlsxwriter 0.99.1](https://github.com/jmcnamara/rust_xlsxwriter)
 - [rustls-platform-verifier-android 0.2.0](https://github.com/rustls/rustls-platform-verifier)
-- [tauri-plugin-dialog 2.8.0](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-dialog 2.8.1](https://github.com/tauri-apps/plugins-workspace)
 - [tauri-plugin-fs 2.6.0](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin-updater 2.13.0](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin 2.7.0](https://github.com/tauri-apps/tauri)
+- [tauri-plugin-updater 2.13.1](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin 2.7.1](https://github.com/tauri-apps/tauri)
 - [webview2-com-macros 0.8.1](https://github.com/wravery/webview2-rs)
 - [webview2-com-sys 0.39.1](https://github.com/wravery/webview2-rs)
 - [webview2-com 0.39.1](https://github.com/wravery/webview2-rs)
@@ -7392,7 +7389,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [tokio-util 0.7.19](https://github.com/tokio-rs/tokio)
-- [tokio 1.53.1](https://github.com/tokio-rs/tokio)
+- [tokio 1.53.2](https://github.com/tokio-rs/tokio)
 
 ```
 MIT License
