@@ -57,7 +57,7 @@ impl NinjaApiClient {
     /// ~10 JSON keys — and then walked the tree a second time to produce the
     /// `Patch`. The rows were parsed twice and the intermediate was discarded
     /// immediately. Here the row array is handed to `serde_json` once, as `Vec<T>`.
-    async fn request_page<T: DeserializeOwned>(
+    async fn request_page<T: DeserializeOwned + Send + 'static>(
         &self,
         path: &str,
         query: &[(&str, String)],
@@ -81,7 +81,7 @@ impl NinjaApiClient {
     /// short, and ids are de-duplicated so an inclusive-`after` boundary row isn't
     /// counted twice. Forward progress is required (the max id must advance), so a
     /// misbehaving endpoint can't loop forever.
-    pub async fn get_paginated<T: DeserializeOwned + PagedRow>(
+    pub async fn get_paginated<T: DeserializeOwned + PagedRow + Send + 'static>(
         &self,
         path: &str,
         base_query: &[(&str, String)],
@@ -93,7 +93,7 @@ impl NinjaApiClient {
     /// Like [`get_paginated`](Self::get_paginated), reporting the cumulative row
     /// count to `on_progress` after each page so a long fetch can stream progress
     /// to the UI.
-    pub async fn get_paginated_reporting<T: DeserializeOwned + PagedRow>(
+    pub async fn get_paginated_reporting<T: DeserializeOwned + PagedRow + Send + 'static>(
         &self,
         path: &str,
         base_query: &[(&str, String)],
@@ -328,12 +328,25 @@ struct RawEnvelope<'a> {
 }
 
 /// Reads a successful response as one page of `T`.
-async fn decode_page<T: DeserializeOwned>(resp: reqwest::Response) -> Result<PageBody<T>> {
+///
+/// The parse runs off the runtime. A reporting page is up to 5000 rows of JSON —
+/// megabytes that `serde_json` walks in one go — and it ran inline on a tokio
+/// worker. A cold query's five whole-fleet fetches share one task under a single
+/// `join!`, so each parse stalled the four sibling fetches outright, and the worker
+/// it held served neither the job poller nor the IPC commands queued on it.
+/// CPU-bound work goes on `spawn_blocking`, per the backend-core rule; the thread
+/// hop costs microseconds against a page's round trip, so even the small lookup
+/// pages take it rather than carry a size cutoff.
+async fn decode_page<T: DeserializeOwned + Send + 'static>(
+    resp: reqwest::Response,
+) -> Result<PageBody<T>> {
     if resp.status() == StatusCode::NO_CONTENT {
         return Ok(PageBody::Empty);
     }
     let bytes = resp.bytes().await.context("read body")?;
-    parse_page(&bytes)
+    tokio::task::spawn_blocking(move || parse_page(&bytes))
+        .await
+        .context("page decode task failed")?
 }
 
 /// Decides which of NinjaOne's two pagination shapes a body is and deserializes it.
