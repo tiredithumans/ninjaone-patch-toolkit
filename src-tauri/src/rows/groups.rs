@@ -423,6 +423,54 @@ pub fn group_member_page(
         .collect()
 }
 
+/// One device's rows from the cached result, for a read over several devices at
+/// once ([`rows_by_device`]).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRows {
+    pub device_id: i64,
+    pub rows: Vec<PatchRow>,
+    /// The device has more rows than the caller's limit, so `rows` is a prefix: a
+    /// caller deciding what a device no longer lists must not read it as complete.
+    pub truncated: bool,
+}
+
+/// Each requested device's rows in one pass over the cache, in the cache's order,
+/// at most `limit` per device, ordered by device id. A device with nothing listed
+/// still gets its entry (empty), so a caller can tell "left the scope" from "not
+/// asked".
+///
+/// One scan for the set: the selection prune after an auto-refresh used to call
+/// [`group_member_page`] once per selected device — an IPC round trip and a
+/// `spawn_blocking` walk of every cached row each, O(selected devices × rows) per
+/// refresh tick.
+pub fn rows_by_device(rows: &[PatchRow], device_ids: &[i64], limit: usize) -> Vec<DeviceRows> {
+    let mut by_device: std::collections::BTreeMap<i64, DeviceRows> = device_ids
+        .iter()
+        .map(|&device_id| {
+            (
+                device_id,
+                DeviceRows {
+                    device_id,
+                    rows: Vec::new(),
+                    truncated: false,
+                },
+            )
+        })
+        .collect();
+    for row in rows {
+        let Some(entry) = by_device.get_mut(&row.device_id) else {
+            continue;
+        };
+        if entry.rows.len() < limit {
+            entry.rows.push(row.clone());
+        } else {
+            entry.truncated = true;
+        }
+    }
+    by_device.into_values().collect()
+}
+
 /// A parsed [`group_key`], so membership is an equality check rather than a fresh
 /// `String` per row. Mirrors `group_key`'s encoding exactly — a change to one is a
 /// change to the other, which `group_key_and_matcher_agree` pins.
