@@ -122,6 +122,7 @@ pub fn run() {
             commands::patches::get_patch_rows,
             commands::patches::get_patch_groups,
             commands::patches::get_patch_group_members,
+            commands::patches::get_device_rows,
             commands::patches::device_detail,
             commands::export::export_patches_xlsx,
             commands::export::export_report_html,

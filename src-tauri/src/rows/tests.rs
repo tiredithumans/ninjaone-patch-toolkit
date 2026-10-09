@@ -1119,6 +1119,11 @@ fn serialized_shapes_carry_every_frontend_required_key() {
         &["device", "rows", "rowsTotal"],
         "DeviceDetail",
     );
+    assert_keys_present(
+        &serde_json::to_value(&rows_by_device(&result.rows, &[1], 10)[0]).unwrap(),
+        &["deviceId", "rows", "truncated"],
+        "DeviceRows",
+    );
 
     let compliance = build_compliance(&summaries, &refs(&patches), &by_id, &maps, &sla30());
     assert_keys_present(
@@ -1649,6 +1654,43 @@ fn build_groups_by_product_folds_versions_and_falls_back_to_the_patch_key() {
             (&b.label, &b.sublabel, b.rows)
         );
     }
+}
+
+/// The batched read answers for every device asked — an empty entry for one that
+/// left the scope, a `truncated` prefix for one past the limit — and ignores the
+/// rest, so the selection prune can tell "gone" from "not asked" and "partial".
+#[test]
+fn rows_by_device_answers_for_every_requested_device() {
+    let rows = vec![
+        group_row(1, "web-01", Some("KB1"), "Cumulative Update", 7),
+        group_row(2, "web-02", Some("KB1"), "Cumulative Update", 7),
+        group_row(1, "web-01", Some("KB2"), "Security Update", 6),
+        group_row(3, "web-03", Some("KB1"), "Cumulative Update", 7),
+    ];
+
+    let by = rows_by_device(&rows, &[1, 9, 2], 1);
+
+    assert_eq!(
+        by.iter().map(|d| d.device_id).collect::<Vec<_>>(),
+        vec![1, 2, 9],
+        "every requested device, by id; device 3 was not asked"
+    );
+    assert_eq!(by[0].rows.len(), 1);
+    assert!(
+        by[0].truncated,
+        "device 1 has two rows and the limit is one"
+    );
+    assert_eq!(
+        by[0].rows[0].kb.as_deref(),
+        Some("KB1"),
+        "the cache's order"
+    );
+    assert_eq!(by[1].rows.len(), 1);
+    assert!(!by[1].truncated);
+    assert!(
+        by[2].rows.is_empty() && !by[2].truncated,
+        "asked, nothing listed"
+    );
 }
 
 /// A product key is two fields and a patch key three, so neither can pass for

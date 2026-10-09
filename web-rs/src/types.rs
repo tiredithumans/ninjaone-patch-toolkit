@@ -1246,3 +1246,14 @@ impl RunRecord {
             && self.scope_key == other.scope_key
     }
 }
+
+/// One device's rows from the cached result, from `get_device_rows`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRows {
+    pub device_id: i64,
+    pub rows: Vec<PatchRow>,
+    /// `rows` is a prefix of the device's rows, so it cannot say what the device no
+    /// longer lists.
+    pub truncated: bool,
+}

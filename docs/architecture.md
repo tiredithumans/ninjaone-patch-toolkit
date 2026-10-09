@@ -32,7 +32,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── compliance.rs            # compliance / by-OS / per-device rollups (apply_device_health), rollup_device, scope note, SlaCutoffs
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
 │   ├── backlog.rs · install_time.rs  # worst devices / offline backlog; first seen → installed median
-│   ├── groups.rs                # grouping, sorting, paging, device_detail over the cache
+│   ├── groups.rs                # grouping, sorting, paging, device_detail, rows_by_device over the cache
 │   ├── scope.rs                 # QueryScope export provenance
 │   ├── table.rs                 # TableCell / TableColumn / format_pct / clamp_cell / join_capped — the shared column definition
 │   └── tests.rs

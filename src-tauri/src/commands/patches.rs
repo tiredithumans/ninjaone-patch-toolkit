@@ -938,6 +938,26 @@ pub async fn get_patch_group_members(
     .map_err(|e| UiError::new(format!("reading the group's rows panicked: {e}")))
 }
 
+/// Serves several devices' rows in one pass over the cached result — the
+/// post-refresh selection prune's read, which was one `get_patch_group_members`
+/// call per selected device. Empty on a cache miss, like the paging commands.
+#[tauri::command]
+pub async fn get_device_rows(
+    state: State<'_, AppState>,
+    device_ids: Vec<i64>,
+    limit: usize,
+) -> Result<Vec<crate::rows::DeviceRows>, UiError> {
+    let Some(result) = state.current_result_handle()? else {
+        return Ok(Vec::new());
+    };
+    let limit = clamp_page(limit);
+    tokio::task::spawn_blocking(move || {
+        crate::rows::rows_by_device(&result.rows, &device_ids, limit)
+    })
+    .await
+    .map_err(|e| UiError::new(format!("reading the devices' rows panicked: {e}")))
+}
+
 /// Serves the device drill-down — one device's facts, its per-device rollup and up
 /// to [`MAX_PAGE_LIMIT`] of its detail rows — from the cached result. Read-only.
 ///

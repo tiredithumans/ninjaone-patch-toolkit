@@ -357,6 +357,12 @@ ipc!(
         -> Vec<PatchRow>
 );
 
+ipc!(
+    /// Fetches several devices' rows in one call, each capped at `limit` and flagged
+    /// `truncated` past it — the post-refresh selection prune's read.
+    get_device_rows(device_ids: Vec<i64>, limit: usize) -> Vec<crate::types::DeviceRows>
+);
+
 /// Subscribes to backend `query:progress` events for the lifetime of the app,
 /// decoding each event's payload and handing it to `handler`. The Tauri unlisten
 /// handle is intentionally dropped — the subscription lives as long as the app.

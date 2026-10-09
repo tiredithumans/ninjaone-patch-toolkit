@@ -100,7 +100,10 @@ exporting" beside a visible table — the same divergence one layer up.
 
 The three paging commands all return empty on a cache miss. A miss is a normal transient (tenant
 switch, sign-out, superseded query); the frontend already renders its own empty state from the
-absent result.
+absent result. `get_device_rows` (several devices' rows in one pass, `rows::rows_by_device`, the
+post-refresh selection prune's read) follows the same rule, with one distinction the caller
+needs: an empty *reply* is a miss, so the prune keeps the whole selection; an empty *entry* is a
+device the result no longer lists, so its ticked rows go.
 
 `device_detail` (the device drill-down) follows the same rule: `None` on a miss, which the dialog
 renders as "not in the current results". It is a read over a handle (`current_result_handle`), its
@@ -131,7 +134,8 @@ land, or a sign-out clear the slot, mid-build; a permutation over the old rows w
 ones in a meaningless order). The first version built the memo inside the lock, from an `async`
 command with no `.await`: the first sorted page of a six-figure fleet ran the whole sweep on a
 tokio worker holding the mutex every paging command and the export take. `get_patch_group_members`
-scans every row for its key, so it too runs on a handle in `spawn_blocking`.
+scans every row for its key, so it too runs on a handle in `spawn_blocking`; so does
+`get_device_rows`, one scan for every device it is asked about.
 
 ## Grouping is backend-side too
 

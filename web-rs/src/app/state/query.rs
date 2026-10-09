@@ -273,7 +273,7 @@ impl AppState {
     /// the new result and drops the ticked patches that are gone (installed,
     /// rejected, or the device left the scope) — see `util::prune_device_selection`.
     ///
-    /// Reads the backend's by-device grouping, which serves from the result just
+    /// One backend read for the whole selection, served from the result just
     /// cached — no NinjaOne traffic. Abandoned if another run lands meanwhile: a
     /// manual run clears the selection itself, and a newer refresh prunes again.
     fn prune_selection_after_refresh(self, seq: u64) {
@@ -285,31 +285,25 @@ impl AppState {
             return;
         }
         spawn_local(async move {
-            let mut fresh = Vec::with_capacity(devices.len());
-            for id in devices {
-                // A failed (or full, so possibly partial) read keeps that device
-                // as it was rather than drop a selection the operator can't
-                // rebuild from memory; the backend re-plans against live state
-                // before any dispatch anyway.
-                if let Ok(rows) = api::get_patch_group_members(
-                    GroupBy::Device,
-                    id.to_string(),
-                    0,
-                    SELECTION_PRUNE_LIMIT,
-                )
-                .await
-                    && rows.len() < SELECTION_PRUNE_LIMIT
-                {
-                    fresh.push((id, rows));
-                }
-            }
+            // A failed read keeps every device as it was rather than drop a
+            // selection the operator can't rebuild from memory; the backend re-plans
+            // against live state before any dispatch anyway. This was one awaited
+            // call per selected device, in series, each carrying up to the limit in
+            // rows over the IPC bridge.
+            let Ok(fresh) = api::get_device_rows(devices, SELECTION_PRUNE_LIMIT).await else {
+                return;
+            };
             if util::is_superseded(self.run.query_seq.get_untracked(), seq) {
                 return;
             }
             let mut removed = 0;
             self.actions.selected.update(|sel| {
-                for (id, rows) in &fresh {
-                    removed += util::prune_device_selection(sel, *id, rows);
+                for device in &fresh {
+                    // A truncated read is a prefix: it cannot say what is gone.
+                    if device.truncated {
+                        continue;
+                    }
+                    removed += util::prune_device_selection(sel, device.device_id, &device.rows);
                 }
             });
             if removed > 0 {
