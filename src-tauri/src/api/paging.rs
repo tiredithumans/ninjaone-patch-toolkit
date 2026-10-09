@@ -331,11 +331,12 @@ struct RawEnvelope<'a> {
 ///
 /// The parse runs off the runtime. A reporting page is up to 5000 rows of JSON —
 /// megabytes that `serde_json` walks in one go — and it ran inline on a tokio
-/// worker while a cold query had five whole-fleet fetches in flight, so for the
-/// length of each parse that worker served neither the job poller nor the IPC
-/// commands queued on it. CPU-bound work goes on `spawn_blocking`, per the
-/// backend-core rule; the thread hop costs microseconds against a page's round
-/// trip, so even the small lookup pages take it rather than carry a size cutoff.
+/// worker. A cold query's five whole-fleet fetches share one task under a single
+/// `join!`, so each parse stalled the four sibling fetches outright, and the worker
+/// it held served neither the job poller nor the IPC commands queued on it.
+/// CPU-bound work goes on `spawn_blocking`, per the backend-core rule; the thread
+/// hop costs microseconds against a page's round trip, so even the small lookup
+/// pages take it rather than carry a size cutoff.
 async fn decode_page<T: DeserializeOwned + Send + 'static>(
     resp: reqwest::Response,
 ) -> Result<PageBody<T>> {
