@@ -121,18 +121,29 @@ pub(super) async fn dispatch_batch(
             Err(err) => warn!(?err, "a dispatch task panicked"),
         }
     }
-    // A task that panicked left its slot empty. Its POST may already have gone
-    // out, so the device gets a job all the same — `Unknown`, polled like any other
-    // ambiguous send — rather than vanishing with no row, no poller entry, and an
-    // opening audit record that nothing ever closes.
-    dispatched
+    fill_unreported(&ctx, eligible, dispatched, started)
+}
+
+/// The batch's jobs in plan order, with every slot a panicked task left empty
+/// filled in.
+///
+/// Such a device's POST may already have gone out, so it gets a job all the same —
+/// `Unknown`, polled like any other ambiguous send — rather than vanishing with no
+/// row, no poller entry, and an opening audit record that nothing ever closes.
+/// `slots` is indexed like `eligible`, so the filled job carries the id its task
+/// would have used.
+pub(super) fn fill_unreported(
+    ctx: &DispatchContext,
+    eligible: &[PlannedTarget],
+    slots: Vec<Option<JobReport>>,
+    started: chrono::DateTime<Utc>,
+) -> Vec<JobReport> {
+    slots
         .into_iter()
         .zip(eligible)
         .enumerate()
         .map(|(index, (slot, target))| {
-            slot.unwrap_or_else(|| {
-                unrecorded_job(&ctx, target, ctx.id_base + index as u64, started)
-            })
+            slot.unwrap_or_else(|| unrecorded_job(ctx, target, ctx.id_base + index as u64, started))
         })
         .collect()
 }

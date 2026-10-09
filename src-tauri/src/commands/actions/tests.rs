@@ -1324,6 +1324,55 @@ async fn a_device_whose_dispatch_task_panicked_still_gets_an_unknown_job() {
     assert_eq!(job.finished_at, None);
 }
 
+/// The fill keeps plan order and gives the filled slot the id its task would have
+/// used, so the Jobs tab and the audit trail agree on which device went unreported.
+#[tokio::test]
+async fn a_panicked_slot_is_filled_in_place_with_its_own_id() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let server = MockServer::start().await;
+    let ctx = scan_context(mock_api(&server), Arc::new(AtomicBool::new(true)));
+    let targets: Vec<PlannedTarget> = [7, 8, 9]
+        .into_iter()
+        .map(|device_id| PlannedTarget {
+            device_id,
+            device_name: format!("srv-{device_id}"),
+            organization: "Contoso".into(),
+            offline: false,
+        })
+        .collect();
+    let started = Utc::now();
+    let reported = |index: usize| {
+        pending_job(
+            ctx.id_base + index as u64,
+            targets[index].device_id,
+            ActionKind::OsPatchScan,
+            started.timestamp(),
+        )
+    };
+
+    let jobs = dispatch::fill_unreported(
+        &ctx,
+        &targets,
+        vec![Some(reported(0)), None, Some(reported(2))],
+        started,
+    );
+
+    assert_eq!(
+        jobs.iter().map(|j| (j.id, j.device_id)).collect::<Vec<_>>(),
+        vec![(1, 7), (2, 8), (3, 9)],
+        "plan order, and the filled slot's id is the one its task would have used"
+    );
+    assert_eq!(jobs[0].state, JobState::Running);
+    assert!(
+        matches!(jobs[1].state, JobState::Unknown(_)),
+        "{:?}",
+        jobs[1].state
+    );
+    assert_eq!(jobs[2].state, JobState::Running);
+}
+
 /// The opening audit record redacts by construction: `parameters` can only be made
 /// through `Redacted::of`, so a second construction site cannot forget to.
 #[tokio::test]

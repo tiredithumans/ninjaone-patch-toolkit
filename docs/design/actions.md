@@ -381,9 +381,11 @@ timeout and pulled the floor back far enough for the third-tier heuristic to bin
 older than the send. The opening "dispatching" audit record is still written before the wait —
 by `dispatch_batch`, for every device in one pass, before any task is spawned: one write per
 device before its own wait used to open the log up to 500 times at once on the blocking pool.
-A task that panics before reporting leaves its device an `Unknown` job dated from the batch
-start (`dispatch::unrecorded_job`), so the row exists, the poller resolves it like any other
-ambiguous send, and its opening record gets its close. `resolve_pending` hands back only the
+A task that panics before reporting leaves its device an `Unknown` job (`dispatch::fill_unreported`),
+so the row exists, the poller resolves it like any other ambiguous send, and its opening record
+gets its close. It is dated from the batch start, since its turn is unknown and a later floor
+could exclude a send that did happen — so its 45-minute timeout and third-tier floor run from
+then, the queue-time trade-off a normal job avoids, paid only by a panic. `resolve_pending` hands back only the
 rows a tick moved; every pending row used to be re-applied and re-emitted each 15 s.
 
 A read is narrowed with the documented `seriesUid` parameter only when the device has exactly one
@@ -414,6 +416,10 @@ scheduler runs — so a condition firing after a dispatch, an unrelated `SYSTEM`
 software apply could resolve a job with somebody else's verdict.
 
 ## The audit log redacts credentials in every shape a script takes them
+
+The log's `parameters` field is `audit::Redacted`, whose only constructor runs the redaction
+below; the field was a plain string the one dispatch site remembered to redact, so a second
+construction site that forgot would have written the credential with nothing to stop it.
 
 `audit::redact_parameters` redacts the value of a sensitive `key=value`, a sensitive `-Flag value`
 pair, and PowerShell's inline `-Password:value` (`:` is a separator as well as `=`; it used to be

@@ -32,7 +32,7 @@ version and start a fresh `[Unreleased]`.
 - **Dispatching a batch opens the audit log once, and job polling sends only what changed.** The
   opening audit record for every device in a batch is written in one pass before any request
   goes out, instead of one write per device; and each 15-second poll now passes the Jobs tab only
-  the rows the activity feed moved, instead of every pending row.
+  the rows that changed, instead of every pending row.
 - **Select-all and group checkboxes update the selection once.** Ticking a page or a group's
   members applied the change one row at a time, so the action bar, the header checkbox and every
   row checkbox re-ran once per row; a 500-row group tick now runs them once.

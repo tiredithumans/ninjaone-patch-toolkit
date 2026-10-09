@@ -63,3 +63,10 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   the verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is
   applied client-side; `is_action_activity(kind, type)` accepts only the types that kind emits.
   → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
+- **Opening audit records are written once per batch, before any task is spawned, and a
+  dispatch task that panics still yields an `Unknown` job** (`dispatch::fill_unreported`, dated
+  from the batch start) so the poller resolves it and its opening record gets its close.
+  → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
+- **Audit `parameters` are `audit::Redacted`**, constructible only through `Redacted::of`, which
+  runs the redaction; never add a raw-string path into the log.
+  → `docs/design/actions.md#the-audit-log-redacts-credentials-in-every-shape-a-script-takes-them`
