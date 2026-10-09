@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-10-09
+
 ### Fixed
 
 - **A sign-in whose token could not be saved no longer leaves the previous operator's.** When
