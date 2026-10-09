@@ -1,4 +1,5 @@
-//! What can be dispatched: `ActionKind`, its guardrail predicates, `RebootChoice`.
+//! What can be dispatched: `ActionKind`, its guardrail predicates, `RebootChoice`,
+//! and which library script a remediation kind resolves to (`remediation_script_id`).
 
 use crate::settings::ActionSettings;
 use serde::{Deserialize, Serialize};
@@ -79,7 +80,7 @@ impl ActionKind {
     ///
     /// Necessary, not sufficient: a script previews only if it actually reads
     /// `dryRun`, which is a property of the library entry, not of the kind — see
-    /// [`DryRunSupport`], which `plan()` checks on top of this.
+    /// [`DryRunSupport`](super::DryRunSupport), which `plan()` checks on top of this.
     pub fn supports_dry_run(self) -> bool {
         self.runs_a_script()
     }
@@ -140,7 +141,7 @@ pub fn remediation_script_id(kind: ActionKind, s: &ActionSettings) -> Option<i64
 }
 
 /// Whether the dispatched *script* should restart the device when it finishes.
-/// Distinct from [`RebootMode`], which addresses the reboot endpoint directly.
+/// Distinct from [`RebootMode`](crate::model::RebootMode), which addresses the reboot endpoint directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RebootChoice {

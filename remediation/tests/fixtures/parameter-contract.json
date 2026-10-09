@@ -1,5 +1,5 @@
 {
-  "_comment": "The parameter string contract between src-tauri/src/actions.rs::build_parameters and the reference scripts in remediation/. The Rust test build_parameters_matches_the_reference_script_fixture asserts that build_parameters(kind, targets, reboot, dryRun) produces exactly `parameters`; remediation/tests/*.Tests.ps1 assert that the scripts parse `parameters` into `expect`. Change both sides together.",
+  "_comment": "The parameter string contract between src-tauri/src/actions/parameters.rs::build_parameters and the reference scripts in remediation/. The Rust test build_parameters_matches_the_reference_script_fixture asserts that build_parameters(kind, targets, reboot, dryRun) produces exactly `parameters`; remediation/tests/*.Tests.ps1 assert that the scripts parse `parameters` into `expect`. Change both sides together.",
   "cases": [
     {
       "name": "OS, dry run, never reboot, mixed KB spellings",
