@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,6 +57,39 @@ pub const CHANGE_LIST_LIMIT: usize = 200;
 /// Serializes every write + prune in this process: two overlapping queries of
 /// different scopes must not have one's prune delete the other's temp file.
 static SNAPSHOT_LOCK: Mutex<()> = Mutex::new(());
+
+/// The snapshot this process wrote last, held so the next run of the same scope
+/// diffs against it without re-reading and re-parsing the file.
+///
+/// Every query loaded its baseline from disk, including an auto-refresh tick or a
+/// re-filter over the warm cache that fetched nothing — a read and a full JSON parse
+/// of up to a million items on the path between the fetch and the summary. The
+/// common case is the same scope again (a refresh cadence), so one slot covers it;
+/// a different scope still reads its file. Bounded to the one snapshot, which
+/// [`MAX_ITEMS`] already caps.
+struct LastSaved(Mutex<Option<Arc<RunSnapshot>>>);
+
+impl LastSaved {
+    const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    fn remember(&self, snapshot: Arc<RunSnapshot>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
+    }
+
+    /// The remembered snapshot, if it is this tenant's and scope's.
+    fn get(&self, tenant: &str, scope: &str) -> Option<Arc<RunSnapshot>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .filter(|s| s.tenant == tenant && s.scope == scope)
+            .cloned()
+    }
+}
+
+static LAST_SAVED: LastSaved = LastSaved::new();
 
 /// The one definition of "the same patch" across runs. Everything that compares
 /// runs goes through it, so it can adopt NinjaOne's `productIdentifier` for
@@ -507,11 +540,14 @@ fn snapshot_dir() -> Option<PathBuf> {
     paths::app_dir().ok().map(|d| d.join(SNAPSHOT_DIR))
 }
 
-/// The previous comparable run for this tenant + scope, if one was stored.
+/// The previous comparable run for this tenant + scope, if one was stored: the one
+/// this process wrote last when it is the same scope, else the file.
 ///
 /// **Synchronous file I/O — call from `spawn_blocking`.**
-pub fn load(tenant: &str, scope: &str) -> Option<RunSnapshot> {
-    load_from(&snapshot_dir()?, tenant, scope)
+pub fn load(tenant: &str, scope: &str) -> Option<Arc<RunSnapshot>> {
+    LAST_SAVED
+        .get(tenant, scope)
+        .or_else(|| load_from(&snapshot_dir()?, tenant, scope).map(Arc::new))
 }
 
 fn load_from(dir: &Path, tenant: &str, scope: &str) -> Option<RunSnapshot> {
@@ -530,28 +566,35 @@ fn load_from(dir: &Path, tenant: &str, scope: &str) -> Option<RunSnapshot> {
     }
 }
 
-/// Replaces this scope's snapshot and prunes the directory. Never fails the caller.
+/// Replaces this scope's snapshot, prunes the directory and keeps the snapshot as
+/// the next run's in-memory baseline. Never fails the caller.
+///
+/// Only a snapshot that reached disk is remembered: the in-memory copy stands in
+/// for the file, so it must never describe a baseline the next launch cannot find.
 ///
 /// **Synchronous file I/O — call from `spawn_blocking`.**
-pub fn save(snapshot: &RunSnapshot) {
+pub fn save(snapshot: RunSnapshot) {
     let Some(dir) = snapshot_dir() else {
         warn!("no config directory available; run snapshot dropped");
         return;
     };
-    save_to(&dir, snapshot);
+    if save_to(&dir, &snapshot) {
+        LAST_SAVED.remember(Arc::new(snapshot));
+    }
 }
 
-fn save_to(dir: &Path, snapshot: &RunSnapshot) {
+/// Whether the snapshot was written.
+fn save_to(dir: &Path, snapshot: &RunSnapshot) -> bool {
     if snapshot.too_large() {
         warn!("run snapshot past the item cap; not written");
-        return;
+        return false;
     }
     let _guard = SNAPSHOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let body = match serde_json::to_vec(snapshot) {
         Ok(b) => b,
         Err(err) => {
             warn!(?err, "could not serialize a run snapshot");
-            return;
+            return false;
         }
     };
     let name = file_name(&snapshot.tenant, &snapshot.scope);
@@ -575,9 +618,10 @@ fn save_to(dir: &Path, snapshot: &RunSnapshot) {
     if let Err(err) = written {
         warn!(?err, "could not write the run snapshot");
         let _ = std::fs::remove_file(&tmp);
-        return;
+        return false;
     }
     prune(dir, &path);
+    true
 }
 
 /// Evicts the least recently written snapshots past [`MAX_SNAPSHOTS`] or

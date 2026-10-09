@@ -194,7 +194,7 @@ pub async fn query_patches(
     tokio::task::spawn_blocking(move || crate::history::record(&entry));
 
     let outcome = state.store_last_result_if_current(token, result);
-    save_baseline_if_stored(&outcome, move || changes::save(&snapshot)).await;
+    save_baseline_if_stored(&outcome, move || changes::save(snapshot)).await;
     summary_for(outcome, summary, qid)
 }
 
@@ -227,8 +227,9 @@ async fn save_baseline_if_stored(outcome: &StoreOutcome, save: impl FnOnce() + S
 /// Fills `result.changes` from the previous comparable run's snapshot and returns
 /// this run's snapshot for the caller to persist once the result is stored.
 ///
-/// Off the runtime: it reads a file and walks every row. The run is compared
-/// against whatever baseline is on disk *now*, so an auto-refresh tick diffs
+/// Off the runtime: it walks every row, and reads a file unless the baseline is
+/// the snapshot this process wrote last (`changes::load`). The run is compared
+/// against whatever baseline is current *now*, so an auto-refresh tick diffs
 /// against the run immediately before it in the same scope.
 async fn diff_against_previous_run(
     mut result: QueryResult,
@@ -250,7 +251,7 @@ async fn diff_against_previous_run(
             &result.generated_at,
             &statuses,
         );
-        result.changes = changes::diff(previous.as_ref(), &snapshot);
+        result.changes = changes::diff(previous.as_deref(), &snapshot);
         (result, snapshot)
     })
     .await
