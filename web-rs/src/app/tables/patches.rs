@@ -144,7 +144,8 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                     prop:checked=move || page_selection.get().0
                                     prop:indeterminate=move || page_selection.get().1
                                     on:change=move |ev| {
-                                        state.toggle_page_selection(event_target_checked(&ev))
+                                        state.toggle_page_selection(event_target_checked(&ev));
+                                        sync_header_box(&ev, page_selection.get_untracked());
                                     }
                                 />
                             </th>
@@ -365,7 +366,8 @@ fn GroupedPatches() -> impl IntoView {
                                                         &k_tick,
                                                         tick_label.clone(),
                                                         event_target_checked(&ev),
-                                                    )
+                                                    );
+                                                sync_header_box(&ev, selection.get_untracked());
                                             }
                                         />
                                         <button
@@ -464,12 +466,27 @@ fn RowCheckbox(row: Arc<PatchRow>) -> impl IntoView {
             <input
                 type="checkbox"
                 aria-label=label
-                prop:disabled=row.device_id == util::ORPHAN_DEVICE_ID
+                prop:disabled=!util::row_selectable(&row)
                 prop:checked=move || state.is_row_selected(&checked_row)
                 on:change=move |ev| state.toggle_row_selection(&row, event_target_checked(&ev))
             />
         </td>
     }
+}
+
+/// Puts a header checkbox back in step with the selection after its click.
+///
+/// The browser flips the box before `on:change` runs, and `prop:checked` is
+/// rewritten only when the `(all, some)` memo changes value — so a click whose
+/// toggle changed nothing (an orphan-only page, a group whose members failed to
+/// load) left the box showing a state the selection never reached. Reading the memo
+/// untracked here recomputes it against the post-toggle selection; on the async
+/// group path it reads unticked until the members land, which the memo's own
+/// effect then reflects.
+fn sync_header_box(ev: &web_sys::Event, (all, some): (bool, bool)) {
+    let el = event_target::<web_sys::HtmlInputElement>(ev);
+    el.set_checked(all);
+    el.set_indeterminate(some);
 }
 
 /// The member rows inside an expanded group. Deliberately a compact table rather

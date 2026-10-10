@@ -549,6 +549,88 @@ fn rows_selection_state_covers_all_some_none_and_empty() {
     );
 }
 
+/// An orphan row cannot be ticked, so it must not hold the header box at
+/// indeterminate: a page or group holding one reads fully checked once every
+/// selectable row is, and an orphan-only set has nothing to tick.
+#[test]
+fn an_orphan_row_does_not_hold_the_header_box_partial() {
+    let real = sel_row(1, "web-01", Some("KB1"), "Cumulative Update", "OS");
+    let orphan = sel_row(ORPHAN_DEVICE_ID, "", Some("KB9"), "Orphan", "OS");
+    assert!(row_selectable(&real) && !row_selectable(&orphan));
+
+    let rows = vec![real, orphan.clone()];
+    let mut sel = BTreeMap::new();
+    apply_rows_selection(&mut sel, &rows, true);
+    assert_eq!(
+        rows_selection_state(Some(rows.as_slice()), &sel),
+        (true, false),
+        "every selectable row is ticked"
+    );
+    assert_eq!(
+        rows_selection_state(Some(std::slice::from_ref(&orphan)), &sel),
+        (false, false),
+        "nothing to tick"
+    );
+}
+
+/// A member slot that is missing or empty still needs a load: an empty slot is a
+/// failed load or a cache miss, and caching it as final left the group's header
+/// checkbox dead until the next result.
+#[test]
+fn an_empty_member_slot_still_needs_a_fetch() {
+    assert!(needs_member_fetch::<PatchRow>(None));
+    assert!(needs_member_fetch::<PatchRow>(Some(&[])));
+    let row = sel_row(1, "web-01", Some("KB1"), "Cumulative Update", "OS");
+    assert!(!needs_member_fetch(Some(std::slice::from_ref(&row))));
+}
+
+/// After a refresh a device's ticks are pruned against its fresh rows — unless the
+/// read was truncated, which is a prefix and cannot say what is gone.
+#[test]
+fn a_truncated_read_leaves_the_device_selection_alone() {
+    use crate::types::DeviceRows;
+    let a = sel_row(1, "web-01", Some("KB1"), "Cumulative Update", "OS");
+    let b = sel_row(1, "web-01", Some("KB2"), "Security Update", "OS");
+    let c = sel_row(2, "web-02", None, "7-Zip", "SOFTWARE");
+    let mut sel = BTreeMap::new();
+    apply_rows_selection(&mut sel, &[a.clone(), b, c], true);
+
+    let reads = vec![
+        DeviceRows {
+            device_id: 1,
+            rows: vec![a.clone()],
+            truncated: true,
+        },
+        DeviceRows {
+            device_id: 2,
+            rows: vec![],
+            truncated: false,
+        },
+    ];
+    assert_eq!(
+        prune_selection_from_reads(&mut sel, &reads),
+        1,
+        "only the complete, empty read drops anything"
+    );
+    assert_eq!(sel[&1].patches.len(), 2, "truncated: both ticks kept");
+    assert!(
+        !sel.contains_key(&2),
+        "a complete empty read drops the device"
+    );
+
+    let reads = vec![DeviceRows {
+        device_id: 1,
+        rows: vec![a],
+        truncated: false,
+    }];
+    assert_eq!(prune_selection_from_reads(&mut sel, &reads), 1);
+    assert_eq!(
+        sel[&1].patches.len(),
+        1,
+        "a complete read prunes to what is listed"
+    );
+}
+
 /// An open group's body re-renders only when its own slot changes: same `Arc` is
 /// unchanged however the rest of the map moved, a fresh `Arc` (even with equal
 /// rows) or a slot appearing/disappearing is a change.

@@ -286,8 +286,10 @@ impl AppState {
         }
         spawn_local(async move {
             // A failed read keeps every device as it was rather than drop a
-            // selection the operator can't rebuild from memory; the backend re-plans
-            // against live state before any dispatch anyway. This was one awaited
+            // selection the operator can't rebuild from memory. The backend re-plans
+            // against the device inventory (cached up to 15 minutes) and Settings before
+            // any dispatch; ticked KBs are not re-checked against current patches, but the
+            // confirm dialog shows each device's parameter string. This was one awaited
             // call per selected device, in series, each carrying up to the limit in
             // rows over the IPC bridge.
             let Ok(fresh) = api::get_device_rows(devices, SELECTION_PRUNE_LIMIT).await else {
@@ -297,15 +299,9 @@ impl AppState {
                 return;
             }
             let mut removed = 0;
-            self.actions.selected.update(|sel| {
-                for device in &fresh {
-                    // A truncated read is a prefix: it cannot say what is gone.
-                    if device.truncated {
-                        continue;
-                    }
-                    removed += util::prune_device_selection(sel, device.device_id, &device.rows);
-                }
-            });
+            self.actions
+                .selected
+                .update(|sel| removed = util::prune_selection_from_reads(sel, &fresh));
             if removed > 0 {
                 self.notify(Toast::ok(format!(
                     "Auto-refresh: {removed} selected patch row(s) are no longer listed and were deselected"

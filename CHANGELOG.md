@@ -24,6 +24,16 @@ version and start a fresh `[Unreleased]`.
 - **The group pager no longer shows the previous grouping's total.** Changing the grouping (or
   applying a view link that changes it) left the old count on the pager while the new group
   headers loaded, and kept it there if they failed to load. It now starts from zero.
+- **Select-all now reads fully checked on a page or group that lists a patch with no device.**
+  Such a row can never be ticked, but the header counted it, so the box stayed partly checked
+  however many rows were selected. It is no longer counted.
+- **A header checkbox no longer shows ticked when the click selected nothing.** The browser
+  flips the box before the app runs, and when the toggle changed nothing — a group whose members
+  failed to load, a page with nothing selectable — the box kept the browser's state. It is now
+  written back from the selection after every click.
+- **A group whose members failed to load can be opened or ticked again to retry.** The failed
+  load was cached as an empty group, so the header checkbox did nothing and re-opening never
+  tried again until the next query. Both now reload the members.
 
 ## [0.15.3] - 2026-10-09
 
