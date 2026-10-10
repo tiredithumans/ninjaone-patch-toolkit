@@ -74,11 +74,15 @@ What keeps it deterministic and useful: every clock read is `FIXTURE_NOW`; ids, 
 versions are literals (never `CARGO_PKG_VERSION`); inputs avoid hash-ordered ties; and
 `assert_every_field_is_exercised` fails if any field of any shape is only ever `null` or `[]`, since
 an always-empty field is a nested shape nothing decodes. Regenerate both fixtures with
-`UPDATE_FIXTURES=1 cargo test --manifest-path src-tauri/Cargo.toml fixture_is_current`; the diff
-is the wire change to review.
+`just fixtures`; the diff is the wire change to review. A wrapper added to `api.rs` must appear
+in the decode table or in its `NOT_DECODED` list with the reason (`()`, a path, or a type another
+command already covers) — `every_ipc_wrapper_is_decoded_or_listed` reads `api.rs` and fails
+otherwise, so the rule is not left to review.
 
-Two gaps remain. A backend `T` → `Option<T>` change regenerates an identical file while every
-sample is `Some`, so a field made optional needs a `None` sample too. And the test decodes with
+Three gaps remain. A backend `T` → `Option<T>` change regenerates an identical file while every
+sample is `Some`, so a field made optional needs a `None` sample too. The mirror side of that is
+not guarded either: a mirror that tightens `Option<T>` to `T` still decodes every `Some` sample,
+so the fixture should carry a `None` wherever the backend can send one. And the test decodes with
 `serde_json` where the app uses `serde_wasm_bindgen`; they differ only for integers above 2^53
 (none here come near) and integral floats, where the host test is the stricter one. Request
 payloads (frontend → backend: `PatchQueryArgs`, `ActionRequest`, `SaveSettingsArgs`) are not

@@ -730,73 +730,6 @@ fn compliance_by_os_groups_devices_and_patches_by_os() {
 }
 
 #[test]
-fn query_result_serializes_camel_case_for_the_frontend() {
-    // web-rs/src/types.rs deserializes the query result with
-    // rename_all = "camelCase"; serializing snake_case here breaks decoding
-    // with `missing field deviceName`. Guard the IPC contract.
-    let d = device(2, 10, "Windows Server 2022");
-    let by_id = HashMap::from([(2, &d)]);
-    let patches = vec![patch(2, "PENDING", "CRITICAL", Some(1))];
-    let maps = maps();
-    let rows = build_rows(
-        &by_id,
-        &maps,
-        &[PatchSource {
-            patches: &refs(&patches),
-            type_label: "OS",
-            status_override: None,
-            status_filter: None,
-        }],
-        &FilterParams::default().prepare(),
-    );
-    let counts = pending_counts(&refs(&patches));
-    let devices = build_device_summaries(&[&d], &counts, &maps);
-    let compliance = build_compliance(&devices, &refs(&patches), &by_id, &maps, &sla30());
-    let result = QueryResult {
-        rows,
-        devices,
-        compliance,
-        compliance_by_os: Vec::new(),
-        failures: Vec::new(),
-        severity_by_org: Vec::new(),
-        age_buckets: Vec::new(),
-        worst_devices: Default::default(),
-        offline_backlog: Default::default(),
-        time_to_install: Default::default(),
-        sla_policy: Default::default(),
-        instance: "https://app.ninjarmm.com".into(),
-        approvals: Default::default(),
-        devices_total: 1,
-        devices_offline: 0,
-        devices_unpatchable: 0,
-        patch_families: PatchFamilies {
-            os: true,
-            software: true,
-        },
-        scope: Default::default(),
-        changes: Default::default(),
-        generated_at: "2026-01-01 00:00 UTC".into(),
-        data_fetched_at: "2026-01-01 00:00 UTC".into(),
-    };
-
-    let json = serde_json::to_string(&result).expect("serialize QueryResult");
-    for key in [
-        "\"deviceName\"",
-        "\"deviceRole\"",
-        "\"osName\"",
-        "\"patchType\"",
-        "\"needsReboot\"",
-        "\"pendingCount\"",
-        "\"devicesTotal\"",
-        "\"generatedAt\"",
-        "\"compliancePct\"",
-    ] {
-        assert!(json.contains(key), "missing {key} in {json}");
-    }
-    assert!(!json.contains("device_name"), "snake_case leaked: {json}");
-}
-
-#[test]
 fn query_summary_trims_to_first_page_and_reboot_subset() {
     // Two rows, two devices (one needing reboot). A first page of 1 keeps a
     // single row but reports the true total; only the reboot device is carried.
@@ -2483,9 +2416,8 @@ const DEMO_MIRROR_FIXTURE: &str = "../web-rs/tests/backend-grouping.json";
 /// byte-equality against it. Neither side can drift without a red test, and the
 /// generator is the backend itself rather than a hand-written expectation.
 ///
-/// Regenerate deliberately: `UPDATE_FIXTURES=1 cargo test --manifest-path
-/// src-tauri/Cargo.toml fixture_is_current`. A diff here means the frontend must
-/// change too.
+/// Regenerate deliberately with `just fixtures`. A diff here means the frontend
+/// must change too.
 #[test]
 fn demo_grouping_fixture_is_current() {
     // Deliberately exercises the fields cc33b0a found wrong: a group spanning an

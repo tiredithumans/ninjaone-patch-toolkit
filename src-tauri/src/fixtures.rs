@@ -6,8 +6,8 @@
 //! committed copy is stale, and a frontend test fails when its mirror no longer
 //! reads what the file says. Neither half can move alone.
 //!
-//! Regenerate both deliberately with `UPDATE_FIXTURES=1 cargo test --manifest-path
-//! src-tauri/Cargo.toml fixture_is_current`; the diff is the wire change to review.
+//! Regenerate both deliberately with `just fixtures`; the diff is the wire change to
+//! review.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -75,8 +75,7 @@ pub(crate) fn assert_fixture_current(path: &str, fixture: &Value) {
         panic!(
             "{path} is stale from line {line} (committed `{was}`, generated `{now}`). The \
              backend's output changed, so the web-rs code asserting against it must change \
-             with it. Regenerate with UPDATE_FIXTURES=1 cargo test --manifest-path \
-             src-tauri/Cargo.toml fixture_is_current"
+             with it. Regenerate with `just fixtures`"
         );
     }
 }

@@ -28,8 +28,9 @@ A command returning a new shape (or a new event) also adds one entry to
   by the backend from fixed inputs, decoded through each mirror by `types::tests`, which also
   fails on a mirror key the backend no longer sends (a rename hidden by `#[serde(default)]`).
   Every clock read is `FIXTURE_NOW`; every `Option`/`Vec` field needs a filled sample
-  (`assert_every_field_is_exercised`). Regenerate with `UPDATE_FIXTURES=1 cargo test
-  --manifest-path src-tauri/Cargo.toml fixture_is_current`; the diff is the wire change.
+  (`assert_every_field_is_exercised`). Regenerate with `just fixtures`; the diff is the wire
+  change. Every `ipc!` wrapper must be in the decode table or in `NOT_DECODED` with its reason
+  (`every_ipc_wrapper_is_decoded_or_listed` reads `api.rs`).
   → `docs/design/frontend.md#ipc-shapes-are-pinned-by-a-backend-generated-fixture`
 - **Event listeners go through `api::subscribe`**, which logs an undecodable payload
   (`leptos::logging::warn!`) instead of dropping it silently.

@@ -46,9 +46,9 @@ git checkout -b <type>/<short-slug> origin/main
   and command string derive from the wrapper — they cannot drift). Mirror `MyArgs`/`MyResult` in
   `web-rs/src/types.rs` (plain `String` for backend `Arc<str>`). Add a sample of `MyResult` to
   `fixtures::ipc_fixture_is_current` (`src-tauri/src/fixtures.rs`), its decode to
-  `web-rs/src/types/tests.rs`, and regenerate (`UPDATE_FIXTURES=1 cargo test --manifest-path
-  src-tauri/Cargo.toml fixture_is_current`); if the result rides on `QuerySummary`, also
-  `demo.rs`'s `assemble`.
+  `COMMAND_CHECKS` in `web-rs/src/types/tests.rs` (or the command to `NOT_DECODED` with why —
+  `every_ipc_wrapper_is_decoded_or_listed` insists), and regenerate with `just fixtures`; if
+  the result rides on `QuerySummary`, also `demo.rs`'s `assemble`.
 - **UI (optional):** call `api::my_command(...)` from a signal-driven handler in
   `web-rs/src/app/state/<concern>.rs` or the component module; render in
   `web-rs/src/app/<module>.rs`; CSS is global `web-rs/styles.css`; a new dialog calls

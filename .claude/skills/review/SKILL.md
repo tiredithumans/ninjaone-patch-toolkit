@@ -27,7 +27,8 @@ review-time copy; when a domain here feels thin, Read its rule file before judgi
   parameter is a wire-format change on both sides.
 - New summary/result field: `QueryResult` + `QuerySummary` + `from_result` + the types mirror +
   `demo.rs` + a regenerated `web-rs/tests/backend-ipc.json` (read its diff: it is the wire change).
-  A hand-edited fixture, or one regenerated without the matching mirror change, is a finding.
+  A hand-edited fixture is a finding; a regenerated one is the wire change to review (a field the
+  frontend does not read needs no mirror change).
 
 **Write path** (`docs/design/actions.md`) — the highest-risk surface
 - Every mutating handler calls `require_actions_enabled` (the source-derived test must still pass).
