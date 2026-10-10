@@ -469,6 +469,32 @@ pub(crate) fn action_blocked_reason(
     None
 }
 
+/// Why one action-bar button is disabled, as its tooltip says it, or `None`.
+///
+/// Four reasons stack in a fixed order: `base` (what blocks every button — see
+/// [`action_disabled_reason`]), then whether this selection source can reach the
+/// kind at all (a device-level selection has no patch rows), then the kind's own
+/// (no remediation script, nothing of its family ticked), then Dry run. The later
+/// checks are closures so they run — and, inside a `Memo`, are tracked — only
+/// when the earlier ones pass; the selection is not walked for a blocked bar or a
+/// kind that has no targets.
+pub(crate) fn action_button_reason(
+    base: Option<String>,
+    source: SelectionSource,
+    kind: ActionKind,
+    script_configured: impl FnOnce() -> bool,
+    matching_targets: impl FnOnce() -> usize,
+    dry_run: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    base.or_else(|| source_disabled_reason(source, kind))
+        .or_else(|| {
+            kind.is_remediation()
+                .then(|| kind_disabled_reason(kind, script_configured(), matching_targets()))
+                .flatten()
+        })
+        .or_else(dry_run)
+}
+
 /// Why every action button is disabled, or `None` when they are live.
 ///
 /// The precedence is the point and is why this is not inline: the tooltip must

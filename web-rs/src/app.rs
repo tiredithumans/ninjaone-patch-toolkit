@@ -138,13 +138,12 @@ pub fn App() -> impl IntoView {
     // Live job status from the backend poller. Rows arrive already advanced, so
     // this merges them in by job id rather than refetching the whole list.
     api::on_action_progress(move |ev| {
-        state
-            .actions
-            .dispatch_progress
-            .set(match ev.stage.as_str() {
-                "dispatching" => Some((ev.dispatched, ev.total)),
-                _ => None,
-            });
+        state.actions.dispatch_progress.maybe_update(|p| {
+            let next = util::next_dispatch_progress(*p, &ev.stage, ev.dispatched, ev.total);
+            let changed = next != *p;
+            *p = next;
+            changed
+        });
         if ev.jobs.is_empty() {
             return;
         }
