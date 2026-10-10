@@ -1,12 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
     ActionKind, ActionSettings, AuthStatus, DeviceSummary, JobReport, JobRequest, JobState,
-    Location, Organization, PatchFamilies, PatchRow, RebootChoice, RebootMode, RowSort, RowSortKey,
-    RunRecord,
+    Location, Organization, PatchFamilies, PatchGroup, PatchRow, RebootChoice, RebootMode, RowSort,
+    RowSortKey, RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -380,6 +380,148 @@ fn query_seq_wraps_and_compares_by_equality() {
     // Across the wrap the comparison still behaves.
     let mine = u64::MAX;
     assert!(is_superseded(next_query_seq(mine), mine));
+}
+
+/// A manual run is a new scope and a silent refresh the same scope with fresher
+/// data; `run_plan` is where that difference is decided, and this pins it.
+#[test]
+fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
+    let sort = RowSort {
+        key: RowSortKey::Organization,
+        desc: true,
+    };
+    let base = RunContext {
+        silent: false,
+        grouped: false,
+        rows_total: 450,
+        groups_total: 0,
+        page_size: 100,
+        current_page: 3,
+        current_sort: Some(sort),
+        sort_on_next_run: None,
+        filters_pref_set: false,
+    };
+    let manual = run_plan(base);
+    assert_eq!(manual.page, 0);
+    assert_eq!(
+        manual.sort, None,
+        "canonical order unless a view link queued one"
+    );
+    assert!(manual.collapse_filters && !manual.keep_selection && !manual.reopen_groups);
+    assert_eq!(manual.fetch, ViewFetch::SeedFirstPage);
+
+    let linked = run_plan(RunContext {
+        sort_on_next_run: Some(sort),
+        ..base
+    });
+    assert_eq!(linked.sort, Some(sort));
+    assert_eq!(
+        linked.fetch,
+        ViewFetch::Rows(0),
+        "a sorted page 0 is fetched, not seeded"
+    );
+    assert!(
+        !run_plan(RunContext {
+            filters_pref_set: true,
+            ..base
+        })
+        .collapse_filters,
+        "an explicit toggle wins"
+    );
+
+    let silent = run_plan(RunContext {
+        silent: true,
+        ..base
+    });
+    assert_eq!(silent.page, 3);
+    assert_eq!(
+        silent.sort,
+        Some(sort),
+        "the operator's sort survives a refresh"
+    );
+    assert!(!silent.collapse_filters && silent.keep_selection);
+    assert_eq!(silent.fetch, ViewFetch::Rows(3));
+
+    // The result shrank under the refresh: the page is clamped to the last one.
+    let shrunk = run_plan(RunContext {
+        silent: true,
+        rows_total: 150,
+        ..base
+    });
+    assert_eq!(shrunk.page, 1);
+}
+
+/// A grouped view fetches headers whatever the sort, and only a silent refresh of
+/// a grouped view reopens the operator's groups.
+#[test]
+fn a_grouped_run_fetches_headers_and_a_silent_one_reopens_groups() {
+    let base = RunContext {
+        silent: false,
+        grouped: true,
+        rows_total: 10_000,
+        groups_total: 250,
+        page_size: 100,
+        current_page: 2,
+        current_sort: Some(RowSort {
+            key: RowSortKey::Organization,
+            desc: false,
+        }),
+        sort_on_next_run: None,
+        filters_pref_set: true,
+    };
+    let manual = run_plan(base);
+    assert_eq!(manual.fetch, ViewFetch::Groups(0));
+    assert!(!manual.reopen_groups);
+
+    let silent = run_plan(RunContext {
+        silent: true,
+        ..base
+    });
+    assert_eq!(silent.fetch, ViewFetch::Groups(2));
+    assert!(silent.reopen_groups);
+    // Fewer groups now: clamped against the group total, not the row total.
+    let shrunk = run_plan(RunContext {
+        silent: true,
+        groups_total: 120,
+        ..base
+    });
+    assert_eq!(
+        shrunk.fetch,
+        ViewFetch::Groups(1),
+        "paged by groups, not rows"
+    );
+}
+
+/// Only the groups still listed on the new header page are reopened, in header
+/// order; one that moved to another page or left the result stays closed.
+#[test]
+fn only_groups_still_listed_are_reopened() {
+    let group = |key: &str| PatchGroup {
+        key: key.into(),
+        label: String::new(),
+        sublabel: None,
+        rows: 0,
+        devices: 0,
+        severity: String::new(),
+        severity_rank: 0,
+        offline: false,
+        needs_reboot: false,
+    };
+    let groups = [group("b"), group("a"), group("c")];
+    let open: BTreeSet<String> = ["a", "c", "gone"].into_iter().map(String::from).collect();
+    let none = BTreeSet::new();
+    assert_eq!(
+        groups_to_reopen(&open, &none, &groups),
+        vec!["a".to_string(), "c".to_string()]
+    );
+    assert!(groups_to_reopen(&none, &none, &groups).is_empty());
+    // The operator reopened "a" while the headers loaded: toggling it again would
+    // close it, so it is left alone.
+    let already: BTreeSet<String> = ["a".to_string()].into_iter().collect();
+    assert_eq!(
+        groups_to_reopen(&open, &already, &groups),
+        vec!["c".to_string()]
+    );
 }
 
 /// The load-bearing half of the selection model. Ticking one row must affect

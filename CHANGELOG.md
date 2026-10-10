@@ -43,6 +43,14 @@ version and start a fresh `[Unreleased]`.
   settled a job before that arrived, the row went back to its earlier state and, since the
   poller never re-sends a finished job, stayed there until Refresh. A finished row now keeps its
   result.
+- **Auto-refresh no longer collapses the groups you have open.** In a grouped Patches view every
+  automatic refresh closed the expanded groups and forgot their members. The groups still on the
+  page after the refresh now reopen with fresh members; a manual Run or Refresh still starts
+  collapsed.
+- **A quick Run pushes the next automatic refresh a full cadence out.** The countdown restarted
+  only if the once-a-second ticker happened to see the run in flight, so a run served from the
+  cache in under a second left it where it was and an automatic refresh could land seconds later.
+  It now restarts whenever a run lands.
 
 ### Changed
 
