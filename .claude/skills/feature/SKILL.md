@@ -44,8 +44,10 @@ git checkout -b <type>/<short-slug> origin/main
   `src-tauri/src/lib.rs`.
 - **Frontend wrapper:** `ipc!(name(args: MyArgs) -> MyResult)` in `web-rs/src/api.rs` (arg keys
   and command string derive from the wrapper — they cannot drift). Mirror `MyArgs`/`MyResult` in
-  `web-rs/src/types.rs` (plain `String` for backend `Arc<str>`); if the result rides on
-  `QuerySummary`, add the key to `serialized_shapes_carry_every_frontend_required_key` and to
+  `web-rs/src/types.rs` (plain `String` for backend `Arc<str>`). Add a sample of `MyResult` to
+  `fixtures::ipc_fixture_is_current` (`src-tauri/src/fixtures.rs`), its decode to
+  `web-rs/src/types/tests.rs`, and regenerate (`UPDATE_FIXTURES=1 cargo test --manifest-path
+  src-tauri/Cargo.toml fixture_is_current`); if the result rides on `QuerySummary`, also
   `demo.rs`'s `assemble`.
 - **UI (optional):** call `api::my_command(...)` from a signal-driven handler in
   `web-rs/src/app/state/<concern>.rs` or the component module; render in

@@ -42,10 +42,12 @@ may already name the cause. `docs/architecture.md` is the file-by-file layer map
   camelCase arg keys derive from the wrapper's own name and parameters, so a mismatch is a typo
   in one place.
 - `src/types.rs` — the hand-mirrored IPC types; a missing field deserializes as an error toast
-  "decode <cmd>". `rows::tests::serialized_shapes_carry_every_frontend_required_key` pins the
-  keys.
+  "decode <cmd>", and an undecodable event payload as a console warning (`api::subscribe`).
+  `types::tests` decodes the backend-generated `tests/backend-ipc.json` through every mirror;
+  if both fixture tests pass and the app still fails to decode, suspect a `null` the fixture
+  never samples (a backend field made optional) — see `docs/design/frontend.md`.
 - Signal state lives in `src/app/state.rs` + `state/<concern>.rs`; view modules in `src/app/`;
-  the only frontend code with tests is the pure `src/app/util/`. Full layer map:
+  frontend tests cover the pure `src/app/util/`, `demo.rs` and the IPC mirrors. Full layer map:
   `docs/architecture.md`.
 
 ## 3. Auth (`src-tauri/src/auth.rs`, `docs/design/auth.md`)

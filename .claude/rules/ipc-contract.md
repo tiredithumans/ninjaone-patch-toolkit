@@ -4,6 +4,9 @@ paths:
   - "src-tauri/src/lib.rs"
   - "web-rs/src/api.rs"
   - "web-rs/src/types.rs"
+  - "web-rs/src/types/**"
+  - "web-rs/tests/backend-ipc.json"
+  - "src-tauri/src/fixtures.rs"
 ---
 
 # IPC / Tauri command contract
@@ -17,6 +20,19 @@ paths:
 3. `ipc!(name(arg: T, …) -> Ret)` in `web-rs/src/api.rs` (+ mirror types in `web-rs/src/types.rs`).
    Arg keys and the command string are derived from the wrapper, so they cannot drift.
 
+A command returning a new shape (or a new event) also adds one entry to
+`fixtures::ipc_fixture_is_current` (`src-tauri/src/fixtures.rs`) and one to the decode table in
+`web-rs/src/types/tests.rs`; the two must name the same entries.
+
+- **Every shape the frontend decodes is pinned by `web-rs/tests/backend-ipc.json`**: generated
+  by the backend from fixed inputs, decoded through each mirror by `types::tests`, which also
+  fails on a mirror key the backend no longer sends (a rename hidden by `#[serde(default)]`).
+  Every clock read is `FIXTURE_NOW`; every `Option`/`Vec` field needs a filled sample
+  (`assert_every_field_is_exercised`). Regenerate with `UPDATE_FIXTURES=1 cargo test
+  --manifest-path src-tauri/Cargo.toml fixture_is_current`; the diff is the wire change.
+  → `docs/design/frontend.md#ipc-shapes-are-pinned-by-a-backend-generated-fixture`
+- **Event listeners go through `api::subscribe`**, which logs an undecodable payload
+  (`leptos::logging::warn!`) instead of dropping it silently.
 - **Errors are `UiError { message }`; one the frontend branches on adds a `code`**
   (`UiError::coded(error::ERR_*)` + the `types.rs` mirror + a `coded` `ipc!` wrapper), never
   message matching. → `docs/design/frontend.md#tauri-commands`
@@ -24,9 +40,9 @@ paths:
   wire-format change; update both sides. → `docs/design/frontend.md#ipc-arg-shape--keys-match-rust-fn-parameter-names-camelcase`
 - **Compact aggregates (`failures`, `approvals`, `changes`, `worst_devices`, …) ride on both
   `QueryResult` and `QuerySummary`** (`approvals.stuck_devices` capped there). Add one in lockstep
-  with `QuerySummary::from_result`, the `types.rs` mirror, the demo's `assemble`, and
-  `serialized_shapes_carry_every_frontend_required_key`. `QueryScope` and `instance` are the
-  `QueryResult`-only exceptions. → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
+  with `QuerySummary::from_result`, the `types.rs` mirror, the demo's `assemble`, and the
+  regenerated IPC fixture. `QueryScope` and `instance` are the `QueryResult`-only exceptions.
+  → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
 - **A new summary/result field touches six places** — `QueryResult` + `QuerySummary` +
-  `from_result` + the `types.rs` mirror + `demo.rs` + the shape test. A diff that adds a field to
-  one shape but not the mirror deserializes as a "decode <cmd>" error toast.
+  `from_result` + the `types.rs` mirror + `demo.rs` + the regenerated fixture (with a filled
+  sample). A mirror field the summary does not carry fails `just web-test`, not a running app.

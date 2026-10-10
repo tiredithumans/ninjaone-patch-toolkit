@@ -25,6 +25,20 @@ pub enum JobState {
 }
 
 impl JobState {
+    /// Every variant (with an empty detail), for the IPC fixture's enum list and the
+    /// Jobs rows it emits. A new variant breaks the match in
+    /// `all_lists_every_job_state_once` until it is listed here.
+    #[cfg(test)]
+    pub const ALL: [Self; 7] = [
+        Self::Queued,
+        Self::Running,
+        Self::Completed,
+        Self::Failed(String::new()),
+        Self::TimedOut,
+        Self::Unknown(String::new()),
+        Self::Skipped(String::new()),
+    ];
+
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,

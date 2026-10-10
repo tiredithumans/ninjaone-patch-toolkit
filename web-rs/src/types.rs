@@ -2,10 +2,11 @@
 //! the backend's serde contract across the IPC boundary.
 //!
 //! These types are a hand-maintained mirror of the backend arg/result structs
-//! (`src-tauri/src/{rows,model,commands}.rs`). A backend test,
-//! `serialized_shapes_carry_every_frontend_required_key` in `src-tauri/src/rows.rs`,
-//! fails if the backend drops/renames a key the mirrors below read — so drift is
-//! caught in CI rather than as a silently blank column at runtime.
+//! (`src-tauri/src/{rows,model,commands}.rs`). The backend emits one value of every
+//! shape the frontend decodes to `web-rs/tests/backend-ipc.json`, and `tests` here
+//! decodes each through its mirror — so drift is caught in CI rather than as a
+//! "decode <cmd>" toast or a silently blank column at runtime. That is why the
+//! decode-only mirrors also derive `Serialize` under test.
 
 use std::collections::BTreeMap;
 
@@ -48,6 +49,7 @@ pub struct FilterParams {
 /// Mirror of the backend's `rows::PatchFamilies` — the honest scope of every
 /// compliance/severity/age number in a result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct PatchFamilies {
     #[serde(default)]
@@ -75,12 +77,14 @@ impl PatchFamilies {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 pub struct Organization {
     pub id: i64,
     pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct Location {
     pub id: i64,
@@ -93,12 +97,14 @@ pub struct Location {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 pub struct Role {
     pub id: i64,
     pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct NodeClass {
     pub value: String,
@@ -110,6 +116,7 @@ pub struct NodeClass {
 // action selection, since NinjaOne has no per-patch apply endpoint and checking a
 // row therefore selects that row's *device*.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct PatchRow {
     pub device_id: i64,
@@ -148,6 +155,7 @@ pub struct PatchRow {
 /// header. Mirrors `rows::DeviceSummary`; the rollup fields default so an older
 /// backend's payload still loads.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSummary {
     /// What the Needs Reboot tab's device selection and the drill-down are keyed by.
@@ -184,6 +192,7 @@ pub struct DeviceSummary {
 /// Whether a device is in the population the fleet-health rollups describe, and
 /// if not, why. Mirrors `rows::RollupScope`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub enum RollupScope {
     #[default]
@@ -195,6 +204,7 @@ pub enum RollupScope {
 /// One device's drill-down, served from the backend's cached result by
 /// `device_detail`. Mirrors `rows::DeviceDetail`.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceDetail {
     /// `None` only for rows with no device in the scoped inventory.
@@ -205,6 +215,7 @@ pub struct DeviceDetail {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct ComplianceBucket {
     pub organization: String,
@@ -224,6 +235,7 @@ pub struct ComplianceBucket {
 /// Per-OS compliance row for the Compliance tab's "Compliance by OS" section.
 /// Mirrors the backend `OsCompliance`.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct OsCompliance {
     pub os: String,
@@ -242,6 +254,7 @@ pub struct OsCompliance {
 /// columns and the devices whose approved patches are not installing. The
 /// `stuck_devices` list is capped on the wire; `stuck_devices_total` is not.
 #[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase", default)]
 pub struct ApprovalBacklog {
     pub awaiting_approval: usize,
@@ -255,6 +268,7 @@ pub struct ApprovalBacklog {
 /// Mirror of the backend `rows::StuckDevice` (its `deviceId` and
 /// `oldestFirstSeenTs` are not rendered, so not mirrored).
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct StuckDevice {
     pub device_name: String,
@@ -266,6 +280,7 @@ pub struct StuckDevice {
 // Backend also sends severityRank and latestFailureTs; serde ignores undeclared
 // fields. Only what the failures table renders is mirrored here.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct FailureGroup {
     /// `OS` or `SOFTWARE`. Third-party failures carry no KB, so this is what tells
@@ -284,6 +299,7 @@ pub struct FailureGroup {
 /// Mirror of the backend's `changes::RunChanges`: the diff against the previous run
 /// with the same tenant and facets. Counts are exact; the lists are capped.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunChanges {
     /// When the run compared against ran. `None`: no previous comparable run.
@@ -301,6 +317,7 @@ pub struct RunChanges {
 
 /// One patch on one device in a change list (backend `changes::ChangeItem`).
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase", default)]
 pub struct ChangeItem {
     pub device_id: i64,
@@ -312,6 +329,7 @@ pub struct ChangeItem {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct SeverityCounts {
     pub critical: usize,
@@ -326,6 +344,7 @@ pub struct SeverityCounts {
 
 /// One device's pending backlog. Mirrors `rows::DeviceBacklog`.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceBacklog {
     pub device_id: i64,
@@ -345,6 +364,7 @@ pub struct DeviceBacklog {
 /// A capped device list plus how many devices qualified. Mirrors
 /// `rows::DeviceBacklogList`.
 #[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceBacklogList {
     #[serde(default)]
@@ -355,6 +375,7 @@ pub struct DeviceBacklogList {
 
 /// One first-seen → installed distribution, in days. Mirrors `rows::InstallLatency`.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct InstallLatency {
     pub label: String,
@@ -365,6 +386,7 @@ pub struct InstallLatency {
 
 /// Mirrors `rows::TimeToInstall`.
 #[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase", default)]
 pub struct TimeToInstall {
     pub installs_queried: bool,
@@ -412,6 +434,7 @@ impl SlaBySeverity {
 
 /// The SLA policy a result was computed under. Mirrors `settings::SlaPolicy`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase", default)]
 pub struct SlaPolicy {
     pub default_days: i64,
@@ -442,6 +465,7 @@ pub enum GroupBy {
 /// separately via `get_patch_group_members` — a patch group can span the whole
 /// fleet, so its rows stay off the wire until the operator expands it.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct PatchGroup {
     pub key: String,
@@ -457,6 +481,7 @@ pub struct PatchGroup {
 
 /// One page of group headers plus the total. Mirrors `rows::GroupPage`.
 #[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct GroupPage {
     #[serde(default)]
@@ -466,6 +491,7 @@ pub struct GroupPage {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct OrgSeverity {
     pub organization: String,
@@ -473,6 +499,7 @@ pub struct OrgSeverity {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct AgeBucket {
     pub label: String,
@@ -484,6 +511,7 @@ pub struct AgeBucket {
 /// are fetched a page at a time via `get_patch_rows`, so a large fleet doesn't ship
 /// every row over IPC. Mirrors the backend `QuerySummary`.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResult {
     /// First page of detail rows; seeds the table without an extra round trip.
@@ -542,6 +570,7 @@ pub struct QueryResult {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct AuthStatus {
     pub authenticated: bool,
@@ -560,6 +589,7 @@ pub struct AuthStatus {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsView {
     pub instance_base_url: String,
@@ -641,6 +671,7 @@ pub struct Preset {
 /// `query:progress` event. `stage` is one of `devices` / `osPatches` /
 /// `swPatches` / `osInstalls` / `swInstalls` / `joining`.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct QueryProgressEvent {
     pub query_id: u64,
@@ -651,6 +682,7 @@ pub struct QueryProgressEvent {
 /// Available-update metadata from the backend updater. `notes` is the published
 /// release body (the changelog) shown in the update splash.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     pub version: String,
@@ -862,6 +894,7 @@ pub enum RebootChoice {
 /// Mirror of the backend `actions::JobState`, which serializes as an internally
 /// tagged `{ state, detail }`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase", tag = "state", content = "detail")]
 pub enum JobState {
     Queued,
@@ -874,6 +907,19 @@ pub enum JobState {
 }
 
 impl JobState {
+    /// Every variant (with an empty detail), so `tests` can hold the mirror to the
+    /// backend's set of states. Test-only, like [`ActionKind::ALL`].
+    #[cfg(test)]
+    pub const ALL: [Self; 7] = [
+        Self::Queued,
+        Self::Running,
+        Self::Completed,
+        Self::Failed(String::new()),
+        Self::TimedOut,
+        Self::Unknown(String::new()),
+        Self::Skipped(String::new()),
+    ];
+
     /// Mirrors the backend's `JobState::is_terminal`. `Unknown` is deliberately not
     /// terminal: a timed-out dispatch is polled until `/activities` resolves it.
     pub fn is_terminal(&self) -> bool {
@@ -912,6 +958,7 @@ impl JobState {
 // has no script-output endpoint, so they are how an operator finds the run in the
 // NinjaOne console.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct JobReport {
     pub id: u64,
@@ -939,6 +986,7 @@ pub struct JobReport {
 /// produced one job, for that one device. `kind` and `dry_run` live on the
 /// [`JobReport`]; the maintenance-window override is deliberately not recorded.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct JobRequest {
     pub script_id: Option<i64>,
@@ -969,6 +1017,7 @@ impl JobReport {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct PlannedTarget {
     pub device_name: String,
@@ -977,6 +1026,7 @@ pub struct PlannedTarget {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct SkippedTarget {
     pub device_name: String,
@@ -984,6 +1034,7 @@ pub struct SkippedTarget {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct ActionPlan {
     pub summary: String,
@@ -1009,6 +1060,7 @@ pub struct ActionPlan {
 /// Mirror of the backend `actions::ApplyPreview`: what NinjaOne's apply endpoint
 /// will install, counted from the cached whole-fleet current patches.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyPreview {
     /// `"OS"` or `"software"`.
@@ -1023,6 +1075,7 @@ pub struct ApplyPreview {
 
 /// Mirror of the backend `actions::ApplyPreviewDevice`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyPreviewDevice {
     pub device_id: i64,
@@ -1045,6 +1098,7 @@ impl ActionPlan {
 pub const ERR_PARTIAL_DISPATCH: &str = "partialDispatch";
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct ActionBatch {
     pub dispatched: usize,
@@ -1055,6 +1109,7 @@ pub struct ActionBatch {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptSummary {
     pub id: i64,
@@ -1074,6 +1129,7 @@ pub struct ScriptSummary {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct RunAsOptions {
     pub roles: Vec<String>,
@@ -1127,6 +1183,7 @@ impl ActionRequest {
 
 /// Payload of the `action:progress` event.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct ActionProgressEvent {
     /// `dispatching` | `dispatched` | `polling` | `settled`
@@ -1141,6 +1198,7 @@ pub struct ActionProgressEvent {
 /// `commands::diagnostics::AuditRecord`; every field is tolerant because the log is
 /// append-only across app versions and older records predate newer fields.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase", default)]
 pub struct AuditRecord {
     pub timestamp: String,
@@ -1162,6 +1220,7 @@ pub struct AuditRecord {
 /// `history::RunRecord`. Every field is a scalar whose meaning is stable across app
 /// versions — derived values (percentages) are recomputed here, never frozen on disk.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunRecord {
     pub at: String,
@@ -1193,6 +1252,7 @@ pub struct RunRecord {
 /// One organization in one run (backend `history::OrgRun`). Short keys on the wire
 /// because the entry repeats per org on every history line.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(default)]
 pub struct OrgRun {
     #[serde(rename = "o")]
@@ -1249,6 +1309,7 @@ impl RunRecord {
 
 /// One device's rows from the cached result, from `get_device_rows`.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceRows {
     pub device_id: i64,
@@ -1257,3 +1318,6 @@ pub struct DeviceRows {
     /// longer lists.
     pub truncated: bool,
 }
+
+#[cfg(test)]
+mod tests;

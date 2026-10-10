@@ -427,8 +427,9 @@ because both vocabularies are fixed. The cached `QueryResult` is the app's large
 allocation, and it once held one owned `String` per field per row for a few thousand distinct
 values. `FailureGroup` and `PatchGroup` carry the same shared strings so the rollups are refcount
 bumps. All of it serializes to plain JSON strings, so `web-rs/src/types.rs` still mirrors them as
-`String` — `serialized_shapes_carry_every_frontend_required_key` asserts the wire *types*, not
-just the keys, because the two crates share no code.
+`String` — and because the two crates share no code, the IPC fixture (`web-rs/tests/backend-ipc.json`)
+decodes the backend's real rows through those mirrors, so a field that stopped serializing as a
+string fails `just web-test`.
 
 ## Installed/Failed vs current patches (status routing)
 

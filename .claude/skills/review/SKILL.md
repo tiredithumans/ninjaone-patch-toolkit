@@ -22,10 +22,12 @@ review-time copy; when a domain here feels thin, Read its rule file before judgi
 
 **IPC / command chain** (`docs/design/frontend.md`)
 - New command: handler in `src-tauri/src/commands/<domain>.rs`, entry in `generate_handler![]`,
-  `ipc!` wrapper in `web-rs/src/api.rs`, types mirrored in `web-rs/src/types.rs`. A renamed
+  `ipc!` wrapper in `web-rs/src/api.rs`, types mirrored in `web-rs/src/types.rs`, a sample in
+  `src-tauri/src/fixtures.rs` and its decode in `web-rs/src/types/tests.rs`. A renamed
   parameter is a wire-format change on both sides.
 - New summary/result field: `QueryResult` + `QuerySummary` + `from_result` + the types mirror +
-  `demo.rs` + `serialized_shapes_carry_every_frontend_required_key`.
+  `demo.rs` + a regenerated `web-rs/tests/backend-ipc.json` (read its diff: it is the wire change).
+  A hand-edited fixture, or one regenerated without the matching mirror change, is a finding.
 
 **Write path** (`docs/design/actions.md`) — the highest-risk surface
 - Every mutating handler calls `require_actions_enabled` (the source-derived test must still pass).

@@ -51,6 +51,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/window_state.rs          # window geometry: debounced save, clamped restore before first show
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, SLA policy, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
+├── src/fixtures.rs              # test-only: generates web-rs/tests/*.json (assert_fixture_current) + the IPC fixture
 ├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
 ├── src/commands/actions/        # mod.rs handlers · confirm.rs request_hash · plan.rs build_plan · dispatch.rs send_action · poller.rs poll_tick · tests.rs
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
@@ -72,10 +73,11 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
 │       └── one file per concern (query, selection, sla, guardrails, changes, shortcuts, view_link, theme, …) + tests.rs
-├── src/api.rs                   # ipc! macro → typed invoke wrappers + is_tauri() browser-mode guard
+├── src/api.rs                   # ipc! macro → typed invoke wrappers, event subscribe, is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
-├── src/types.rs                 # request/response types mirrored from the backend
+├── src/types.rs                 # request/response types mirrored from the backend (+ types/tests.rs: decodes backend-ipc.json)
 ├── tests/backend-grouping.json  # backend-generated fixture the demo's grouping is asserted against
+├── tests/backend-ipc.json       # backend-generated: one value per IPC command/event result, decoded through every mirror
 ├── styles.css                   # plain global CSS (BEM-ish names); every colour a :root token, light palette via data-theme
 └── Trunk.toml                   # WASM build/serve (127.0.0.1:8080); never set public_url here
 ```

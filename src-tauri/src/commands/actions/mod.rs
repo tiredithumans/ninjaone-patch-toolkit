@@ -116,16 +116,18 @@ pub struct RunAsOptions {
     pub roles: Vec<String>,
 }
 
+/// The `action:progress` payload. Crate-visible for the same reason as
+/// `patches::QueryProgressEvent`: the IPC fixture is the only test of its shape.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ActionProgressEvent {
-    batch_id: u64,
+pub(crate) struct ActionProgressEvent {
+    pub(crate) batch_id: u64,
     /// `dispatching` | `dispatched` | `polling` | `settled`
-    stage: &'static str,
-    dispatched: usize,
-    total: usize,
+    pub(crate) stage: &'static str,
+    pub(crate) dispatched: usize,
+    pub(crate) total: usize,
     /// Rows whose state changed since the last event; empty on a pure stage tick.
-    jobs: Vec<JobReport>,
+    pub(crate) jobs: Vec<JobReport>,
 }
 
 const SESSION_CHANGED_WHILE_PLANNING: &str = "You signed in again or switched instance while this \

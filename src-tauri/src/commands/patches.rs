@@ -61,13 +61,14 @@ pub struct PatchQueryArgs {
 /// Incremental progress for an in-flight `query_patches`, emitted on the
 /// `query:progress` event so the UI can show live record counts. `query_id`
 /// echoes the value the frontend passed so it can drop events from a superseded
-/// run.
+/// run. Crate-visible so the IPC fixture (`fixtures::ipc_fixture_is_current`) can
+/// emit one — the frontend's listener decodes it and nothing else tests that shape.
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct QueryProgressEvent {
-    query_id: u64,
-    stage: &'static str,
-    loaded: usize,
+pub(crate) struct QueryProgressEvent {
+    pub(crate) query_id: u64,
+    pub(crate) stage: &'static str,
+    pub(crate) loaded: usize,
 }
 
 /// Best-effort emit of a progress event (a dropped event just means one fewer UI
