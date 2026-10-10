@@ -79,11 +79,11 @@ merely miss. A superseded or tenant-drifted result is dropped, not stored.
 the operator and the frontend already discards the response itself (`run_query` compares
 `query_seq` after the await and drops a superseded one, while still clearing its own busy flag),
 so the summary is still returned. `TenantChanged` and `Poisoned` are **errors**:
-`commands::patches::summary_for` refuses to hand back a renderable summary, because the frontend
-has no equivalent guard — `query_seq` counts runs the frontend *starts*, and switching instance
-never bumps it, so returning the summary painted the previous tenant's rows over the new tenant's
-empty cache while paging and export read the miss. The rule: return a summary only when the rows
-behind it are readable.
+`commands::patches::summary_for` refuses to hand back a renderable summary, because the frontend's
+guard can arrive too late — `clear_session()` bumps `query_seq` only once the session-ending
+command replies, and the query's reply can land first, so returning the summary painted the
+previous tenant's rows over the new tenant's empty cache while paging and export read the miss.
+The rule: return a summary only when the rows behind it are readable.
 
 ## A tenant switch, a sign-out, a sign-in and a re-authorization all clear the frontend
 

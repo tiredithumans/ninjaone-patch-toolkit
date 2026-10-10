@@ -129,7 +129,7 @@ impl AppState {
             // Not `set_group_by`: that fetches for the result on screen, and the
             // run below fetches for the new one.
             self.query.group_by.set(view.group_by);
-            self.query.groups.set(Vec::new());
+            self.query.clear_groups();
             self.query.reset_members();
         }
         self.query.sort_on_next_run.set(view.sort);

@@ -182,7 +182,8 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                     // Rendered only while the window is enforced and Settings permits
                     // overriding it; the backend decides whether the window is actually
                     // closed, and audits the dispatch only when it was. Cleared after
-                    // every dispatch, so it never outlives the one it was ticked for.
+                    // every dispatch and when the session ends, so it never outlives
+                    // the one it was ticked for.
                     <Show when=move || state.settings.f_actions.with(util::window_override_offered)>
                         <label
                             class="checkbox"

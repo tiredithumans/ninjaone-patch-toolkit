@@ -266,8 +266,9 @@ window for this dispatch" (`override_window` on the request) *requests* it. The 
 only while the window is enforced and overridable — not "only while it is closed", which would
 need a second copy of `window_is_open` against the webview's clock that could disagree at the
 boundary; an override requested inside an open window is inert. It is bound into the confirm
-token, sent only while the checkbox is shown, and **cleared after every dispatch** so it cannot
-silently carry over. When it actually bypasses a closed window, `ActionPlan.window_overridden` is
+token, sent only while the checkbox is shown, and **cleared after every dispatch and by
+`clear_session()`** so it cannot silently carry over — not even into the next session when a
+dispatch is cut short by a sign-out or tenant switch. When it actually bypasses a closed window, `ActionPlan.window_overridden` is
 set and every opening audit record carries `windowOverride: true` (omitted otherwise, so ordinary
 records keep their shape); the audit trail shows "Live (window override)".
 

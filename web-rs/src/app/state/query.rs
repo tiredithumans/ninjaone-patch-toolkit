@@ -423,10 +423,24 @@ impl AppState {
     /// exporting" beside a visible table.
     pub(in crate::app) fn clear_session(self) {
         self.clear_results();
+        // A run from the ended session may still be in flight. The backend refuses
+        // a store that lands after its own clear, but one that won *before* it
+        // (and then awaited the baseline save) comes back `Ok` and would repaint
+        // the old rows over a cache that is already gone. Moving the stamp makes
+        // that reply superseded; the run still owns its busy flag and releases it
+        // on the superseded path, so a Run pressed after the clear is queued, not
+        // lost.
+        self.run.query_seq.update(|s| *s = util::next_query_seq(*s));
+        self.run.progress.set(Progress::default());
         self.actions.jobs.set(Vec::new());
         self.actions.pending.set(None);
         self.actions.confirm_input.set(String::new());
         self.actions.dispatch_error.set(None);
+        // Consent for one dispatch. The Ok arm of `confirm_plan` clears it, but a
+        // dispatch cut short by the session ending takes the partial-dispatch arm
+        // instead, and a tick must not carry into another operator's (or tenant's)
+        // first dispatch.
+        self.actions.override_window.set(false);
         // A run queued behind one from the old session would fire into the new
         // one (or, signed out, just to say "Sign in first").
         self.run.queued.set(None);
@@ -509,7 +523,7 @@ impl AppState {
         self.query.page_rows.set(Vec::new());
         self.query.patches_page.set(0);
         self.query.patches_sort.set(None);
-        self.query.groups.set(Vec::new());
+        self.query.clear_groups();
         self.query.reset_members();
         // Invalidates a page/header request still in flight for the dropped result.
         self.query.next_view_seq();
