@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-10-10
+
 ### Fixed
 
 - **Signing out or switching tenant no longer repaints the ended session's rows.** A query that
