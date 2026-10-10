@@ -1,7 +1,13 @@
-//! The Run guard chain, the queued-run slot and the overlapping-run stamp, lifted
-//! out of `AppState::run_query` so their ordering is testable.
+//! The Run guard chain, the queued-run slot, the overlapping-run stamp and what a
+//! landed run does to the view, lifted out of `AppState::run_query` so their
+//! ordering is testable.
+
+use std::collections::BTreeSet;
+
+use crate::types::{PatchGroup, RowSort};
 
 use super::super::state::Progress;
+use super::{clamp_page, page_count, paged_total};
 
 /// What [`AppState::run_query_inner`] should do, decided from the flags alone.
 ///
@@ -106,4 +112,100 @@ pub(crate) fn apply_progress_stage(p: &mut Progress, stage: &str, loaded: usize)
         "joining" => p.joining = true,
         _ => {}
     }
+}
+
+/// Which collection the view fetches once a run has landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewFetch {
+    /// Grouped view: this page of group headers.
+    Groups(usize),
+    /// Flat view, page 0, canonical order: the rows that shipped with the summary.
+    SeedFirstPage,
+    /// Flat view, a later page or an active sort: fetched.
+    Rows(usize),
+}
+
+/// What [`run_plan`] decides from. `groups_total` is the *previous* result's (the
+/// new one arrives with the headers, and `fetch_groups` re-clamps against it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RunContext {
+    pub silent: bool,
+    pub grouped: bool,
+    pub rows_total: usize,
+    pub groups_total: usize,
+    pub page_size: usize,
+    pub current_page: usize,
+    pub current_sort: Option<RowSort>,
+    pub sort_on_next_run: Option<RowSort>,
+    /// The operator has toggled the filter panel at least once (the choice is
+    /// remembered and always wins over the first-run collapse).
+    pub filters_pref_set: bool,
+}
+
+/// What a run that succeeded does to the view.
+///
+/// Lifted out of the `Ok` arm of `AppState::run_query_inner` so the decisions are
+/// reachable by a test; that arm is compile-checked only. A manual run is a new
+/// scope: page 1, the sort a view link queued (or the canonical order), the
+/// selection dropped, the groups collapsed. A silent refresh is the same scope with
+/// fresher data: the page is kept (clamped in case the result shrank), the sort and
+/// the ticked rows are kept, and the groups the operator had open are reopened.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RunPlan {
+    pub page: usize,
+    /// The sort the view lands on. Applied only by a manual run — a silent one
+    /// leaves `patches_sort` as it is rather than rewriting it with its own value.
+    pub sort: Option<RowSort>,
+    pub fetch: ViewFetch,
+    /// Reclaim the fold on a manual run when the operator has not said otherwise.
+    pub collapse_filters: bool,
+    /// Prune the selection against the fresh rows instead of dropping it.
+    pub keep_selection: bool,
+    /// Reopen the groups that were open and are still listed.
+    pub reopen_groups: bool,
+}
+
+pub(crate) fn run_plan(ctx: RunContext) -> RunPlan {
+    let (page, sort) = if ctx.silent {
+        let total = paged_total(ctx.grouped, ctx.rows_total, ctx.groups_total);
+        (
+            clamp_page(ctx.current_page, page_count(total, ctx.page_size)),
+            ctx.current_sort,
+        )
+    } else {
+        (0, ctx.sort_on_next_run)
+    };
+    let fetch = if ctx.grouped {
+        ViewFetch::Groups(page)
+    } else if page == 0 && sort.is_none() {
+        ViewFetch::SeedFirstPage
+    } else {
+        ViewFetch::Rows(page)
+    };
+    RunPlan {
+        page,
+        sort,
+        fetch,
+        collapse_filters: !ctx.silent && !ctx.filters_pref_set,
+        keep_selection: ctx.silent,
+        reopen_groups: ctx.silent && ctx.grouped,
+    }
+}
+
+/// The groups to reopen after a silent refresh: those that were `open` and are
+/// still on the new header page, in header order. One that moved to another page
+/// or left the result stays closed — its key would otherwise sit in `expanded`
+/// with no header to show it under. One in `already_open` is skipped: the operator
+/// reopened it while the headers were loading, and the reopen is a toggle that
+/// would close it again.
+pub(crate) fn groups_to_reopen(
+    open: &BTreeSet<String>,
+    already_open: &BTreeSet<String>,
+    groups: &[PatchGroup],
+) -> Vec<String> {
+    groups
+        .iter()
+        .filter(|g| open.contains(&g.key) && !already_open.contains(&g.key))
+        .map(|g| g.key.clone())
+        .collect()
 }

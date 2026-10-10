@@ -163,29 +163,31 @@ impl AppState {
             }
             match outcome {
                 Ok(r) => {
-                    // Jump back to page 1 on a manual run; an auto-refresh keeps the
-                    // current page, clamped in case the new result is shorter. The
-                    // bound comes from whichever collection this view pages — see
-                    // `util::paged_total`, which is also what sizes the pager itself,
-                    // so the two cannot disagree about how many pages exist.
+                    // The decisions — page, sort, what to fetch, what to keep — are
+                    // `util::run_plan`'s, so they are testable; this arm carries
+                    // them out. The page bound comes from whichever collection this
+                    // view pages (`util::paged_total`, which also sizes the pager).
                     let grouped = self.query.group_by.get_untracked().is_some();
-                    let total = util::paged_total(
+                    let plan = util::run_plan(util::RunContext {
+                        silent,
                         grouped,
-                        r.rows_total,
-                        self.query.groups_total.get_untracked(),
-                    );
-                    let page = if silent {
-                        util::clamp_page(
-                            self.query.patches_page.get_untracked(),
-                            util::page_count(total, PATCHES_PAGE_SIZE),
-                        )
-                    } else {
-                        // A manual run returns to page 1 in the canonical order —
-                        // or in the order a just-applied view link asked for.
-                        self.query.patches_sort.set(self.take_sort_on_next_run());
-                        0
-                    };
-                    self.query.patches_page.set(page);
+                        rows_total: r.rows_total,
+                        groups_total: self.query.groups_total.get_untracked(),
+                        page_size: PATCHES_PAGE_SIZE,
+                        current_page: self.query.patches_page.get_untracked(),
+                        current_sort: self.query.patches_sort.get_untracked(),
+                        sort_on_next_run: self.query.sort_on_next_run.get_untracked(),
+                        filters_pref_set: api::ui_pref(api::PREF_FILTERS_COLLAPSED).is_some(),
+                    });
+                    self.query.patches_page.set(plan.page);
+                    if !silent {
+                        // A manual run lands on the sort a just-applied view link
+                        // asked for (consumed here) or the canonical order; a silent
+                        // one keeps the operator's sort and leaves the slot for the
+                        // next manual run.
+                        self.query.sort_on_next_run.set(None);
+                        self.query.patches_sort.set(plan.sort);
+                    }
                     // Fetch only the collection the active view renders, mirroring
                     // `set_group_by`. A grouped view is built from group headers and
                     // per-group member pages, none of which ride along with the
@@ -199,20 +201,28 @@ impl AppState {
                     // grouped view are never drawn, so fetching them alongside was a
                     // wasted round trip on every auto-refresh tick; switching back to
                     // flat re-fetches page 0 through `set_group_by`.
-                    self.query.reset_members();
-                    if grouped {
-                        self.fetch_groups(page);
-                    } else if page == 0 && self.query.patches_sort.get_untracked().is_none() {
-                        // Page 0 ships inline with the summary (canonical order), so
-                        // seed it directly; a later page — or a silent refresh with an
-                        // active sort — is fetched instead. Stamped like a fetch, so
-                        // a page request still in flight cannot overwrite it.
-                        self.query.next_view_seq();
-                        self.query
-                            .page_rows
-                            .set(r.rows.iter().cloned().map(Arc::new).collect());
+                    //
+                    // The groups the operator had open survive a silent refresh: they
+                    // are reopened (members reloaded) once the new headers land.
+                    // Every tick used to collapse them under the operator.
+                    let reopen = if plan.reopen_groups {
+                        self.query.expanded.get_untracked()
                     } else {
-                        self.fetch_page(page);
+                        BTreeSet::new()
+                    };
+                    self.query.reset_members();
+                    match plan.fetch {
+                        util::ViewFetch::Groups(page) => self.fetch_groups_reopening(page, reopen),
+                        util::ViewFetch::SeedFirstPage => {
+                            // Page 0 ships inline with the summary (canonical order),
+                            // so seed it directly. Stamped like a fetch, so a page
+                            // request still in flight cannot overwrite it.
+                            self.query.next_view_seq();
+                            self.query
+                                .page_rows
+                                .set(r.rows.iter().cloned().map(Arc::new).collect());
+                        }
+                        util::ViewFetch::Rows(page) => self.fetch_page(page),
                     }
                     // Reclaim the fold. The filter panel is ~487px tall and always
                     // opened expanded, so on the app's own default window not one
@@ -220,13 +230,13 @@ impl AppState {
                     // past the controls to reach the thing they ran the query for.
                     // Only when they have expressed no preference: an explicit
                     // toggle is remembered and always wins.
-                    if !silent && api::ui_pref(api::PREF_FILTERS_COLLAPSED).is_none() {
+                    if plan.collapse_filters {
                         self.ui.filters_collapsed.set(true);
                     }
                     self.query.result.set(Some(r));
                     self.query.applied_filters.set(Some(snapshot));
                     self.query.query_error.set(None);
-                    if silent {
+                    if plan.keep_selection {
                         // Same scope, fresher data: keep what the operator ticked,
                         // minus anything this refresh no longer lists.
                         self.prune_selection_after_refresh(seq);
@@ -248,9 +258,16 @@ impl AppState {
             }
             // Record the round-trip so the next run can show "Last run took Ns"
             // and drive the estimated progress bar.
-            self.run
-                .last_duration_ms
-                .set(Some(js_sys::Date::now() - started));
+            let now = js_sys::Date::now();
+            self.run.last_duration_ms.set(Some(now - started));
+            // A run restarts the cadence whether or not the one-second ticker saw
+            // it in flight: a warm-cache Run lands between two ticks, and on the
+            // `Running` hold alone the next automatic refresh could then fire
+            // seconds after the result the operator just asked for.
+            self.run.refresh_clock.set(util::RefreshClock::start(
+                self.run.refresh_secs.get_untracked(),
+                now,
+            ));
             flag.set(false);
             self.run_queued();
         });
@@ -389,9 +406,13 @@ impl AppState {
             Some(self.filters.install_days.get_untracked()),
         );
         self.query.patches_page.set(0);
-        // A run returns to the canonical order, as on the live path; leaving the
-        // sort in place drew a ▲ on a header over rows that were not sorted by it.
-        self.query.patches_sort.set(self.take_sort_on_next_run());
+        // A run returns to the canonical order — or the one a just-applied view link
+        // asked for, consumed here — as on the live path; leaving the sort in place
+        // drew a ▲ on a header over rows that were not sorted by it.
+        self.query
+            .patches_sort
+            .set(self.query.sort_on_next_run.get_untracked());
+        self.query.sort_on_next_run.set(None);
         self.query.result.set(Some(r));
         // Same reason as the live path: a grouped view's headers and members don't
         // ride along with the result, so they'd otherwise describe the last query.
@@ -441,12 +462,6 @@ impl AppState {
         // one (or, signed out, just to say "Sign in first").
         self.run.queued.set(None);
         self.query.sort_on_next_run.set(None);
-    }
-
-    fn take_sort_on_next_run(self) -> Option<RowSort> {
-        let sort = self.query.sort_on_next_run.get_untracked();
-        self.query.sort_on_next_run.set(None);
-        sort
     }
 
     /// Why auto-refresh is holding right now, if it is — see `util::refresh_hold`

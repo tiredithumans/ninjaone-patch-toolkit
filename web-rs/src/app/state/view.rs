@@ -67,6 +67,15 @@ impl AppState {
 
     /// Loads one page of group headers for the active grouping.
     pub(in crate::app) fn fetch_groups(self, page: usize) {
+        self.fetch_groups_reopening(page, BTreeSet::new());
+    }
+
+    /// `fetch_groups`, then reopens the groups in `reopen` that the new page still
+    /// lists — the ones a silent refresh found open — and reloads their members
+    /// (`util::groups_to_reopen`). Each reopen is `toggle_group` on a collapsed
+    /// group with no cached members, since `reset_members` ran first; one the
+    /// operator reopened while the headers loaded is left open.
+    pub(in crate::app) fn fetch_groups_reopening(self, page: usize, reopen: BTreeSet<String>) {
         let Some(group_by) = self.query.group_by.get_untracked() else {
             return;
         };
@@ -74,12 +83,17 @@ impl AppState {
         if self.session.demo.get_untracked() {
             let all = demo::group_rows(&self.demo_rows(), group_by);
             self.query.groups_total.set(all.len());
-            self.query.groups.set(
-                all.into_iter()
-                    .skip(page * PATCHES_PAGE_SIZE)
-                    .take(PATCHES_PAGE_SIZE)
-                    .collect(),
-            );
+            let groups: Vec<PatchGroup> = all
+                .into_iter()
+                .skip(page * PATCHES_PAGE_SIZE)
+                .take(PATCHES_PAGE_SIZE)
+                .collect();
+            let keys =
+                util::groups_to_reopen(&reopen, &self.query.expanded.get_untracked(), &groups);
+            self.query.groups.set(groups);
+            for key in keys {
+                self.toggle_group(key);
+            }
             return;
         }
         spawn_local(async move {
@@ -104,10 +118,18 @@ impl AppState {
                         util::clamp_page(page, util::page_count(response.total, PATCHES_PAGE_SIZE));
                     if clamped != page {
                         self.query.patches_page.set(clamped);
-                        self.fetch_groups(clamped);
+                        self.fetch_groups_reopening(clamped, reopen);
                         return;
                     }
+                    let keys = util::groups_to_reopen(
+                        &reopen,
+                        &self.query.expanded.get_untracked(),
+                        &response.groups,
+                    );
                     self.query.groups.set(response.groups);
+                    for key in keys {
+                        self.toggle_group(key);
+                    }
                 }
                 Err(e) => {
                     self.query.query_error.set(Some(e.clone()));
