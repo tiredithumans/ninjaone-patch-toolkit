@@ -7,18 +7,42 @@ use std::collections::BTreeMap;
 use crate::types::{ActionRequest, JobReport, JobRequest, JobState};
 
 /// Upserts `incoming` into `jobs` by job id: a known id is replaced in place (the
-/// row arrives already advanced), an unknown one is appended.
+/// row arrives already advanced), an unknown one is appended — except that a row
+/// already in a terminal state is never replaced by a non-terminal one.
 ///
 /// Both writers go through this — the `action:progress` listener and the
-/// `run_action` response — because they race. The poller emits a batch's rows over
-/// the event while the dispatch response is still in flight, so an append-only
-/// response handler listed every job twice on the Jobs tab.
+/// `run_action` response — because they race. Dispatch emits a batch's rows over
+/// the event while the response is still in flight, so an append-only response
+/// handler listed every job twice on the Jobs tab. And the response is a snapshot
+/// of the batch as the POSTs returned: should a poller event that already settled
+/// a job land first, replaying the snapshot would roll that row back — and the
+/// poller never re-sends a job it considers finished, so the row would stay
+/// "Running" until a manual refresh.
 pub(crate) fn merge_jobs(jobs: &mut Vec<JobReport>, incoming: impl IntoIterator<Item = JobReport>) {
     for job in incoming {
         match jobs.iter_mut().find(|j| j.id == job.id) {
+            Some(slot) if slot.state.is_terminal() && !job.state.is_terminal() => {}
             Some(slot) => *slot = job,
             None => jobs.push(job),
         }
+    }
+}
+
+/// The "Dispatching N/M…" counter after one `action:progress` event. Only the
+/// dispatch stages move it: `dispatching` sets it and `dispatched` clears it. The
+/// poller's `polling` / `settled` ticks — which arrive every 15 s for as long as
+/// any earlier batch is unsettled, rows or not — leave it alone; clearing on them
+/// dropped the label back to a bare "Dispatching…" mid-batch on every tick.
+pub(crate) fn next_dispatch_progress(
+    current: Option<(usize, usize)>,
+    stage: &str,
+    dispatched: usize,
+    total: usize,
+) -> Option<(usize, usize)> {
+    match stage {
+        "dispatching" => Some((dispatched, total)),
+        "dispatched" => None,
+        _ => current,
     }
 }
 

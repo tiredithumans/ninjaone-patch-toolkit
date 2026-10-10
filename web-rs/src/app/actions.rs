@@ -34,6 +34,21 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
     // One disabled reason for every button, so the tooltip always explains itself.
     let disabled_reason = move || action_disabled_reason(blocked(), counts().0, busy());
 
+    // The per-device targets of the two remediation kinds, computed once per
+    // selection change and shared by their buttons and the target chips rather
+    // than walked again for every button prop and every chip. Only meaningful for
+    // a remediation kind; the callers check that first.
+    let os_targets = Memo::new(move |_| state.remediation_targets(ActionKind::OsPatchRemediate));
+    let sw_targets =
+        Memo::new(move |_| state.remediation_targets(ActionKind::SoftwarePatchRemediate));
+    let targets_of = move |kind: ActionKind| {
+        if kind.is_os_family() {
+            os_targets
+        } else {
+            sw_targets
+        }
+    };
+
     view! {
         <div class="action-bar">
             <div class="action-bar-summary">
@@ -83,24 +98,21 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                                     .iter()
                                     .map(|(kind, label)| {
                                         let kind = *kind;
-                                        // Three reasons stack: the ones that block every
-                                        // action, then whether this selection can reach
-                                        // the kind at all (a device-level one has no
-                                        // patch rows), then the ones specific to the
-                                        // kind (no remediation script, nothing of its
-                                        // family ticked). The tooltip always says which.
-                                        let why = move || {
-                                            disabled_reason()
-                                                .or_else(|| util::source_disabled_reason(source, kind))
-                                                .or_else(|| {
-                                                    util::kind_disabled_reason(
-                                                        kind,
-                                                        state.remediation_script_configured(kind),
-                                                        state.remediation_targets(kind).len(),
-                                                    )
-                                                })
-                                                .or_else(|| state.dry_run_reason(kind))
-                                        };
+                                        // The stacked reasons live in
+                                        // `util::action_button_reason` (their order is
+                                        // pinned by its test); one Memo per button, so
+                                        // the title and the disabled prop share a
+                                        // single evaluation per change.
+                                        let why = Memo::new(move |_| {
+                                            util::action_button_reason(
+                                                disabled_reason(),
+                                                source,
+                                                kind,
+                                                || state.remediation_script_configured(kind),
+                                                || targets_of(kind).with(|t| t.len()),
+                                                || state.dry_run_reason(kind),
+                                            )
+                                        });
                                         view! {
                                             <button
                                                 // The two untargeted applies reach
@@ -121,7 +133,7 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                                                     format!("{}. {}", kind.label(), kind.blast_radius())
                                                 }
                                                 title=move || {
-                                                    why().unwrap_or_else(|| {
+                                                    why.get().unwrap_or_else(|| {
                                                         format!(
                                                             "{}. {}",
                                                             kind.label(),
@@ -129,7 +141,7 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                                                         )
                                                     })
                                                 }
-                                                prop:disabled=move || why().is_some()
+                                                prop:disabled=move || why.with(Option::is_some)
                                                 on:click=move |_| state.open_plan(kind, source)
                                             >
                                                 {*label}
@@ -153,8 +165,8 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                         [ActionKind::OsPatchRemediate, ActionKind::SoftwarePatchRemediate]
                             .into_iter()
                             .filter_map(|kind| {
-                                let targets = state.remediation_targets(kind);
-                                let summary = util::remediation_summary(kind, &targets)?;
+                                let summary =
+                                    targets_of(kind).with(|t| util::remediation_summary(kind, t))?;
                                 Some(view! { <span class="action-target-chip">{summary}</span> })
                             })
                             .collect_view()
@@ -1165,9 +1177,9 @@ fn AuditTrail() -> impl IntoView {
             </button>
         </h3>
         <p class="chips-label">
-            "Every dispatch this install has ever made, newest first. Written before the request "
-            "goes out, so an action that never reported back still appears. Not affected by "
-            "\"Clear finished\"."
+            "This install's most recent dispatch records, newest first; the full log is "
+            "action-audit.jsonl. Written before the request goes out, so an action that never "
+            "reported back still appears. Not affected by \"Clear finished\"."
         </p>
         {move || {
             if !loaded.get() {

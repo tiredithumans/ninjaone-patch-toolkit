@@ -34,6 +34,21 @@ version and start a fresh `[Unreleased]`.
 - **A group whose members failed to load can be opened or ticked again to retry.** The failed
   load was cached as an empty group, so the header checkbox did nothing and re-opening never
   tried again until the next query. Both now reload the members.
+- **The "Dispatching N/M…" counter no longer flickers while an earlier batch is still being
+  polled.** Each 15-second poll tick reset the counter mid-dispatch, so the label fell back to a
+  bare "Dispatching…" until the next device completed. It now moves only when a device's
+  dispatch completes.
+- **A finished job can no longer be shown as still running by a late dispatch response.** The
+  response carries the batch as it was when the requests returned; if the poller had already
+  settled a job before that arrived, the row went back to its earlier state and, since the
+  poller never re-sends a finished job, stayed there until Refresh. A finished row now keeps its
+  result.
+
+### Changed
+
+- **The Jobs tab's audit panel says what it shows.** It read "Every dispatch this install has
+  ever made" but shows only the newest 500 records; the copy now says so and names
+  `action-audit.jsonl` as the full log.
 
 ## [0.15.3] - 2026-10-09
 

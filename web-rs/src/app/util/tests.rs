@@ -1925,6 +1925,74 @@ fn a_hand_picked_script_keeps_every_selected_device() {
     assert!(req.device_targets.contains_key(&1));
 }
 
+/// A button's four reasons stack in a fixed order, and a later check is not run
+/// (so, inside a `Memo`, not tracked) once an earlier one has spoken.
+#[test]
+fn action_button_reason_stacks_in_order_and_stops_early() {
+    use std::cell::Cell;
+    let kind = ActionKind::OsPatchRemediate;
+    let walked = Cell::new(0);
+    let targets = || {
+        walked.set(walked.get() + 1);
+        0
+    };
+    let dry = || Some("dry".to_string());
+
+    let why = action_button_reason(
+        Some("blocked".into()),
+        SelectionSource::PatchRows,
+        kind,
+        || true,
+        targets,
+        dry,
+    );
+    assert_eq!(why.as_deref(), Some("blocked"));
+    assert_eq!(walked.get(), 0, "a blocked bar never walks the selection");
+
+    let why = action_button_reason(None, SelectionSource::Devices, kind, || true, targets, dry)
+        .expect("device selection cannot reach a remediation");
+    assert!(why.contains("needs the patch rows"), "{why}");
+    assert_eq!(walked.get(), 0);
+
+    let why = action_button_reason(
+        None,
+        SelectionSource::PatchRows,
+        kind,
+        || true,
+        targets,
+        dry,
+    )
+    .expect("nothing of the family ticked");
+    assert!(why.contains("No OS patches selected"), "{why}");
+    assert_eq!(walked.get(), 1, "the kind's own check walks once");
+
+    let why = action_button_reason(None, SelectionSource::PatchRows, kind, || true, || 2, dry);
+    assert_eq!(why.as_deref(), Some("dry"), "dry run is the last word");
+    assert_eq!(
+        action_button_reason(
+            None,
+            SelectionSource::PatchRows,
+            kind,
+            || true,
+            || 2,
+            || None
+        ),
+        None
+    );
+
+    // A kind that is not a remediation never consults the script or the targets.
+    let why = action_button_reason(
+        None,
+        SelectionSource::PatchRows,
+        ActionKind::OsPatchScan,
+        || false,
+        targets,
+        || None,
+    );
+    assert_eq!(why, None);
+    assert_eq!(walked.get(), 1);
+}
+
 /// The three shared run options reach every `runs_a_script()` kind and no other.
 /// The native endpoints take no parameters, have no preview mode and run as
 /// NinjaOne's agent, so setting them there would claim protection they cannot
@@ -2149,6 +2217,52 @@ fn job_row_key_moves_with_every_mutable_column() {
         job_row_key(&job_with(1, JobState::Failed("b".into()))),
         "a new failure message is a new row"
     );
+}
+
+/// The dispatch response is a snapshot from when the POSTs returned; if the poller
+/// already settled a job before that snapshot was merged, replaying it must not
+/// roll the row back — the poller never re-sends a job it considers finished.
+#[test]
+fn a_terminal_job_is_never_rolled_back_by_a_later_snapshot() {
+    let mut jobs = vec![
+        job_with(1, JobState::Completed),
+        job_with(2, JobState::Running),
+    ];
+    merge_jobs(
+        &mut jobs,
+        vec![job_with(1, JobState::Queued), job_with(2, JobState::Queued)],
+    );
+    assert_eq!(jobs[0].state, JobState::Completed, "terminal row kept");
+    assert_eq!(
+        jobs[1].state,
+        JobState::Queued,
+        "a non-terminal row still takes the latest report"
+    );
+    assert_eq!(jobs_in_flight(&jobs), 1);
+
+    // Terminal to terminal still replaces (the response replaying a row its
+    // dispatch event already settled).
+    merge_jobs(
+        &mut jobs,
+        vec![job_with(1, JobState::Failed("exit 1".into()))],
+    );
+    assert_eq!(jobs[0].state, JobState::Failed("exit 1".into()));
+}
+
+/// Only the dispatch stages move the "Dispatching N of M" counter; the poller's
+/// ticks for an earlier batch leave it where it was.
+#[test]
+fn the_dispatch_counter_ignores_poller_ticks() {
+    let mid = next_dispatch_progress(None, "dispatching", 3, 10);
+    assert_eq!(mid, Some((3, 10)));
+    assert_eq!(next_dispatch_progress(mid, "polling", 0, 0), mid);
+    assert_eq!(next_dispatch_progress(mid, "settled", 0, 0), mid);
+    assert_eq!(
+        next_dispatch_progress(mid, "dispatching", 4, 10),
+        Some((4, 10))
+    );
+    assert_eq!(next_dispatch_progress(mid, "dispatched", 10, 10), None);
+    assert_eq!(next_dispatch_progress(None, "polling", 0, 0), None);
 }
 
 /// `Unknown` is an ambiguous dispatch still being polled, so it holds the update
