@@ -57,7 +57,7 @@ impl AppState {
         }
         self.query.group_by.set(group_by);
         self.query.patches_page.set(0);
-        self.query.groups.set(Vec::new());
+        self.query.clear_groups();
         self.query.reset_members();
         match group_by {
             None => self.fetch_page(0),

@@ -357,6 +357,15 @@ impl QueryState {
         self.members_gen.update(|g| *g = util::next_query_seq(*g));
     }
 
+    /// Drops the group headers *and* their total together. The pager reads
+    /// `groups_total`, so clearing only `groups` left the previous grouping's (or
+    /// result's) count on screen while the new headers loaded, and kept it there
+    /// when that load failed.
+    pub(super) fn clear_groups(self) {
+        self.groups.set(Vec::new());
+        self.groups_total.set(0);
+    }
+
     pub(super) fn new() -> Self {
         Self {
             result: RwSignal::new(None),

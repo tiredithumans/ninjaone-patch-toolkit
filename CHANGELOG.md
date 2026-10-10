@@ -11,6 +11,20 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Signing out or switching tenant no longer repaints the ended session's rows.** A query that
+  finished just as the session ended could still report back afterwards and fill the table from
+  a cache the backend had already dropped, so Next page came back blank under "Rows 101–200 of
+  N". That reply is now discarded.
+- **The maintenance-window override is cleared when the session ends.** A sign-out, a tenant
+  switch, or a dispatch cut short by either left the box ticked, so the next session's first
+  dispatch would carry the override unless the operator unticked it. It is now cleared with the
+  rest of the session.
+- **The group pager no longer shows the previous grouping's total.** Changing the grouping (or
+  applying a view link that changes it) left the old count on the pager while the new group
+  headers loaded, and kept it there if they failed to load. It now starts from zero.
+
 ## [0.15.3] - 2026-10-09
 
 ### Fixed

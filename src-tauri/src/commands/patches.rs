@@ -282,11 +282,12 @@ fn summary_for(
             tracing::debug!(qid, "query superseded before its result could be cached");
             Ok(summary)
         }
-        // No such frontend guard exists here: `query_seq` counts runs the frontend
-        // *starts*, and switching instance never bumps it, so returning the summary
-        // painted the previous tenant's rows and rollups over the new tenant's empty
-        // cache. Fail instead — the operator did just change instance, so the
-        // message explains itself and re-running is the obvious next step.
+        // The frontend guard is not enough here: `clear_session` bumps `query_seq`
+        // only once the settings save replies, and this reply can land first, so
+        // returning the summary painted the previous tenant's rows and rollups over
+        // the new tenant's empty cache. Fail instead — the operator did just change
+        // instance, so the message explains itself and re-running is the obvious
+        // next step.
         StoreOutcome::TenantChanged => {
             tracing::info!(qid, "instance changed mid-query; discarding the result");
             Err(UiError::new(
