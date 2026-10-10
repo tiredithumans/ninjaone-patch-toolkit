@@ -136,9 +136,10 @@ impl AppState {
         (!stale).then_some(outcome)
     }
 
-    /// Opens or closes a group, fetching its members the first time it opens.
-    /// Members are cached per key, so re-opening is free and a collapse doesn't
-    /// discard what was already loaded.
+    /// Opens or closes a group, fetching its members when it opens with none
+    /// cached (never loaded, or an empty slot from a failed load — see
+    /// `util::needs_member_fetch`). Loaded members are cached per key, so
+    /// re-opening is free and a collapse doesn't discard them.
     pub(in crate::app) fn toggle_group(self, key: String) {
         let open = self.query.expanded.with_untracked(|e| e.contains(&key));
         if open {
@@ -150,7 +151,12 @@ impl AppState {
         self.query.expanded.update(|e| {
             e.insert(key.clone());
         });
-        if self.query.members.with_untracked(|m| m.contains_key(&key)) {
+        // An empty slot is a failed load or a cache miss, not an answer: retry it.
+        let loaded = self
+            .query
+            .members
+            .with_untracked(|m| !util::needs_member_fetch(m.get(&key).map(|r| r.as_slice())));
+        if loaded {
             return;
         }
         let Some(group_by) = self.query.group_by.get_untracked() else {
@@ -166,7 +172,9 @@ impl AppState {
                 }),
                 Err(e) => {
                     // Leave the group open but empty and say why, rather than
-                    // silently collapsing it back under the operator.
+                    // silently collapsing it back under the operator. The empty
+                    // slot is not final: the next open or header tick retries it
+                    // (`util::needs_member_fetch`).
                     self.query.members.update(|m| {
                         m.insert(key, Arc::default());
                     });
@@ -184,9 +192,9 @@ impl AppState {
             .with_untracked(|r| r.as_ref().map(|r| r.rows.clone()).unwrap_or_default())
     }
 
-    /// Ticks or clears every member of a group, loading them first if the group has
-    /// never been expanded — otherwise the checkbox on a collapsed group would
-    /// silently do nothing.
+    /// Ticks or clears every member of a group, loading them first if none are
+    /// cached (never expanded, or an earlier load came back empty) — otherwise the
+    /// checkbox on a collapsed group would silently do nothing.
     ///
     /// Members are capped at `GROUP_MEMBER_LIMIT`, so one click can never select
     /// more rows than the expanded group would show. Ticking a group whose members
@@ -194,7 +202,10 @@ impl AppState {
     /// by-patch group can hold hundreds of devices, and selecting them behind a
     /// collapsed header left the only trace in the action bar's running total.
     pub(in crate::app) fn toggle_group_selection(self, key: &str, label: String, checked: bool) {
-        if let Some(rows) = self.query.members.with_untracked(|m| m.get(key).cloned()) {
+        let cached = self.query.members.with_untracked(|m| m.get(key).cloned());
+        if let Some(rows) = cached
+            && !util::needs_member_fetch(Some(rows.as_slice()))
+        {
             self.toggle_rows_selection(&rows, checked);
             return;
         }
@@ -212,7 +223,9 @@ impl AppState {
                     if checked {
                         self.notify(Toast::ok(util::group_selection_note(
                             &label,
-                            rows.len(),
+                            // What was actually ticked: the by-device orphan group
+                            // holds rows that can never be selected.
+                            rows.iter().filter(|r| util::row_selectable(r)).count(),
                             rows.len() >= GROUP_MEMBER_LIMIT,
                         )));
                         self.query.expanded.update(|e| {

@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::types::{
-    ActionKind, ActionRequest, AuthStatus, DeviceSummary, PatchRow, RebootChoice, RebootMode,
+    ActionKind, ActionRequest, AuthStatus, DeviceRows, DeviceSummary, PatchRow, RebootChoice,
+    RebootMode,
 };
 
 use super::super::state::{DeviceSelection, SelectedPatch};
@@ -16,6 +17,15 @@ use super::*;
 /// Mirrors `rows::join::ORPHAN_DEVICE_ID`: the device id of a patch row whose
 /// record named no device.
 pub(crate) const ORPHAN_DEVICE_ID: i64 = 0;
+
+/// Whether a row can be ticked at all. The orphan row is listed so the fleet total
+/// adds up, but it is never a dispatch target. One predicate for the row checkbox,
+/// the selection and the header counts, so they cannot disagree: when the header
+/// counted orphans that the checkbox refused, a page holding one could never read
+/// fully checked.
+pub(crate) fn row_selectable(row: &PatchRow) -> bool {
+    row.device_id != ORPHAN_DEVICE_ID
+}
 
 /// Applies one row's checkbox to the selection map.
 ///
@@ -32,7 +42,7 @@ pub(crate) fn apply_row_selection(
 ) {
     // A row with no device id is joined under a sentinel id the backend never
     // dispatches to; letting it into the selection would offer a phantom target.
-    if checked && row.device_id == ORPHAN_DEVICE_ID {
+    if checked && !row_selectable(row) {
         return;
     }
     let key = patch_key(row);
@@ -131,7 +141,9 @@ pub(crate) fn patch_key(row: &PatchRow) -> String {
 
 /// `(all, some)` ticked state of a set of rows against the selection — the
 /// checked/indeterminate pair a header checkbox (the page's, or a group's) shows.
-/// `None` and an empty set are `(false, false)`: there is nothing to tick.
+/// `None`, an empty set and a set with nothing selectable are `(false, false)`:
+/// there is nothing to tick. Orphan rows are not counted at all — they cannot be
+/// ticked, so counting them held the box at indeterminate forever.
 ///
 /// Takes borrows so a caller can evaluate it inside nested `.with` reads instead of
 /// cloning up to `GROUP_MEMBER_LIMIT` rows and the whole selection map per tick.
@@ -141,21 +153,48 @@ pub(crate) fn rows_selection_state<R: Borrow<PatchRow>>(
     rows: Option<&[R]>,
     selected: &BTreeMap<i64, DeviceSelection>,
 ) -> (bool, bool) {
-    let Some(rows) = rows.filter(|r| !r.is_empty()) else {
+    let Some(rows) = rows else {
         return (false, false);
     };
     // Counts ticked *rows*, not devices: with per-row selection a device can be
     // partly ticked, and the header box must read indeterminate for that.
-    let ticked = rows
+    let (selectable, ticked) = rows
         .iter()
         .map(Borrow::borrow)
-        .filter(|r: &&PatchRow| {
-            selected
+        .filter(|r: &&PatchRow| row_selectable(r))
+        .fold((0usize, 0usize), |(n, t), r| {
+            let hit = selected
                 .get(&r.device_id)
-                .is_some_and(|d| d.patches.contains_key(&patch_key(r)))
-        })
-        .count();
-    (ticked == rows.len(), ticked > 0 && ticked < rows.len())
+                .is_some_and(|d| d.patches.contains_key(&patch_key(r)));
+            (n + 1, t + usize::from(hit))
+        });
+    if selectable == 0 {
+        return (false, false);
+    }
+    (ticked == selectable, ticked > 0 && ticked < selectable)
+}
+
+/// Whether a group's member slot still needs a load. `None` was never loaded; an
+/// empty slot is a load that failed (the group was left open with a message) or a
+/// cache miss, and both must retry on the next open or header tick — caching the
+/// empty list as final left the header checkbox dead for the rest of the result.
+pub(crate) fn needs_member_fetch<T>(entry: Option<&[T]>) -> bool {
+    entry.is_none_or(|rows| rows.is_empty())
+}
+
+/// Applies a batch of fresh per-device reads to the selection after a refresh and
+/// returns how many ticked rows it dropped. A truncated read is a prefix of the
+/// device's rows: it cannot say what is gone, so that device is left as it was
+/// rather than pruned against a partial list.
+pub(crate) fn prune_selection_from_reads(
+    sel: &mut BTreeMap<i64, DeviceSelection>,
+    reads: &[DeviceRows],
+) -> usize {
+    reads
+        .iter()
+        .filter(|d| !d.truncated)
+        .map(|d| prune_device_selection(sel, d.device_id, &d.rows))
+        .sum()
 }
 
 /// The `Memo` comparator for one group's slot in the members map: changed only
