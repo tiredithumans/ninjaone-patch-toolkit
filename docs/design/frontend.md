@@ -50,6 +50,47 @@ Backend arg/result structs sent to/from the frontend carry `#[serde(rename_all =
 `web-rs/src/types.rs` mirrors them. NinjaOne API JSON (e.g. `systemName`, `nodeClass`) is
 deserialized inside the backend models — that's separate from the IPC wire format.
 
+## IPC shapes are pinned by a backend-generated fixture
+
+The mirrors in `types.rs` are hand-maintained, and the compiler sees each crate alone. The guard
+used to be backend tests asserting hand-typed key lists on serialized JSON; none decoded anything
+through the frontend's types, so a `String` → number change, an enum spelling or a rename the
+mirror hid with `#[serde(default)]` passed CI and surfaced as a "decode <cmd>" toast — and for the
+two progress events, whose listeners dropped an undecodable payload, as nothing at all.
+
+Now the backend emits its real output for every shape the frontend decodes:
+`fixtures::ipc_fixture_is_current` (`src-tauri/src/fixtures.rs`) builds a query result through the
+same `rows` builders `query_patches` uses, plus the action, settings, diagnostics, lookup and
+update shapes and both events, and writes `web-rs/tests/backend-ipc.json` keyed by command / event
+name, with an `enums` section listing every `ActionKind` and `JobState` spelling. It fails when the
+committed copy is stale, exactly like the grouping fixture (`assert_fixture_current`, shared). On
+the other side, `web-rs/src/types/tests.rs` decodes each entry through the type its `ipc!` wrapper
+returns, re-serializes it (the decode-only mirrors derive `Serialize` under `cfg(test)`) and
+requires every key the mirror writes to be one the backend sent with the same value — the check
+that catches a renamed field a default would otherwise paper over. Both sides keep a table of
+entries, and the frontend test fails unless they name the same ones.
+
+What keeps it deterministic and useful: every clock read is `FIXTURE_NOW`; ids, tokens and
+versions are literals (never `CARGO_PKG_VERSION`); inputs avoid hash-ordered ties; and
+`assert_every_field_is_exercised` fails if any field of any shape is only ever `null` or `[]`, since
+an always-empty field is a nested shape nothing decodes. Regenerate both fixtures with
+`just fixtures`; the diff is the wire change to review. A wrapper added to `api.rs` must appear
+in the decode table or in its `NOT_DECODED` list with the reason (`()`, a path, or a type another
+command already covers) — `every_ipc_wrapper_is_decoded_or_listed` reads `api.rs` and fails
+otherwise, so the rule is not left to review.
+
+Three gaps remain. A backend `T` → `Option<T>` change regenerates an identical file while every
+sample is `Some`, so a field made optional needs a `None` sample too. The mirror side of that is
+not guarded either: a mirror that tightens `Option<T>` to `T` still decodes every `Some` sample,
+so the fixture should carry a `None` wherever the backend can send one. And the test decodes with
+`serde_json` where the app uses `serde_wasm_bindgen`; they differ only for integers above 2^53
+(none here come near) and integral floats, where the host test is the stricter one. Request
+payloads (frontend → backend: `PatchQueryArgs`, `ActionRequest`, `SaveSettingsArgs`) are not
+covered — the `ipc!` macro pins only their top-level argument keys.
+
+Event listeners share `api::subscribe`, which logs an undecodable payload with
+`leptos::logging::warn!` rather than dropping it — not a toast, since events stream.
+
 ## WASM gating
 
 `web-rs` compiles to `wasm32-unknown-unknown` and is a **separate crate**. Server deps (tokio,
@@ -141,7 +182,8 @@ desktop-only and intentionally inert in the hosted demo.
 ## Non-trivial logic does not belong in a `#[component]` body
 
 The frontend's `just web-test` covers only the JS-free **pure helpers** (run on the host target;
-the wasm build excludes the `#[cfg(test)]` module). Components and `js_sys`-backed helpers aren't
+the wasm build excludes the `#[cfg(test)]` module), plus the demo's and the IPC mirrors' checks
+against the backend-generated fixtures above. Components and `js_sys`-backed helpers aren't
 unit-tested, so `verify` still leans on `web-clippy` (which type-checks the wasm target first) for the rest of the frontend. A
 `#[component]` can only be compile-checked, so arithmetic written inline inside one is unreachable
 by any test.

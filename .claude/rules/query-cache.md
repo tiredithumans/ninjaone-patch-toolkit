@@ -26,7 +26,8 @@ paths:
   → `docs/design/query-cache.md#paging-commands-return-empty-on-a-miss-never-an-error`
 - **Compact aggregates (`failures`, `approvals`, `changes`, `worst_devices`, …) ride on both
   `QueryResult` and `QuerySummary`.** Add one in lockstep with `QuerySummary::from_result`, the
-  `types.rs` mirror, the demo's `assemble`, and `serialized_shapes_carry_every_frontend_required_key`.
+  `types.rs` mirror, the demo's `assemble`, and a filled sample in the regenerated IPC fixture
+  (`web-rs/tests/backend-ipc.json`, see `ipc-contract.md`).
   → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
 - **Every TTL'd cache slot is a `TenantCache<T>`** — it owns the tenant stamp, TTL,
   single-flight gate, and the epoch sampled before the fetch and re-checked at the store. Never

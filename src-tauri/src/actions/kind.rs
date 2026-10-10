@@ -22,6 +22,21 @@ pub enum ActionKind {
 }
 
 impl ActionKind {
+    /// Every variant, for the IPC fixture's enum list — the frontend asserts its own
+    /// `ActionKind::ALL` serializes to exactly this set. A new variant breaks the
+    /// match in `all_lists_every_action_kind_once` until it is listed here.
+    #[cfg(test)]
+    pub const ALL: [Self; 8] = [
+        Self::OsPatchScan,
+        Self::SoftwarePatchScan,
+        Self::OsPatchApply,
+        Self::SoftwarePatchApply,
+        Self::OsPatchRemediate,
+        Self::SoftwarePatchRemediate,
+        Self::Reboot,
+        Self::Script,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::OsPatchScan => "Scan for OS patches",

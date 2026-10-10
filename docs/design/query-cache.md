@@ -183,9 +183,11 @@ whole rather than paged — except `approvals.stuck_devices`, which is one entry
 is capped on the summary (`ApprovalBacklog::capped(STUCK_DEVICES_SUMMARY_CAP)`, oldest first,
 totals kept) while the cached result keeps every one for the workbook.
 Add such a field in lockstep: `QueryResult` + `QuerySummary` + clone in `QuerySummary::from_result`
-+ the `web-rs/src/types.rs` mirror + the demo's `assemble`, and assert its key in
-`serialized_shapes_carry_every_frontend_required_key`. Keep the backend `QuerySummary` ⇄ frontend
-`QueryResult` (`web-rs/src/types.rs`) shapes in sync.
++ the `web-rs/src/types.rs` mirror + the demo's `assemble`, then regenerate
+`web-rs/tests/backend-ipc.json` with the field filled — `types::tests` decodes the summary through
+the mirror, so the backend `QuerySummary` ⇄ frontend `QueryResult` (`web-rs/src/types.rs`) shapes
+cannot drift apart unnoticed. See
+[frontend.md](./frontend.md#ipc-shapes-are-pinned-by-a-backend-generated-fixture).
 
 The documented exceptions are `QueryScope` and `instance`, which live on `QueryResult` only —
 export provenance the frontend already has — see

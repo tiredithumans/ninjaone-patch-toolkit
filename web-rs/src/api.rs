@@ -363,24 +363,36 @@ ipc!(
     get_device_rows(device_ids: Vec<i64>, limit: usize) -> Vec<crate::types::DeviceRows>
 );
 
-/// Subscribes to backend `query:progress` events for the lifetime of the app,
-/// decoding each event's payload and handing it to `handler`. The Tauri unlisten
-/// handle is intentionally dropped — the subscription lives as long as the app.
-pub fn on_query_progress(mut handler: impl FnMut(QueryProgressEvent) + 'static) {
+/// Subscribes to a backend event for the lifetime of the app, decoding each
+/// payload and handing it to `handler`. The Tauri unlisten handle is intentionally
+/// dropped — the subscription lives as long as the app.
+///
+/// A payload that does not decode is logged, not dropped silently: there is no
+/// command reply to toast, so a drifted event shape would otherwise just stop the
+/// progress bar or the live Jobs updates with nothing anywhere saying why. Not a
+/// toast either: events stream, so one drifted shape would toast on every tick.
+/// `types::tests` holds both payload mirrors to the backend's fixture.
+fn subscribe<E: DeserializeOwned + 'static>(event: &'static str, handler: impl Fn(E) + 'static) {
     // No Tauri event bus in a plain browser — skip the subscription rather than
     // call an undefined global at startup.
     if !is_tauri() {
         return;
     }
-    let cb = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
-        if let Ok(payload) = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
-            && let Ok(ev) = serde_wasm_bindgen::from_value::<QueryProgressEvent>(payload)
-        {
-            handler(ev);
+    let cb = Closure::<dyn FnMut(JsValue)>::new(move |ev: JsValue| {
+        let payload =
+            js_sys::Reflect::get(&ev, &JsValue::from_str("payload")).unwrap_or(JsValue::UNDEFINED);
+        match serde_wasm_bindgen::from_value::<E>(payload) {
+            Ok(payload) => handler(payload),
+            Err(e) => leptos::logging::warn!("{event}: {e}"),
         }
     });
-    let _ = tauri_listen("query:progress", cb.as_ref());
+    let _ = tauri_listen(event, cb.as_ref());
     cb.forget();
+}
+
+/// Subscribes to backend `query:progress` events.
+pub fn on_query_progress(handler: impl Fn(QueryProgressEvent) + 'static) {
+    subscribe("query:progress", handler);
 }
 
 ipc!(
@@ -434,21 +446,9 @@ ipc!(clear_jobs() -> Vec<JobReport>);
 ipc!(list_scripts() -> Vec<ScriptSummary>);
 ipc!(list_run_as_options(device_id: i64) -> RunAsOptions);
 
-/// Subscribes to backend `action:progress` events. Same lifetime and browser-mode
-/// handling as [`on_query_progress`].
-pub fn on_action_progress(mut handler: impl FnMut(ActionProgressEvent) + 'static) {
-    if !is_tauri() {
-        return;
-    }
-    let cb = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
-        if let Ok(payload) = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
-            && let Ok(ev) = serde_wasm_bindgen::from_value::<ActionProgressEvent>(payload)
-        {
-            handler(ev);
-        }
-    });
-    let _ = tauri_listen("action:progress", cb.as_ref());
-    cb.forget();
+/// Subscribes to backend `action:progress` events.
+pub fn on_action_progress(handler: impl Fn(ActionProgressEvent) + 'static) {
+    subscribe("action:progress", handler);
 }
 
 // --- Diagnostics -------------------------------------------------------------

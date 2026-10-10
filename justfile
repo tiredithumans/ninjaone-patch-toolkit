@@ -69,6 +69,12 @@ web-clippy:
 test:
     cargo test --manifest-path src-tauri/Cargo.toml
 
+# Regenerate the backend-written fixtures under web-rs/tests/ after a deliberate
+# wire change (backend-ipc.json, backend-grouping.json). Their diff is the change
+# to review; the frontend tests then hold the mirrors to it.
+fixtures:
+    UPDATE_FIXTURES=1 cargo test --manifest-path src-tauri/Cargo.toml fixture_is_current
+
 # Backend test coverage (requires `cargo install cargo-llvm-cov`). Runs the
 # instrumented suite once, prints a per-file summary, then writes an lcov report
 # to src-tauri/target/lcov.info. Backend-only: the frontend's `web-test` suite

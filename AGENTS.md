@@ -48,7 +48,8 @@ whole chain first:
 
 - **New Tauri command** — handler in `commands/<domain>.rs` → register in
   `tauri::generate_handler![]` (`src-tauri/src/lib.rs`) → `ipc!` wrapper + type mirror in
-  `web-rs/src/api.rs` + `types.rs`. A mutating handler checks `require_actions_enabled`.
+  `web-rs/src/api.rs` + `types.rs` → an entry in the backend-generated IPC fixture and its
+  decode in `types/tests.rs`. A mutating handler checks `require_actions_enabled`.
   → `ipc-contract.md`
 - **New NinjaOne endpoint** — a method on `NinjaApiClient` using `get_paginated`/`request_raw`;
   never a second reqwest/cursor loop. → `api-client.md`

@@ -1351,71 +1351,42 @@ fn unknown_is_not_terminal_but_the_other_end_states_are() {
     assert!(JobState::Skipped("offline".into()).is_terminal());
 }
 
-/// IPC-drift guard, mirroring `rows::serialized_shapes_carry_every_frontend_required_key`:
-/// `web-rs/src/types.rs` deserializes these exact camelCase keys, and a rename
-/// here would fail silently in the webview rather than at compile time.
+/// `ActionKind::ALL` is the backend half of the IPC fixture's `actionKind` set,
+/// which the frontend's mirror must serialize to exactly — so a kind missing from
+/// it is a kind the frontend is never checked against. A new variant breaks this
+/// match until it is given a slot in `ALL`.
 #[test]
-fn job_report_serializes_every_frontend_required_key() {
-    let value = serde_json::to_value(job(Some(1), Some("uid"), 0)).expect("serialize");
-    for key in [
-        "id",
-        "batchId",
-        "deviceId",
-        "deviceName",
-        "organization",
-        "kind",
-        "detail",
-        "dryRun",
-        "state",
-        "dispatchedAt",
-        "dispatchedTs",
-        "finishedAt",
-        "durationSeconds",
-        "activityId",
-        "seriesUid",
-        "exitCode",
-        // What a Jobs-tab retry is rebuilt from.
-        "request",
-    ] {
-        assert!(value.get(key).is_some(), "JobReport is missing `{key}`");
+fn all_lists_every_action_kind_once() {
+    let slot = |k: ActionKind| match k {
+        ActionKind::OsPatchScan => 0,
+        ActionKind::SoftwarePatchScan => 1,
+        ActionKind::OsPatchApply => 2,
+        ActionKind::SoftwarePatchApply => 3,
+        ActionKind::OsPatchRemediate => 4,
+        ActionKind::SoftwarePatchRemediate => 5,
+        ActionKind::Reboot => 6,
+        ActionKind::Script => 7,
+    };
+    for (i, k) in ActionKind::ALL.into_iter().enumerate() {
+        assert_eq!(slot(k), i, "{k:?}");
     }
-    assert_eq!(
-        value["kind"], "SCRIPT",
-        "ActionKind must stay SCREAMING_SNAKE"
-    );
 }
 
-/// `web-rs/src/types.rs` mirrors these keys; a rename here would silently drop
-/// the Apply-all preview from the confirm dialog.
+/// Same guard for `JobState::ALL`, which supplies the fixture's `jobState` set and
+/// one Jobs row per state.
 #[test]
-fn action_plan_serializes_the_preview_keys_the_frontend_reads() {
-    let eligible = vec![planned(1, "srv-a")];
-    let patches = vec![os_patch(1, "KB1", "APPROVED")];
-    let plan = ActionPlan {
-        apply_preview: apply_preview(ActionKind::OsPatchApply, &eligible, Some(cached(&patches))),
-        ..ActionPlan::default()
+fn all_lists_every_job_state_once() {
+    let slot = |s: &JobState| match s {
+        JobState::Queued => 0,
+        JobState::Running => 1,
+        JobState::Completed => 2,
+        JobState::Failed(_) => 3,
+        JobState::TimedOut => 4,
+        JobState::Unknown(_) => 5,
+        JobState::Skipped(_) => 6,
     };
-    let value = serde_json::to_value(&plan).expect("serialize");
-    assert!(value.get("windowOverridden").is_some());
-    let preview = &value["applyPreview"];
-    for key in [
-        "family",
-        "known",
-        "devices",
-        "approvedTotal",
-        "pendingManualTotal",
-        "dataFetchedAt",
-    ] {
-        assert!(
-            preview.get(key).is_some(),
-            "ApplyPreview is missing `{key}`"
-        );
-    }
-    for key in ["deviceId", "deviceName", "approved", "pendingManual"] {
-        assert!(
-            preview["devices"][0].get(key).is_some(),
-            "ApplyPreviewDevice is missing `{key}`"
-        );
+    for (i, s) in JobState::ALL.iter().enumerate() {
+        assert_eq!(slot(s), i, "{s:?}");
     }
 }
 

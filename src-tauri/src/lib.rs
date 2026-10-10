@@ -7,6 +7,8 @@ mod csv_export;
 mod error;
 mod export;
 mod filter;
+#[cfg(test)]
+mod fixtures;
 mod history;
 mod model;
 mod paths;
