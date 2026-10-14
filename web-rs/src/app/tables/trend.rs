@@ -48,8 +48,11 @@ pub(super) fn TrendTab() -> impl IntoView {
                     return view! { <p class="empty">"Reading run history…"</p> }.into_any();
                 }
                 let runs = series();
+                let older = util::older_method_note(util::older_method_runs(&history.get()))
+                    .map(|n| view! { <p class="chips-label">{n}</p> });
                 if runs.len() < 2 {
                     return view! {
+                        {older}
                         <p class="empty">
                             "Not enough history yet. Every completed query appends one line; "
                             "run a couple more and the trend appears here."
@@ -71,17 +74,26 @@ pub(super) fn TrendTab() -> impl IntoView {
                             if newest.scoped { ", filtered scope" } else { ", whole fleet" },
                         )}
                     </p>
+                    {older}
+                    // Every run here shares the newest one's method, so a method-1
+                    // figure is present on each; `filter_map` only drops an empty scope.
                     <TrendLine
-                        title="Compliance"
+                        title="Within SLA"
                         percent=true
                         higher_is_better=true
-                        values={runs.iter().filter_map(|r| r.compliance_pct()).collect::<Vec<_>>()}
+                        values={runs.iter().filter_map(|r| r.within_sla_pct()).collect::<Vec<_>>()}
+                    />
+                    <TrendLine
+                        title="Fully patched"
+                        percent=true
+                        higher_is_better=true
+                        values={runs.iter().filter_map(|r| r.fully_patched_pct()).collect::<Vec<_>>()}
                     />
                     <TrendLine
                         title="Pending patches"
                         percent=false
                         higher_is_better=false
-                        values={runs.iter().map(|r| r.rows_total as f64).collect::<Vec<_>>()}
+                        values={runs.iter().filter_map(|r| r.pending_total.map(|n| n as f64)).collect::<Vec<_>>()}
                     />
                     <TrendLine
                         title="Urgent past SLA"
@@ -112,7 +124,7 @@ fn OrgDeltaTable(newest: RunRecord, previous: RunRecord) -> impl IntoView {
     let deltas = util::org_deltas(&newest, &previous);
     let pct = |o: &Option<OrgRun>| {
         o.as_ref()
-            .and_then(OrgRun::compliance_pct)
+            .and_then(OrgRun::within_sla_pct)
             .map(util::format_pct)
             .unwrap_or_else(|| "\u{2014}".to_string())
     };
@@ -130,7 +142,7 @@ fn OrgDeltaTable(newest: RunRecord, previous: RunRecord) -> impl IntoView {
                             // Spelled as the Compliance tab spells them
                             // (`rows::ComplianceBucket::COLUMNS`).
                             <th scope="col">"Organization"</th>
-                            <th scope="col">"Compliance %"</th>
+                            <th scope="col">"Within SLA %"</th>
                             <th scope="col">"Change"</th>
                             <th scope="col">"Pending Patches"</th>
                             <th scope="col">"Change"</th>
@@ -159,7 +171,7 @@ fn OrgDeltaTable(newest: RunRecord, previous: RunRecord) -> impl IntoView {
                                     <tr>
                                         <td>{d.organization.clone()}</td>
                                         <td>{pct(&d.now)}</td>
-                                        {cell(d.compliance_delta(), true, true)}
+                                        {cell(d.within_sla_delta(), true, true)}
                                         <td>{count(&d.now, |o| o.pending)}</td>
                                         {cell(d.pending_delta(), false, false)}
                                         <td>{count(&d.now, |o| o.urgent_pending)}</td>

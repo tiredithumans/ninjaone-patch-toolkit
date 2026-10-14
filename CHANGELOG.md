@@ -23,6 +23,10 @@ version and start a fresh `[Unreleased]`.
   weighted by device rather than averaged across organizations.
 - **Organizations with no online, patchable device are named under the table** instead of
   silently missing from it.
+- **The Trend tab charts Within SLA and Fully patched, and "Pending patches" is now the real
+  pending count** (it used to chart the number of rows the query returned, after every filter).
+  Runs recorded before this release were calculated differently, so they are left out of the
+  trend and the tab says how many; the trend restarts from your first run on this version.
 - **Percentages show one decimal everywhere** (87.5%, never rounded up to 100%), so the Compliance
   tab, the Trend tab, the workbook and the report agree.
 - **Security patches now count as urgent.** The compliance tables' backlog columns are renamed

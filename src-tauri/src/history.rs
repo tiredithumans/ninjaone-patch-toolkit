@@ -61,6 +61,19 @@ const MAX_ORGS: usize = 100;
 /// two rows of it. Two hundred lines leaves room for other scopes run in between.
 const ORG_DETAIL_RECORDS: usize = 200;
 
+/// The calculation method a run's fleet-health figures were computed under. A run
+/// is only charted against runs of the same method (`RunRecord::comparable_with` in
+/// `web-rs`), because a change in what a figure *means* would otherwise read as the
+/// fleet moving.
+///
+/// - **0** — every line written before the field existed: "compliant" was zero
+///   pending of any severity, the urgent backlog was Critical and Important only,
+///   and every band had an SLA window.
+/// - **1** — Within SLA is recorded, Security counts as urgent, a band can have No
+///   SLA (Optional by default), and first seen is the earlier of NinjaOne's time and
+///   this app's own first observation.
+pub const METHOD: u32 = 1;
+
 /// Serializes every append and trim in this process.
 ///
 /// Queries overlap by design (an auto-refresh tick during a manual Run), and each
@@ -92,10 +105,23 @@ pub struct RunRecord {
     pub devices_total: usize,
     pub devices_offline: usize,
     pub devices_unpatchable: usize,
-    /// Devices with no pending patches, over the `rows::rollup_device` population —
-    /// the same numerator and denominator the Compliance tab shows.
+    /// Devices with no pending patches (Fully patched), over the
+    /// `rows::rollup_device` population — the same numerator and denominator the
+    /// Compliance tab shows.
     pub devices_compliant: usize,
     pub devices_in_scope: usize,
+    /// Devices Within SLA, over the same population. `None` on lines written before
+    /// [`METHOD`] 1.
+    #[serde(default)]
+    pub devices_within_sla: Option<usize>,
+    /// Pending records of every severity over the same population — the fleet
+    /// backlog. `None` on lines written before [`METHOD`] 1, which recorded only
+    /// `rows_total`, a different number.
+    #[serde(default)]
+    pub pending_total: Option<usize>,
+    /// The [`METHOD`] this line's figures were computed under; 0 on older lines.
+    #[serde(default)]
+    pub method: u32,
     /// Detail rows the query produced, across **every** selected status and after
     /// the patch facets (severity, search, first-seen window) — not only pending
     /// rows. Comparable across runs only under the same [`scope_key`](Self::scope_key).
@@ -145,6 +171,9 @@ pub struct OrgRun {
     pub devices_in_scope: usize,
     #[serde(rename = "c", default)]
     pub devices_compliant: usize,
+    /// Devices Within SLA; `None` on lines written before [`METHOD`] 1.
+    #[serde(rename = "w", default)]
+    pub devices_within_sla: Option<usize>,
     /// Pending patches of every severity (`rows::build_severity_by_org`).
     #[serde(rename = "p", default)]
     pub pending: usize,
@@ -171,6 +200,7 @@ impl RunRecord {
                 organization: c.organization.clone(),
                 devices_in_scope: c.devices_total,
                 devices_compliant: c.devices_fully_patched,
+                devices_within_sla: Some(c.devices_within_sla),
                 pending: pending_by_org
                     .get(c.organization.as_str())
                     .copied()
@@ -195,6 +225,15 @@ impl RunRecord {
             devices_unpatchable: result.devices_unpatchable,
             devices_compliant: total.devices_fully_patched,
             devices_in_scope: total.devices_total,
+            devices_within_sla: Some(total.devices_within_sla),
+            pending_total: Some(
+                result
+                    .severity_by_org
+                    .iter()
+                    .map(|o| o.counts.total())
+                    .sum(),
+            ),
+            method: METHOD,
             rows_total: result.rows.len(),
             urgent_pending: total.urgent_pending,
             urgent_past_sla: total.urgent_past_sla,
@@ -352,6 +391,9 @@ mod tests {
             devices_unpatchable: 3,
             devices_compliant: compliant,
             devices_in_scope: scope,
+            devices_within_sla: Some(compliant),
+            pending_total: Some(40),
+            method: METHOD,
             rows_total: 40,
             urgent_pending: 7,
             urgent_past_sla: 2,
@@ -490,6 +532,26 @@ mod tests {
         assert_eq!(parsed[0].scope_key, "");
     }
 
+    /// A line from before the calculation method was versioned reads back as method
+    /// 0 with no Within SLA or pending total — never as a method-1 line whose
+    /// figures happen to be zero — and keeps its urgent counts under the keys it was
+    /// written with.
+    #[test]
+    fn a_record_from_before_the_method_version_reads_as_method_zero() {
+        let mut old = serde_json::to_value(rec("2026-01-01 00:00:00 UTC", 5, 10)).unwrap();
+        let obj = old.as_object_mut().unwrap();
+        for key in ["method", "devicesWithinSla", "pendingTotal"] {
+            obj.remove(key);
+        }
+        assert_eq!(obj["pendingCritical"], 7, "the original on-disk key");
+        let parsed = parse(&old.to_string());
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].method, 0);
+        assert_eq!(parsed[0].devices_within_sla, None);
+        assert_eq!(parsed[0].pending_total, None);
+        assert_eq!(parsed[0].urgent_pending, 7);
+    }
+
     /// Lines written before the per-org rollup existed read back with none.
     #[test]
     fn a_record_from_before_the_org_rollup_still_parses() {
@@ -508,6 +570,7 @@ mod tests {
             organization: "Contoso".into(),
             devices_in_scope: 10,
             devices_compliant: 5,
+            devices_within_sla: Some(8),
             pending: 3,
             urgent_pending: 1,
             urgent_past_sla: 0,

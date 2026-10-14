@@ -1306,8 +1306,16 @@ pub struct RunRecord {
     pub devices_total: usize,
     pub devices_offline: usize,
     pub devices_unpatchable: usize,
+    /// Fully patched devices (the backend's key predates the rename).
     pub devices_compliant: usize,
     pub devices_in_scope: usize,
+    /// Within SLA devices; `None` on lines from before calculation method 1.
+    pub devices_within_sla: Option<usize>,
+    /// Pending records over the counted devices; `None` on lines from before
+    /// method 1, which recorded only `rows_total` — a different number.
+    pub pending_total: Option<usize>,
+    /// The backend's `history::METHOD` the line was computed under; 0 when older.
+    pub method: u32,
     pub rows_total: usize,
     /// Under the backend's original keys, which every line on disk carries.
     #[serde(rename = "pendingCritical")]
@@ -1342,6 +1350,8 @@ pub struct OrgRun {
     pub devices_in_scope: usize,
     #[serde(rename = "c")]
     pub devices_compliant: usize,
+    #[serde(rename = "w")]
+    pub devices_within_sla: Option<usize>,
     #[serde(rename = "p")]
     pub pending: usize,
     #[serde(rename = "pc")]
@@ -1350,22 +1360,31 @@ pub struct OrgRun {
     pub urgent_past_sla: usize,
 }
 
+/// `n` as a percentage of a non-empty `total`; `None` for an empty one.
+fn share(n: usize, total: usize) -> Option<f64> {
+    (total > 0).then(|| n as f64 * 100.0 / total as f64)
+}
+
 impl OrgRun {
-    /// Same rule as [`RunRecord::compliance_pct`]: an empty org has no percentage.
-    pub fn compliance_pct(&self) -> Option<f64> {
-        (self.devices_in_scope > 0)
-            .then(|| self.devices_compliant as f64 * 100.0 / self.devices_in_scope as f64)
+    /// Same rule as [`RunRecord::within_sla_pct`].
+    pub fn within_sla_pct(&self) -> Option<f64> {
+        share(self.devices_within_sla?, self.devices_in_scope)
     }
 }
 
 impl RunRecord {
-    /// Compliance over the population the rollups cover. `None` for an empty scope
+    /// Within SLA over the population the rollups cover. `None` for an empty scope
     /// rather than 0% — an empty scope is not a fleet at zero compliance, and
-    /// charting it as one is the same class of lie as rounding 99.5% up to 100.
-    /// The backend stores only the two counts; the percentage is derived here.
-    pub fn compliance_pct(&self) -> Option<f64> {
-        (self.devices_in_scope > 0)
-            .then(|| self.devices_compliant as f64 * 100.0 / self.devices_in_scope as f64)
+    /// charting it as one is the same class of lie as rounding 99.95% up to 100 —
+    /// and `None` on a line that predates the figure. The backend stores only the
+    /// counts; the percentage is derived here.
+    pub fn within_sla_pct(&self) -> Option<f64> {
+        share(self.devices_within_sla?, self.devices_in_scope)
+    }
+
+    /// Fully patched over the same population, under the same empty-scope rule.
+    pub fn fully_patched_pct(&self) -> Option<f64> {
+        share(self.devices_compliant, self.devices_in_scope)
     }
 
     /// Which families these numbers cover, in the same words `PatchFamilies::label`
@@ -1378,8 +1397,16 @@ impl RunRecord {
         .label()
     }
 
-    /// Whether two records measured the same thing, and so belong on one trend line.
+    /// Whether two records measured the same thing, and so belong on one trend line:
+    /// the same scope *and* the same calculation method, since a change in what a
+    /// figure means would otherwise chart as the fleet moving.
     pub fn comparable_with(&self, other: &Self) -> bool {
+        self.same_scope(other) && self.method == other.method
+    }
+
+    /// Whether two records measured the same tenant, families and facets — the same
+    /// question asked, though perhaps under different calculation methods.
+    pub fn same_scope(&self, other: &Self) -> bool {
         self.instance == other.instance
             && self.os_patches == other.os_patches
             && self.software_patches == other.software_patches

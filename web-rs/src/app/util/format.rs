@@ -438,6 +438,34 @@ pub(crate) fn trend_series(history: &[RunRecord], limit: usize) -> Vec<RunRecord
     series
 }
 
+/// How many runs of the newest run's scope were computed under an older calculation
+/// method, and so are left out of its trend.
+pub(crate) fn older_method_runs(history: &[RunRecord]) -> usize {
+    let Some(newest) = history.last() else {
+        return 0;
+    };
+    history
+        .iter()
+        .filter(|r| r.same_scope(newest) && r.method < newest.method)
+        .count()
+}
+
+/// The Trend tab's note when [`older_method_runs`] left runs out — right after an
+/// upgrade it is what explains why the history seems to have restarted.
+pub(crate) fn older_method_note(n: usize) -> Option<String> {
+    (n > 0).then(|| {
+        let (runs, verb) = if n == 1 {
+            ("run", "is")
+        } else {
+            ("runs", "are")
+        };
+        format!(
+            "{n} earlier {runs} of this scope used an older calculation method and {verb} \
+             left out of these trends."
+        )
+    })
+}
+
 /// `(x, y)` points in a 0..=1 box for a sparkline over `values`, oldest first.
 ///
 /// Y is inverted (0 is the top) so callers can use it as an SVG coordinate directly.

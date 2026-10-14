@@ -3554,3 +3554,40 @@ fn uncounted_orgs_note_caps_and_pluralises() {
     assert!(note.starts_with("14 organizations"), "{note}");
     assert!(note.ends_with("Org 10, and 4 more."), "{note}");
 }
+
+/// Runs of the newest run's scope computed under an older method are counted and
+/// left out of the trend; other scopes are not counted at all.
+#[test]
+fn older_method_runs_are_counted_and_left_out() {
+    let at = |at: &str, method: u32, scope: &str| RunRecord {
+        at: at.into(),
+        method,
+        scope_key: scope.into(),
+        devices_in_scope: 10,
+        devices_within_sla: (method > 0).then_some(9),
+        ..RunRecord::default()
+    };
+    let history = [
+        at("1", 0, ""),
+        at("2", 0, ""),
+        at("3", 0, "org=2"),
+        at("4", 1, ""),
+        at("5", 1, ""),
+    ];
+    assert_eq!(older_method_runs(&history), 2);
+    let series = trend_series(&history, 60);
+    assert_eq!(
+        series.iter().map(|r| r.at.as_str()).collect::<Vec<_>>(),
+        ["4", "5"],
+        "only the newest method's runs chart"
+    );
+    assert_eq!(series[0].within_sla_pct(), Some(90.0));
+    assert_eq!(older_method_note(0), None);
+    assert_eq!(
+        older_method_note(1).as_deref(),
+        Some(
+            "1 earlier run of this scope used an older calculation method and is left out of these trends."
+        )
+    );
+    assert!(older_method_note(2).unwrap().starts_with("2 earlier runs"));
+}

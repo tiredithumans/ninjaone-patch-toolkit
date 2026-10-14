@@ -647,7 +647,18 @@ fn ipc_fixture_is_current() {
                 exit_code: Some(0),
                 legacy: false,
             }],
-            "read_run_history": [RunRecord::from_result(&result, INSTANCE)],
+            // A line from before the method was versioned, then the current one: the
+            // frontend must decode both, and leave the older out of the trend.
+            "read_run_history": [
+                RunRecord {
+                    at: fmt_ts(FIXTURE_NOW - Duration::days(1)),
+                    method: 0,
+                    devices_within_sla: None,
+                    pending_total: None,
+                    ..RunRecord::from_result(&result, INSTANCE)
+                },
+                RunRecord::from_result(&result, INSTANCE),
+            ],
             "check_for_update": Some(UpdateInfo {
                 version: "1.4.0".into(),
                 current_version: "1.3.2".into(),

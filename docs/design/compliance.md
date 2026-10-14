@@ -311,6 +311,17 @@ not written and says so (`too_large`). Consequence worth knowing: every stored r
 baseline, so re-running the same scope over a warm cache reports "no changes since" the run
 seconds earlier — "since the previous run", literally.
 
+**The run history is versioned by calculation method** (`history::METHOD`, stored per line as
+`method`; lines from before it read as 0). `RunRecord::comparable_with` in `web-rs` requires the
+same method as well as the same scope (`same_scope`), so a change in what a figure *means* — Within
+SLA replacing zero-pending, Security joining the urgent backlog, No SLA, the first-seen ledger —
+never charts as the fleet moving; the Trend tab says how many runs of the scope it left out
+(`util::older_method_note`). A new rule that changes a recorded figure bumps `METHOD`. Within SLA
+and the fleet's pending count (`pending_total`, from `severity_by_org`) are recorded from method
+1: the "Pending patches" card used to plot `rows_total`, the detail-row count after every patch
+filter, which is not the backlog. The urgent fields keep their original on-disk keys
+(`pendingCritical`/`agedCritical`, `pc`/`ac`).
+
 The Trend tab's per-organization table reads `history::RunRecord::orgs` (the Compliance tab's
 per-org rows plus each org's pending count), capped at the 100 largest organizations per line so
 an MSP's history file stays bounded; `read_run_history` returns that detail only for the newest

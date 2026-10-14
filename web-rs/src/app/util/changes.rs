@@ -101,9 +101,9 @@ pub(crate) struct OrgDelta {
 }
 
 impl OrgDelta {
-    /// Percentage points; `None` unless both runs have a percentage.
-    pub(crate) fn compliance_delta(&self) -> Option<f64> {
-        Some(self.now.as_ref()?.compliance_pct()? - self.previous.as_ref()?.compliance_pct()?)
+    /// Within SLA, in percentage points; `None` unless both runs have a percentage.
+    pub(crate) fn within_sla_delta(&self) -> Option<f64> {
+        Some(self.now.as_ref()?.within_sla_pct()? - self.previous.as_ref()?.within_sla_pct()?)
     }
 
     fn count_delta(&self, get: fn(&OrgRun) -> usize) -> Option<f64> {
@@ -126,8 +126,8 @@ impl OrgDelta {
 /// The per-organization delta table: every org in either run, the biggest
 /// regression first.
 ///
-/// "Regression" is ranked by compliance lost, then aged criticals gained, then
-/// pending criticals gained, then pending gained — the order an operator would
+/// "Regression" is ranked by Within SLA lost, then urgent past SLA gained, then
+/// urgent pending gained, then pending gained — the order an operator would
 /// triage in. An org present in only one run has no deltas and sorts after every
 /// org that does; an org's name breaks every tie so the table does not reshuffle
 /// between renders.
@@ -156,10 +156,10 @@ pub(crate) fn org_deltas(newest: &RunRecord, previous: &RunRecord) -> Vec<OrgDel
                 previous: Some(p.clone()),
             }),
     );
-    // Worse first: a *lower* compliance delta and *higher* count deltas.
+    // Worse first: a *lower* Within SLA delta and *higher* count deltas.
     let key = |d: &OrgDelta| {
         [
-            d.compliance_delta().map(|v| -v),
+            d.within_sla_delta().map(|v| -v),
             d.aged_delta(),
             d.urgent_pending_delta(),
             d.pending_delta(),
@@ -240,11 +240,13 @@ pub(crate) fn org_delta_note(newest: &RunRecord, previous: &RunRecord) -> Option
 mod tests {
     use super::*;
 
-    fn org(name: &str, n: usize, c: usize, pending: usize, pc: usize, ac: usize) -> OrgRun {
+    /// `w` is the Within SLA count the ranking reads; Fully patched is never more.
+    fn org(name: &str, n: usize, w: usize, pending: usize, pc: usize, ac: usize) -> OrgRun {
         OrgRun {
             organization: name.into(),
             devices_in_scope: n,
-            devices_compliant: c,
+            devices_compliant: w / 2,
+            devices_within_sla: Some(w),
             pending,
             urgent_pending: pc,
             urgent_past_sla: ac,
@@ -294,23 +296,23 @@ mod tests {
     }
 
     #[test]
-    fn a_tie_on_compliance_is_broken_by_the_aged_backlog() {
+    fn a_tie_on_within_sla_is_broken_by_the_urgent_past_sla_backlog() {
         let previous = run(vec![org("A", 10, 5, 3, 0, 0), org("B", 10, 5, 3, 0, 0)]);
         let newest = run(vec![org("A", 10, 5, 3, 0, 0), org("B", 10, 5, 3, 0, 2)]);
         let first = &org_deltas(&newest, &previous)[0];
         assert_eq!(first.organization, "B");
         assert_eq!(first.aged_delta(), Some(2.0));
-        assert_eq!(first.compliance_delta(), Some(0.0));
+        assert_eq!(first.within_sla_delta(), Some(0.0));
     }
 
     #[test]
-    fn an_empty_org_has_no_compliance_delta_rather_than_a_fake_one() {
+    fn an_empty_org_has_no_within_sla_delta_rather_than_a_fake_one() {
         let d = OrgDelta {
             organization: "Empty".into(),
             now: Some(org("Empty", 0, 0, 0, 0, 0)),
             previous: Some(org("Empty", 5, 5, 0, 0, 0)),
         };
-        assert_eq!(d.compliance_delta(), None);
+        assert_eq!(d.within_sla_delta(), None);
         assert_eq!(d.pending_delta(), Some(0.0));
     }
 

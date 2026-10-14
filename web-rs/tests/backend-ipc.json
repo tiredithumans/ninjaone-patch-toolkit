@@ -1214,14 +1214,16 @@
     "read_run_history": [
       {
         "agedCritical": 2,
-        "at": "2026-07-01 12:00:00 UTC",
+        "at": "2026-06-30 12:00:00 UTC",
         "devicesCompliant": 0,
         "devicesInScope": 1,
         "devicesOffline": 2,
         "devicesTotal": 4,
         "devicesUnpatchable": 1,
+        "devicesWithinSla": null,
         "failures": 1,
         "instance": "https://app.ninjarmm.com",
+        "method": 0,
         "needsReboot": 4,
         "orgs": [
           {
@@ -1230,12 +1232,47 @@
             "n": 1,
             "o": "Contoso",
             "p": 3,
-            "pc": 2
+            "pc": 2,
+            "w": 0
           }
         ],
         "orgsTotal": 1,
         "osPatches": true,
         "pendingCritical": 2,
+        "pendingTotal": null,
+        "rowsTotal": 6,
+        "scopeKey": "[[\"org\",\"\"],[\"loc\",\"\"],[\"role\",\"\"],[\"class\",\"\"],[\"os\",\"\"],[\"status\",\"Approved,Failed,Installed,Pending\"],[\"sev\",\"\"],[\"q\",\"\"],[\"after\",\"\"],[\"before\",\"\"]]",
+        "scoped": false,
+        "softwarePatches": true
+      },
+      {
+        "agedCritical": 2,
+        "at": "2026-07-01 12:00:00 UTC",
+        "devicesCompliant": 0,
+        "devicesInScope": 1,
+        "devicesOffline": 2,
+        "devicesTotal": 4,
+        "devicesUnpatchable": 1,
+        "devicesWithinSla": 0,
+        "failures": 1,
+        "instance": "https://app.ninjarmm.com",
+        "method": 1,
+        "needsReboot": 4,
+        "orgs": [
+          {
+            "ac": 2,
+            "c": 0,
+            "n": 1,
+            "o": "Contoso",
+            "p": 3,
+            "pc": 2,
+            "w": 0
+          }
+        ],
+        "orgsTotal": 1,
+        "osPatches": true,
+        "pendingCritical": 2,
+        "pendingTotal": 3,
         "rowsTotal": 6,
         "scopeKey": "[[\"org\",\"\"],[\"loc\",\"\"],[\"role\",\"\"],[\"class\",\"\"],[\"os\",\"\"],[\"status\",\"Approved,Failed,Installed,Pending\"],[\"sev\",\"\"],[\"q\",\"\"],[\"after\",\"\"],[\"before\",\"\"]]",
         "scoped": false,
