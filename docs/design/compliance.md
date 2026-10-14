@@ -293,8 +293,14 @@ previous one, and three decisions shape what the numbers mean.
   (interned: device and patch tables, items as index pairs — ~11 bytes a pending row) rather than
   bare hashes. Failed items use the same form; they are few.
 
-Patch identity is `changes::patch_key`: an OS patch is its normalized KB, anything else its
-lowercased title. It is the one place to adopt `productIdentifier` for third-party patches.
+Patch identity is `changes::patch_key` (built from a raw record by `changes::write_patch_key`,
+which the first-seen ledger uses, so the two cannot disagree): an OS patch is its normalized KB, a
+third-party patch its **product** (`productIdentifier`, shared by every version), anything else
+its lowercased title. Keyed by title, a superseding version ("Chrome …55" → "…66") was a new patch:
+the diff listed it as resolved-and-new, and its age restarted, so a device that never updated
+Chrome never went past SLA. `SNAPSHOT_VERSION` 2 marks the change; a version-1 baseline reads as
+no previous run. OS cumulative updates still restart with each new KB — the API carries no
+product-line identity for them.
 
 The baseline advances only when a result **wins the cache** (`StoreOutcome::Stored`); a
 superseded run is older than the one that won, and writing it would roll the baseline back. The

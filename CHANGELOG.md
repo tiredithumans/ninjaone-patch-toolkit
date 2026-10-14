@@ -29,6 +29,10 @@ version and start a fresh `[Unreleased]`.
   trend and the tab says how many; the trend restarts from your first run on this version.
 - **Percentages show one decimal everywhere** (87.5%, never rounded up to 100%), so the Compliance
   tab, the Trend tab, the workbook and the report agree.
+- **A third-party update is tracked per product, not per version.** When a newer version of, say,
+  Chrome replaces the pending one, "Changes since last run" no longer reports one resolved and one
+  new patch, and the patch keeps its age. The first run after upgrading reports no previous run
+  to compare with.
 - **Security patches now count as urgent.** The compliance tables' backlog columns are renamed
   **Urgent Pending** and **Urgent Past SLA** (formerly "Pending Critical/Important" and "Aged
   (past SLA)") and now count Critical, Important *and* Security patches. NinjaOne grades most

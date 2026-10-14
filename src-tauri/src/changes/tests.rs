@@ -144,6 +144,43 @@ fn the_patch_identity_normalizes_the_kb_and_the_title() {
     );
 }
 
+/// A third-party patch is its product: two versions of one product are one
+/// identity (so a superseding version is not a "new" patch and does not restart its
+/// age), two products sharing a title are two, and a record with no product falls
+/// back to its title. The keys keep the shape the old ones had where nothing
+/// changed.
+#[test]
+fn a_third_party_patch_is_its_product_not_its_version() {
+    let sw = |name: &str, product: Option<&str>| PatchRow {
+        product_identifier: product.map(Into::into),
+        ..row(1, None, name, "PENDING")
+    };
+    let chrome = "A1B2C3D4-0000-0000-0000-000000000001";
+    assert_eq!(
+        patch_key(&sw("Google Chrome 141.0.7390.55", Some(chrome))),
+        patch_key(&sw(
+            "Google Chrome 141.0.7390.66",
+            Some(&chrome.to_lowercase())
+        )),
+    );
+    assert_ne!(
+        patch_key(&sw("Updater", Some(chrome))),
+        patch_key(&sw("Updater", Some("a1b2c3d4-0000-0000-0000-000000000002"))),
+    );
+    assert_eq!(
+        patch_key(&sw(" Google Chrome ", None)),
+        "SOFTWARE|google chrome"
+    );
+    assert_eq!(
+        patch_key(&row(1, Some("KB5040434"), "CU", "PENDING")),
+        "OS|kb5040434"
+    );
+    // The buffered writer agrees with the row form, so the ledger keys match.
+    let mut buf = String::from("stale");
+    write_patch_key(&mut buf, "SOFTWARE", None, "Ignored", Some(chrome));
+    assert_eq!(buf, patch_key(&sw("Google Chrome", Some(chrome))));
+}
+
 #[test]
 fn lists_are_capped_but_counts_are_exact() {
     let rows: Vec<PatchRow> = (0..(CHANGE_LIST_LIMIT as i64 + 25))

@@ -33,9 +33,11 @@ use crate::rows::{PatchFamilies, TableCell, TableColumn, cmp_ci};
 
 const SNAPSHOT_DIR: &str = "run-snapshots";
 
-/// Bumped when the on-disk shape changes; a file of another version reads as "no
-/// previous run" rather than as a misparsed one.
-const SNAPSHOT_VERSION: u32 = 1;
+/// Bumped when the on-disk shape changes — or when [`patch_key`] does, since a
+/// baseline keyed the old way would report every changed key as resolved and new —
+/// so a file of another version reads as "no previous run" rather than as a
+/// misparsed one. 2: third-party patches keyed by product, not title.
+const SNAPSHOT_VERSION: u32 = 2;
 
 /// Scopes remembered at once. An operator flips between a handful of saved presets;
 /// twenty covers that with room, and each extra scope is one more file to keep.
@@ -92,15 +94,42 @@ impl LastSaved {
 static LAST_SAVED: LastSaved = LastSaved::new();
 
 /// The one definition of "the same patch" across runs. Everything that compares
-/// runs goes through it, so it can adopt NinjaOne's `productIdentifier` for
-/// third-party patches in one place once the row carries it.
+/// runs goes through it — the changes diff here and the first-seen ledger
+/// (`crate::first_seen`), which builds the same key from a raw record with
+/// [`write_patch_key`] — so the two can never disagree about identity.
 ///
 /// An OS patch is its KB (normalized: NinjaOne spells it with and without the `KB`
-/// prefix); a KB-less OS patch and a third-party patch fall back to the title.
+/// prefix). A third-party patch is its **product** (`productIdentifier`, shared by
+/// every version), so "Chrome 141.0.7390.55" superseded by "…66" is still the one
+/// pending Chrome update — keyed by title, each new version restarted its age and a
+/// device that never updated Chrome never went past SLA. A record with neither falls
+/// back to its title.
 pub fn patch_key(row: &PatchRow) -> String {
-    let kb = row
-        .kb
-        .as_deref()
+    let mut key = String::new();
+    write_patch_key(
+        &mut key,
+        row.patch_type,
+        row.kb.as_deref(),
+        &row.name,
+        row.product_identifier.as_deref(),
+    );
+    key
+}
+
+/// [`patch_key`] into a caller-owned buffer, which it clears first, from the parts
+/// a raw record and a row both carry: the family label (`OS`/`SOFTWARE`), the KB,
+/// the display name (`Patch::write_display_name`, which is what a row's `name` is)
+/// and the product identifier. Buffered because the ledger keys every pending record
+/// of a six-figure feed.
+pub fn write_patch_key(
+    buf: &mut String,
+    patch_type: &str,
+    kb: Option<&str>,
+    display_name: &str,
+    product: Option<&str>,
+) {
+    buf.clear();
+    let kb = kb
         .map(str::trim)
         .map(|k| {
             k.strip_prefix("KB")
@@ -108,9 +137,28 @@ pub fn patch_key(row: &PatchRow) -> String {
                 .unwrap_or(k)
         })
         .filter(|k| !k.is_empty());
-    match kb {
-        Some(kb) if row.patch_type == "OS" => format!("OS|kb{}", kb.to_ascii_lowercase()),
-        _ => format!("{}|{}", row.patch_type, row.name.trim().to_lowercase()),
+    let product = product.map(str::trim).filter(|p| !p.is_empty());
+    buf.push_str(patch_type);
+    buf.push('|');
+    match (kb, product) {
+        (Some(kb), _) if patch_type == "OS" => {
+            buf.push_str("kb");
+            push_lowercase(buf, kb);
+        }
+        (_, Some(product)) if patch_type == "SOFTWARE" => {
+            buf.push_str("product:");
+            push_lowercase(buf, product);
+        }
+        _ => push_lowercase(buf, display_name.trim()),
+    }
+}
+
+/// Appends `s` lowercased, without a temporary `String` for the common ASCII case.
+fn push_lowercase(buf: &mut String, s: &str) {
+    if s.is_ascii() {
+        buf.extend(s.chars().map(|c| c.to_ascii_lowercase()));
+    } else {
+        buf.push_str(&s.to_lowercase());
     }
 }
 
