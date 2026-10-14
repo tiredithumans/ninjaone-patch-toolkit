@@ -17,8 +17,11 @@ charts. Anything `from_raw` fails to map becomes `Unknown` (rank 0), which both 
 every other patch in the severity sort **and** makes it unreachable from the severity facet; that
 is why an unmapped value reads as "those patches don't exist". `SEVERITY_OPTIONS`
 (`web-rs/src/app.rs`) must therefore cover the whole vocabulary including `UNKNOWN`. Ranks are
-ordered so `Security`/`Recommended` fall **below** `Important`, keeping them out of the
-`rank() >= Important.rank()` compliance/SLA rollups.
+ordered so `Security`/`Recommended` fall **below** `Important` in the sort, but urgency is its
+own rule: `Severity::is_urgent()` (rank ≥ `Security`) puts **Security** in the urgent backlog the
+compliance tables count ("Urgent Pending" / "Urgent Past SLA"). The engine vocabulary has no
+`important` at all and `security` is its largest OS bucket, so the old rank ≥ Important threshold
+left an engine-graded fleet's urgent backlog at its Criticals alone. Recommended stays out.
 
 ## Adding a value — the full checklist
 

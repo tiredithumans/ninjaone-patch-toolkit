@@ -79,7 +79,7 @@ fn device_band_headers_follow_the_bands() {
             optional: 17,
             unknown: 19,
         },
-        aged_critical: 0,
+        urgent_past_sla: 0,
         failed_installs: None,
         last_contact: None,
         last_contact_ts: None,
@@ -599,8 +599,8 @@ fn compliance_counts_compliant_and_aged_backlog() {
     let b = &buckets[0];
     assert_eq!(b.devices_total, 2);
     assert_eq!(b.devices_compliant, 1);
-    assert_eq!(b.pending_critical, 2);
-    assert_eq!(b.aged_critical, 1);
+    assert_eq!(b.urgent_pending, 2);
+    assert_eq!(b.urgent_past_sla, 1);
     assert!((b.compliance_pct - 50.0).abs() < 1e-9);
 }
 
@@ -644,7 +644,7 @@ fn an_orphan_patch_does_not_invent_an_organization() {
     let summaries = summaries_for(&[&d], &refs(&current), &sla30(), &maps);
     let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets.len(), 1, "only the real organization: {buckets:?}");
-    assert_eq!(buckets[0].pending_critical, 0);
+    assert_eq!(buckets[0].urgent_pending, 0);
 }
 
 /// A current-feed record with no `status` is pending by construction — that feed
@@ -663,7 +663,7 @@ fn a_current_patch_with_no_status_still_counts_as_pending() {
     assert_eq!(summaries[0].pending_count, 1);
     let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets[0].devices_compliant, 0);
-    assert_eq!(buckets[0].pending_critical, 1);
+    assert_eq!(buckets[0].urgent_pending, 1);
     // 90 days old → the "61-90 days" bucket.
     assert_eq!(
         build_age_buckets(&refs(&current), &by_id, Utc::now())[2].count,
@@ -725,7 +725,7 @@ fn compliance_by_os_groups_devices_and_patches_by_os() {
     assert_eq!(win11.os, "Windows 11 Pro");
     assert_eq!(win11.devices_total, 1);
     assert_eq!(win11.devices_compliant, 1);
-    assert_eq!(win11.pending_critical, 0);
+    assert_eq!(win11.urgent_pending, 0);
     assert!((win11.compliance_pct - 100.0).abs() < 1e-9);
     let server = &buckets[1];
     assert_eq!(server.os, "Windows Server 2022");
@@ -734,9 +734,9 @@ fn compliance_by_os_groups_devices_and_patches_by_os() {
         server.devices_compliant, 0,
         "the device has a pending patch"
     );
-    assert_eq!(server.pending_critical, 1);
+    assert_eq!(server.urgent_pending, 1);
     assert_eq!(
-        server.aged_critical, 1,
+        server.urgent_past_sla, 1,
         "first seen 45d ago, past the 30d SLA"
     );
 }
@@ -2184,11 +2184,11 @@ fn severity_and_age_rollups_cover_the_same_devices_compliance_does() {
         compliance[0].devices_total, 1,
         "the offline device is excluded"
     );
-    assert_eq!(compliance[0].pending_critical, 1, "and so is its backlog");
+    assert_eq!(compliance[0].urgent_pending, 1, "and so is its backlog");
 
     let severity_total: usize = severity.iter().map(|o| o.counts.total()).sum();
     assert_eq!(
-        severity_total, compliance[0].pending_critical,
+        severity_total, compliance[0].urgent_pending,
         "the severity breakdown counted the devices compliance excluded"
     );
     assert_eq!(
@@ -2199,7 +2199,7 @@ fn severity_and_age_rollups_cover_the_same_devices_compliance_does() {
     );
     let age_total: usize = age.iter().map(|b| b.count).sum();
     assert_eq!(
-        age_total, compliance[0].pending_critical,
+        age_total, compliance[0].urgent_pending,
         "the age histogram counted them too"
     );
     // The worst-devices list is over the same population; the offline device's
@@ -2207,7 +2207,7 @@ fn severity_and_age_rollups_cover_the_same_devices_compliance_does() {
     let (worst, offline_list) = build_device_backlogs(&current, &by_id, &maps, &sla30());
     let worst_total: usize = worst.devices.iter().map(|d| d.pending_total).sum();
     assert_eq!(
-        worst_total, compliance[0].pending_critical,
+        worst_total, compliance[0].urgent_pending,
         "the worst-devices list counted the devices compliance excluded"
     );
     assert_eq!(offline_list.devices.len(), 1);
@@ -2219,7 +2219,7 @@ fn severity_and_age_rollups_cover_the_same_devices_compliance_does() {
 /// FAILED record is pending (it still breaks compliance) but in neither column —
 /// the `status_override = MANUAL` that labels an untyped row PENDING is a display
 /// decision and never reaches the rollups. Both columns count every severity,
-/// unlike the Critical/Important SLA columns beside them.
+/// unlike the urgent SLA columns beside them.
 #[test]
 fn the_approval_split_uses_the_vendor_status_across_every_severity() {
     let d1 = device(1, 10, "Windows Server 2022");
@@ -2569,6 +2569,27 @@ fn a_no_sla_band_is_never_past_sla() {
     assert!(aged("something-new", None), "Unknown has no switch");
 }
 
+/// Security is urgent — NinjaOne's engine vocabulary grades its monthly security
+/// updates `security`, with no `important` — while Moderate and Recommended are
+/// not, and an urgent record past its window is Urgent Past SLA.
+#[test]
+fn security_patches_are_urgent_and_moderate_ones_are_not() {
+    let d = device(1, 10, "Windows Server 2022");
+    let by_id = HashMap::from([(1, &d)]);
+    let maps = maps();
+    let current = vec![
+        patch(1, "MANUAL", "security", Some(45)),
+        patch(1, "MANUAL", "CRITICAL", Some(5)),
+        patch(1, "MANUAL", "MODERATE", Some(45)),
+        patch(1, "MANUAL", "recommended", Some(45)),
+    ];
+    let summaries = summaries_for(&[&d], &refs(&current), &sla30(), &maps);
+    let org = &build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30())[0];
+    assert_eq!(org.urgent_pending, 2, "the Security and the Critical");
+    assert_eq!(org.urgent_past_sla, 1, "only the 45-day-old Security");
+    assert_eq!(summaries[0].urgent_past_sla, 1);
+}
+
 /// The compliance table's aged column follows the per-band policy too.
 #[test]
 fn the_compliance_aged_column_uses_the_band_cutoffs() {
@@ -2581,7 +2602,10 @@ fn the_compliance_aged_column_uses_the_band_cutoffs() {
     ];
     let summaries = summaries_for(&[&d], &refs(&current), &sla30(), &maps);
     let flat = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
-    assert_eq!(flat[0].aged_critical, 1, "30 days flat: only the Important");
+    assert_eq!(
+        flat[0].urgent_past_sla, 1,
+        "30 days flat: only the Important"
+    );
     let banded = SlaCutoffs::new(
         &policy(
             30,
@@ -2595,10 +2619,10 @@ fn the_compliance_aged_column_uses_the_band_cutoffs() {
     );
     let per_band = build_compliance(&summaries, &refs(&current), &by_id, &maps, &banded);
     assert_eq!(
-        per_band[0].aged_critical, 1,
+        per_band[0].urgent_past_sla, 1,
         "per band: only the Critical (10d > 7d; 45d < 60d)"
     );
-    assert_eq!(per_band[0].pending_critical, 2);
+    assert_eq!(per_band[0].urgent_pending, 2);
 }
 
 // --- Worst devices + offline backlog -------------------------------------------

@@ -19,7 +19,7 @@ pub(super) fn SlaPolicyNote() -> impl IntoView {
                         r.as_ref()
                             .map(|r| {
                                 format!(
-                                    "SLA policy: {}. Aged (past SLA) counts Critical/Important patches first seen longer ago than their severity's SLA; undated patches count as aged.",
+                                    "SLA policy: {}. Urgent Past SLA counts Critical, Important and Security patches first seen longer ago than their severity's SLA; undated patches count as past SLA.",
                                     util::sla_policy_summary(&r.sla_policy),
                                 )
                             })

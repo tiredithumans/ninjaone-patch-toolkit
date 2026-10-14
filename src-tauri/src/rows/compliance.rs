@@ -42,9 +42,10 @@ pub struct DeviceSummary {
     /// Pending current patches ([`is_pending`](super::rollups::is_pending)) on this device, by severity band.
     /// Sums to `pending_count`; filled by [`apply_device_health`].
     pub pending_by_severity: SeverityCounts,
-    /// Pending Critical/Important patches first seen longer ago than the SLA window
-    /// (or undated) — [`ComplianceBucket::aged_critical`] for one device.
-    pub aged_critical: usize,
+    /// Pending urgent (Critical, Important, Security) patches first seen longer ago
+    /// than their SLA window (or undated) — [`ComplianceBucket::urgent_past_sla`] for
+    /// one device.
+    pub urgent_past_sla: usize,
     /// FAILED install-history records for this device inside the lookback window,
     /// or `None` when the query did not ask for the Failed status and so never
     /// fetched them — blank rather than zero, because "no failures" is not something
@@ -125,7 +126,7 @@ pub fn build_device_summaries(
                 offline: d.is_offline(),
                 rollup_scope: RollupScope::of(d),
                 pending_by_severity: SeverityCounts::default(),
-                aged_critical: 0,
+                urgent_past_sla: 0,
                 failed_installs: None,
                 last_contact: super::join::fmt_dt(last_contact),
                 last_contact_ts: last_contact.map(|t| t.timestamp()),
@@ -149,7 +150,7 @@ pub fn build_device_summaries(
         s.pending_count += 1;
         s.pending_by_severity.add(r.severity);
         if counts_toward_backlog(r) && sla.is_aged(r) {
-            s.aged_critical += 1;
+            s.urgent_past_sla += 1;
         }
     }
     if let Some(failed) = failed_installs {
@@ -185,10 +186,12 @@ pub struct ComplianceBucket {
     pub devices_total: usize,
     pub devices_compliant: usize,
     pub compliance_pct: f64,
-    pub pending_critical: usize,
-    /// Pending Critical/Important patches first seen longer ago than the SLA
-    /// window — the backlog that has aged past target.
-    pub aged_critical: usize,
+    /// Pending urgent patches — Critical, Important or Security
+    /// ([`Severity::is_urgent`]).
+    pub urgent_pending: usize,
+    /// The subset of `urgent_pending` first seen longer ago than its band's SLA
+    /// window — the urgent backlog that has aged past target.
+    pub urgent_past_sla: usize,
     /// Patches, of any severity, NinjaOne holds for an approval decision (vendor
     /// status `MANUAL`) — waiting on a person. See [`approval_state`].
     pub awaiting_approval: usize,
@@ -202,8 +205,8 @@ pub struct ComplianceBucket {
 struct ComplianceAcc {
     total: usize,
     compliant: usize,
-    pending_critical: usize,
-    aged_critical: usize,
+    urgent_pending: usize,
+    urgent_past_sla: usize,
     awaiting_approval: usize,
     approved_not_installed: usize,
 }
@@ -255,15 +258,15 @@ impl ComplianceAcc {
     }
 }
 
-/// Whether a current-patch record belongs to the backlog the compliance rollups
-/// track: not yet installed, and at least Important.
+/// Whether a current-patch record belongs to the urgent backlog the compliance
+/// rollups track: not yet installed, and Critical, Important or Security
+/// ([`Severity::is_urgent`]).
 ///
-/// Pending is [`is_pending`](super::rollups::is_pending)'s exclude list — every status except `REJECTED` and
-/// `INSTALLED` counts, not only NinjaOne's usual `MANUAL`/`APPROVED`. The rank
-/// threshold deliberately excludes `Security` and `Recommended`, which are NinjaOne
-/// *classifications* rather than urgency grades.
+/// Pending is [`is_pending`](super::rollups::is_pending)'s exclude list — every
+/// status except `REJECTED` and `INSTALLED` counts, not only NinjaOne's usual
+/// `MANUAL`/`APPROVED`.
 fn counts_toward_backlog(r: &PatchRecord<'_>) -> bool {
-    r.pending && r.severity.rank() >= Severity::Important.rank()
+    r.pending && r.severity.is_urgent()
 }
 
 /// The SLA cutoff for every severity band at one instant: a record first seen
@@ -383,7 +386,7 @@ fn accumulate_compliance<'a>(
             continue;
         };
         // The approval split counts every severity (it describes the workflow, not
-        // the urgency); the SLA backlog only Important and above.
+        // the urgency); the SLA backlog only the urgent bands.
         let approval = approval_state(r.patch.status.as_deref());
         let backlog = counts_toward_backlog(r);
         if approval.is_none() && !backlog {
@@ -400,9 +403,9 @@ fn accumulate_compliance<'a>(
             None => {}
         }
         if backlog {
-            acc.pending_critical += 1;
+            acc.urgent_pending += 1;
             if sla.is_aged(r) {
-                acc.aged_critical += 1;
+                acc.urgent_past_sla += 1;
             }
         }
     }
@@ -411,7 +414,7 @@ fn accumulate_compliance<'a>(
 }
 
 /// Computes per-org compliance from device summaries and the current (pending/
-/// approved) patches. `sla` flags aged Critical/Important backlog, each patch
+/// approved) patches. `sla` flags aged urgent backlog, each patch
 /// against its own band's cutoff.
 pub fn build_compliance(
     summaries: &[DeviceSummary],
@@ -436,8 +439,8 @@ pub fn build_compliance(
             devices_total: a.total,
             devices_compliant: a.compliant,
             compliance_pct: a.pct(),
-            pending_critical: a.pending_critical,
-            aged_critical: a.aged_critical,
+            urgent_pending: a.urgent_pending,
+            urgent_past_sla: a.urgent_past_sla,
             awaiting_approval: a.awaiting_approval,
             approved_not_installed: a.approved_not_installed,
         })
@@ -456,14 +459,14 @@ pub struct OsCompliance {
     pub devices_total: usize,
     pub devices_compliant: usize,
     pub compliance_pct: f64,
-    pub pending_critical: usize,
-    pub aged_critical: usize,
+    pub urgent_pending: usize,
+    pub urgent_past_sla: usize,
     pub awaiting_approval: usize,
     pub approved_not_installed: usize,
 }
 
 /// Computes compliance grouped by OS name, mirroring [`build_compliance`] (offline
-/// devices excluded from the denominator; pending Critical/Important counted, and
+/// devices excluded from the denominator; pending urgent patches counted, and
 /// flagged aged when older than the SLA window or undated). Devices and patches with
 /// no reported OS fall under "(unknown)".
 pub fn build_compliance_by_os(
@@ -488,8 +491,8 @@ pub fn build_compliance_by_os(
             devices_total: a.total,
             devices_compliant: a.compliant,
             compliance_pct: a.pct(),
-            pending_critical: a.pending_critical,
-            aged_critical: a.aged_critical,
+            urgent_pending: a.urgent_pending,
+            urgent_past_sla: a.urgent_past_sla,
             awaiting_approval: a.awaiting_approval,
             approved_not_installed: a.approved_not_installed,
         })
@@ -548,7 +551,7 @@ impl DeviceSummary {
         (DEVICE_BAND_HEADERS[5], band_cell::<5>),
         (DEVICE_BAND_HEADERS[6], band_cell::<6>),
         (DEVICE_BAND_HEADERS[7], band_cell::<7>),
-        ("Aged (past SLA)", |d| included_count(d, d.aged_critical)),
+        ("Urgent Past SLA", |d| included_count(d, d.urgent_past_sla)),
         ("Failed Installs", |d| match d.failed_installs {
             Some(n) => TableCell::Count(n),
             None => TableCell::Text(String::new()),
@@ -596,10 +599,8 @@ impl ComplianceBucket {
         ("Devices", |b| TableCell::Count(b.devices_total)),
         ("Compliant", |b| TableCell::Count(b.devices_compliant)),
         ("Compliance %", |b| pct_cell(b.compliance_pct)),
-        ("Pending Critical/Important", |b| {
-            TableCell::Count(b.pending_critical)
-        }),
-        ("Aged (past SLA)", |b| TableCell::Count(b.aged_critical)),
+        ("Urgent Pending", |b| TableCell::Count(b.urgent_pending)),
+        ("Urgent Past SLA", |b| TableCell::Count(b.urgent_past_sla)),
         ("Awaiting Approval", |b| {
             TableCell::Count(b.awaiting_approval)
         }),
@@ -617,10 +618,8 @@ impl OsCompliance {
         ("Devices", |b| TableCell::Count(b.devices_total)),
         ("Compliant", |b| TableCell::Count(b.devices_compliant)),
         ("Compliance %", |b| pct_cell(b.compliance_pct)),
-        ("Pending Critical/Important", |b| {
-            TableCell::Count(b.pending_critical)
-        }),
-        ("Aged (past SLA)", |b| TableCell::Count(b.aged_critical)),
+        ("Urgent Pending", |b| TableCell::Count(b.urgent_pending)),
+        ("Urgent Past SLA", |b| TableCell::Count(b.urgent_past_sla)),
         ("Awaiting Approval", |b| {
             TableCell::Count(b.awaiting_approval)
         }),

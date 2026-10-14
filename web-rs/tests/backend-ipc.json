@@ -17,7 +17,6 @@
     },
     "device_detail": {
       "device": {
-        "agedCritical": 2,
         "deviceId": 1,
         "deviceName": "web-01",
         "deviceRole": "Domain Controller",
@@ -41,7 +40,8 @@
           "unknown": 0
         },
         "pendingCount": 3,
-        "rollupScope": "included"
+        "rollupScope": "included",
+        "urgentPastSla": 2
       },
       "rows": [
         {
@@ -756,26 +756,26 @@
       },
       "compliance": [
         {
-          "agedCritical": 2,
           "approvedNotInstalled": 1,
           "awaitingApproval": 2,
           "compliancePct": 0.0,
           "devicesCompliant": 0,
           "devicesTotal": 1,
           "organization": "Contoso",
-          "pendingCritical": 2
+          "urgentPastSla": 2,
+          "urgentPending": 2
         }
       ],
       "complianceByOs": [
         {
-          "agedCritical": 2,
           "approvedNotInstalled": 1,
           "awaitingApproval": 2,
           "compliancePct": 0.0,
           "devicesCompliant": 0,
           "devicesTotal": 1,
           "os": "Windows Server 2022",
-          "pendingCritical": 2
+          "urgentPastSla": 2,
+          "urgentPending": 2
         }
       ],
       "dataFetchedAt": "2026-07-01 11:50:00 UTC",
@@ -831,7 +831,6 @@
       },
       "rebootDevices": [
         {
-          "agedCritical": 0,
           "deviceId": 3,
           "deviceName": "core-sw-01",
           "deviceRole": "Domain Controller",
@@ -855,10 +854,10 @@
             "unknown": 0
           },
           "pendingCount": 0,
-          "rollupScope": "nonPatchable"
+          "rollupScope": "nonPatchable",
+          "urgentPastSla": 0
         },
         {
-          "agedCritical": 2,
           "deviceId": 1,
           "deviceName": "web-01",
           "deviceRole": "Domain Controller",
@@ -882,10 +881,10 @@
             "unknown": 0
           },
           "pendingCount": 3,
-          "rollupScope": "included"
+          "rollupScope": "included",
+          "urgentPastSla": 2
         },
         {
-          "agedCritical": 0,
           "deviceId": 2,
           "deviceName": "web-02",
           "deviceRole": "Domain Controller",
@@ -909,7 +908,8 @@
             "unknown": 0
           },
           "pendingCount": 1,
-          "rollupScope": "offline"
+          "rollupScope": "offline",
+          "urgentPastSla": 0
         }
       ],
       "rows": [

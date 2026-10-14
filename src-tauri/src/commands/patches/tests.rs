@@ -529,7 +529,7 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
     assert_eq!(summary.reboot_devices[0].device_id, 10);
 
     // Compliance: both online, both carry a pending/approved patch → 0% compliant.
-    // The MANUAL Critical (aged) lands in pending_critical AND aged_critical; the
+    // The MANUAL Critical (aged) lands in urgent_pending AND urgent_past_sla; the
     // APPROVED Low is below the Important rank so neither counts it.
     assert_eq!(result.compliance.len(), 1);
     let alpha = &result.compliance[0];
@@ -537,8 +537,8 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
     assert_eq!(alpha.devices_total, 2);
     assert_eq!(alpha.devices_compliant, 0);
     assert_eq!(alpha.compliance_pct, 0.0);
-    assert_eq!(alpha.pending_critical, 1);
-    assert_eq!(alpha.aged_critical, 1);
+    assert_eq!(alpha.urgent_pending, 1);
+    assert_eq!(alpha.urgent_past_sla, 1);
 }
 
 #[tokio::test]
@@ -705,7 +705,7 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
         "two pending CRITICAL patches make the device non-compliant"
     );
     assert_eq!(
-        org.pending_critical, 2,
+        org.urgent_pending, 2,
         "REJECTED is the only status excluded"
     );
     assert_eq!(result.devices[0].pending_count, 2);
@@ -1034,7 +1034,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
         "the bands sum to the pending count (REJECTED is in neither)"
     );
     assert_eq!(
-        zeta.aged_critical, 1,
+        zeta.urgent_past_sla, 1,
         "the 90-day-old CRITICAL, not the LOW"
     );
     assert_eq!(zeta.failed_installs, Some(1), "FAILED only, not INSTALLED");
@@ -1043,7 +1043,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
 
     let beta = &result.devices[1];
     assert_eq!(beta.pending_by_severity.important, 1);
-    assert_eq!(beta.aged_critical, 0, "first seen today is within SLA");
+    assert_eq!(beta.urgent_past_sla, 0, "first seen today is within SLA");
     assert_eq!(beta.failed_installs, Some(0), "queried, and none failed");
 
     let alpha = &result.devices[0];
@@ -1339,7 +1339,7 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
         "only Alpha in the compliance roll"
     );
     assert_eq!(&*result.compliance[0].organization, "Alpha");
-    assert_eq!(result.compliance[0].pending_critical, 1);
+    assert_eq!(result.compliance[0].urgent_pending, 1);
 }
 /// `status` is not required on an install record. Under the single-status
 /// pushdown the server has already filtered, so labelling an untyped record
@@ -1517,7 +1517,7 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
         "a device whose only pending patch is third-party is not compliant"
     );
     assert_eq!(
-        alpha.pending_critical, 2,
+        alpha.urgent_pending, 2,
         "the CRITICAL third-party patch counts toward the backlog beside the OS one"
     );
 

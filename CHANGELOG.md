@@ -11,6 +11,15 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Security patches now count as urgent.** The compliance tables' backlog columns are renamed
+  **Urgent Pending** and **Urgent Past SLA** (formerly "Pending Critical/Important" and "Aged
+  (past SLA)") and now count Critical, Important *and* Security patches. NinjaOne grades most
+  monthly OS security updates `security`, not Critical or Important, so these columns used to leave
+  most of them out. Expect both numbers to rise; the Devices sheet, the device drill-down and the
+  Trend tab use the new names.
+
 ### Added
 
 - **A "No SLA" switch for each severity in Settings → Patch SLA.** A severity switched to No SLA

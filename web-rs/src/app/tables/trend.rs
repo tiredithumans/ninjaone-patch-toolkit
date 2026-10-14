@@ -84,10 +84,10 @@ pub(super) fn TrendTab() -> impl IntoView {
                         values={runs.iter().map(|r| r.rows_total as f64).collect::<Vec<_>>()}
                     />
                     <TrendLine
-                        title="Aged criticals"
+                        title="Urgent past SLA"
                         percent=false
                         higher_is_better=false
-                        values={runs.iter().map(|r| r.aged_critical as f64).collect::<Vec<_>>()}
+                        values={runs.iter().map(|r| r.urgent_past_sla as f64).collect::<Vec<_>>()}
                     />
                     <TrendLine
                         title="Devices needing reboot"
@@ -134,9 +134,9 @@ fn OrgDeltaTable(newest: RunRecord, previous: RunRecord) -> impl IntoView {
                             <th scope="col">"Change"</th>
                             <th scope="col">"Pending Patches"</th>
                             <th scope="col">"Change"</th>
-                            <th scope="col">"Pending Critical/Important"</th>
+                            <th scope="col">"Urgent Pending"</th>
                             <th scope="col">"Change"</th>
-                            <th scope="col">"Aged (past SLA)"</th>
+                            <th scope="col">"Urgent Past SLA"</th>
                             <th scope="col">"Change"</th>
                         </tr>
                     </thead>
@@ -162,9 +162,9 @@ fn OrgDeltaTable(newest: RunRecord, previous: RunRecord) -> impl IntoView {
                                         {cell(d.compliance_delta(), true, true)}
                                         <td>{count(&d.now, |o| o.pending)}</td>
                                         {cell(d.pending_delta(), false, false)}
-                                        <td>{count(&d.now, |o| o.pending_critical)}</td>
-                                        {cell(d.pending_critical_delta(), false, false)}
-                                        <td>{count(&d.now, |o| o.aged_critical)}</td>
+                                        <td>{count(&d.now, |o| o.urgent_pending)}</td>
+                                        {cell(d.urgent_pending_delta(), false, false)}
+                                        <td>{count(&d.now, |o| o.urgent_past_sla)}</td>
                                         {cell(d.aged_delta(), false, false)}
                                     </tr>
                                 }

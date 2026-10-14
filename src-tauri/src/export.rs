@@ -804,7 +804,7 @@ mod tests {
                 low: 1,
                 ..Default::default()
             },
-            aged_critical: 2,
+            urgent_past_sla: 2,
             failed_installs: None,
             last_contact: Some("2026-04-24 03:06 UTC".into()),
             last_contact_ts: Some(1_777_000_000),
@@ -964,13 +964,13 @@ mod tests {
         assert_eq!(at(1, "Pending Critical"), "3");
         assert_eq!(at(1, "Pending Low"), "1");
         assert_eq!(at(1, "Pending Important"), "0");
-        assert_eq!(at(1, "Aged (past SLA)"), "2");
+        assert_eq!(at(1, "Urgent Past SLA"), "2");
         assert_eq!(at(1, "Failed Installs"), "2");
 
         assert_eq!(at(2, "Device"), "srv02");
         assert_eq!(at(2, "Online"), "No");
         assert_eq!(at(2, "Compliance Scope"), "Excluded (offline)");
-        for title in ["Pending Critical", "Pending Low", "Aged (past SLA)"] {
+        for title in ["Pending Critical", "Pending Low", "Urgent Past SLA"] {
             assert_eq!(at(2, title), "", "{title} is blank for an excluded device");
         }
         assert_eq!(
@@ -998,8 +998,8 @@ mod tests {
             devices_total: 2,
             devices_compliant: 1,
             compliance_pct: 50.0,
-            pending_critical: 3,
-            aged_critical: 1,
+            urgent_pending: 3,
+            urgent_past_sla: 1,
             awaiting_approval: 2,
             approved_not_installed: 1,
         }];
@@ -1008,8 +1008,8 @@ mod tests {
             devices_total: 2,
             devices_compliant: 1,
             compliance_pct: 50.0,
-            pending_critical: 3,
-            aged_critical: 1,
+            urgent_pending: 3,
+            urgent_past_sla: 1,
             awaiting_approval: 2,
             approved_not_installed: 1,
         }];
@@ -1246,8 +1246,8 @@ mod tests {
             devices_total: 2,
             devices_compliant: 1,
             compliance_pct: 50.0,
-            pending_critical: 3,
-            aged_critical: 1,
+            urgent_pending: 3,
+            urgent_past_sla: 1,
             awaiting_approval: 4,
             approved_not_installed: 2,
         }];

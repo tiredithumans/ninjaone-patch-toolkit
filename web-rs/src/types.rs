@@ -179,9 +179,9 @@ pub struct DeviceSummary {
     pub rollup_scope: RollupScope,
     #[serde(default)]
     pub pending_by_severity: SeverityCounts,
-    /// Pending Critical/Important past the SLA window (or undated).
+    /// Pending urgent (Critical, Important, Security) past the SLA window (or undated).
     #[serde(default)]
-    pub aged_critical: usize,
+    pub urgent_past_sla: usize,
     /// `None` when the query did not include the Failed status — unknown, not zero.
     #[serde(default)]
     pub failed_installs: Option<usize>,
@@ -222,8 +222,8 @@ pub struct ComplianceBucket {
     pub devices_total: usize,
     pub devices_compliant: usize,
     pub compliance_pct: f64,
-    pub pending_critical: usize,
-    pub aged_critical: usize,
+    pub urgent_pending: usize,
+    pub urgent_past_sla: usize,
     /// Pending approval (vendor status `MANUAL`), any severity.
     #[serde(default)]
     pub awaiting_approval: usize,
@@ -242,8 +242,8 @@ pub struct OsCompliance {
     pub devices_total: usize,
     pub devices_compliant: usize,
     pub compliance_pct: f64,
-    pub pending_critical: usize,
-    pub aged_critical: usize,
+    pub urgent_pending: usize,
+    pub urgent_past_sla: usize,
     #[serde(default)]
     pub awaiting_approval: usize,
     #[serde(default)]
@@ -1290,8 +1290,11 @@ pub struct RunRecord {
     pub devices_compliant: usize,
     pub devices_in_scope: usize,
     pub rows_total: usize,
-    pub pending_critical: usize,
-    pub aged_critical: usize,
+    /// Under the backend's original keys, which every line on disk carries.
+    #[serde(rename = "pendingCritical")]
+    pub urgent_pending: usize,
+    #[serde(rename = "agedCritical")]
+    pub urgent_past_sla: usize,
     pub failures: usize,
     pub needs_reboot: usize,
     pub os_patches: bool,
@@ -1323,9 +1326,9 @@ pub struct OrgRun {
     #[serde(rename = "p")]
     pub pending: usize,
     #[serde(rename = "pc")]
-    pub pending_critical: usize,
+    pub urgent_pending: usize,
     #[serde(rename = "ac")]
-    pub aged_critical: usize,
+    pub urgent_past_sla: usize,
 }
 
 impl OrgRun {

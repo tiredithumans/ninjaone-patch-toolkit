@@ -114,12 +114,12 @@ impl OrgDelta {
         self.count_delta(|o| o.pending)
     }
 
-    pub(crate) fn pending_critical_delta(&self) -> Option<f64> {
-        self.count_delta(|o| o.pending_critical)
+    pub(crate) fn urgent_pending_delta(&self) -> Option<f64> {
+        self.count_delta(|o| o.urgent_pending)
     }
 
     pub(crate) fn aged_delta(&self) -> Option<f64> {
-        self.count_delta(|o| o.aged_critical)
+        self.count_delta(|o| o.urgent_past_sla)
     }
 }
 
@@ -161,7 +161,7 @@ pub(crate) fn org_deltas(newest: &RunRecord, previous: &RunRecord) -> Vec<OrgDel
         [
             d.compliance_delta().map(|v| -v),
             d.aged_delta(),
-            d.pending_critical_delta(),
+            d.urgent_pending_delta(),
             d.pending_delta(),
         ]
     };
@@ -246,8 +246,8 @@ mod tests {
             devices_in_scope: n,
             devices_compliant: c,
             pending,
-            pending_critical: pc,
-            aged_critical: ac,
+            urgent_pending: pc,
+            urgent_past_sla: ac,
         }
     }
 

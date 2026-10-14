@@ -94,8 +94,8 @@ struct ComplianceRow {
     devices_total: usize,
     devices_compliant: usize,
     compliance_pct: f64,
-    pending_critical: usize,
-    aged_critical: usize,
+    urgent_pending: usize,
+    urgent_past_sla: usize,
     awaiting_approval: usize,
     approved_not_installed: usize,
 }
@@ -107,8 +107,8 @@ impl From<&ComplianceBucket> for ComplianceRow {
             devices_total: b.devices_total,
             devices_compliant: b.devices_compliant,
             compliance_pct: b.compliance_pct,
-            pending_critical: b.pending_critical,
-            aged_critical: b.aged_critical,
+            urgent_pending: b.urgent_pending,
+            urgent_past_sla: b.urgent_past_sla,
             awaiting_approval: b.awaiting_approval,
             approved_not_installed: b.approved_not_installed,
         }
@@ -122,8 +122,8 @@ impl From<&OsCompliance> for ComplianceRow {
             devices_total: b.devices_total,
             devices_compliant: b.devices_compliant,
             compliance_pct: b.compliance_pct,
-            pending_critical: b.pending_critical,
-            aged_critical: b.aged_critical,
+            urgent_pending: b.urgent_pending,
+            urgent_past_sla: b.urgent_past_sla,
             awaiting_approval: b.awaiting_approval,
             approved_not_installed: b.approved_not_installed,
         }
@@ -165,8 +165,8 @@ fn ComplianceRollupTable(
                             <th scope="col">"Devices"</th>
                             <th scope="col">"Compliant"</th>
                             <th scope="col">"Compliance %"</th>
-                            <th scope="col">"Pending Critical/Important"</th>
-                            <th scope="col">"Aged (past SLA)"</th>
+                            <th scope="col">"Urgent Pending"</th>
+                            <th scope="col">"Urgent Past SLA"</th>
                             // Vendor status MANUAL vs APPROVED, any severity — see
                             // `rows::approval_state` for why untyped records are in
                             // neither.
@@ -181,7 +181,7 @@ fn ComplianceRollupTable(
                                 .map(|b| {
                                     let pct = util::format_pct(b.compliance_pct);
                                     let (aged_class, aged_label, aged_title) = aged_badge(
-                                        b.aged_critical,
+                                        b.urgent_past_sla,
                                     );
                                     let label_cell = match drill {
                                         Some(RollupDrill::Organization) => {
@@ -213,7 +213,7 @@ fn ComplianceRollupTable(
                                             <td>{b.devices_total}</td>
                                             <td>{b.devices_compliant}</td>
                                             <td>{pct}</td>
-                                            <td>{b.pending_critical}</td>
+                                            <td>{b.urgent_pending}</td>
                                             <td>
                                                 <span class=aged_class title=aged_title>
                                                     {aged_label}

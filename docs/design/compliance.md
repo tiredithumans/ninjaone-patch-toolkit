@@ -47,7 +47,7 @@ was already there (the in-app table draws its "offline" chip from it).
 ## One per-device rollup for the Devices sheet and the drill-down
 
 `DeviceSummary` carries each in-scope device's share of the fleet-health numbers — pending by
-severity band, pending past SLA (`aged_critical`), failed installs and NinjaOne's `lastContact` —
+severity band, urgent pending past SLA (`urgent_past_sla`), failed installs and NinjaOne's `lastContact` —
 filled by `rows::build_device_summaries` from the **same unnarrowed current feed** and the same
 `is_pending` / `counts_toward_backlog` / `is_aged` predicates the compliance rollups use. The
 workbook's **Devices** sheet (`DeviceSummary::DEVICE_COLUMNS`) and the in-app drill-down both read
@@ -149,9 +149,9 @@ valid); `Settings::sla_policy()` clamps again, because a hand-edited file reache
   `Unknown` has no switch: an unrated patch cannot be shown to be unimportant. `describe()` names
   the exempt bands in a closing `no SLA: …` clause and drops any override they kept. Stuck
   approvals ignore the switch (see below).
-- **Two "past SLA" figures, on purpose.** The compliance tables' "Aged (past SLA)" stays the
-  Critical/Important subset of the column beside it ("Pending Critical/Important"), so the two
-  still reconcile. The worst-devices and offline lists' "Past SLA" counts *every* pending record
+- **Two "past SLA" figures, on purpose.** The compliance tables' "Urgent Past SLA" stays the
+  urgent subset of the column beside it ("Urgent Pending" — Critical, Important or Security,
+  `Severity::is_urgent`), so the two still reconcile. The worst-devices and offline lists' "Past SLA" counts *every* pending record
   against its own band's window — that is what the overrides for Moderate/Low are for, and why
   Optional defaults to No SLA.
 - **The result carries the policy it was computed with** (`QueryResult`/`QuerySummary`
@@ -161,7 +161,7 @@ valid); `Settings::sla_policy()` clamps again, because a hand-edited file reache
   assembled; only an instance/client-id change invalidates fleet data. The next **Run query** — a
   re-filter over the warm cache, no refetch — reflects the new policy; the result on screen keeps
   its own until then.
-- The run history's `aged_critical` is recorded under whatever policy each run used, so a trend
+- The run history's `urgent_past_sla` is recorded under whatever policy each run used, so a trend
   across a policy change moves for that reason alone.
 
 ## Worst devices and the offline backlog
@@ -321,7 +321,7 @@ lead with the change against that previous run; the change over the whole series
 
 Both compliance rollups carry `awaiting_approval` (vendor status `MANUAL`, NinjaOne's "Pending") and
 `approved_not_installed` (`APPROVED`), over the same `rollup_device` population and across **every**
-severity — the split describes the workflow, not the urgency, unlike the Critical/Important SLA
+severity — the split describes the workflow, not the urgency, unlike the urgent SLA
 columns beside it. They matter because the two stall for different reasons: `MANUAL` waits on a
 person, `APPROVED` on the agent, and `is_pending` scores both the same.
 
@@ -344,11 +344,12 @@ exactly the agent symptom this list exists for. An undated approved patch counts
 The workbook writes every stuck device on a **Stuck Approvals** sheet with the threshold as a
 footnote; the report and the Compliance tab show the oldest ones and say how many more there are.
 
-## "Compliant" and "Pending Critical/Important" grade differently, on purpose
+## "Compliant" and "Urgent Pending" grade differently, on purpose
 
 Compliant is `pending_count == 0` over patches of *any* severity (`is_pending`), while the two
-SLA columns count only rank ≥ Important (`counts_toward_backlog`). A row can legitimately read
-"10 devices · 4 compliant · 0 pending Critical/Important".
+SLA columns count only the urgent bands (`counts_toward_backlog`, `Severity::is_urgent`:
+Critical, Important, Security). A row can legitimately read "10 devices · 4 compliant · 0 urgent
+pending".
 
 ## `rows::is_pending` is an exclude list
 
@@ -382,7 +383,7 @@ overflow the bar. See [severity.md](./severity.md).
 ## Table headers come from `rows::TableColumn` spellings
 
 The Leptos tables are hand-written and are not wired to `COLUMNS`, so they are kept spelled
-identically by review: "Compliance %", "Pending Critical/Important", "Aged (past SLA)",
+identically by review: "Compliance %", "Urgent Pending", "Urgent Past SLA",
 "Awaiting Approval", "Approved, Not Installed", "Device Role", "Pending Patches", the Failures table's seven columns including "Patch Type", and the
 two device lists (`DeviceBacklog::WORST_COLUMNS` / `OFFLINE_COLUMNS`), and `StuckDevice::COLUMNS`. The in-app first seen →
 installed table drops `InstallLatency::COLUMNS`' "(Days)" suffixes because its cells carry the
@@ -396,7 +397,7 @@ two lists agreeing by convention. `export.rs` renders every one through one `wri
 contributes only the width arrays, each length-tied to its `COLUMNS.len()`; `report.rs` renders
 through one `write_table`; the CSV writes `DETAIL_COLUMNS` through `csv_export::write_csv`. The
 drill-down dialog's hand-written labels reuse these spellings ("Device Role", "Pending Patches",
-"Aged (past SLA)").
+"Urgent Past SLA").
 Before this the two had diverged: the report dropped `Patch Type` from the failures table, and
 hardcoded the reboot table's headers as "Role"/"Pending patches" against the workbook's "Device
 Role"/"Pending Patches".
@@ -420,7 +421,7 @@ data was collected/updated"); the non-`Device` `OSPatch`/`SoftwarePatch` variant
 `Patch::collected_timestamp` (alias `timestamp`, read via `collected_at()` into
 `rows::PatchRecord::first_seen`) is therefore
 **detection time, not publication time**, and everything derived from it —
-`PatchRow.first_seen_ts`/`first_seen_date`, the SLA `aged_critical` rollup, `build_age_buckets`,
+`PatchRow.first_seen_ts`/`first_seen_date`, the SLA `urgent_past_sla` rollup, `build_age_buckets`,
 and the `detected_within_days`/`detected_after`/`detected_before` filter window — measures *how
 long we have known about the patch*. The UI says so ("First seen", "Pending past SLA", "Pending
 patch age (since first seen)"); keep the naming honest if you touch these.

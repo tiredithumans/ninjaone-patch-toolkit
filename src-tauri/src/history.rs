@@ -100,9 +100,13 @@ pub struct RunRecord {
     /// the patch facets (severity, search, first-seen window) — not only pending
     /// rows. Comparable across runs only under the same [`scope_key`](Self::scope_key).
     pub rows_total: usize,
-    /// Pending criticals, and the subset past the SLA window.
-    pub pending_critical: usize,
-    pub aged_critical: usize,
+    /// Pending urgent patches (Critical, Important and — from calculation method 1 —
+    /// Security), and the subset past the SLA window. Stored under their original
+    /// keys so every line already on disk still reads.
+    #[serde(rename = "pendingCritical")]
+    pub urgent_pending: usize,
+    #[serde(rename = "agedCritical")]
+    pub urgent_past_sla: usize,
     /// Distinct patches with at least one FAILED install.
     pub failures: usize,
     /// Devices flagged as needing a reboot.
@@ -145,9 +149,9 @@ pub struct OrgRun {
     #[serde(rename = "p", default)]
     pub pending: usize,
     #[serde(rename = "pc", default)]
-    pub pending_critical: usize,
+    pub urgent_pending: usize,
     #[serde(rename = "ac", default)]
-    pub aged_critical: usize,
+    pub urgent_past_sla: usize,
 }
 
 impl RunRecord {
@@ -171,8 +175,8 @@ impl RunRecord {
                     .get(c.organization.as_str())
                     .copied()
                     .unwrap_or(0),
-                pending_critical: c.pending_critical,
-                aged_critical: c.aged_critical,
+                urgent_pending: c.urgent_pending,
+                urgent_past_sla: c.urgent_past_sla,
             })
             .collect();
         orgs.sort_by(|a, b| {
@@ -192,8 +196,8 @@ impl RunRecord {
             devices_compliant,
             devices_in_scope,
             rows_total: result.rows.len(),
-            pending_critical: result.compliance.iter().map(|c| c.pending_critical).sum(),
-            aged_critical: result.compliance.iter().map(|c| c.aged_critical).sum(),
+            urgent_pending: result.compliance.iter().map(|c| c.urgent_pending).sum(),
+            urgent_past_sla: result.compliance.iter().map(|c| c.urgent_past_sla).sum(),
             failures: result.failures.len(),
             needs_reboot: result.devices.iter().filter(|d| d.needs_reboot).count(),
             os_patches: result.patch_families.os,
@@ -349,8 +353,8 @@ mod tests {
             devices_compliant: compliant,
             devices_in_scope: scope,
             rows_total: 40,
-            pending_critical: 7,
-            aged_critical: 2,
+            urgent_pending: 7,
+            urgent_past_sla: 2,
             failures: 1,
             needs_reboot: 4,
             os_patches: true,
@@ -505,8 +509,8 @@ mod tests {
             devices_in_scope: 10,
             devices_compliant: 5,
             pending: 3,
-            pending_critical: 1,
-            aged_critical: 0,
+            urgent_pending: 1,
+            urgent_past_sla: 0,
         };
         let mut records: Vec<RunRecord> = (0..ORG_DETAIL_RECORDS + 3)
             .map(|i| RunRecord {
@@ -529,8 +533,8 @@ mod tests {
             devices_total: i,
             devices_compliant: i / 2,
             compliance_pct: 50.0,
-            pending_critical: 1,
-            aged_critical: 0,
+            urgent_pending: 1,
+            urgent_past_sla: 0,
             awaiting_approval: 0,
             approved_not_installed: 0,
         };

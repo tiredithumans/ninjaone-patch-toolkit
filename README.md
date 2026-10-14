@@ -37,7 +37,8 @@ lists individual patches per server, and exports to Excel.
 - **Patching‑ops extras**
   - Install‑history export (what actually installed / failed) over a date window.
   - Reboot & failure views (devices pending reboot; `FAILED` patches).
-  - Compliance & SLA aging — per‑org compliance % and aged Critical/Important backlog.
+  - Compliance & SLA aging — per‑org compliance % and the urgent (Critical, Important, Security)
+    backlog past SLA.
   - Saved filter presets and optional auto‑refresh with a visible countdown and Pause (it
     also waits while a dialog or Settings is open, or the window is hidden).
 - **Operator comforts** — keyboard shortcuts (below); a **Columns** menu to hide Patches‑table

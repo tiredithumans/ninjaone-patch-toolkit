@@ -2888,7 +2888,7 @@ fn reboot_device(id: i64, name: &str, offline: bool) -> DeviceSummary {
         needs_reboot: true,
         rollup_scope: crate::types::RollupScope::Included,
         pending_by_severity: crate::types::SeverityCounts::default(),
-        aged_critical: 0,
+        urgent_past_sla: 0,
         failed_installs: None,
         last_contact: None,
     }
@@ -3388,7 +3388,7 @@ fn drill_device() -> crate::types::DeviceSummary {
         offline: false,
         rollup_scope: crate::types::RollupScope::Included,
         pending_by_severity: Default::default(),
-        aged_critical: 0,
+        urgent_past_sla: 0,
         failed_installs: None,
         last_contact: Some("2026-06-26 14:31 UTC".into()),
     }

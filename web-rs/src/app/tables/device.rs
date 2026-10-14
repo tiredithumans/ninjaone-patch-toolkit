@@ -220,7 +220,7 @@ fn DeviceHealth(device: DeviceSummary) -> impl IntoView {
             view! { <span class=sev_class(label)>{format!("{label} {}", read(&counts))}</span> }
         })
         .collect_view();
-    let (aged_class, aged_label, aged_title) = aged_badge(device.aged_critical);
+    let (aged_class, aged_label, aged_title) = aged_badge(device.urgent_past_sla);
     let failed = util::failed_installs_label(device.failed_installs);
     view! {
         <dl class="device-facts">{facts}</dl>
@@ -242,7 +242,7 @@ fn DeviceHealth(device: DeviceSummary) -> impl IntoView {
                             <dd>{device.pending_count}</dd>
                         </div>
                         <div class="device-fact">
-                            <dt>"Aged (past SLA)"</dt>
+                            <dt>"Urgent Past SLA"</dt>
                             <dd>
                                 <span class=aged_class title=aged_title>{aged_label}</span>
                             </dd>

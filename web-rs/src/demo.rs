@@ -279,8 +279,8 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
             devices_total: 18,
             devices_compliant: 12,
             compliance_pct: 66.7,
-            pending_critical: 5,
-            aged_critical: 2,
+            urgent_pending: 5,
+            urgent_past_sla: 2,
             awaiting_approval: 6,
             approved_not_installed: 7,
         },
@@ -289,8 +289,8 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
             devices_total: 14,
             devices_compliant: 11,
             compliance_pct: 78.6,
-            pending_critical: 3,
-            aged_critical: 1,
+            urgent_pending: 3,
+            urgent_past_sla: 1,
             awaiting_approval: 4,
             approved_not_installed: 3,
         },
@@ -299,8 +299,8 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
             devices_total: 10,
             devices_compliant: 9,
             compliance_pct: 90.0,
-            pending_critical: 1,
-            aged_critical: 0,
+            urgent_pending: 1,
+            urgent_past_sla: 0,
             awaiting_approval: 2,
             approved_not_installed: 1,
         },
@@ -381,10 +381,10 @@ fn scoped_compliance_by_os(rows: &[PatchRow]) -> Vec<OsCompliance> {
                 } else {
                     compliant as f64 / total as f64 * 100.0
                 },
-                pending_critical: critical,
+                urgent_pending: critical,
                 // The sample carries no SLA breach detail; the real backend
                 // computes this from first-seen age.
-                aged_critical: 0,
+                urgent_past_sla: 0,
                 awaiting_approval: awaiting,
                 approved_not_installed: approved,
             }
@@ -471,7 +471,7 @@ fn sample_device_summary(device_id: i64, failed_queried: bool) -> Option<DeviceS
         // Every sample device is a Windows, macOS or Linux agent.
         rollup_scope: RollupScope::Included,
         pending_by_severity: counts,
-        aged_critical: aged,
+        urgent_past_sla: aged,
         failed_installs: failed_queried.then_some(failed),
         last_contact: Some(SAMPLE_LAST_CONTACT.to_string()),
     })

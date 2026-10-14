@@ -412,7 +412,7 @@ pub(crate) fn status_class(status: &str) -> &'static str {
     }
 }
 
-/// Presentation for an "Aged (past SLA)" table cell as (CSS class, label, title).
+/// Presentation for an "Urgent Past SLA" table cell as (CSS class, label, title).
 /// An aged backlog gets a ⚠ prefix so it reads without relying on color.
 pub(crate) fn aged_badge(aged: usize) -> (&'static str, String, &'static str) {
     if aged > 0 {

@@ -31,7 +31,7 @@ pub struct DeviceBacklog {
     pub pending_total: usize,
     /// Pending records of **any** severity first seen before their own band's SLA
     /// cutoff (undated counts, as in the compliance rollups). Wider than the
-    /// compliance tables' "Aged (past SLA)", which counts Critical/Important only.
+    /// compliance tables' "Urgent Past SLA", which counts the urgent bands only.
     pub past_sla: usize,
     /// The earliest `timestamp` among the pending records — how long the oldest
     /// one has been known, not when it was released.
