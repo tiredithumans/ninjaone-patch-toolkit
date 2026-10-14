@@ -68,6 +68,12 @@ version and start a fresh `[Unreleased]`.
   behavior. Unrated (Unknown) patches always keep the default window. The SLA policy line on the
   Compliance tab, the report and the workbook names the bands with no SLA.
 
+### Security
+
+- **Updated the TLS library (`rustls` 0.23.46)** for RUSTSEC-2026-0346 to 0349: TLS secrets in
+  debug output, a downgrade of later connections' key exchange, unbounded certificate
+  decompression, and data sent to the wrong server after an ECH rejection.
+
 ## [0.15.4] - 2026-10-10
 
 ### Fixed
