@@ -62,9 +62,9 @@ const DETAIL_WIDTHS: [f64; DETAIL_COLUMNS.len()] = [
     24.0, 18.0, 18.0, 22.0, 26.0, 18.0, 11.0, 12.0, 40.0, 11.0, 11.0, 13.0, 9.0, 20.0, 20.0,
 ];
 const SUMMARY_WIDTHS: [f64; ComplianceBucket::COLUMNS.len()] =
-    [28.0, 10.0, 11.0, 14.0, 24.0, 16.0, 18.0, 22.0];
+    [28.0, 10.0, 12.0, 14.0, 14.0, 16.0, 16.0, 17.0, 18.0, 22.0];
 const OS_SUMMARY_WIDTHS: [f64; OsCompliance::COLUMNS.len()] =
-    [28.0, 10.0, 11.0, 14.0, 24.0, 16.0, 18.0, 22.0];
+    [28.0, 10.0, 12.0, 14.0, 14.0, 16.0, 16.0, 17.0, 18.0, 22.0];
 const STUCK_WIDTHS: [f64; StuckDevice::COLUMNS.len()] = [26.0, 24.0, 22.0, 20.0];
 const REBOOT_WIDTHS: [f64; DeviceSummary::COLUMNS.len()] = [24.0, 18.0, 18.0, 22.0, 26.0, 14.0];
 const FAILURE_WIDTHS: [f64; FailureGroup::COLUMNS.len()] =
@@ -75,8 +75,8 @@ const OFFLINE_WIDTHS: [f64; DeviceBacklog::OFFLINE_COLUMNS.len()] =
     [24.0, 22.0, 26.0, 26.0, 15.0, 10.0, 40.0];
 const INSTALL_TIME_WIDTHS: [f64; InstallLatency::COLUMNS.len()] = [14.0, 28.0, 17.0, 34.0, 20.0];
 const DEVICE_WIDTHS: [f64; DeviceSummary::DEVICE_COLUMNS.len()] = [
-    24.0, 18.0, 18.0, 22.0, 26.0, 8.0, 24.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 14.0,
-    13.0, 13.0, 18.0,
+    24.0, 18.0, 18.0, 22.0, 26.0, 8.0, 24.0, 11.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0,
+    10.0, 16.0, 13.0, 13.0, 18.0,
 ];
 
 /// The one number format every date-time cell is written with. The values are UTC
@@ -804,6 +804,7 @@ mod tests {
                 low: 1,
                 ..Default::default()
             },
+            past_sla: 2,
             urgent_past_sla: 2,
             failed_installs: None,
             last_contact: Some("2026-04-24 03:06 UTC".into()),
@@ -996,8 +997,10 @@ mod tests {
         let compliance = vec![ComplianceBucket {
             organization: "Contoso".into(),
             devices_total: 2,
-            devices_compliant: 1,
-            compliance_pct: 50.0,
+            devices_within_sla: 1,
+            within_sla_pct: 50.0,
+            devices_fully_patched: 1,
+            fully_patched_pct: 50.0,
             urgent_pending: 3,
             urgent_past_sla: 1,
             awaiting_approval: 2,
@@ -1006,8 +1009,10 @@ mod tests {
         let compliance_by_os = vec![OsCompliance {
             os: "Windows Server 2022".into(),
             devices_total: 2,
-            devices_compliant: 1,
-            compliance_pct: 50.0,
+            devices_within_sla: 1,
+            within_sla_pct: 50.0,
+            devices_fully_patched: 1,
+            fully_patched_pct: 50.0,
             urgent_pending: 3,
             urgent_past_sla: 1,
             awaiting_approval: 2,
@@ -1244,8 +1249,10 @@ mod tests {
         let compliance = vec![ComplianceBucket {
             organization: "Contoso".into(),
             devices_total: 2,
-            devices_compliant: 1,
-            compliance_pct: 50.0,
+            devices_within_sla: 1,
+            within_sla_pct: 50.0,
+            devices_fully_patched: 1,
+            fully_patched_pct: 50.0,
             urgent_pending: 3,
             urgent_past_sla: 1,
             awaiting_approval: 4,
@@ -1282,15 +1289,15 @@ mod tests {
         let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
         let summary = wb.worksheet_range("Compliance").unwrap();
         assert_eq!(
-            summary.get_value((0, 6)).unwrap().to_string(),
+            summary.get_value((0, 8)).unwrap().to_string(),
             "Awaiting Approval"
         );
-        assert_eq!(summary.get_value((1, 6)).unwrap().to_string(), "4");
+        assert_eq!(summary.get_value((1, 8)).unwrap().to_string(), "4");
         assert_eq!(
-            summary.get_value((0, 7)).unwrap().to_string(),
+            summary.get_value((0, 9)).unwrap().to_string(),
             "Approved, Not Installed"
         );
-        assert_eq!(summary.get_value((1, 7)).unwrap().to_string(), "2");
+        assert_eq!(summary.get_value((1, 9)).unwrap().to_string(), "2");
 
         let stuck = wb.worksheet_range("Stuck Approvals").unwrap();
         assert_eq!(stuck.get_value((0, 0)).unwrap().to_string(), "Device");

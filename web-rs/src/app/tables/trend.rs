@@ -113,7 +113,7 @@ fn OrgDeltaTable(newest: RunRecord, previous: RunRecord) -> impl IntoView {
     let pct = |o: &Option<OrgRun>| {
         o.as_ref()
             .and_then(OrgRun::compliance_pct)
-            .map(util::format_pct_tenths)
+            .map(util::format_pct)
             .unwrap_or_else(|| "\u{2014}".to_string())
     };
     let count = |o: &Option<OrgRun>, get: fn(&OrgRun) -> usize| {

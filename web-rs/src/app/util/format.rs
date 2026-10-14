@@ -293,28 +293,16 @@ fn excluded_clause(offline: usize, unpatchable: usize) -> String {
     }
 }
 
-/// Formats a compliance percentage at zero decimals **without ever rounding up to
-/// 100%**.
+/// A percentage at one decimal **without ever rounding up to 100%**: `87.5%`,
+/// `99.9%`, `100.0%`.
 ///
-/// Mirrors `src-tauri/src/rows.rs::format_pct`; the two crates share no code, so the
-/// rule is written twice on purpose. Plain `{:.0}%` renders anything from 99.5% up as
-/// `100%`, which is the one rounding error here that changes what an operator does:
-/// a compliance report claiming a clean fleet stops the work. Values below 100 cap at
-/// 99%.
+/// Mirrors `src-tauri/src/rows/table.rs::format_pct`; the two crates share no code,
+/// so the rule is written twice on purpose. Plain `{:.1}` turns 99.96 into
+/// "100.0%", which is the one rounding error here that changes what an operator
+/// does: a compliance report claiming a clean fleet stops the work. Values below
+/// 100 cap at 99.9%. One decimal everywhere — the tab, the Trend tab, the workbook
+/// and the report — so no two surfaces show one figure differently.
 pub(crate) fn format_pct(pct: f64) -> String {
-    let shown = if pct >= 100.0 {
-        100.0
-    } else {
-        pct.round().min(99.0)
-    };
-    format!("{shown:.0}%")
-}
-
-/// [`format_pct`] at one decimal, with the same rule: a value below 100 never
-/// prints as `100.0%`. Plain `{:.1}` turns 99.96 into "100.0%", which is exactly the
-/// clean-fleet claim the zero-decimal formatter exists to refuse; below 100 this
-/// caps at 99.9%. Mirrors the backend's one-decimal `pct_cell`.
-pub(crate) fn format_pct_tenths(pct: f64) -> String {
     let shown = if pct >= 100.0 {
         100.0
     } else {

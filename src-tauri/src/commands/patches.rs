@@ -12,12 +12,12 @@ use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
-    DeviceDetail, GroupBy, GroupPage, InstallWindow, LookupMaps, PatchFamilies, PatchRecord,
-    PatchSource, QueryResult, QuerySummary, RowSort, SlaCutoffs, build_age_buckets,
+    ComplianceBucket, DeviceDetail, GroupBy, GroupPage, InstallWindow, LookupMaps, PatchFamilies,
+    PatchRecord, PatchSource, QueryResult, QuerySummary, RowSort, SlaCutoffs, build_age_buckets,
     build_approval_backlog, build_compliance, build_compliance_by_os, build_device_backlogs,
     build_device_summaries, build_failures, build_groups, build_query_scope, build_rows,
     build_severity_by_org, build_time_to_install, group_member_page, page_rows, slice_groups,
-    sort_device_summaries, sort_order,
+    sort_device_summaries, sort_order, uncounted_orgs,
 };
 use crate::settings::{MAX_WINDOW_DAYS, SlaPolicy};
 use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
@@ -758,6 +758,8 @@ fn assemble_result(
     );
     sort_device_summaries(&mut summaries);
     let compliance = build_compliance(&summaries, &current, &devices_by_id, &maps, &cutoffs);
+    let compliance_total = ComplianceBucket::total(&compliance);
+    let uncounted_orgs = uncounted_orgs(&summaries);
     let compliance_by_os = build_compliance_by_os(&summaries, &current, &devices_by_id, &cutoffs);
     let (worst_devices, offline_backlog) =
         build_device_backlogs(&current, &devices_by_id, &maps, &cutoffs);
@@ -786,6 +788,8 @@ fn assemble_result(
         rows,
         devices: summaries,
         compliance,
+        compliance_total,
+        uncounted_orgs,
         compliance_by_os,
         failures,
         severity_by_org,

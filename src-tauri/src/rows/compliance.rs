@@ -39,9 +39,14 @@ pub struct DeviceSummary {
     /// non-patchable devices excluded" means, rather than leaving the reader to infer
     /// it from an Online column and a node class.
     pub rollup_scope: RollupScope,
-    /// Pending current patches ([`is_pending`](super::rollups::is_pending)) on this device, by severity band.
-    /// Sums to `pending_count`; filled by [`apply_device_health`].
+    /// Pending current patches ([`is_pending`](super::rollups::is_pending)) on this
+    /// device, by severity band. Sums to `pending_count`.
     pub pending_by_severity: SeverityCounts,
+    /// Pending patches of **any** band past that band's own SLA window (or undated);
+    /// a band with No SLA never counts. Zero is what makes a counted device Within
+    /// SLA — the same predicate, over the same records, as the worst-devices list's
+    /// "Past SLA".
+    pub past_sla: usize,
     /// Pending urgent (Critical, Important, Security) patches first seen longer ago
     /// than their SLA window (or undated) — [`ComplianceBucket::urgent_past_sla`] for
     /// one device.
@@ -126,6 +131,7 @@ pub fn build_device_summaries(
                 offline: d.is_offline(),
                 rollup_scope: RollupScope::of(d),
                 pending_by_severity: SeverityCounts::default(),
+                past_sla: 0,
                 urgent_past_sla: 0,
                 failed_installs: None,
                 last_contact: super::join::fmt_dt(last_contact),
@@ -149,8 +155,11 @@ pub fn build_device_summaries(
         let s = &mut summaries[i];
         s.pending_count += 1;
         s.pending_by_severity.add(r.severity);
-        if counts_toward_backlog(r) && sla.is_aged(r) {
-            s.urgent_past_sla += 1;
+        if sla.is_aged(r) {
+            s.past_sla += 1;
+            if counts_toward_backlog(r) {
+                s.urgent_past_sla += 1;
+            }
         }
     }
     if let Some(failed) = failed_installs {
@@ -179,13 +188,19 @@ pub fn sort_device_summaries(summaries: &mut [DeviceSummary]) {
 }
 
 /// Per-organization compliance rollup for the summary view and Excel summary sheet.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComplianceBucket {
     pub organization: String,
+    /// Counted devices: in scope, online and patchable ([`rollup_device`]).
     pub devices_total: usize,
-    pub devices_compliant: usize,
-    pub compliance_pct: f64,
+    /// Counted devices with no pending patch past its band's SLA window
+    /// ([`DeviceSummary::past_sla`] is zero) — the headline figure.
+    pub devices_within_sla: usize,
+    pub within_sla_pct: f64,
+    /// Counted devices with no pending patch at all, of any severity or age.
+    pub devices_fully_patched: usize,
+    pub fully_patched_pct: f64,
     /// Pending urgent patches — Critical, Important or Security
     /// ([`Severity::is_urgent`]).
     pub urgent_pending: usize,
@@ -204,7 +219,8 @@ pub struct ComplianceBucket {
 #[derive(Default)]
 struct ComplianceAcc {
     total: usize,
-    compliant: usize,
+    within_sla: usize,
+    fully_patched: usize,
     urgent_pending: usize,
     urgent_past_sla: usize,
     awaiting_approval: usize,
@@ -246,15 +262,14 @@ pub(super) enum ApprovalState {
     Approved,
 }
 
-impl ComplianceAcc {
-    /// Compliant share. An empty bucket is 100%, not 0% — it has no devices to be
-    /// non-compliant.
-    fn pct(&self) -> f64 {
-        if self.total == 0 {
-            100.0
-        } else {
-            (self.compliant as f64 / self.total as f64) * 100.0
-        }
+/// `n` as a percentage of `total`. An empty bucket is 100%, not 0% — it has no
+/// devices to fall short — which no bucket built from devices can be; the fleet
+/// total over an empty scope can, and every surface prints "—" for it instead.
+fn share(n: usize, total: usize) -> f64 {
+    if total == 0 {
+        100.0
+    } else {
+        n as f64 * 100.0 / total as f64
     }
 }
 
@@ -376,8 +391,11 @@ fn accumulate_compliance<'a>(
             None => by_key.entry(key.into_owned()).or_default(),
         };
         acc.total += 1;
+        if s.past_sla == 0 {
+            acc.within_sla += 1;
+        }
         if s.pending_count == 0 {
-            acc.compliant += 1;
+            acc.fully_patched += 1;
         }
     }
 
@@ -437,8 +455,10 @@ pub fn build_compliance(
         .map(|(organization, a)| ComplianceBucket {
             organization,
             devices_total: a.total,
-            devices_compliant: a.compliant,
-            compliance_pct: a.pct(),
+            devices_within_sla: a.within_sla,
+            within_sla_pct: share(a.within_sla, a.total),
+            devices_fully_patched: a.fully_patched,
+            fully_patched_pct: share(a.fully_patched, a.total),
             urgent_pending: a.urgent_pending,
             urgent_past_sla: a.urgent_past_sla,
             awaiting_approval: a.awaiting_approval,
@@ -449,6 +469,54 @@ pub fn build_compliance(
     buckets
 }
 
+impl ComplianceBucket {
+    /// The label the fleet-wide total carries in its organization column.
+    pub const TOTAL_LABEL: &'static str = "All organizations";
+
+    /// The fleet-wide figures: every organization's counts summed and both
+    /// percentages recomputed from the sums, so the total is device-weighted — a
+    /// 2-device org at 50% does not pull a 200-device org at 100% down to 75%. Exact,
+    /// because every counted device and record lands in exactly one organization
+    /// (both halves of [`accumulate_compliance`] key by the same org-name lookup).
+    pub fn total(buckets: &[ComplianceBucket]) -> Self {
+        let sum = |f: fn(&ComplianceBucket) -> usize| buckets.iter().map(f).sum::<usize>();
+        let devices_total = sum(|b| b.devices_total);
+        let devices_within_sla = sum(|b| b.devices_within_sla);
+        let devices_fully_patched = sum(|b| b.devices_fully_patched);
+        Self {
+            organization: Self::TOTAL_LABEL.to_string(),
+            devices_total,
+            devices_within_sla,
+            within_sla_pct: share(devices_within_sla, devices_total),
+            devices_fully_patched,
+            fully_patched_pct: share(devices_fully_patched, devices_total),
+            urgent_pending: sum(|b| b.urgent_pending),
+            urgent_past_sla: sum(|b| b.urgent_past_sla),
+            awaiting_approval: sum(|b| b.awaiting_approval),
+            approved_not_installed: sum(|b| b.approved_not_installed),
+        }
+    }
+}
+
+/// Organizations with devices in scope but none counted — every one offline or not
+/// patchable — so they have no row in the compliance table at all. Named so every
+/// surface can say where they went rather than let an organization silently vanish.
+/// Case-insensitively sorted, like the table.
+pub fn uncounted_orgs(summaries: &[DeviceSummary]) -> Vec<String> {
+    let mut counted: HashMap<&str, bool> = HashMap::new();
+    for s in summaries {
+        *counted.entry(s.organization.as_str()).or_default() |=
+            s.rollup_scope == RollupScope::Included;
+    }
+    let mut out: Vec<String> = counted
+        .into_iter()
+        .filter(|(_, any)| !any)
+        .map(|(org, _)| org.to_string())
+        .collect();
+    out.sort_by(|a, b| cmp_ci(a, b));
+    out
+}
+
 /// Per-OS compliance rollup (grouped by the device's reported OS name) for the
 /// Compliance tab's "Compliance by OS" section. Same shape as [`ComplianceBucket`]
 /// but keyed on OS instead of organization.
@@ -457,8 +525,10 @@ pub fn build_compliance(
 pub struct OsCompliance {
     pub os: String,
     pub devices_total: usize,
-    pub devices_compliant: usize,
-    pub compliance_pct: f64,
+    pub devices_within_sla: usize,
+    pub within_sla_pct: f64,
+    pub devices_fully_patched: usize,
+    pub fully_patched_pct: f64,
     pub urgent_pending: usize,
     pub urgent_past_sla: usize,
     pub awaiting_approval: usize,
@@ -489,8 +559,10 @@ pub fn build_compliance_by_os(
         .map(|(os, a)| OsCompliance {
             os,
             devices_total: a.total,
-            devices_compliant: a.compliant,
-            compliance_pct: a.pct(),
+            devices_within_sla: a.within_sla,
+            within_sla_pct: share(a.within_sla, a.total),
+            devices_fully_patched: a.fully_patched,
+            fully_patched_pct: share(a.fully_patched, a.total),
             urgent_pending: a.urgent_pending,
             urgent_past_sla: a.urgent_past_sla,
             awaiting_approval: a.awaiting_approval,
@@ -529,7 +601,7 @@ impl DeviceSummary {
     /// current patch records, so a 0 there would read as "clean" when it means
     /// "unknown", which is the exact misreading the exclusion exists to prevent.
     /// The band columns are one per [`SeverityCounts::BANDS`] entry, in its order.
-    pub const DEVICE_COLUMNS: [TableColumn<DeviceSummary>; 19] = [
+    pub const DEVICE_COLUMNS: [TableColumn<DeviceSummary>; 21] = [
         ("Organization", |d| TableCell::text(&d.organization)),
         ("Location", |d| TableCell::opt_text(d.location.as_deref())),
         ("Device Role", |d| {
@@ -543,6 +615,10 @@ impl DeviceSummary {
         ("Compliance Scope", |d| {
             TableCell::text(d.rollup_scope.label())
         }),
+        ("Within SLA", |d| match d.rollup_scope {
+            RollupScope::Included => TableCell::text(if d.past_sla == 0 { "Yes" } else { "No" }),
+            RollupScope::Offline | RollupScope::NonPatchable => TableCell::Text(String::new()),
+        }),
         (DEVICE_BAND_HEADERS[0], band_cell::<0>),
         (DEVICE_BAND_HEADERS[1], band_cell::<1>),
         (DEVICE_BAND_HEADERS[2], band_cell::<2>),
@@ -551,6 +627,7 @@ impl DeviceSummary {
         (DEVICE_BAND_HEADERS[5], band_cell::<5>),
         (DEVICE_BAND_HEADERS[6], band_cell::<6>),
         (DEVICE_BAND_HEADERS[7], band_cell::<7>),
+        ("Past SLA", |d| included_count(d, d.past_sla)),
         ("Urgent Past SLA", |d| included_count(d, d.urgent_past_sla)),
         ("Failed Installs", |d| match d.failed_installs {
             Some(n) => TableCell::Count(n),
@@ -594,11 +671,15 @@ fn included_count(d: &DeviceSummary, n: usize) -> TableCell {
 
 impl ComplianceBucket {
     /// The per-organization compliance columns.
-    pub const COLUMNS: [TableColumn<ComplianceBucket>; 8] = [
+    pub const COLUMNS: [TableColumn<ComplianceBucket>; 10] = [
         ("Organization", |b| TableCell::Text(b.organization.clone())),
         ("Devices", |b| TableCell::Count(b.devices_total)),
-        ("Compliant", |b| TableCell::Count(b.devices_compliant)),
-        ("Compliance %", |b| pct_cell(b.compliance_pct)),
+        ("Within SLA", |b| TableCell::Count(b.devices_within_sla)),
+        ("Within SLA %", |b| pct_cell(b.within_sla_pct)),
+        ("Fully Patched", |b| {
+            TableCell::Count(b.devices_fully_patched)
+        }),
+        ("Fully Patched %", |b| pct_cell(b.fully_patched_pct)),
         ("Urgent Pending", |b| TableCell::Count(b.urgent_pending)),
         ("Urgent Past SLA", |b| TableCell::Count(b.urgent_past_sla)),
         ("Awaiting Approval", |b| {
@@ -613,11 +694,15 @@ impl ComplianceBucket {
 impl OsCompliance {
     /// The per-OS compliance columns. Same shape as [`ComplianceBucket::COLUMNS`]
     /// apart from the leading identity column.
-    pub const COLUMNS: [TableColumn<OsCompliance>; 8] = [
+    pub const COLUMNS: [TableColumn<OsCompliance>; 10] = [
         ("OS", |b| TableCell::Text(b.os.clone())),
         ("Devices", |b| TableCell::Count(b.devices_total)),
-        ("Compliant", |b| TableCell::Count(b.devices_compliant)),
-        ("Compliance %", |b| pct_cell(b.compliance_pct)),
+        ("Within SLA", |b| TableCell::Count(b.devices_within_sla)),
+        ("Within SLA %", |b| pct_cell(b.within_sla_pct)),
+        ("Fully Patched", |b| {
+            TableCell::Count(b.devices_fully_patched)
+        }),
+        ("Fully Patched %", |b| pct_cell(b.fully_patched_pct)),
         ("Urgent Pending", |b| TableCell::Count(b.urgent_pending)),
         ("Urgent Past SLA", |b| TableCell::Count(b.urgent_past_sla)),
         ("Awaiting Approval", |b| {

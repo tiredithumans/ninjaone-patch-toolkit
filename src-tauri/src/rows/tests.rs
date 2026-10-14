@@ -79,6 +79,7 @@ fn device_band_headers_follow_the_bands() {
             optional: 17,
             unknown: 19,
         },
+        past_sla: 0,
         urgent_past_sla: 0,
         failed_installs: None,
         last_contact: None,
@@ -598,10 +599,10 @@ fn compliance_counts_compliant_and_aged_backlog() {
     assert_eq!(buckets.len(), 1);
     let b = &buckets[0];
     assert_eq!(b.devices_total, 2);
-    assert_eq!(b.devices_compliant, 1);
+    assert_eq!(b.devices_fully_patched, 1);
     assert_eq!(b.urgent_pending, 2);
     assert_eq!(b.urgent_past_sla, 1);
-    assert!((b.compliance_pct - 50.0).abs() < 1e-9);
+    assert!((b.fully_patched_pct - 50.0).abs() < 1e-9);
 }
 
 /// The two halves of a compliance bucket must describe the *same* devices.
@@ -662,7 +663,7 @@ fn a_current_patch_with_no_status_still_counts_as_pending() {
     let summaries = summaries_for(&[&d], &refs(&current), &sla30(), &maps);
     assert_eq!(summaries[0].pending_count, 1);
     let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
-    assert_eq!(buckets[0].devices_compliant, 0);
+    assert_eq!(buckets[0].devices_fully_patched, 0);
     assert_eq!(buckets[0].urgent_pending, 1);
     // 90 days old → the "61-90 days" bucket.
     assert_eq!(
@@ -674,12 +675,13 @@ fn a_current_patch_with_no_status_still_counts_as_pending() {
 /// Rounding must never manufacture a clean fleet.
 #[test]
 fn a_compliance_percentage_never_rounds_up_to_a_hundred() {
-    assert_eq!(format_pct(100.0), "100%");
-    assert_eq!(format_pct(99.9), "99%");
-    assert_eq!(format_pct(99.5), "99%");
-    assert_eq!(format_pct(94.6), "95%");
-    assert_eq!(format_pct(0.4), "0%");
-    // Same rule at the workbook's one decimal.
+    assert_eq!(format_pct(100.0), "100.0%");
+    assert_eq!(format_pct(99.96), "99.9%");
+    assert_eq!(format_pct(99.9), "99.9%");
+    assert_eq!(format_pct(94.64), "94.6%");
+    assert_eq!(format_pct(87.5), "87.5%");
+    assert_eq!(format_pct(0.04), "0.0%");
+    // Same rule, same value, in the workbook's number cell.
     let cell = |pct| match pct_cell(pct) {
         TableCell::Number(n) => n,
         _ => unreachable!("pct_cell always yields a number"),
@@ -705,7 +707,7 @@ fn compliance_excludes_offline_devices_from_the_denominator() {
         "offline device excluded from denominator"
     );
     assert_eq!(
-        b.devices_compliant, 0,
+        b.devices_fully_patched, 0,
         "the online device has a pending patch"
     );
 }
@@ -724,14 +726,14 @@ fn compliance_by_os_groups_devices_and_patches_by_os() {
     let win11 = &buckets[0];
     assert_eq!(win11.os, "Windows 11 Pro");
     assert_eq!(win11.devices_total, 1);
-    assert_eq!(win11.devices_compliant, 1);
+    assert_eq!(win11.devices_fully_patched, 1);
     assert_eq!(win11.urgent_pending, 0);
-    assert!((win11.compliance_pct - 100.0).abs() < 1e-9);
+    assert!((win11.fully_patched_pct - 100.0).abs() < 1e-9);
     let server = &buckets[1];
     assert_eq!(server.os, "Windows Server 2022");
     assert_eq!(server.devices_total, 1);
     assert_eq!(
-        server.devices_compliant, 0,
+        server.devices_fully_patched, 0,
         "the device has a pending patch"
     );
     assert_eq!(server.urgent_pending, 1);
@@ -769,6 +771,8 @@ fn query_summary_trims_to_first_page_and_reboot_subset() {
     let result = QueryResult {
         rows,
         devices,
+        compliance_total: ComplianceBucket::total(&compliance),
+        uncounted_orgs: Vec::new(),
         compliance,
         compliance_by_os: Vec::new(),
         failures: Vec::new(),
@@ -979,7 +983,7 @@ fn devices_ninjaone_cannot_patch_are_excluded_from_every_fleet_health_rollup() {
         "the server and the unclassed device count; the switch does not"
     );
     assert_eq!(
-        org.devices_compliant, 1,
+        org.devices_fully_patched, 1,
         "only the unclassed device is clean"
     );
 
@@ -2588,6 +2592,126 @@ fn security_patches_are_urgent_and_moderate_ones_are_not() {
     assert_eq!(org.urgent_pending, 2, "the Security and the Critical");
     assert_eq!(org.urgent_past_sla, 1, "only the 45-day-old Security");
     assert_eq!(summaries[0].urgent_past_sla, 1);
+}
+
+/// Within SLA is "no pending record past its own band's window": a device whose
+/// only backlog is recent, or held to No SLA, is Within SLA but not Fully patched;
+/// one past SLA in any band is neither. It reconciles with the worst-devices list,
+/// which ranks by the same per-device past-SLA count.
+#[test]
+fn within_sla_counts_devices_with_nothing_past_its_window() {
+    let devices = [
+        device(1, 10, "Windows Server 2022"), // recent Critical only
+        device(2, 10, "Windows Server 2022"), // old Optional, held to No SLA
+        device(3, 10, "Windows Server 2022"), // old Moderate: past SLA
+        device(4, 10, "Windows Server 2022"), // clean
+    ];
+    let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+    let maps = maps();
+    let current = vec![
+        patch(1, "MANUAL", "CRITICAL", Some(3)),
+        patch(2, "MANUAL", "OPTIONAL", Some(200)),
+        patch(3, "MANUAL", "MODERATE", Some(45)),
+    ];
+    let sla = SlaCutoffs::new(&SlaPolicy::default(), Utc::now()); // Optional: No SLA
+    let refs = refs(&current);
+    let summaries = summaries_for(&devices.iter().collect::<Vec<_>>(), &refs, &sla, &maps);
+    let org = &build_compliance(&summaries, &refs, &by_id, &maps, &sla)[0];
+    assert_eq!(org.devices_total, 4);
+    assert_eq!(org.devices_within_sla, 3, "devices 1, 2 and 4");
+    assert_eq!(org.devices_fully_patched, 1, "device 4 only");
+    assert!((org.within_sla_pct - 75.0).abs() < 1e-9);
+    assert!((org.fully_patched_pct - 25.0).abs() < 1e-9);
+    assert!(org.devices_fully_patched <= org.devices_within_sla);
+
+    let (worst, _) = build_device_backlogs(&refs, &by_id, &maps, &sla);
+    let past: Vec<i64> = worst
+        .devices
+        .iter()
+        .filter(|d| d.past_sla > 0)
+        .map(|d| d.device_id)
+        .collect();
+    assert_eq!(
+        past,
+        [3],
+        "the worst list's Past SLA marks exactly the device out of SLA"
+    );
+    for s in &summaries {
+        let listed = worst.devices.iter().find(|d| d.device_id == s.device_id);
+        assert_eq!(
+            listed.map_or(0, |d| d.past_sla),
+            s.past_sla,
+            "{}",
+            s.device_name
+        );
+    }
+}
+
+/// The fleet total is device-weighted: summed counts, recomputed percentages —
+/// never the mean of the organization rows.
+#[test]
+fn the_fleet_total_is_device_weighted() {
+    let bucket = |org: &str, total, within, full| ComplianceBucket {
+        organization: org.into(),
+        devices_total: total,
+        devices_within_sla: within,
+        within_sla_pct: within as f64 * 100.0 / total as f64,
+        devices_fully_patched: full,
+        fully_patched_pct: full as f64 * 100.0 / total as f64,
+        urgent_pending: 1,
+        urgent_past_sla: 1,
+        awaiting_approval: 1,
+        approved_not_installed: 1,
+    };
+    let total = ComplianceBucket::total(&[bucket("A", 2, 1, 0), bucket("B", 198, 198, 99)]);
+    assert_eq!(total.organization, "All organizations");
+    assert_eq!(total.devices_total, 200);
+    assert_eq!(total.devices_within_sla, 199);
+    assert!(
+        (total.within_sla_pct - 99.5).abs() < 1e-9,
+        "not the 75% mean of 50 and 100"
+    );
+    assert!((total.fully_patched_pct - 49.5).abs() < 1e-9);
+    assert_eq!(
+        (
+            total.urgent_pending,
+            total.urgent_past_sla,
+            total.awaiting_approval
+        ),
+        (2, 2, 2)
+    );
+    assert_eq!(ComplianceBucket::total(&[]).devices_total, 0);
+}
+
+/// An organization whose devices are all offline or non-patchable has no row; it is
+/// named instead, and an organization with any counted device is not.
+#[test]
+fn organizations_with_no_counted_device_are_named() {
+    let mut offline = device(1, 10, "Windows Server 2022");
+    offline.offline = Some(true);
+    let mut switch = device(2, 20, "Cisco IOS");
+    switch.node_class = Some("NMS_SWITCH".into());
+    let mixed_offline = {
+        let mut d = device(3, 30, "Windows Server 2022");
+        d.offline = Some(true);
+        d
+    };
+    let mixed_online = device(4, 30, "Windows Server 2022");
+    let maps = LookupMaps {
+        orgs: HashMap::from([
+            (10, "Contoso".to_string()),
+            (20, "adatum".to_string()),
+            (30, "Fabrikam".to_string()),
+        ]),
+        ..maps()
+    };
+    let summaries = summaries_for(
+        &[&offline, &switch, &mixed_offline, &mixed_online],
+        &[],
+        &sla30(),
+        &maps,
+    );
+    assert_eq!(uncounted_orgs(&summaries), ["adatum", "Contoso"]);
 }
 
 /// The compliance table's aged column follows the per-band policy too.

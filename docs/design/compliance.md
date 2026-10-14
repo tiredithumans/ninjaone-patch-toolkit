@@ -344,12 +344,43 @@ exactly the agent symptom this list exists for. An undated approved patch counts
 The workbook writes every stuck device on a **Stuck Approvals** sheet with the threshold as a
 footnote; the report and the Compliance tab show the oldest ones and say how many more there are.
 
-## "Compliant" and "Urgent Pending" grade differently, on purpose
+## Within SLA is the headline; Fully patched is the strict figure beside it
 
-Compliant is `pending_count == 0` over patches of *any* severity (`is_pending`), while the two
-SLA columns count only the urgent bands (`counts_toward_backlog`, `Severity::is_urgent`:
-Critical, Important, Security). A row can legitimately read "10 devices · 4 compliant · 0 urgent
-pending".
+Every compliance table carries two device counts over the same `rollup_device` population:
+
+- **Within SLA** — `DeviceSummary::past_sla == 0`: no pending record, of any band, first seen
+  longer ago than its band's window (`SlaCutoffs::is_aged`; a No-SLA band never counts). This
+  is the headline: it measures the fleet against the policy the operator set. "Zero pending"
+  alone failed a device for an Optional patch nobody intends to approve and for a Critical
+  found an hour ago, so on a real Windows fleet it hovered near zero and moved for reasons that
+  were not a patching backlog.
+- **Fully patched** — `pending_count == 0` over *any* severity and age (`is_pending`); the old
+  "Compliant". Kept because "nothing outstanding at all" is still a question worth answering, and
+  because Fully patched ≤ Within SLA always, so the gap is the in-window backlog.
+
+`past_sla` is the very count the worst-devices list ranks by (`DeviceBacklog::past_sla`, the same
+`is_aged` over the same records), so a device is Within SLA exactly when it would show Past SLA
+0 there — `within_sla_counts_devices_with_nothing_past_its_window` pins it.
+
+The two urgent columns grade differently again: they count only Critical, Important and Security
+records (`counts_toward_backlog`, `Severity::is_urgent`). A row can legitimately read "10 devices ·
+9 within SLA · 4 fully patched · 0 urgent pending".
+
+### The fleet total is device-weighted
+
+`QueryResult.compliance_total` (`ComplianceBucket::total`, labelled "All organizations") sums the
+organizations' counts and recomputes both percentages from the sums — never the mean of the
+rows, which would let a 2-device org weigh as much as a 2,000-device one. It is exact because both
+halves of `accumulate_compliance` key by the same org-name lookup, so every counted device and
+record lands in one organization. An empty scope's total is 100% by the bucket rule, so every
+surface prints "—" when `devices_total` is 0. The run history reads its fleet figures from it.
+
+### Organizations with no counted device are named
+
+An organization whose devices are all offline or non-patchable gets no bucket (a bucket with no
+devices once read "0 devices · 100% compliant"), so it used to vanish from the table without a
+word. `QueryResult.uncounted_orgs` (`rows::uncounted_orgs`) names them, and the tab prints
+`util::uncounted_orgs_note` under the table (capped at ten names).
 
 ## `rows::is_pending` is an exclude list
 
@@ -369,9 +400,11 @@ sheet and missing from the Patches sheet.
 
 ## A percentage never rounds up to 100
 
-`rows::format_pct` (and its `web-rs` mirror) caps anything below 100 at 99%, and `pct_cell` does
-the same at one decimal. Plain `{:.0}%` prints "100%" from 99.5% up, so 199 of 200 devices
-patched reads as a clean fleet — the one rounding error here that changes what an operator does.
+Every percentage is one decimal on every surface — `rows::format_pct` and `pct_cell` share
+`round_pct`, the report prints number cells `{:.1}`, and the `web-rs` `format_pct` mirrors it (the
+tab once showed 0 decimals beside the Trend tab's 1). Anything below 100 caps at 99.9. Plain
+rounding prints "100.0%" from 99.95% up, so 1,999 of 2,000 devices patched reads as a clean fleet —
+the one rounding error here that changes what an operator does.
 
 ## Enumerate bands through an accessor list, never by matching a label string
 
@@ -383,7 +416,8 @@ overflow the bar. See [severity.md](./severity.md).
 ## Table headers come from `rows::TableColumn` spellings
 
 The Leptos tables are hand-written and are not wired to `COLUMNS`, so they are kept spelled
-identically by review: "Compliance %", "Urgent Pending", "Urgent Past SLA",
+identically by review: "Within SLA", "Within SLA %", "Fully Patched", "Fully Patched %",
+"Urgent Pending", "Urgent Past SLA",
 "Awaiting Approval", "Approved, Not Installed", "Device Role", "Pending Patches", the Failures table's seven columns including "Patch Type", and the
 two device lists (`DeviceBacklog::WORST_COLUMNS` / `OFFLINE_COLUMNS`), and `StuckDevice::COLUMNS`. The in-app first seen →
 installed table drops `InstallLatency::COLUMNS`' "(Days)" suffixes because its cells carry the

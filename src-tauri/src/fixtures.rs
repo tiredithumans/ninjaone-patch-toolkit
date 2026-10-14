@@ -30,11 +30,12 @@ use crate::filter::FilterParams;
 use crate::history::RunRecord;
 use crate::model::{Device, Location, Organization, OsInfo, Patch, PatchStatus, RebootMode, Role};
 use crate::rows::{
-    GroupBy, InstallWindow, LookupMaps, PatchFamilies, PatchRecord, PatchSource, QueryResult,
-    QuerySummary, SlaCutoffs, build_age_buckets, build_approval_backlog, build_compliance,
-    build_compliance_by_os, build_device_backlogs, build_device_summaries, build_failures,
-    build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
-    device_detail, page_rows, rows_by_device, slice_groups, sort_device_summaries,
+    ComplianceBucket, GroupBy, InstallWindow, LookupMaps, PatchFamilies, PatchRecord, PatchSource,
+    QueryResult, QuerySummary, SlaCutoffs, build_age_buckets, build_approval_backlog,
+    build_compliance, build_compliance_by_os, build_device_backlogs, build_device_summaries,
+    build_failures, build_groups, build_query_scope, build_rows, build_severity_by_org,
+    build_time_to_install, device_detail, page_rows, rows_by_device, slice_groups,
+    sort_device_summaries, uncounted_orgs,
 };
 use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaExempt, SlaPolicy};
 
@@ -93,6 +94,9 @@ const INSTANCE: &str = "https://app.ninjarmm.com";
 const ORG_ID: i64 = 10;
 const LOCATION_ID: i64 = 100;
 const ROLE_ID: i64 = 2;
+/// An organization whose only device is offline, so it has no counted device and
+/// the result names it in `uncounted_orgs`.
+const OTHER_ORG_ID: i64 = 11;
 const BATCH_ID: u64 = 7;
 
 /// `days` before [`FIXTURE_NOW`], as the epoch seconds a NinjaOne record carries.
@@ -209,10 +213,16 @@ fn assert_every_field_is_exercised(fixture: &Value) {
 /// sample is `Some`, so a field made optional needs a `None` sample added too.
 #[test]
 fn ipc_fixture_is_current() {
-    let orgs = vec![Organization {
-        id: ORG_ID,
-        name: "Contoso".into(),
-    }];
+    let orgs = vec![
+        Organization {
+            id: ORG_ID,
+            name: "Contoso".into(),
+        },
+        Organization {
+            id: OTHER_ORG_ID,
+            name: "Fabrikam".into(),
+        },
+    ];
     let locations = vec![Location {
         id: LOCATION_ID,
         name: "HQ".into(),
@@ -225,11 +235,22 @@ fn ipc_fixture_is_current() {
     }];
     let maps = LookupMaps::build(&orgs, &locations, &roles);
 
-    // One device per `RollupScope`: included, offline, and online but unpatchable.
+    // One device per `RollupScope`: included, offline, and online but unpatchable;
+    // and a second organization whose only device is offline.
     let devices = [
         device(1, "web-01", "WINDOWS_SERVER", "Windows Server 2022", false),
         device(2, "web-02", "WINDOWS_SERVER", "Windows Server 2022", true),
         device(3, "core-sw-01", "NMS_SWITCH", "Cisco IOS XE", false),
+        Device {
+            organization_id: Some(OTHER_ORG_ID),
+            ..device(
+                4,
+                "fab-db-01",
+                "WINDOWS_SERVER",
+                "Windows Server 2019",
+                true,
+            )
+        },
     ];
     let device_refs: Vec<&Device> = devices.iter().collect();
     let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
@@ -413,8 +434,11 @@ fn ipc_fixture_is_current() {
         &statuses,
     );
 
+    let compliance = build_compliance(&summaries, &all_current, &by_id, &maps, &cutoffs);
     let result = QueryResult {
-        compliance: build_compliance(&summaries, &all_current, &by_id, &maps, &cutoffs),
+        compliance_total: ComplianceBucket::total(&compliance),
+        uncounted_orgs: uncounted_orgs(&summaries),
+        compliance,
         compliance_by_os: build_compliance_by_os(&summaries, &all_current, &by_id, &cutoffs),
         failures: build_failures(&rows),
         severity_by_org: build_severity_by_org(&all_current, &by_id, &maps),

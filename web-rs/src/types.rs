@@ -179,6 +179,10 @@ pub struct DeviceSummary {
     pub rollup_scope: RollupScope,
     #[serde(default)]
     pub pending_by_severity: SeverityCounts,
+    /// Pending patches of any band past that band's SLA window (or undated); zero is
+    /// what makes a counted device Within SLA.
+    #[serde(default)]
+    pub past_sla: usize,
     /// Pending urgent (Critical, Important, Security) past the SLA window (or undated).
     #[serde(default)]
     pub urgent_past_sla: usize,
@@ -214,14 +218,21 @@ pub struct DeviceDetail {
     pub rows_total: usize,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+/// One organization's compliance figures, or — as `QueryResult::compliance_total` —
+/// the device-weighted fleet total. Mirrors `rows::ComplianceBucket`.
+#[derive(Clone, Debug, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct ComplianceBucket {
     pub organization: String,
+    /// Counted devices: in scope, online and patchable.
     pub devices_total: usize,
-    pub devices_compliant: usize,
-    pub compliance_pct: f64,
+    /// Counted devices with no pending patch past its severity's SLA window.
+    pub devices_within_sla: usize,
+    pub within_sla_pct: f64,
+    /// Counted devices with no pending patch at all.
+    pub devices_fully_patched: usize,
+    pub fully_patched_pct: f64,
     pub urgent_pending: usize,
     pub urgent_past_sla: usize,
     /// Pending approval (vendor status `MANUAL`), any severity.
@@ -240,8 +251,10 @@ pub struct ComplianceBucket {
 pub struct OsCompliance {
     pub os: String,
     pub devices_total: usize,
-    pub devices_compliant: usize,
-    pub compliance_pct: f64,
+    pub devices_within_sla: usize,
+    pub within_sla_pct: f64,
+    pub devices_fully_patched: usize,
+    pub fully_patched_pct: f64,
     pub urgent_pending: usize,
     pub urgent_past_sla: usize,
     #[serde(default)]
@@ -577,6 +590,12 @@ pub struct QueryResult {
     /// Only the devices flagged for reboot (all the reboot view needs).
     pub reboot_devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// The device-weighted fleet total of `compliance`, labelled "All organizations".
+    #[serde(default)]
+    pub compliance_total: ComplianceBucket,
+    /// Organizations in scope with no counted device, so with no row in `compliance`.
+    #[serde(default)]
+    pub uncounted_orgs: Vec<String>,
     /// Compliance grouped by OS name (the "Compliance by OS" section).
     pub compliance_by_os: Vec<OsCompliance>,
     /// FAILED-install rollup (empty unless the FAILED status was queried).

@@ -51,37 +51,35 @@ pub fn utc_text(ts: i64) -> Option<String> {
 /// of once per renderer.
 pub type TableColumn<T> = (&'static str, fn(&T) -> TableCell);
 
-/// Rounds a percentage to one decimal for display, so the workbook and the report
-/// cannot disagree about precision — and never *up* to a full 100. See
-/// [`format_pct`], which applies the same rule at zero decimals.
-pub(super) fn pct_cell(pct: f64) -> TableCell {
-    let rounded = (pct * 10.0).round() / 10.0;
-    TableCell::Number(if pct >= 100.0 {
-        100.0
-    } else {
-        rounded.min(99.9)
-    })
-}
-
-/// Formats a compliance percentage at zero decimals **without ever rounding up to
-/// 100%**.
+/// A percentage rounded to one decimal **without ever rounding up to 100**.
 ///
 /// A compliance report that prints "100%" for a fleet that is not fully compliant is
-/// the one rounding error in this app that can send someone home: plain `{:.0}%`
-/// renders anything from 99.5% up as `100%`, so 199 of 200 devices patched read as
-/// "done". Values below 100 are capped at 99%, which understates by less than a
-/// point and never claims a clean fleet that isn't. Exactly 100.0 still prints
-/// `100%`.
-///
-/// Mirrored in `web-rs/src/app/util/format.rs::format_pct` for the in-app tables and charts;
-/// the two crates share no code, so the rule is written twice on purpose.
-pub fn format_pct(pct: f64) -> String {
-    let shown = if pct >= 100.0 {
+/// the one rounding error in this app that can send someone home: plain rounding
+/// renders anything from 99.95% up as `100.0%`, so 1,999 of 2,000 devices patched
+/// read as "done". Values below 100 are capped at 99.9, which understates by less
+/// than a tenth of a point and never claims a clean fleet that isn't. Exactly 100.0
+/// stays 100.
+fn round_pct(pct: f64) -> f64 {
+    if pct >= 100.0 {
         100.0
     } else {
-        pct.round().min(99.0)
-    };
-    format!("{shown:.0}%")
+        ((pct * 10.0).round() / 10.0).min(99.9)
+    }
+}
+
+/// A percentage as a workbook/report number cell — [`round_pct`], so the workbook,
+/// the report and the in-app tables all show the same one-decimal value.
+pub(super) fn pct_cell(pct: f64) -> TableCell {
+    TableCell::Number(round_pct(pct))
+}
+
+/// A percentage as text at one decimal, never rounded up to 100 ([`round_pct`]):
+/// `87.5%`, `99.9%`, `100.0%`.
+///
+/// Mirrored in `web-rs/src/app/util/format.rs::format_pct` for the in-app tables and
+/// charts; the two crates share no code, so the rule is written twice on purpose.
+pub fn format_pct(pct: f64) -> String {
+    format!("{:.1}%", round_pct(pct))
 }
 
 /// Excel's hard limit on the characters in one cell. `rust_xlsxwriter` rejects a

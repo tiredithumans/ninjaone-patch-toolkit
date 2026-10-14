@@ -11,7 +11,7 @@
 use leptos::prelude::*;
 
 use super::AppState;
-use super::util::{self, format_pct, format_pct_tenths, group_thousands, severity_raw};
+use super::util::{self, format_pct, group_thousands, severity_raw};
 use crate::types::{OrgSeverity, SeverityCounts};
 
 /// Severity bands in most-to-least-urgent order: display label, the CSS class that
@@ -163,7 +163,7 @@ pub(crate) fn ComplianceCharts() -> impl IntoView {
     view! {
         <div class="charts">
             <div class="chart-card">
-                <h3 class="chart-title">"Compliance by organization"</h3>
+                <h3 class="chart-title">"Within SLA by organization"</h3>
                 <ComplianceBars/>
             </div>
             <div class="chart-card">
@@ -251,12 +251,12 @@ fn ComplianceBars() -> impl IntoView {
                     .map(|r| {
                         r.compliance
                             .iter()
-                            .map(|b| (b.organization.clone(), b.compliance_pct))
+                            .map(|b| (b.organization.clone(), b.within_sla_pct))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
             });
-            compliance_bars("Compliance by organization", items)
+            compliance_bars("Within SLA by organization", items)
         }}
     }
 }
@@ -273,12 +273,12 @@ pub(crate) fn ComplianceByOsBars() -> impl IntoView {
                     .map(|r| {
                         r.compliance_by_os
                             .iter()
-                            .map(|b| (b.os.clone(), b.compliance_pct))
+                            .map(|b| (b.os.clone(), b.within_sla_pct))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
             });
-            compliance_bars("Compliance by OS", items)
+            compliance_bars("Within SLA by OS", items)
         }}
     }
 }
@@ -614,7 +614,7 @@ pub(crate) fn TrendLine(
     // The capped formatter: a compliance of 99.96 must not print as "100.0%".
     let fmt = move |v: f64| {
         if percent {
-            format_pct_tenths(v)
+            format_pct(v)
         } else {
             group_thousands(v.max(0.0).round() as usize)
         }

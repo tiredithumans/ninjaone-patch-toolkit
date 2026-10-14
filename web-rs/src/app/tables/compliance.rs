@@ -43,6 +43,20 @@ pub(super) fn ComplianceTab() -> impl IntoView {
                 .unwrap_or_default()
         })
     });
+    // The device-weighted fleet total, under the organization table only — the OS
+    // table's total would be the same numbers again.
+    let org_total: Signal<Option<ComplianceRow>> = Signal::derive(move || {
+        state
+            .query
+            .result
+            .with(|r| r.as_ref().map(|r| ComplianceRow::from(&r.compliance_total)))
+    });
+    let uncounted = move || {
+        state.query.result.with(|r| {
+            r.as_ref()
+                .and_then(|r| util::uncounted_orgs_note(&r.uncounted_orgs))
+        })
+    };
     let os_rows: Signal<Vec<ComplianceRow>> = Signal::derive(move || {
         state.query.result.with(|r| {
             r.as_ref()
@@ -70,7 +84,13 @@ pub(super) fn ComplianceTab() -> impl IntoView {
             <ComplianceScopeNote/>
             <SlaPolicyNote/>
             <ComplianceCharts/>
-            <ComplianceRollupTable first_col="Organization" rows=org_rows drill=RollupDrill::Organization/>
+            <ComplianceRollupTable
+                first_col="Organization"
+                rows=org_rows
+                total=org_total
+                drill=RollupDrill::Organization
+            />
+            {move || uncounted().map(|note| view! { <p class="scope-note">{note}</p> })}
             <StuckApprovals/>
             <section class="compliance-os">
                 <h3 class="chart-title">"Compliance by OS"</h3>
@@ -92,8 +112,10 @@ pub(super) fn ComplianceTab() -> impl IntoView {
 struct ComplianceRow {
     label: String,
     devices_total: usize,
-    devices_compliant: usize,
-    compliance_pct: f64,
+    devices_within_sla: usize,
+    within_sla_pct: f64,
+    devices_fully_patched: usize,
+    fully_patched_pct: f64,
     urgent_pending: usize,
     urgent_past_sla: usize,
     awaiting_approval: usize,
@@ -105,8 +127,10 @@ impl From<&ComplianceBucket> for ComplianceRow {
         Self {
             label: b.organization.clone(),
             devices_total: b.devices_total,
-            devices_compliant: b.devices_compliant,
-            compliance_pct: b.compliance_pct,
+            devices_within_sla: b.devices_within_sla,
+            within_sla_pct: b.within_sla_pct,
+            devices_fully_patched: b.devices_fully_patched,
+            fully_patched_pct: b.fully_patched_pct,
             urgent_pending: b.urgent_pending,
             urgent_past_sla: b.urgent_past_sla,
             awaiting_approval: b.awaiting_approval,
@@ -120,8 +144,10 @@ impl From<&OsCompliance> for ComplianceRow {
         Self {
             label: b.os.clone(),
             devices_total: b.devices_total,
-            devices_compliant: b.devices_compliant,
-            compliance_pct: b.compliance_pct,
+            devices_within_sla: b.devices_within_sla,
+            within_sla_pct: b.within_sla_pct,
+            devices_fully_patched: b.devices_fully_patched,
+            fully_patched_pct: b.fully_patched_pct,
             urgent_pending: b.urgent_pending,
             urgent_past_sla: b.urgent_past_sla,
             awaiting_approval: b.awaiting_approval,
@@ -148,13 +174,29 @@ enum RollupDrill {
 fn ComplianceRollupTable(
     first_col: &'static str,
     #[prop(into)] rows: Signal<Vec<ComplianceRow>>,
+    /// The fleet total, drawn as a footer row once there are two rows to total.
+    #[prop(optional, into)]
+    total: Option<Signal<Option<ComplianceRow>>>,
     #[prop(optional)] drill: Option<RollupDrill>,
 ) -> impl IntoView {
     let state = expect_context::<AppState>();
+    let footer = move || {
+        let total = total?.get()?;
+        (rows.with(Vec::len) >= 2).then(|| {
+            view! {
+                <tfoot>
+                    <tr class="total-row">
+                        <th scope="row">{total.label.clone()}</th>
+                        <ComplianceCells row=total/>
+                    </tr>
+                </tfoot>
+            }
+        })
+    };
     view! {
         <Show
             when=move || rows.with(|r| !r.is_empty())
-            fallback=|| view! { <p class="empty">"No compliance data yet."</p> }
+            fallback=|| view! { <p class="empty">"No online, patchable device in scope."</p> }
         >
             <div class="table-wrap">
                 <table>
@@ -163,8 +205,10 @@ fn ComplianceRollupTable(
                             <th scope="col">{first_col}</th>
                             // Canonical spellings from `rows::ComplianceBucket::COLUMNS`.
                             <th scope="col">"Devices"</th>
-                            <th scope="col">"Compliant"</th>
-                            <th scope="col">"Compliance %"</th>
+                            <th scope="col">"Within SLA"</th>
+                            <th scope="col">"Within SLA %"</th>
+                            <th scope="col">"Fully Patched"</th>
+                            <th scope="col">"Fully Patched %"</th>
                             <th scope="col">"Urgent Pending"</th>
                             <th scope="col">"Urgent Past SLA"</th>
                             // Vendor status MANUAL vs APPROVED, any severity — see
@@ -179,10 +223,6 @@ fn ComplianceRollupTable(
                             rows.get()
                                 .into_iter()
                                 .map(|b| {
-                                    let pct = util::format_pct(b.compliance_pct);
-                                    let (aged_class, aged_label, aged_title) = aged_badge(
-                                        b.urgent_past_sla,
-                                    );
                                     let label_cell = match drill {
                                         Some(RollupDrill::Organization) => {
                                             let org = b.label.clone();
@@ -210,26 +250,39 @@ fn ComplianceRollupTable(
                                     view! {
                                         <tr>
                                             {label_cell}
-                                            <td>{b.devices_total}</td>
-                                            <td>{b.devices_compliant}</td>
-                                            <td>{pct}</td>
-                                            <td>{b.urgent_pending}</td>
-                                            <td>
-                                                <span class=aged_class title=aged_title>
-                                                    {aged_label}
-                                                </span>
-                                            </td>
-                                            <td>{b.awaiting_approval}</td>
-                                            <td>{b.approved_not_installed}</td>
+                                            <ComplianceCells row=b/>
                                         </tr>
                                     }
                                 })
                                 .collect_view()
                         }}
                     </tbody>
+                    {footer}
                 </table>
             </div>
         </Show>
+    }
+}
+
+/// Every cell of a compliance row after its label, shared by the body rows and the
+/// fleet-total footer so the two cannot render a figure differently.
+#[component]
+fn ComplianceCells(row: ComplianceRow) -> impl IntoView {
+    let (aged_class, aged_label, aged_title) = aged_badge(row.urgent_past_sla);
+    view! {
+        <td>{row.devices_total}</td>
+        <td>{row.devices_within_sla}</td>
+        <td>{util::format_pct(row.within_sla_pct)}</td>
+        <td>{row.devices_fully_patched}</td>
+        <td>{util::format_pct(row.fully_patched_pct)}</td>
+        <td>{row.urgent_pending}</td>
+        <td>
+            <span class=aged_class title=aged_title>
+                {aged_label}
+            </span>
+        </td>
+        <td>{row.awaiting_approval}</td>
+        <td>{row.approved_not_installed}</td>
     }
 }
 

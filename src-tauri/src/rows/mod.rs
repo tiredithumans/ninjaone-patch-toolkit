@@ -46,6 +46,12 @@ pub struct QueryResult {
     pub rows: Vec<PatchRow>,
     pub devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// The fleet-wide figures (`ComplianceBucket::total` of `compliance`) —
+    /// device-weighted, labelled "All organizations".
+    pub compliance_total: ComplianceBucket,
+    /// Organizations in scope with no counted device ([`uncounted_orgs`]), which
+    /// therefore have no row in `compliance`.
+    pub uncounted_orgs: Vec<String>,
     /// Compliance grouped by OS name (the Compliance tab's "Compliance by OS").
     pub compliance_by_os: Vec<OsCompliance>,
     /// FAILED-install rollup (empty unless the FAILED status was queried).
@@ -129,6 +135,10 @@ pub struct QuerySummary {
     /// device list stays in the cache for export.
     pub reboot_devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// See [`QueryResult::compliance_total`].
+    pub compliance_total: ComplianceBucket,
+    /// See [`QueryResult::uncounted_orgs`].
+    pub uncounted_orgs: Vec<String>,
     /// Compliance grouped by OS name (the Compliance tab's "Compliance by OS").
     pub compliance_by_os: Vec<OsCompliance>,
     /// FAILED-install rollup — small (one entry per failing patch), so it ships
@@ -201,6 +211,8 @@ impl QuerySummary {
                 .cloned()
                 .collect(),
             compliance: result.compliance.clone(),
+            compliance_total: result.compliance_total.clone(),
+            uncounted_orgs: result.uncounted_orgs.clone(),
             compliance_by_os: result.compliance_by_os.clone(),
             failures: result.failures.clone(),
             severity_by_org: result.severity_by_org.clone(),

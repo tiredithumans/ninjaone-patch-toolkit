@@ -222,6 +222,7 @@ fn DeviceHealth(device: DeviceSummary) -> impl IntoView {
         .collect_view();
     let (aged_class, aged_label, aged_title) = aged_badge(device.urgent_past_sla);
     let failed = util::failed_installs_label(device.failed_installs);
+    let within_sla = util::within_sla_label(&device).unwrap_or_default();
     view! {
         <dl class="device-facts">{facts}</dl>
         {match excluded {
@@ -240,6 +241,10 @@ fn DeviceHealth(device: DeviceSummary) -> impl IntoView {
                         <div class="device-fact">
                             <dt>"Pending Patches"</dt>
                             <dd>{device.pending_count}</dd>
+                        </div>
+                        <div class="device-fact">
+                            <dt>"Within SLA"</dt>
+                            <dd>{within_sla}</dd>
                         </div>
                         <div class="device-fact">
                             <dt>"Urgent Past SLA"</dt>

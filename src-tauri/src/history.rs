@@ -158,7 +158,7 @@ impl RunRecord {
     /// Projects a completed result. `instance` comes from settings rather than the
     /// result, which carries no tenant of its own.
     pub fn from_result(result: &QueryResult, instance: &str) -> Self {
-        let devices_compliant = result.compliance.iter().map(|c| c.devices_compliant).sum();
+        let total = &result.compliance_total;
         let pending_by_org: std::collections::HashMap<&str, usize> = result
             .severity_by_org
             .iter()
@@ -170,7 +170,7 @@ impl RunRecord {
             .map(|c| OrgRun {
                 organization: c.organization.clone(),
                 devices_in_scope: c.devices_total,
-                devices_compliant: c.devices_compliant,
+                devices_compliant: c.devices_fully_patched,
                 pending: pending_by_org
                     .get(c.organization.as_str())
                     .copied()
@@ -186,18 +186,18 @@ impl RunRecord {
         });
         let orgs_total = orgs.len();
         orgs.truncate(MAX_ORGS);
-        let devices_in_scope = result.compliance.iter().map(|c| c.devices_total).sum();
+
         Self {
             at: result.generated_at.clone(),
             instance: instance.to_string(),
             devices_total: result.devices_total,
             devices_offline: result.devices_offline,
             devices_unpatchable: result.devices_unpatchable,
-            devices_compliant,
-            devices_in_scope,
+            devices_compliant: total.devices_fully_patched,
+            devices_in_scope: total.devices_total,
             rows_total: result.rows.len(),
-            urgent_pending: result.compliance.iter().map(|c| c.urgent_pending).sum(),
-            urgent_past_sla: result.compliance.iter().map(|c| c.urgent_past_sla).sum(),
+            urgent_pending: total.urgent_pending,
+            urgent_past_sla: total.urgent_past_sla,
             failures: result.failures.len(),
             needs_reboot: result.devices.iter().filter(|d| d.needs_reboot).count(),
             os_patches: result.patch_families.os,
@@ -531,8 +531,10 @@ mod tests {
         let bucket = |i: usize| ComplianceBucket {
             organization: format!("org-{i:03}"),
             devices_total: i,
-            devices_compliant: i / 2,
-            compliance_pct: 50.0,
+            devices_within_sla: i / 2,
+            within_sla_pct: 50.0,
+            devices_fully_patched: i / 2,
+            fully_patched_pct: 50.0,
             urgent_pending: 1,
             urgent_past_sla: 0,
             awaiting_approval: 0,
@@ -542,6 +544,8 @@ mod tests {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: (1..=MAX_ORGS + 5).map(bucket).collect(),
+            compliance_total: Default::default(),
+            uncounted_orgs: Vec::new(),
             compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: vec![OrgSeverity {
@@ -603,6 +607,8 @@ mod tests {
                 rows: Vec::new(),
                 devices: Vec::new(),
                 compliance: Vec::new(),
+                compliance_total: Default::default(),
+                uncounted_orgs: Vec::new(),
                 compliance_by_os: Vec::new(),
                 failures: Vec::new(),
                 severity_by_org: Vec::new(),

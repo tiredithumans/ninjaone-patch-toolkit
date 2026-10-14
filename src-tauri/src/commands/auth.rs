@@ -130,6 +130,8 @@ mod tests {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: Vec::new(),
+            compliance_total: Default::default(),
+            uncounted_orgs: Vec::new(),
             compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: Vec::new(),

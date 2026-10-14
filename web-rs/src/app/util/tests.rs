@@ -1650,14 +1650,15 @@ fn only_ambiguous_location_names_are_qualified_by_organization() {
 }
 
 /// A compliance report must never print "100%" for a fleet that isn't clean.
-/// Mirrors the backend assertion on `rows::format_pct`.
+/// Mirrors the backend assertion on `rows::format_pct`, value for value.
 #[test]
 fn a_compliance_percentage_never_rounds_up_to_a_hundred() {
-    assert_eq!(format_pct(100.0), "100%");
-    assert_eq!(format_pct(99.9), "99%");
-    assert_eq!(format_pct(99.5), "99%");
-    assert_eq!(format_pct(94.6), "95%");
-    assert_eq!(format_pct(0.0), "0%");
+    assert_eq!(format_pct(100.0), "100.0%");
+    assert_eq!(format_pct(99.96), "99.9%");
+    assert_eq!(format_pct(99.9), "99.9%");
+    assert_eq!(format_pct(94.64), "94.6%");
+    assert_eq!(format_pct(87.5), "87.5%");
+    assert_eq!(format_pct(0.04), "0.0%");
 }
 
 /// The scope sentence must name both things a bare percentage hides. Mirrors the
@@ -2479,17 +2480,6 @@ fn group_selection_note_says_how_many_and_whether_capped() {
     );
 }
 
-/// The one-decimal percentage never claims a clean fleet it doesn't have.
-#[test]
-fn format_pct_tenths_never_rounds_up_to_100() {
-    assert_eq!(format_pct_tenths(99.96), "99.9%");
-    assert_eq!(format_pct_tenths(99.94), "99.9%");
-    assert_eq!(format_pct_tenths(99.86), "99.9%");
-    assert_eq!(format_pct_tenths(100.0), "100.0%");
-    assert_eq!(format_pct_tenths(87.26), "87.3%");
-    assert_eq!(format_pct_tenths(0.0), "0.0%");
-}
-
 #[test]
 fn trend_delta_is_signed_exactly_once() {
     assert_eq!(trend_delta_label(12.0, false), "+12");
@@ -2888,6 +2878,7 @@ fn reboot_device(id: i64, name: &str, offline: bool) -> DeviceSummary {
         needs_reboot: true,
         rollup_scope: crate::types::RollupScope::Included,
         pending_by_severity: crate::types::SeverityCounts::default(),
+        past_sla: 0,
         urgent_past_sla: 0,
         failed_installs: None,
         last_contact: None,
@@ -3388,6 +3379,7 @@ fn drill_device() -> crate::types::DeviceSummary {
         offline: false,
         rollup_scope: crate::types::RollupScope::Included,
         pending_by_severity: Default::default(),
+        past_sla: 0,
         urgent_past_sla: 0,
         failed_installs: None,
         last_contact: Some("2026-06-26 14:31 UTC".into()),
@@ -3447,8 +3439,24 @@ fn only_an_excluded_device_carries_a_rollup_note() {
     assert!(
         rollup_scope_note(RollupScope::Offline)
             .unwrap()
-            .contains("unknown rather than zero")
+            .contains("rather than read as current")
     );
+}
+
+/// The drill-down says whether a counted device is Within SLA, and how far out it
+/// is when not; an excluded device gets no verdict.
+#[test]
+fn within_sla_label_reads_yes_or_no_with_the_count() {
+    use crate::types::RollupScope;
+    let mut d = reboot_device(1, "srv", false);
+    assert_eq!(within_sla_label(&d).as_deref(), Some("Yes"));
+    d.past_sla = 3;
+    assert_eq!(
+        within_sla_label(&d).as_deref(),
+        Some("No \u{2014} 3 pending past SLA")
+    );
+    d.rollup_scope = RollupScope::Offline;
+    assert_eq!(within_sla_label(&d), None);
 }
 
 #[test]
@@ -3523,4 +3531,26 @@ fn product_names_strip_one_trailing_version_like_the_backend() {
         product_display_name([("Beta Tool 1.0", 2), ("alpha tool 2.0", 2)]),
         "alpha tool"
     );
+}
+
+/// An organization with no counted device is named under the table, never just
+/// missing from it; a long list is capped and says how many it left out.
+#[test]
+fn uncounted_orgs_note_caps_and_pluralises() {
+    assert_eq!(uncounted_orgs_note(&[]), None);
+    assert_eq!(
+        uncounted_orgs_note(&["Acme".into()]).as_deref(),
+        Some("Acme has no online, patchable device in scope, so it is not in the table.")
+    );
+    assert_eq!(
+        uncounted_orgs_note(&["Acme".into(), "Globex".into()]).as_deref(),
+        Some(
+            "2 organizations have no online, patchable device in scope, so they are not in \
+             the table: Acme, Globex."
+        )
+    );
+    let many: Vec<String> = (1..=14).map(|i| format!("Org {i}")).collect();
+    let note = uncounted_orgs_note(&many).unwrap();
+    assert!(note.starts_with("14 organizations"), "{note}");
+    assert!(note.ends_with("Org 10, and 4 more."), "{note}");
 }

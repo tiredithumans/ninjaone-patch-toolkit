@@ -29,6 +29,7 @@
         "offline": false,
         "organization": "Contoso",
         "osName": "Windows Server 2022",
+        "pastSla": 2,
         "pendingBySeverity": {
           "critical": 1,
           "important": 1,
@@ -572,6 +573,10 @@
       {
         "id": 10,
         "name": "Contoso"
+      },
+      {
+        "id": 11,
+        "name": "Fabrikam"
       }
     ],
     "list_roles": [
@@ -758,29 +763,45 @@
         {
           "approvedNotInstalled": 1,
           "awaitingApproval": 2,
-          "compliancePct": 0.0,
-          "devicesCompliant": 0,
+          "devicesFullyPatched": 0,
           "devicesTotal": 1,
+          "devicesWithinSla": 0,
+          "fullyPatchedPct": 0.0,
           "organization": "Contoso",
           "urgentPastSla": 2,
-          "urgentPending": 2
+          "urgentPending": 2,
+          "withinSlaPct": 0.0
         }
       ],
       "complianceByOs": [
         {
           "approvedNotInstalled": 1,
           "awaitingApproval": 2,
-          "compliancePct": 0.0,
-          "devicesCompliant": 0,
+          "devicesFullyPatched": 0,
           "devicesTotal": 1,
+          "devicesWithinSla": 0,
+          "fullyPatchedPct": 0.0,
           "os": "Windows Server 2022",
           "urgentPastSla": 2,
-          "urgentPending": 2
+          "urgentPending": 2,
+          "withinSlaPct": 0.0
         }
       ],
+      "complianceTotal": {
+        "approvedNotInstalled": 1,
+        "awaitingApproval": 2,
+        "devicesFullyPatched": 0,
+        "devicesTotal": 1,
+        "devicesWithinSla": 0,
+        "fullyPatchedPct": 0.0,
+        "organization": "All organizations",
+        "urgentPastSla": 2,
+        "urgentPending": 2,
+        "withinSlaPct": 0.0
+      },
       "dataFetchedAt": "2026-07-01 11:50:00 UTC",
-      "devicesOffline": 1,
-      "devicesTotal": 3,
+      "devicesOffline": 2,
+      "devicesTotal": 4,
       "devicesUnpatchable": 1,
       "failures": [
         {
@@ -843,6 +864,7 @@
           "offline": false,
           "organization": "Contoso",
           "osName": "Cisco IOS XE",
+          "pastSla": 0,
           "pendingBySeverity": {
             "critical": 0,
             "important": 0,
@@ -870,6 +892,7 @@
           "offline": false,
           "organization": "Contoso",
           "osName": "Windows Server 2022",
+          "pastSla": 2,
           "pendingBySeverity": {
             "critical": 1,
             "important": 1,
@@ -897,6 +920,7 @@
           "offline": true,
           "organization": "Contoso",
           "osName": "Windows Server 2022",
+          "pastSla": 0,
           "pendingBySeverity": {
             "critical": 1,
             "important": 0,
@@ -908,6 +932,34 @@
             "unknown": 0
           },
           "pendingCount": 1,
+          "rollupScope": "offline",
+          "urgentPastSla": 0
+        },
+        {
+          "deviceId": 4,
+          "deviceName": "fab-db-01",
+          "deviceRole": "Domain Controller",
+          "failedInstalls": 0,
+          "lastContact": "2026-06-30 12:00 UTC",
+          "lastContactTs": 1782820800,
+          "location": "HQ",
+          "needsReboot": true,
+          "nodeClass": "WINDOWS_SERVER",
+          "offline": true,
+          "organization": "Fabrikam",
+          "osName": "Windows Server 2019",
+          "pastSla": 0,
+          "pendingBySeverity": {
+            "critical": 0,
+            "important": 0,
+            "low": 0,
+            "moderate": 0,
+            "optional": 0,
+            "recommended": 0,
+            "security": 0,
+            "unknown": 0
+          },
+          "pendingCount": 0,
           "rollupScope": "offline",
           "urgentPastSla": 0
         }
@@ -1113,6 +1165,9 @@
           "samples": 1
         }
       },
+      "uncountedOrgs": [
+        "Fabrikam"
+      ],
       "worstDevices": {
         "devices": [
           {
@@ -1162,12 +1217,12 @@
         "at": "2026-07-01 12:00:00 UTC",
         "devicesCompliant": 0,
         "devicesInScope": 1,
-        "devicesOffline": 1,
-        "devicesTotal": 3,
+        "devicesOffline": 2,
+        "devicesTotal": 4,
         "devicesUnpatchable": 1,
         "failures": 1,
         "instance": "https://app.ninjarmm.com",
-        "needsReboot": 3,
+        "needsReboot": 4,
         "orgs": [
           {
             "ac": 2,

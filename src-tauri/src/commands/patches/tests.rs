@@ -11,6 +11,8 @@ fn empty_summary() -> QuerySummary {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: Vec::new(),
+            compliance_total: Default::default(),
+            uncounted_orgs: Vec::new(),
             compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: Vec::new(),
@@ -535,8 +537,8 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
     let alpha = &result.compliance[0];
     assert_eq!(&*alpha.organization, "Alpha");
     assert_eq!(alpha.devices_total, 2);
-    assert_eq!(alpha.devices_compliant, 0);
-    assert_eq!(alpha.compliance_pct, 0.0);
+    assert_eq!(alpha.devices_fully_patched, 0);
+    assert_eq!(alpha.fully_patched_pct, 0.0);
     assert_eq!(alpha.urgent_pending, 1);
     assert_eq!(alpha.urgent_past_sla, 1);
 }
@@ -701,7 +703,7 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
     let org = &result.compliance[0];
     assert_eq!(org.devices_total, 1);
     assert_eq!(
-        org.devices_compliant, 0,
+        org.devices_fully_patched, 0,
         "two pending CRITICAL patches make the device non-compliant"
     );
     assert_eq!(
@@ -1513,7 +1515,7 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
     let alpha = &result.compliance[0];
     assert_eq!(alpha.devices_total, 2);
     assert_eq!(
-        alpha.devices_compliant, 0,
+        alpha.devices_fully_patched, 0,
         "a device whose only pending patch is third-party is not compliant"
     );
     assert_eq!(

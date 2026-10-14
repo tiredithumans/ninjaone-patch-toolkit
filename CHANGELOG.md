@@ -13,6 +13,18 @@ version and start a fresh `[Unreleased]`.
 
 ### Changed
 
+- **The headline compliance figure is now "Within SLA".** A device is Within SLA when none of
+  its pending patches has been pending longer than its severity's SLA window. The old figure —
+  no pending patch of any severity or age — is still shown beside it as **Fully patched**. Both
+  appear in the Compliance and By OS tables, the workbook's Compliance sheets and the report; the
+  bar charts now plot Within SLA. The Devices sheet and the device drill-down say whether each
+  device is Within SLA and how many of its patches are past SLA.
+- **The organization table ends with an "All organizations" row**: the fleet's figures,
+  weighted by device rather than averaged across organizations.
+- **Organizations with no online, patchable device are named under the table** instead of
+  silently missing from it.
+- **Percentages show one decimal everywhere** (87.5%, never rounded up to 100%), so the Compliance
+  tab, the Trend tab, the workbook and the report agree.
 - **Security patches now count as urgent.** The compliance tables' backlog columns are renamed
   **Urgent Pending** and **Urgent Past SLA** (formerly "Pending Critical/Important" and "Aged
   (past SLA)") and now count Critical, Important *and* Security patches. NinjaOne grades most

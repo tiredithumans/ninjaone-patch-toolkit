@@ -48,7 +48,12 @@ Violating these silently misreports a fleet.
 - **SLA aging is per band** (`SlaCutoffs` from the result's `SlaPolicy`); a band with No SLA
   (`SlaExempt`, Optional by default, never `Unknown`) is never past SLA, undated or not.
   → `docs/design/compliance.md#the-sla-is-per-severity-band`
-- **`format_pct` never rounds up to 100** (caps at 99%; `pct_cell` at one decimal).
+- **Within SLA is the headline** (`DeviceSummary::past_sla == 0`, the worst-devices predicate);
+  Fully patched (`pending_count == 0`) beside it; `compliance_total` is device-weighted and
+  `uncounted_orgs` names the orgs with no row.
+  → `docs/design/compliance.md#within-sla-is-the-headline-fully-patched-is-the-strict-figure-beside-it`
+- **Percentages are one decimal everywhere and never round up to 100** (`round_pct` caps at
+  99.9; `format_pct`, `pct_cell` and the `web-rs` mirror share the rule).
   → `docs/design/compliance.md#a-percentage-never-rounds-up-to-100`
 - **There is no patch release date in the API.** `PatchRecord::first_seen` is detection time; keep
   "First seen" / "since first seen" naming; fixtures must emit `timestamp`.

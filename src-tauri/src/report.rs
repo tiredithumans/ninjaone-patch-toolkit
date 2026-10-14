@@ -283,7 +283,7 @@ fn write_compliance_bars(buf: &mut String, rows: &[(String, f64)]) {
 fn write_compliance_chart(buf: &mut String, compliance: &[ComplianceBucket]) {
     let rows: Vec<(String, f64)> = compliance
         .iter()
-        .map(|b| (b.organization.clone(), b.compliance_pct))
+        .map(|b| (b.organization.clone(), b.within_sla_pct))
         .collect();
     write_compliance_bars(buf, &rows);
     if compliance.is_empty() {
@@ -343,7 +343,7 @@ fn write_approvals(buf: &mut String, approvals: &ApprovalBacklog) {
 fn write_os_compliance(buf: &mut String, by_os: &[OsCompliance]) {
     let rows: Vec<(String, f64)> = by_os
         .iter()
-        .map(|b| (b.os.clone(), b.compliance_pct))
+        .map(|b| (b.os.clone(), b.within_sla_pct))
         .collect();
     write_compliance_bars(buf, &rows);
     if by_os.is_empty() {
@@ -476,7 +476,9 @@ fn write_table<T>(buf: &mut String, columns: &[TableColumn<T>], rows: &[&T]) {
                     let _ = write!(buf, "<td class=\"num\">{n}</td>");
                 }
                 TableCell::Number(n) => {
-                    let _ = write!(buf, "<td class=\"num\">{n}</td>");
+                    // One decimal, so a whole-number percentage reads "50.0" beside
+                    // "87.5" rather than "50".
+                    let _ = write!(buf, "<td class=\"num\">{n:.1}</td>");
                 }
                 // The same spelling the rows carry as text, so the report reads the
                 // way the app and the old text-dated workbook did.
@@ -995,6 +997,7 @@ mod tests {
                 pending_count: 3,
                 rollup_scope: crate::rows::RollupScope::Included,
                 pending_by_severity: SeverityCounts::default(),
+                past_sla: 0,
                 urgent_past_sla: 0,
                 failed_installs: None,
                 last_contact: None,
@@ -1004,18 +1007,24 @@ mod tests {
                 // A hostile org name must be escaped, not rendered as markup.
                 organization: "<script>alert(1)</script>".into(),
                 devices_total: 10,
-                devices_compliant: 9,
-                compliance_pct: 90.0,
+                devices_within_sla: 9,
+                within_sla_pct: 90.0,
+                devices_fully_patched: 9,
+                fully_patched_pct: 90.0,
                 urgent_pending: 1,
                 urgent_past_sla: 0,
                 awaiting_approval: 2,
                 approved_not_installed: 1,
             }],
+            compliance_total: Default::default(),
+            uncounted_orgs: Vec::new(),
             compliance_by_os: vec![OsCompliance {
                 os: "Windows Server 2022".into(),
                 devices_total: 10,
-                devices_compliant: 9,
-                compliance_pct: 90.0,
+                devices_within_sla: 9,
+                within_sla_pct: 90.0,
+                devices_fully_patched: 9,
+                fully_patched_pct: 90.0,
                 urgent_pending: 1,
                 urgent_past_sla: 0,
                 awaiting_approval: 2,
@@ -1152,6 +1161,8 @@ mod tests {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: Vec::new(),
+            compliance_total: Default::default(),
+            uncounted_orgs: Vec::new(),
             compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: Vec::new(),

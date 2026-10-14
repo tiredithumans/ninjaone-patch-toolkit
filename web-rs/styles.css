@@ -1683,6 +1683,17 @@ tbody tr:hover {
   color: var(--muted);
 }
 
+/* The fleet total under the organization table. */
+.total-row th,
+.total-row td {
+  font-weight: 600;
+  border-top: 2px solid var(--border);
+}
+
+.total-row th {
+  text-align: left;
+}
+
 .settings-disabled {
   opacity: 0.5;
 }
