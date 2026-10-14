@@ -42,6 +42,15 @@ version and start a fresh `[Unreleased]`.
 
 ### Added
 
+- **The app keeps its own record of when each pending patch was first seen.** NinjaOne's only
+  date on a patch record is when it last collected the data, which may refresh on every scan — if
+  it does, every patch looks a day old and nothing ever shows as past SLA. Ages are now measured
+  from the earlier of NinjaOne's date and the first time this app saw the patch pending. The record
+  starts with your first query on this version, so ages build up from then: if NinjaOne's dates do
+  refresh, expect Within SLA to fall about one SLA window (30 days by default) after upgrading as
+  real backlog starts to count. The Compliance tab says how many pending patches the app's record
+  dated, which shows which kind of date NinjaOne is sending.
+
 - **A "No SLA" switch for each severity in Settings → Patch SLA.** A severity switched to No SLA
   never counts as past SLA; its patches still count as pending. **Optional is switched on by
   default, including on existing installs**, so an optional backlog nobody intends to install

@@ -26,9 +26,10 @@ use crate::app::util::{
 use crate::types::QueryResult;
 use crate::types::{
     AgeBucket, ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceDetail,
-    DeviceSummary, FailureGroup, FilterParams, GroupBy, InstallLatency, Location, NodeClass,
-    OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role,
-    RollupScope, SeverityCounts, SlaBySeverity, SlaExempt, SlaPolicy, StuckDevice, TimeToInstall,
+    DeviceSummary, FailureGroup, FilterParams, FirstSeenTracking, GroupBy, InstallLatency,
+    Location, NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup,
+    PatchRow, Role, RollupScope, SeverityCounts, SlaBySeverity, SlaExempt, SlaPolicy, StuckDevice,
+    TimeToInstall,
 };
 use crate::types::{ChangeItem, RunChanges};
 
@@ -973,6 +974,14 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64], statuses: &[String]) -> Que
             devices: offline,
         },
         time_to_install,
+        // As a desktop install would read a few weeks after upgrading, with NinjaOne
+        // re-stamping its records: the app's own record dates some of them.
+        first_seen: FirstSeenTracking {
+            since: Some("2026-05-18 09:00 UTC".to_string()),
+            since_ts: Some(1_779_094_800),
+            pending_records: 37,
+            from_app_record: 12,
+        },
         sla_policy: DEMO_SLA,
         approvals,
         devices_total,

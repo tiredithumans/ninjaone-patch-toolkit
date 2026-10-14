@@ -66,6 +66,8 @@ pub struct QueryResult {
     pub offline_backlog: DeviceBacklogList,
     /// First seen → installed, by organization and severity.
     pub time_to_install: TimeToInstall,
+    /// How this result's first-seen times were arrived at (`crate::first_seen`).
+    pub first_seen: FirstSeenTracking,
     /// The SLA policy the aging figures were computed under — stamped at assembly,
     /// so an export after a settings change still states the policy its numbers
     /// used.
@@ -154,6 +156,8 @@ pub struct QuerySummary {
     pub offline_backlog: DeviceBacklogList,
     /// See [`QueryResult::time_to_install`].
     pub time_to_install: TimeToInstall,
+    /// See [`QueryResult::first_seen`].
+    pub first_seen: FirstSeenTracking,
     /// See [`QueryResult::sla_policy`]. The Compliance tab states it, since the
     /// policy in Settings may have changed since this result was computed.
     pub sla_policy: SlaPolicy,
@@ -220,6 +224,7 @@ impl QuerySummary {
             worst_devices: result.worst_devices.clone(),
             offline_backlog: result.offline_backlog.clone(),
             time_to_install: result.time_to_install.clone(),
+            first_seen: result.first_seen.clone(),
             sla_policy: result.sla_policy,
             approvals: result.approvals.capped(STUCK_DEVICES_SUMMARY_CAP),
             devices_total: result.devices_total,

@@ -3591,3 +3591,29 @@ fn older_method_runs_are_counted_and_left_out() {
     );
     assert!(older_method_note(2).unwrap().starts_with("2 earlier runs"));
 }
+
+/// The first-seen line says what the time is, since when this app has recorded it,
+/// and how many records it dated; with no family in the result it says nothing.
+#[test]
+fn the_first_seen_note_states_the_record_and_how_much_it_dated() {
+    use crate::types::FirstSeenTracking;
+    assert_eq!(first_seen_note(&FirstSeenTracking::default()), None);
+    let mut t = FirstSeenTracking {
+        since: Some("2026-05-18 09:00 UTC".into()),
+        since_ts: Some(1_779_094_800),
+        pending_records: 37,
+        from_app_record: 0,
+    };
+    let none = first_seen_note(&t).unwrap();
+    assert!(none.contains("record began 2026-05-18 09:00 UTC"), "{none}");
+    assert!(
+        none.ends_with("every pending record here is dated by NinjaOne's time."),
+        "{none}"
+    );
+    t.from_app_record = 12;
+    let some = first_seen_note(&t).unwrap();
+    assert!(
+        some.contains("12 of 37 pending records are dated by this app's record"),
+        "{some}"
+    );
+}

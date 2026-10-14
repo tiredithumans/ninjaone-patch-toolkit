@@ -2,6 +2,8 @@
 //! out. Each mirrors a backend `rows::` function, so the in-app wording and the
 //! exports' read the same.
 
+use crate::types::FirstSeenTracking;
+
 /// How many organizations [`uncounted_orgs_note`] names before "and N more".
 pub(crate) const UNCOUNTED_ORGS_LIMIT: usize = 10;
 
@@ -29,4 +31,24 @@ pub(crate) fn uncounted_orgs_note(orgs: &[String]) -> Option<String> {
             ))
         }
     }
+}
+
+/// What "first seen" means in this result, or `None` when no patch family is in it:
+/// the earlier of NinjaOne's time and this app's own record, since when that record
+/// has been kept, and how many pending records it dated. Mirrors
+/// `rows::FirstSeenTracking::sentence`.
+pub(crate) fn first_seen_note(t: &FirstSeenTracking) -> Option<String> {
+    let since = t.since.as_deref()?;
+    let dated = match t.from_app_record {
+        0 => "every pending record here is dated by NinjaOne's time".to_string(),
+        n => format!(
+            "{n} of {} pending records are dated by this app's record, because NinjaOne's \
+             time on them is later",
+            t.pending_records
+        ),
+    };
+    Some(format!(
+        "First seen is the earlier of NinjaOne's record time and when this app first saw the \
+         patch pending (this app's record began {since}); {dated}."
+    ))
 }

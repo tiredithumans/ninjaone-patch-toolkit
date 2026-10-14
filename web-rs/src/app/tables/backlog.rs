@@ -5,7 +5,8 @@
 use super::*;
 
 /// The SLA policy behind this result's "past SLA" figures — read off the result,
-/// not Settings, since the policy may have changed since the query ran.
+/// not Settings, since the policy may have changed since the query ran — and what
+/// its first-seen times are.
 #[component]
 pub(super) fn SlaPolicyNote() -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -27,6 +28,13 @@ pub(super) fn SlaPolicyNote() -> impl IntoView {
                     })
             }}
         </p>
+        {move || {
+            state
+                .query
+                .result
+                .with(|r| r.as_ref().and_then(|r| util::first_seen_note(&r.first_seen)))
+                .map(|note| view! { <p class="scope-note">{note}</p> })
+        }}
     }
 }
 

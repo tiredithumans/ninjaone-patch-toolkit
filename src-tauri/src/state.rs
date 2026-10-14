@@ -198,7 +198,14 @@ fn current_patches_ttl(force: bool) -> Duration {
 pub struct CurrentPatches {
     pub os: Arc<Vec<Patch>>,
     pub sw: Arc<Vec<Patch>>,
+    /// The older of the fetched families' times — how fresh the data is as a whole.
     pub fetched_at: DateTime<Utc>,
+    /// Each family's own fetch time, `None` for a family not fetched. The
+    /// first-seen ledger stamps a family's new records at its own fetch: the
+    /// combined `fetched_at` is the older family's, which would date a freshly
+    /// fetched OS feed by a third-party feed still cached from earlier.
+    pub os_fetched_at: Option<DateTime<Utc>>,
+    pub sw_fetched_at: Option<DateTime<Utc>>,
 }
 
 /// What [`AppState::write_settings`] hands back once the write is on disk.
@@ -571,6 +578,8 @@ impl AppState {
                 .flatten()
                 .min()
                 .unwrap_or_else(Utc::now),
+            os_fetched_at: os_at,
+            sw_fetched_at: sw_at,
         })
     }
 

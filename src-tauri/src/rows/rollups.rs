@@ -205,7 +205,7 @@ pub struct AgeBucket {
 /// and the opposite of what [`is_aged`] does with an undated patch. An untyped record
 /// is pending for the same reason: the feed is defined as the patches with no
 /// installation attempt, so absence of a status cannot mean "done".
-pub(super) fn is_pending(status: Option<&str>) -> bool {
+pub(crate) fn is_pending(status: Option<&str>) -> bool {
     !matches!(
         status.and_then(PatchStatus::from_api_value),
         Some(PatchStatus::Rejected | PatchStatus::Installed)

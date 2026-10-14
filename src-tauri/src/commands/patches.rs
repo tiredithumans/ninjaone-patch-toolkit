@@ -10,14 +10,15 @@ use crate::api::{NinjaApiClient, ProgressFn};
 use crate::changes::{self, RunSnapshot};
 use crate::error::UiError;
 use crate::filter::FilterParams;
+use crate::first_seen::{self, Family, Observation, Resolver, TenantLedger};
 use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
-    ComplianceBucket, DeviceDetail, GroupBy, GroupPage, InstallWindow, LookupMaps, PatchFamilies,
-    PatchRecord, PatchSource, QueryResult, QuerySummary, RowSort, SlaCutoffs, build_age_buckets,
-    build_approval_backlog, build_compliance, build_compliance_by_os, build_device_backlogs,
-    build_device_summaries, build_failures, build_groups, build_query_scope, build_rows,
-    build_severity_by_org, build_time_to_install, group_member_page, page_rows, slice_groups,
-    sort_device_summaries, sort_order, uncounted_orgs,
+    ComplianceBucket, DeviceDetail, FirstSeenTracking, GroupBy, GroupPage, InstallWindow,
+    LookupMaps, PatchFamilies, PatchRecord, PatchSource, QueryResult, QuerySummary, RowSort,
+    SlaCutoffs, build_age_buckets, build_approval_backlog, build_compliance,
+    build_compliance_by_os, build_device_backlogs, build_device_summaries, build_failures,
+    build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
+    group_member_page, page_rows, slice_groups, sort_device_summaries, sort_order, uncounted_orgs,
 };
 use crate::settings::{MAX_WINDOW_DAYS, SlaPolicy};
 use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
@@ -118,6 +119,9 @@ pub async fn query_patches(
     // the result is stamped with the tenant it was actually fetched under. Redeemed
     // at the store below.
     let token = state.begin_query();
+    // The tenant the rows are fetched under — the key for the run snapshot and the
+    // first-seen ledger alike.
+    let tenant = token.tenant_label();
     // `qid` (0 when the frontend omits it) lets the frontend drop progress events
     // tagged with a run it has already superseded. Display only — the authoritative
     // ordering is `token`, which the frontend cannot influence.
@@ -147,6 +151,16 @@ pub async fn query_patches(
         Some(&p_sw as &ProgressFn),
     );
 
+    // This tenant's record of when each pending patch was first seen. Loaded on a
+    // blocking thread (the first query of a session reads a file) concurrently with
+    // the fetch; later queries take the copy this process holds.
+    let ledger_tenant = tenant.clone();
+    let ledger_fut = async move {
+        tauri::async_runtime::spawn_blocking(move || first_seen::base(&ledger_tenant))
+            .await
+            .context("loading the first-seen ledger failed")
+    };
+
     // What the changes diff needs from the request; `args` moves into the query.
     let statuses = args.statuses.clone();
     let install_days = args
@@ -159,11 +173,15 @@ pub async fn query_patches(
                 .clamp(1, MAX_WINDOW_DAYS)
         });
 
-    let result = run_query(
+    let QueryRun {
+        result,
+        observation,
+    } = run_query(
         &state.api,
         state.lookups(),
         devices_fut,
         current_fut,
+        ledger_fut,
         settings.install_window_days,
         // Clamped (inside `sla_policy`) for the same panic-guard reason as the
         // install window: every SLA window reaches `Duration::days` in the rollups,
@@ -180,7 +198,7 @@ pub async fn query_patches(
     .map_err(UiError::from)?;
 
     let (result, snapshot) =
-        diff_against_previous_run(result, token.tenant_label(), statuses, install_days).await?;
+        diff_against_previous_run(result, tenant.clone(), statuses, install_days).await?;
 
     // Hand the frontend a lightweight summary (first page + rollups) and keep the
     // full result in the tenant-stamped cache for paging (`get_patch_rows`) and
@@ -195,33 +213,40 @@ pub async fn query_patches(
     tokio::task::spawn_blocking(move || crate::history::record(&entry));
 
     let outcome = state.store_last_result_if_current(token, result);
-    save_baseline_if_stored(&outcome, move || changes::save(snapshot)).await;
+    tokio::join!(
+        persist_if_stored(&outcome, "run snapshot", move || changes::save(snapshot)),
+        persist_if_stored(&outcome, "first-seen ledger", move || {
+            first_seen::commit(&tenant, observation)
+        }),
+    );
     summary_for(outcome, summary, qid)
 }
 
-/// Writes this run's snapshot as the next run's baseline, and returns only once it
-/// is on disk.
+/// Persists what the next run reads — this run's snapshot as its changes baseline,
+/// and its observations into the first-seen ledger — and returns only once `save`
+/// has finished.
 ///
-/// Only a stored result becomes the baseline. A superseded one is by definition
-/// older than the run that won the cache; writing it would roll the baseline
-/// backwards, and the next diff would report changes that already happened. A
-/// dropped (tenant-drifted, session-cleared) one belongs to nobody.
+/// Only a stored result is persisted. A superseded one is by definition older than
+/// the run that won the cache; writing it would roll the baseline backwards, and the
+/// next diff would report changes that already happened. A dropped (tenant-drifted,
+/// session-cleared) one belongs to nobody.
 ///
-/// Awaited, not detached. The save used to be spawned and left to finish whenever,
-/// so a query started straight after this one returned (an auto-refresh tick, a
-/// quick re-run) could load the baseline before the save landed and diff against
-/// the run *before* this one. The wait is one serialize and an atomic write of a
-/// snapshot capped at a million items, small next to the fetch it follows. A
-/// failed save is logged inside `save`; it never fails the query.
-async fn save_baseline_if_stored(outcome: &StoreOutcome, save: impl FnOnce() + Send + 'static) {
+/// Awaited, not detached. The snapshot save used to be spawned and left to finish
+/// whenever, so a query started straight after this one returned (an auto-refresh
+/// tick, a quick re-run) could load the baseline before the save landed and diff
+/// against the run *before* this one; the ledger has the same race. The wait is a
+/// serialize and an atomic write, small next to the fetch it follows. A failed save
+/// is logged inside `save`; it never fails the query.
+async fn persist_if_stored(
+    outcome: &StoreOutcome,
+    what: &'static str,
+    save: impl FnOnce() + Send + 'static,
+) {
     if !matches!(outcome, StoreOutcome::Stored) {
         return;
     }
     if let Err(err) = tokio::task::spawn_blocking(save).await {
-        tracing::warn!(
-            ?err,
-            "saving the run snapshot panicked; baseline not advanced"
-        );
+        tracing::warn!(?err, what, "saving panicked; not advanced");
     }
 }
 
@@ -454,15 +479,25 @@ struct FetchedSources {
     lookups: Lookups,
     os_installs: Vec<Patch>,
     sw_installs: Vec<Patch>,
+    /// What this app has recorded about when each pending patch was first seen.
+    ledger: Arc<TenantLedger>,
+}
+
+/// A completed query: its result, and the whole-fleet feeds it ran over for the
+/// first-seen ledger to merge once the result wins the cache.
+pub(crate) struct QueryRun {
+    pub result: QueryResult,
+    pub observation: Observation,
 }
 
 /// The fetch→scope→join→rollup core of [`query_patches`], split out so it can be
 /// driven in tests against a mock NinjaOne server without a Tauri `AppHandle`/`State`.
 ///
-/// `lookups`, `devices_fut`, and `current_fut` are taken as *futures* (not resolved
-/// values) so the cached-or-fetched org/location/role lookups, the whole-fleet device
-/// inventory, and the whole-fleet current patches all resolve concurrently with the
-/// per-query install-history fetch — a cache hit resolves its future instantly.
+/// `lookups`, `devices_fut`, `current_fut` and `ledger_fut` are taken as *futures*
+/// (not resolved values) so the cached-or-fetched org/location/role lookups, the
+/// whole-fleet device inventory, the whole-fleet current patches and the first-seen
+/// ledger all resolve concurrently with the per-query install-history fetch — a
+/// cache hit resolves its future instantly.
 /// `query_patches` passes the `AppState` cache accessors; a test passes ready values.
 /// The whole-fleet devices and current patches are then scoped to the requested
 /// identity facets **client-side** (so a re-filter needs no refetch). `progress` (the
@@ -470,22 +505,24 @@ struct FetchedSources {
 /// windows, SLA aging since first seen, and `generated_at`) are injected so the
 /// caller owns both.
 #[allow(clippy::too_many_arguments)]
-async fn run_query<L, D, C>(
+async fn run_query<L, D, C, G>(
     api: &NinjaApiClient,
     lookups: L,
     devices_fut: D,
     current_fut: C,
+    ledger_fut: G,
     install_window_days: i64,
     sla: SlaPolicy,
     instance: String,
     args: PatchQueryArgs,
     now: DateTime<Utc>,
     progress: &(dyn Fn(&'static str, usize) + Send + Sync),
-) -> anyhow::Result<QueryResult>
+) -> anyhow::Result<QueryRun>
 where
     L: std::future::Future<Output = anyhow::Result<Lookups>>,
     D: std::future::Future<Output = anyhow::Result<Arc<Vec<Device>>>>,
     C: std::future::Future<Output = anyhow::Result<CurrentPatches>>,
+    G: std::future::Future<Output = anyhow::Result<Arc<TenantLedger>>>,
 {
     let plan = QueryPlan::build(args, install_window_days, now)?;
 
@@ -505,10 +542,11 @@ where
     // reach its cache, so the retry started cold and hit exactly the same odds
     // again. Letting every leg finish means the query still fails (the `?`s below
     // are unchanged), but the fleet caches are warm for the retry.
-    let (devices, current, lookup_sets, os_installs, sw_installs) = tokio::join!(
+    let (devices, current, lookup_sets, ledger, os_installs, sw_installs) = tokio::join!(
         devices_fut,
         current_fut,
         lookups,
+        ledger_fut,
         async {
             if plan.want_installs && plan.include_os {
                 api.fleet_os_patch_installs(
@@ -544,17 +582,40 @@ where
     let devices = devices?;
     let current = current?;
     let lookups = lookup_sets?;
+    let ledger = ledger?;
     let os_installs = os_installs?;
     let sw_installs = sw_installs?;
 
     // Fetches done; the rest is the in-memory scope + join/rollup.
     progress("joining", 0);
+    // Only the families this query asked for: a family left cached from an earlier
+    // query is merged by the query that next asks for it.
+    let observation = Observation {
+        devices: Arc::clone(&devices),
+        os: plan
+            .include_os
+            .then(|| {
+                current
+                    .os_fetched_at
+                    .map(|at| (Arc::clone(&current.os), at))
+            })
+            .flatten(),
+        sw: plan
+            .include_sw
+            .then(|| {
+                current
+                    .sw_fetched_at
+                    .map(|at| (Arc::clone(&current.sw), at))
+            })
+            .flatten(),
+    };
     let src = FetchedSources {
         devices,
         current,
         lookups,
         os_installs,
         sw_installs,
+        ledger,
     };
     // Off the async runtime. This is the one genuinely CPU-bound stretch in the
     // command — scoping the whole-fleet caches, joining every patch to its device,
@@ -562,9 +623,27 @@ where
     // runs for seconds with no `.await` in it. Left inline it held a tokio worker for
     // that whole time, stalling unrelated IPC commands and the job poller. Everything
     // it needs is owned and `Send`, so moving it is just a `spawn_blocking`.
-    tauri::async_runtime::spawn_blocking(move || assemble_result(&plan, src, sla, instance, now))
-        .await
-        .context("join/rollup task failed")
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        assemble_result(&plan, src, sla, instance, now)
+    })
+    .await
+    .context("join/rollup task failed")?;
+    Ok(QueryRun {
+        result,
+        observation,
+    })
+}
+
+/// One current-feed record's view. A pending record is dated by the earlier of
+/// NinjaOne's time and this app's own first observation (`crate::first_seen`); only
+/// pending records are looked up, since only their age is measured.
+fn dated<'p>(p: &'p Patch, ledger: &mut Resolver<'_>) -> PatchRecord<'p> {
+    let r = PatchRecord::vendor(p);
+    if r.pending {
+        r.observed(ledger.first_observed(p))
+    } else {
+        r
+    }
 }
 
 /// Scopes the whole-fleet caches client-side, joins devices to patches, and
@@ -626,17 +705,19 @@ fn assemble_result(
     } else {
         &[]
     };
+    let mut os_ledger = src.ledger.resolver(Family::Os);
+    let mut sw_ledger = src.ledger.resolver(Family::Software);
     let mut current: Vec<PatchRecord<'_>> = os_family
         .iter()
         .filter(|p| in_scope(p))
-        .map(PatchRecord::vendor)
+        .map(|p| dated(p, &mut os_ledger))
         .collect();
     let os_count = current.len();
     current.extend(
         sw_family
             .iter()
             .filter(|p| in_scope(p))
-            .map(PatchRecord::vendor),
+            .map(|p| dated(p, &mut sw_ledger)),
     );
     let (scoped_os_current, scoped_sw_current) = current.split_at(os_count);
 
@@ -759,6 +840,17 @@ fn assemble_result(
     sort_device_summaries(&mut summaries);
     let compliance = build_compliance(&summaries, &current, &devices_by_id, &maps, &cutoffs);
     let compliance_total = ComplianceBucket::total(&compliance);
+    let first_seen = FirstSeenTracking::build(
+        &current,
+        &devices_by_id,
+        src.ledger.tracking_since(
+            [
+                (Family::Os, plan.include_os),
+                (Family::Software, plan.include_sw),
+            ],
+            src.current.fetched_at,
+        ),
+    );
     let uncounted_orgs = uncounted_orgs(&summaries);
     let compliance_by_os = build_compliance_by_os(&summaries, &current, &devices_by_id, &cutoffs);
     let (worst_devices, offline_backlog) =
@@ -797,6 +889,7 @@ fn assemble_result(
         worst_devices,
         offline_backlog,
         time_to_install,
+        first_seen,
         sla_policy: sla,
         instance,
         approvals,

@@ -57,6 +57,10 @@ Violating these silently misreports a fleet.
   → `docs/design/compliance.md#a-percentage-never-rounds-up-to-100`
 - **There is no patch release date in the API.** `PatchRecord::first_seen` is detection time; keep
   "First seen" / "since first seen" naming; fixtures must emit `timestamp`.
+- **First seen is the earlier of NinjaOne's time and `crate::first_seen`'s record** (identity
+  `changes::write_patch_key`; undated stays undated; merged from the whole fetched feed per family
+  at its own fetch time; saved only on `StoreOutcome::Stored`; offline devices carried over).
+  → `docs/design/compliance.md#this-app-keeps-its-own-first-seen-record`
   → `docs/design/compliance.md#there-is-no-patch-release-date-in-the-ninjaone-api`
 - **`PatchRow` strings are interned `Arc<str>`** (`rows::Interner`, `DeviceLabels`); the
   frontend mirrors them as `String`.

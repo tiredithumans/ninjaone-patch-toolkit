@@ -30,12 +30,12 @@ use crate::filter::FilterParams;
 use crate::history::RunRecord;
 use crate::model::{Device, Location, Organization, OsInfo, Patch, PatchStatus, RebootMode, Role};
 use crate::rows::{
-    ComplianceBucket, GroupBy, InstallWindow, LookupMaps, PatchFamilies, PatchRecord, PatchSource,
-    QueryResult, QuerySummary, SlaCutoffs, build_age_buckets, build_approval_backlog,
-    build_compliance, build_compliance_by_os, build_device_backlogs, build_device_summaries,
-    build_failures, build_groups, build_query_scope, build_rows, build_severity_by_org,
-    build_time_to_install, device_detail, page_rows, rows_by_device, slice_groups,
-    sort_device_summaries, uncounted_orgs,
+    ComplianceBucket, FirstSeenTracking, GroupBy, InstallWindow, LookupMaps, PatchFamilies,
+    PatchRecord, PatchSource, QueryResult, QuerySummary, SlaCutoffs, build_age_buckets,
+    build_approval_backlog, build_compliance, build_compliance_by_os, build_device_backlogs,
+    build_device_summaries, build_failures, build_groups, build_query_scope, build_rows,
+    build_severity_by_org, build_time_to_install, device_detail, page_rows, rows_by_device,
+    slice_groups, sort_device_summaries, uncounted_orgs,
 };
 use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaExempt, SlaPolicy};
 
@@ -444,6 +444,11 @@ fn ipc_fixture_is_current() {
         severity_by_org: build_severity_by_org(&all_current, &by_id, &maps),
         age_buckets: build_age_buckets(&all_current, &by_id, FIXTURE_NOW),
         time_to_install: build_time_to_install(&rows, true),
+        first_seen: FirstSeenTracking::build(
+            &all_current,
+            &by_id,
+            Some(FIXTURE_NOW - Duration::days(90)),
+        ),
         approvals: build_approval_backlog(
             &all_current,
             &by_id,

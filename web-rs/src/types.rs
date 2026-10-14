@@ -410,6 +410,18 @@ pub struct TimeToInstall {
     pub excluded_records: usize,
 }
 
+/// Since when this app has kept its own first-seen record, and how many pending
+/// records it dated. Mirrors `rows::FirstSeenTracking`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(rename_all = "camelCase", default)]
+pub struct FirstSeenTracking {
+    pub since: Option<String>,
+    pub since_ts: Option<i64>,
+    pub pending_records: usize,
+    pub from_app_record: usize,
+}
+
 /// Per-severity SLA overrides in days; `None` = use the default. Mirrors
 /// `settings::SlaBySeverity` and round-trips through the Settings panel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,6 +625,9 @@ pub struct QueryResult {
     /// First seen → installed, by organization and severity.
     #[serde(default)]
     pub time_to_install: TimeToInstall,
+    /// How this result's first-seen times were arrived at.
+    #[serde(default)]
+    pub first_seen: FirstSeenTracking,
     /// The SLA policy this result's aging figures were computed under — may differ
     /// from Settings if the policy changed since.
     #[serde(default)]

@@ -305,7 +305,7 @@ product-line identity for them.
 The baseline advances only when a result **wins the cache** (`StoreOutcome::Stored`); a
 superseded run is older than the one that won, and writing it would roll the baseline back. The
 write is atomic (temp + rename, 0600) on a blocking thread, and `query_patches` awaits it before
-returning (`save_baseline_if_stored`). It used to be detached, so a query started right after
+returning (`persist_if_stored`). It used to be detached, so a query started right after
 (an auto-refresh tick, a quick re-run) could load the baseline before the save landed and diff
 against the run before last. The snapshot that write landed is also kept in memory
 (`changes::LastSaved`, one slot) as the next baseline for the same tenant and scope, so a refresh
@@ -483,6 +483,43 @@ fleet — and the wiremock fixtures fed `releaseDate`, so CI proved only that th
 **Fixtures must emit `timestamp`.** Undated pending patches get their own `Unknown` age bucket
 rather than inflating `181+ days`; they still count as aged in the SLA rollup (`unwrap_or(true)`
 — can't prove recent).
+
+## This app keeps its own first-seen record
+
+`timestamp` is "Date/Time when data was collected/updated", and nothing in the spec says whether
+a rescan refreshes it. If it does, every pending record looks a day old and nothing is ever past
+SLA — the same ~0-breaches failure the old `releaseDate` alias produced, with nothing on screen
+to show it. Rather than bet the headline figure on which kind of time the vendor sends,
+`crate::first_seen` keeps a per-tenant record of the fetch at which each pending
+`(device, patch)` first appeared in the current feed, and every rollup ages a record from
+`rows::PatchRecord::first_seen` = **the earlier of the two** (`PatchRecord::observed`). When
+NinjaOne's time is the older one nothing changes; when it is not, this record is. Rules:
+
+- **One identity:** `changes::write_patch_key`, the changes diff's own key — a third-party patch
+  by product, so a superseding version keeps its age.
+- **Undated stays undated.** A record NinjaOne never dated already counts as past SLA; dating it
+  from this record would only make it younger. So the record can only make a record older, never
+  newer, and never lowers a past-SLA count.
+- **Merged from the whole fetched feed, per family, at that family's own fetch time**
+  (`CurrentPatches::{os,sw}_fetched_at`; the combined `fetched_at` is the older family's). An
+  org-scoped query sees every org's records (the feed is whole-fleet), so it can stamp them and
+  can never prune them for being out of view. A family the query did not fetch is untouched.
+- **Pruned when no longer pending**, except for devices offline in the inventory — their absence
+  proves nothing, the `rollup_device` reasoning — so a deleted device's records fall out and a
+  sleeping laptop's do not. A feed no newer than the last one merged (`merged_at`) is skipped, and
+  a feed with no pending record never prunes a non-empty record.
+- **Persisted like the run snapshots:** one file per tenant under `first-seen/` (tenant stamped
+  inside and checked on load), atomic temp + rename, 0600, written only on
+  `StoreOutcome::Stored` and awaited (`persist_if_stored`), the last-written copy held in memory
+  (`SLOT`) as the next base. Capped at a million entries per family (the newest dropped first)
+  and 8 tenants / 128 MiB. Unreferenced keys are not written.
+- **It only knows what this install has seen.** It starts at the first query after the upgrade,
+  is per machine (two operators keep two records), and a patch that disappears and returns starts
+  over. Every surface that defines "first seen" says so: `QueryResult.first_seen`
+  (`rows::FirstSeenTracking`) carries since when the record has been kept and how many of the
+  counted pending records it dated — a count that climbs run after run *is* the evidence that
+  NinjaOne's times reset. Install-history records keep NinjaOne's time; time to install is not
+  re-dated.
 
 ## `PatchRow` shares its repeated strings; it does not own them
 

@@ -781,6 +781,7 @@ fn query_summary_trims_to_first_page_and_reboot_subset() {
         worst_devices: Default::default(),
         offline_backlog: Default::default(),
         time_to_install: Default::default(),
+        first_seen: Default::default(),
         sla_policy: Default::default(),
         instance: "https://app.ninjarmm.com".into(),
         approvals: Default::default(),

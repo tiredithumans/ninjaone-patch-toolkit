@@ -7,6 +7,7 @@ mod csv_export;
 mod error;
 mod export;
 mod filter;
+mod first_seen;
 #[cfg(test)]
 mod fixtures;
 mod history;
