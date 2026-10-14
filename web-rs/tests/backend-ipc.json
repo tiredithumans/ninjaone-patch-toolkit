@@ -247,6 +247,15 @@
         "security": 30
       },
       "slaDays": 30,
+      "slaExempt": {
+        "critical": false,
+        "important": false,
+        "low": false,
+        "moderate": false,
+        "optional": true,
+        "recommended": false,
+        "security": false
+      },
       "tenantChanged": false
     },
     "list_jobs": [
@@ -1063,7 +1072,16 @@
           "recommended": 60,
           "security": 30
         },
-        "defaultDays": 30
+        "defaultDays": 30,
+        "exempt": {
+          "critical": false,
+          "important": false,
+          "low": false,
+          "moderate": false,
+          "optional": true,
+          "recommended": false,
+          "security": false
+        }
       },
       "timeToInstall": {
         "byOrganization": [

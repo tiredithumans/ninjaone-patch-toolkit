@@ -178,14 +178,77 @@ impl SlaBySeverity {
     }
 }
 
-/// The SLA a query's aging rollups were computed under: the default window plus
-/// any per-band overrides. Carried on the result so an export states the policy
-/// its numbers were computed with, not whatever Settings holds when it is saved.
+/// The bands held to no SLA at all: a band switched on here is never past SLA, so
+/// its pending patches cannot take a device out of Within SLA — they still count as
+/// pending, so the device is not Fully patched.
+///
+/// Separate from [`SlaBySeverity`] rather than a sentinel day count inside it:
+/// `Settings::save` writes every override band, so files on disk already hold
+/// `"optional": null`, and a sentinel could not tell "never set" from "cleared" —
+/// which would have kept every existing install from getting the Optional default.
+/// Same field-per-band shape, for the same reason: a new severity fails to compile
+/// in [`get`](Self::get) until someone decides it. `Unknown` has no switch — an
+/// unrated patch cannot be shown to be unimportant, so it always keeps a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SlaExempt {
+    pub critical: bool,
+    pub important: bool,
+    pub security: bool,
+    pub moderate: bool,
+    pub recommended: bool,
+    pub low: bool,
+    pub optional: bool,
+}
+
+impl Default for SlaExempt {
+    /// Optional patches — driver and feature packs NinjaOne itself labels optional —
+    /// are held to no SLA unless the operator says otherwise. With a window on them,
+    /// a fleet that never intends to install them reads as out of SLA forever.
+    fn default() -> Self {
+        Self {
+            optional: true,
+            ..Self::NONE
+        }
+    }
+}
+
+impl SlaExempt {
+    /// Every band held to an SLA.
+    pub const NONE: Self = Self {
+        critical: false,
+        important: false,
+        security: false,
+        moderate: false,
+        recommended: false,
+        low: false,
+        optional: false,
+    };
+
+    pub fn get(&self, severity: Severity) -> bool {
+        match severity {
+            Severity::Critical => self.critical,
+            Severity::Important => self.important,
+            Severity::Security => self.security,
+            Severity::Moderate => self.moderate,
+            Severity::Recommended => self.recommended,
+            Severity::Low => self.low,
+            Severity::Optional => self.optional,
+            Severity::Unknown => false,
+        }
+    }
+}
+
+/// The SLA a query's aging rollups were computed under: the default window, any
+/// per-band overrides, and the bands held to no SLA. Carried on the result so an
+/// export states the policy its numbers were computed with, not whatever Settings
+/// holds when it is saved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlaPolicy {
     pub default_days: i64,
     pub by_severity: SlaBySeverity,
+    pub exempt: SlaExempt,
 }
 
 impl Default for SlaPolicy {
@@ -193,24 +256,30 @@ impl Default for SlaPolicy {
         Self {
             default_days: DEFAULT_SLA_DAYS,
             by_severity: SlaBySeverity::default(),
+            exempt: SlaExempt::default(),
         }
     }
 }
 
 impl SlaPolicy {
-    /// The SLA window for one band: its override, else the default.
-    pub fn days_for(&self, severity: Severity) -> i64 {
-        self.by_severity.get(severity).unwrap_or(self.default_days)
+    /// The SLA window for one band — its override, else the default — or `None` for
+    /// a band held to no SLA.
+    pub fn window_for(&self, severity: Severity) -> Option<i64> {
+        (!self.exempt.get(severity))
+            .then(|| self.by_severity.get(severity).unwrap_or(self.default_days))
     }
 
     /// One line for the exports, e.g. `30 days (default); Critical 7 days, Important
-    /// 14 days`. Overrides in severity order; bands without one are not listed.
+    /// 14 days; no SLA: Optional`. Overrides in severity order; bands without one are
+    /// not listed, and a band with no SLA is named only in the last clause — its
+    /// override, if it kept one, applies to nothing.
     pub fn describe(&self) -> String {
         let days = |n: i64| if n == 1 { "day" } else { "days" };
         let d = self.default_days;
         let mut out = format!("{d} {} (default)", days(d));
         let overrides: Vec<String> = SlaBySeverity::BANDS
             .into_iter()
+            .filter(|s| !self.exempt.get(*s))
             .filter_map(|s| {
                 self.by_severity
                     .get(s)
@@ -220,6 +289,15 @@ impl SlaPolicy {
         if !overrides.is_empty() {
             out.push_str("; ");
             out.push_str(&overrides.join(", "));
+        }
+        let exempt: Vec<&str> = SlaBySeverity::BANDS
+            .into_iter()
+            .filter(|s| self.exempt.get(*s))
+            .map(Severity::label)
+            .collect();
+        if !exempt.is_empty() {
+            out.push_str("; no SLA: ");
+            out.push_str(&exempt.join(", "));
         }
         out
     }
@@ -239,6 +317,10 @@ pub struct Settings {
     /// Per-band overrides of `sla_days`. Absent from files written before it existed.
     #[serde(default)]
     pub sla_by_severity: SlaBySeverity,
+    /// Bands held to no SLA. Absent from files written before it existed, which then
+    /// get the default — Optional only.
+    #[serde(default)]
+    pub sla_exempt: SlaExempt,
     #[serde(default)]
     pub presets: Vec<Preset>,
     /// Whether to check GitHub for a newer release on launch. Defaults on; older
@@ -260,6 +342,7 @@ impl Default for Settings {
             install_window_days: DEFAULT_INSTALL_WINDOW_DAYS,
             sla_days: DEFAULT_SLA_DAYS,
             sla_by_severity: SlaBySeverity::default(),
+            sla_exempt: SlaExempt::default(),
             presets: Vec::new(),
             auto_check_updates: true,
             actions: ActionSettings::default(),
@@ -286,6 +369,7 @@ impl Settings {
                 low: o.low.map(clamp),
                 optional: o.optional.map(clamp),
             },
+            exempt: self.sla_exempt,
         }
     }
 
@@ -480,6 +564,12 @@ mod tests {
                 critical: Some(3),
                 ..SlaBySeverity::default()
             },
+            // Optional switched back on to an SLA, Low switched off: both directions
+            // away from the default have to survive the disk.
+            sla_exempt: SlaExempt {
+                low: true,
+                ..SlaExempt::NONE
+            },
             presets: vec![Preset {
                 name: "Servers".into(),
                 filter: FilterParams::default(),
@@ -506,6 +596,13 @@ mod tests {
         assert_eq!(loaded.sla_days, 7);
         assert_eq!(loaded.sla_by_severity.critical, Some(3));
         assert_eq!(loaded.sla_by_severity.important, None);
+        assert_eq!(
+            loaded.sla_exempt,
+            SlaExempt {
+                low: true,
+                ..SlaExempt::NONE
+            }
+        );
         assert!(!loaded.auto_check_updates);
         assert!(loaded.actions.enabled);
         assert_eq!(loaded.actions.os_patch_script_id, Some(123));
@@ -563,7 +660,22 @@ mod tests {
         // A file from before per-severity SLAs has no overrides: every band ages
         // against the single window it was configured with.
         assert_eq!(loaded.sla_by_severity, SlaBySeverity::default());
-        assert_eq!(loaded.sla_policy().days_for(Severity::Critical), 30);
+        assert_eq!(loaded.sla_policy().window_for(Severity::Critical), Some(30));
+        // …and gets the No-SLA default: Optional only, so an existing install's
+        // optional backlog stops counting against its SLA without being asked.
+        assert_eq!(
+            loaded.sla_exempt,
+            SlaExempt {
+                optional: true,
+                ..SlaExempt::NONE
+            }
+        );
+        assert_eq!(loaded.sla_policy().window_for(Severity::Optional), None);
+        assert_eq!(
+            loaded.sla_policy().window_for(Severity::Unknown),
+            Some(30),
+            "Unknown has no switch: an unrated patch keeps the default window"
+        );
         // The load-bearing migration guarantee: an install that predates patch
         // actions stays read-only. If this ever flips, every existing deployment
         // would start requesting the `management` scope without being asked.
@@ -617,13 +729,57 @@ mod tests {
         )
         .expect("parse");
         let policy = cfg.sla_policy();
-        assert_eq!(policy.days_for(Severity::Critical), 7);
-        assert_eq!(policy.days_for(Severity::Important), 45);
+        assert_eq!(policy.window_for(Severity::Critical), Some(7));
+        assert_eq!(policy.window_for(Severity::Important), Some(45));
         assert_eq!(
-            policy.days_for(Severity::Unknown),
-            45,
+            policy.window_for(Severity::Unknown),
+            Some(45),
             "an unmapped severity has no override of its own"
         );
+    }
+
+    /// A partial No-SLA block keeps the default for every band it does not name — so
+    /// switching Low off does not quietly switch Optional back on — and an explicit
+    /// `false` is kept.
+    #[test]
+    fn a_partial_no_sla_block_keeps_the_default_for_unnamed_bands() {
+        let parse = |block: &str| {
+            Settings::parse(&format!(
+                r#"{{
+                    "instanceBaseUrl": "https://us2.ninjarmm.com",
+                    "callbackPort": 11434,
+                    "installWindowDays": 30,
+                    "slaDays": 30,
+                    "slaExempt": {block}
+                }}"#
+            ))
+            .expect("parse")
+            .sla_exempt
+        };
+        let low = parse(r#"{ "low": true }"#);
+        assert!(low.low && low.optional, "{low:?}");
+        let cleared = parse(r#"{ "optional": false }"#);
+        assert_eq!(cleared, SlaExempt::NONE);
+    }
+
+    /// A band with No SLA has no window, whatever override it still carries, and
+    /// every other band keeps its own.
+    #[test]
+    fn a_no_sla_band_has_no_window() {
+        let policy = SlaPolicy {
+            default_days: 30,
+            by_severity: SlaBySeverity {
+                low: Some(90),
+                ..SlaBySeverity::default()
+            },
+            exempt: SlaExempt {
+                low: true,
+                ..SlaExempt::NONE
+            },
+        };
+        assert_eq!(policy.window_for(Severity::Low), None);
+        assert_eq!(policy.window_for(Severity::Optional), Some(30));
+        assert_eq!(policy.window_for(Severity::Critical), Some(30));
     }
 
     /// Save-time validation rejects these, but a hand-edited file can hold anything
@@ -640,23 +796,37 @@ mod tests {
             },
             ..Settings::default()
         };
-        let policy = cfg.sla_policy();
+        let policy = SlaPolicy {
+            exempt: SlaExempt::NONE,
+            ..cfg.sla_policy()
+        };
         assert_eq!(policy.default_days, MAX_WINDOW_DAYS);
-        assert_eq!(policy.days_for(Severity::Critical), 1);
-        assert_eq!(policy.days_for(Severity::Low), 1);
-        assert_eq!(policy.days_for(Severity::Optional), MAX_WINDOW_DAYS);
-        assert_eq!(policy.days_for(Severity::Moderate), MAX_WINDOW_DAYS);
+        assert_eq!(policy.window_for(Severity::Critical), Some(1));
+        assert_eq!(policy.window_for(Severity::Low), Some(1));
+        assert_eq!(policy.window_for(Severity::Optional), Some(MAX_WINDOW_DAYS));
+        assert_eq!(policy.window_for(Severity::Moderate), Some(MAX_WINDOW_DAYS));
     }
 
     #[test]
     fn the_sla_policy_describes_its_overrides_in_severity_order() {
         let mut policy = SlaPolicy::default();
+        assert_eq!(policy.describe(), "30 days (default); no SLA: Optional");
+        policy.exempt = SlaExempt::NONE;
         assert_eq!(policy.describe(), "30 days (default)");
         policy.by_severity.important = Some(14);
         policy.by_severity.critical = Some(1);
         assert_eq!(
             policy.describe(),
             "30 days (default); Critical 1 day, Important 14 days"
+        );
+        // A band with No SLA is named only in its own clause; the override it kept
+        // applies to nothing, so it is not listed as a window.
+        policy.by_severity.low = Some(90);
+        policy.exempt.low = true;
+        policy.exempt.optional = true;
+        assert_eq!(
+            policy.describe(),
+            "30 days (default); Critical 1 day, Important 14 days; no SLA: Low, Optional"
         );
     }
 

@@ -432,6 +432,60 @@ impl SlaBySeverity {
     ];
 }
 
+/// The bands held to no SLA. Mirrors `settings::SlaExempt`, including its default:
+/// Optional only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SlaExempt {
+    pub critical: bool,
+    pub important: bool,
+    pub security: bool,
+    pub moderate: bool,
+    pub recommended: bool,
+    pub low: bool,
+    pub optional: bool,
+}
+
+impl Default for SlaExempt {
+    fn default() -> Self {
+        Self {
+            optional: true,
+            ..Self::NONE
+        }
+    }
+}
+
+/// One band's No-SLA switch: its label, and how to read and write it.
+pub type SlaExemptBand = (
+    &'static str,
+    fn(&SlaExempt) -> bool,
+    fn(&mut SlaExempt) -> &mut bool,
+);
+
+impl SlaExempt {
+    pub const NONE: Self = Self {
+        critical: false,
+        important: false,
+        security: false,
+        moderate: false,
+        recommended: false,
+        low: false,
+        optional: false,
+    };
+
+    /// Every switchable band, index-aligned with [`SlaBySeverity::BANDS`]
+    /// (`no_sla_bands_follow_the_sla_bands` pins it). `Unknown` has no switch.
+    pub const BANDS: [SlaExemptBand; 7] = [
+        ("Critical", |s| s.critical, |s| &mut s.critical),
+        ("Important", |s| s.important, |s| &mut s.important),
+        ("Security", |s| s.security, |s| &mut s.security),
+        ("Moderate", |s| s.moderate, |s| &mut s.moderate),
+        ("Recommended", |s| s.recommended, |s| &mut s.recommended),
+        ("Low", |s| s.low, |s| &mut s.low),
+        ("Optional", |s| s.optional, |s| &mut s.optional),
+    ];
+}
+
 /// The SLA policy a result was computed under. Mirrors `settings::SlaPolicy`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
@@ -439,6 +493,7 @@ impl SlaBySeverity {
 pub struct SlaPolicy {
     pub default_days: i64,
     pub by_severity: SlaBySeverity,
+    pub exempt: SlaExempt,
 }
 
 impl Default for SlaPolicy {
@@ -446,6 +501,7 @@ impl Default for SlaPolicy {
         Self {
             default_days: 30,
             by_severity: SlaBySeverity::default(),
+            exempt: SlaExempt::default(),
         }
     }
 }
@@ -599,6 +655,8 @@ pub struct SettingsView {
     pub sla_days: i64,
     #[serde(default)]
     pub sla_by_severity: SlaBySeverity,
+    #[serde(default)]
+    pub sla_exempt: SlaExempt,
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
@@ -740,6 +798,7 @@ pub struct SaveSettingsArgs {
     pub install_window_days: i64,
     pub sla_days: i64,
     pub sla_by_severity: SlaBySeverity,
+    pub sla_exempt: SlaExempt,
     pub client_secret: Option<String>,
     pub clear_secret: bool,
     pub auto_check_updates: bool,

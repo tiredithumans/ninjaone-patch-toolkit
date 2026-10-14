@@ -135,14 +135,25 @@ valid); `Settings::sla_policy()` clamps again, because a hand-edited file reache
 `Duration::days`, which panics on overflow.
 
 - **Cut once per query, per band.** `rows::SlaCutoffs` precomputes one cutoff per `Severity`
-  (indexed by `rank()`, unique per variant) and `is_aged` reads the patch's own band. Undated
-  patches still count as aged.
+  (indexed by `rank()`, unique per variant) and `is_aged` reads the record's own band. Undated
+  records still count as aged — unless the band has No SLA (below).
+- **A band can be held to no SLA at all** (`Settings.sla_exempt`, `SlaExempt`; the Settings
+  panel's "No SLA" box beside each band). `SlaPolicy::window_for` returns `None` for it and
+  `SlaCutoffs` has no cutoff, so `is_aged` is false — undated or not, since there is no target to
+  have missed. Its records are still *pending*, so they still break Fully patched; only the
+  past-SLA figures ignore them. **Optional is on by default**, and `SlaExempt` is its own struct
+  rather than a sentinel inside `SlaBySeverity` for that reason: `Settings::save` writes every
+  override band, so files on disk already hold `"optional": null`, and a sentinel could not tell
+  "never set" from "cleared" — existing installs would never have picked up the default. Its
+  struct-level `#[serde(default)]` keeps the default for every band a partial block omits.
+  `Unknown` has no switch: an unrated patch cannot be shown to be unimportant. `describe()` names
+  the exempt bands in a closing `no SLA: …` clause and drops any override they kept. Stuck
+  approvals ignore the switch (see below).
 - **Two "past SLA" figures, on purpose.** The compliance tables' "Aged (past SLA)" stays the
   Critical/Important subset of the column beside it ("Pending Critical/Important"), so the two
   still reconcile. The worst-devices and offline lists' "Past SLA" counts *every* pending record
-  against its own band's window — that is what the overrides for Moderate/Low/Optional are for.
-  With the default policy (30 days everywhere) an old Optional backlog therefore counts; set a
-  longer window for the low bands if that is not the target.
+  against its own band's window — that is what the overrides for Moderate/Low are for, and why
+  Optional defaults to No SLA.
 - **The result carries the policy it was computed with** (`QueryResult`/`QuerySummary`
   `sla_policy`). An export after a settings change states the numbers' policy, not the new one,
   and the Compliance tab prints it for the same reason.
@@ -327,7 +338,9 @@ summed, one population — plus the **stuck approvals**: per device, the `APPROV
 more than the default SLA days (`SlaPolicy::default_days`) ago, oldest first. No operator decision is holding those up, so they point at
 agents (never-opening maintenance windows, a broken patch engine) rather than at a backlog. The
 threshold is the SLA window because that is already this app's "too long" knob; a second one would
-only let the two disagree. An undated approved patch counts as stuck, the same rule `is_aged` uses.
+only let the two disagree. It is the *default* window for every band, and it ignores No SLA: an
+approval is an explicit decision to install, so an approved Optional patch that never installs is
+exactly the agent symptom this list exists for. An undated approved patch counts as stuck, the same rule `is_aged` uses.
 The workbook writes every stuck device on a **Stuck Approvals** sheet with the threshold as a
 footnote; the report and the Compliance tab show the oldest ones and say how many more there are.
 

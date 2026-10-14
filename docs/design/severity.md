@@ -31,10 +31,11 @@ ordered so `Security`/`Recommended` fall **below** `Important`, keeping them out
 7. `SEVERITY_OPTIONS` (`web-rs/src/app.rs`).
 8. The CSS.
 9. `demo.rs`.
-10. `SlaBySeverity` — its field, `BANDS` and `get` (`settings.rs`; `get` is an exhaustive match, so
-    the backend fails to compile) **and** the `web-rs/src/types.rs` mirror's field and `BANDS`
-    (nothing fails there — `every_sla_band_reads_and_writes_its_own_field` only checks the ones
-    listed). `SeverityCounts::bump` is exhaustive too.
+10. `SlaBySeverity` **and** `SlaExempt` — each one's field, `BANDS` and `get` (`settings.rs`; both
+    `get`s are exhaustive matches, so the backend fails to compile) **and** the
+    `web-rs/src/types.rs` mirrors' fields and `BANDS` (nothing fails there —
+    `every_sla_band_reads_and_writes_its_own_field` and `no_sla_bands_follow_the_sla_bands` only
+    check the ones listed). `SeverityCounts::bump` is exhaustive too.
 
 The CSS end of this is guarded: the eight band colors are `--sev-*` / `--sev-*-fg` custom
 properties defined once on `:root`, and the three rule families (`.sev-*`, `.chart .seg-*`,

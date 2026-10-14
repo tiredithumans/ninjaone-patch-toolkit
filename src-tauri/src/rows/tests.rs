@@ -8,7 +8,7 @@ use crate::model::{Device, Patch, PatchRow, PatchStatus};
 
 use super::*;
 use crate::filter::FilterParams;
-use crate::settings::{SlaBySeverity, SlaPolicy};
+use crate::settings::{SlaBySeverity, SlaExempt, SlaPolicy};
 
 /// Composes the two halves of paging the way `AppState::with_sorted_result`
 /// does — build the order once, then slice it — so these assertions still
@@ -217,9 +217,15 @@ fn patch(device_id: i64, status: &str, sev: &str, first_seen_days_ago: Option<i6
     }
 }
 
-/// The default policy (30 days for every band), cut at the current clock.
+/// 30 days for every band, none held to No SLA, cut at the current clock. Not the
+/// shipped default (which exempts Optional): these tests are about the window, and
+/// several use Optional records as ordinary aged backlog.
 fn sla30() -> SlaCutoffs {
-    SlaCutoffs::new(&SlaPolicy::default(), Utc::now())
+    let policy = SlaPolicy {
+        exempt: SlaExempt::NONE,
+        ..SlaPolicy::default()
+    };
+    SlaCutoffs::new(&policy, Utc::now())
 }
 
 fn maps() -> LookupMaps {
@@ -2497,6 +2503,7 @@ fn policy(default_days: i64, by_severity: SlaBySeverity) -> SlaPolicy {
     SlaPolicy {
         default_days,
         by_severity,
+        exempt: SlaExempt::NONE,
     }
 }
 
@@ -2533,6 +2540,33 @@ fn each_patch_ages_against_its_own_bands_cutoff() {
         sla.is_aged(&PatchRecord::vendor(&patch(1, "MANUAL", "LOW", None))),
         "undated still can't be proven recent"
     );
+}
+
+/// A band held to No SLA is never past SLA — not when it is old, and not when it is
+/// undated — while every other band keeps its window.
+#[test]
+fn a_no_sla_band_is_never_past_sla() {
+    let sla = SlaCutoffs::new(
+        &SlaPolicy {
+            exempt: SlaExempt {
+                optional: true,
+                ..SlaExempt::NONE
+            },
+            ..policy(30, SlaBySeverity::default())
+        },
+        Utc::now(),
+    );
+    let aged = |sev: &str, days: Option<i64>| {
+        sla.is_aged(&PatchRecord::vendor(&patch(1, "MANUAL", sev, days)))
+    };
+    assert!(!aged("OPTIONAL", Some(400)));
+    assert!(!aged("NONE", Some(400)), "NONE is Optional");
+    assert!(
+        !aged("OPTIONAL", None),
+        "undated, but there is no target to miss"
+    );
+    assert!(aged("LOW", Some(45)), "Low keeps the default window");
+    assert!(aged("something-new", None), "Unknown has no switch");
 }
 
 /// The compliance table's aged column follows the per-band policy too.

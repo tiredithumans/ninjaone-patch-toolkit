@@ -45,7 +45,8 @@ Violating these silently misreports a fleet.
   query returns (never detached); the baseline is served from the last snapshot this process
   saved when the scope matches, remembered only once it is on disk.
   → `docs/design/compliance.md#changes-since-the-previous-comparable-run`
-- **SLA aging is per band** (`SlaCutoffs` from the result's `SlaPolicy`).
+- **SLA aging is per band** (`SlaCutoffs` from the result's `SlaPolicy`); a band with No SLA
+  (`SlaExempt`, Optional by default, never `Unknown`) is never past SLA, undated or not.
   → `docs/design/compliance.md#the-sla-is-per-severity-band`
 - **`format_pct` never rounds up to 100** (caps at 99%; `pct_cell` at one decimal).
   → `docs/design/compliance.md#a-percentage-never-rounds-up-to-100`

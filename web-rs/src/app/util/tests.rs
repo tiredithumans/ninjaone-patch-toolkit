@@ -3239,11 +3239,17 @@ fn every_sla_band_reads_and_writes_its_own_field() {
     }
 }
 
-/// Mirrors `settings::SlaPolicy::describe`, which the exports print.
+/// Mirrors `settings::SlaPolicy::describe`, which the exports print — including
+/// the backend's own tests' strings, so the two spell the policy identically.
 #[test]
 fn the_sla_summary_matches_the_exports() {
-    use crate::types::{SlaBySeverity, SlaPolicy};
+    use crate::types::{SlaBySeverity, SlaExempt, SlaPolicy};
     let mut p = SlaPolicy::default();
+    assert_eq!(
+        sla_policy_summary(&p),
+        "30 days (default); no SLA: Optional"
+    );
+    p.exempt = SlaExempt::NONE;
     assert_eq!(sla_policy_summary(&p), "30 days (default)");
     p.by_severity = SlaBySeverity {
         important: Some(14),
@@ -3254,10 +3260,69 @@ fn the_sla_summary_matches_the_exports() {
         sla_policy_summary(&p),
         "30 days (default); Critical 1 day, Important 14 days"
     );
-    assert_eq!(sla_days_for(&p, "Critical"), 1);
-    assert_eq!(sla_days_for(&p, "important"), 14);
-    assert_eq!(sla_days_for(&p, "Moderate"), 30, "no override");
-    assert_eq!(sla_days_for(&p, "Unknown"), 30, "never overridable");
+    assert_eq!(sla_days_for(&p, "Critical"), Some(1));
+    assert_eq!(sla_days_for(&p, "important"), Some(14));
+    assert_eq!(sla_days_for(&p, "Moderate"), Some(30), "no override");
+    assert_eq!(sla_days_for(&p, "Unknown"), Some(30), "never overridable");
+    p.by_severity.low = Some(90);
+    p.exempt.low = true;
+    p.exempt.optional = true;
+    assert_eq!(
+        sla_policy_summary(&p),
+        "30 days (default); Critical 1 day, Important 14 days; no SLA: Low, Optional"
+    );
+    assert_eq!(
+        sla_days_for(&p, "Low"),
+        None,
+        "its kept override applies to nothing"
+    );
+}
+
+/// Mirrors `rows::SlaCutoffs::is_aged`: undated is past SLA, a No-SLA band never is.
+#[test]
+fn is_past_sla_never_flags_a_no_sla_band() {
+    use crate::types::SlaPolicy;
+    let p = SlaPolicy::default();
+    let now = 100 * 86_400;
+    let days_ago = |d: i64| Some(now - d * 86_400);
+    assert!(is_past_sla(&p, "Critical", days_ago(31), now));
+    assert!(!is_past_sla(&p, "Critical", days_ago(29), now));
+    assert!(
+        is_past_sla(&p, "Critical", None, now),
+        "undated can't be shown recent"
+    );
+    assert!(!is_past_sla(&p, "Optional", days_ago(90), now));
+    assert!(!is_past_sla(&p, "Optional", None, now), "no target to miss");
+    assert!(is_past_sla(&p, "Unknown", days_ago(31), now));
+}
+
+/// The No-SLA switches are index-aligned with the SLA bands, which the Settings
+/// form zips together, and each writes its own wire field.
+#[test]
+fn no_sla_bands_follow_the_sla_bands() {
+    use crate::types::{SlaBySeverity, SlaExempt};
+    for ((a, _, _), (b, _, _)) in SlaBySeverity::BANDS.iter().zip(SlaExempt::BANDS.iter()) {
+        assert_eq!(a, b);
+    }
+    assert_eq!(SlaBySeverity::BANDS.len(), SlaExempt::BANDS.len());
+    for (i, (label, get, set)) in SlaExempt::BANDS.iter().enumerate() {
+        let mut e = SlaExempt::NONE;
+        *set(&mut e) = true;
+        assert!(get(&e), "{label}");
+        let json = serde_json::to_value(e).unwrap();
+        let on: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, v)| v.as_bool() == Some(true))
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(
+            on,
+            [label.to_lowercase()],
+            "band {i} writes only its own field"
+        );
+    }
 }
 
 #[test]

@@ -13,6 +13,7 @@ impl AppState {
         self.settings.f_install_days.set(v.install_window_days);
         self.settings.f_sla.set(v.sla_days);
         self.settings.f_sla_by_severity.set(v.sla_by_severity);
+        self.settings.f_sla_exempt.set(v.sla_exempt);
         self.settings.has_secret.set(v.has_client_secret);
         self.settings.f_auto_update.set(v.auto_check_updates);
         self.settings.f_actions.set(v.actions);

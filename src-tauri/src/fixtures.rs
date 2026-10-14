@@ -36,7 +36,7 @@ use crate::rows::{
     build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
     device_detail, page_rows, rows_by_device, slice_groups, sort_device_summaries,
 };
-use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaPolicy};
+use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaExempt, SlaPolicy};
 
 /// Writes `fixture` to `path` under `UPDATE_FIXTURES`, and otherwise fails unless the
 /// committed file holds exactly what `fixture` renders to. `path` is relative to
@@ -345,6 +345,8 @@ fn ipc_fixture_is_current() {
             low: Some(90),
             optional: Some(90),
         },
+        // The shipped default, so the fixture carries a band with No SLA.
+        exempt: SlaExempt::default(),
     };
     let cutoffs = SlaCutoffs::new(&sla_policy, FIXTURE_NOW);
     let mut summaries =
@@ -533,6 +535,7 @@ fn ipc_fixture_is_current() {
         install_window_days: 30,
         sla_days: 30,
         sla_by_severity: sla_policy.by_severity,
+        sla_exempt: sla_policy.exempt,
         has_client_secret: true,
         presets: vec![Preset {
             name: "Critical servers".into(),

@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::app::util::{
-    date_to_epoch, median, nearest_rank, product_display_name, severity_rank, sla_days_for,
+    date_to_epoch, is_past_sla, median, nearest_rank, product_display_name, severity_rank,
     strip_version_token,
 };
 use crate::types::QueryResult;
@@ -28,7 +28,7 @@ use crate::types::{
     AgeBucket, ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceDetail,
     DeviceSummary, FailureGroup, FilterParams, GroupBy, InstallLatency, Location, NodeClass,
     OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role,
-    RollupScope, SeverityCounts, SlaBySeverity, SlaPolicy, StuckDevice, TimeToInstall,
+    RollupScope, SeverityCounts, SlaBySeverity, SlaExempt, SlaPolicy, StuckDevice, TimeToInstall,
 };
 use crate::types::{ChangeItem, RunChanges};
 
@@ -445,14 +445,13 @@ fn sample_device_summary(device_id: i64, failed_queried: bool) -> Option<DeviceS
                 pending += 1;
                 bump(&mut counts, &r.severity);
                 let backlog = severity_rank(&r.severity) >= severity_rank("Important");
-                let old = r
-                    .first_seen_date
-                    .as_deref()
-                    .and_then(date_to_epoch)
-                    // Per band, like `SlaCutoffs` and the demo's worst devices.
-                    .is_none_or(|seen| {
-                        seen < SAMPLE_NOW_EPOCH - sla_days_for(&DEMO_SLA, &r.severity) * 86_400
-                    });
+                // Per band, like `SlaCutoffs` and the demo's worst devices.
+                let old = is_past_sla(
+                    &DEMO_SLA,
+                    &r.severity,
+                    r.first_seen_date.as_deref().and_then(date_to_epoch),
+                    SAMPLE_NOW_EPOCH,
+                );
                 if backlog && old {
                     aged += 1;
                 }
@@ -618,6 +617,10 @@ const DEMO_SLA: SlaPolicy = SlaPolicy {
         low: None,
         optional: None,
     },
+    exempt: SlaExempt {
+        optional: true,
+        ..SlaExempt::NONE
+    },
 };
 
 /// Mirrors the backend's cap on each device list.
@@ -665,8 +668,7 @@ fn demo_worst_devices(rows: &[PatchRow]) -> DeviceBacklogList {
         bump(&mut d.pending, &r.severity);
         d.pending_total += 1;
         let seen = r.first_seen_date.as_deref().and_then(date_to_epoch);
-        let sla_secs = sla_days_for(&DEMO_SLA, &r.severity) * 86_400;
-        if seen.is_none_or(|s| s < SAMPLE_NOW_EPOCH - sla_secs) {
+        if is_past_sla(&DEMO_SLA, &r.severity, seen, SAMPLE_NOW_EPOCH) {
             d.past_sla += 1;
         }
         // YYYY-MM-DD compares chronologically as text.

@@ -467,6 +467,8 @@ pub(crate) struct SettingsState {
     pub(super) f_sla: RwSignal<i64>,
     /// Per-band SLA overrides; a blank band uses `f_sla`.
     pub(super) f_sla_by_severity: RwSignal<SlaBySeverity>,
+    /// Bands held to no SLA; such a band's days input is disabled, not cleared.
+    pub(super) f_sla_exempt: RwSignal<SlaExempt>,
     pub(super) has_secret: RwSignal<bool>,
     pub(super) f_auto_update: RwSignal<bool>,
     /// Whole write-path block, held as one value so a field the panel doesn't
@@ -486,6 +488,7 @@ impl SettingsState {
             f_install_days: RwSignal::new(30),
             f_sla: RwSignal::new(30),
             f_sla_by_severity: RwSignal::new(SlaBySeverity::default()),
+            f_sla_exempt: RwSignal::new(SlaExempt::default()),
             has_secret: RwSignal::new(false),
             f_auto_update: RwSignal::new(true),
             f_actions: RwSignal::new(ActionSettings::default()),

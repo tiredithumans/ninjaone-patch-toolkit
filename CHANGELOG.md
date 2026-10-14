@@ -11,6 +11,15 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **A "No SLA" switch for each severity in Settings → Patch SLA.** A severity switched to No SLA
+  never counts as past SLA; its patches still count as pending. **Optional is switched on by
+  default, including on existing installs**, so an optional backlog nobody intends to install
+  (driver and feature packs) stops counting against the SLA. Untick it to restore the old
+  behavior. Unrated (Unknown) patches always keep the default window. The SLA policy line on the
+  Compliance tab, the report and the workbook names the bands with no SLA.
+
 ## [0.15.4] - 2026-10-10
 
 ### Fixed

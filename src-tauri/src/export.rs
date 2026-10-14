@@ -735,6 +735,7 @@ mod tests {
             low: None,
             optional: None,
         },
+        exempt: crate::settings::SlaExempt::NONE,
     };
 
     static NO_DEVICES: DeviceBacklogList = DeviceBacklogList {

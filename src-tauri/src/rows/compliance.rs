@@ -266,26 +266,29 @@ fn counts_toward_backlog(r: &PatchRecord<'_>) -> bool {
     r.pending && r.severity.rank() >= Severity::Important.rank()
 }
 
-/// The SLA cutoff for every severity band at one instant: a patch first seen
-/// before its band's cutoff is past SLA.
+/// The SLA cutoff for every severity band at one instant: a record first seen
+/// before its band's cutoff is past SLA. A band held to no SLA has no cutoff.
 ///
 /// Computed once per query rather than once per patch, indexed by
 /// [`Severity::rank`] and sized from [`Severity::ALL`], which lists every variant at
 /// its rank, so every slot is filled. Each band's window comes from
-/// [`SlaPolicy::days_for`] — its override, else the default; `Unknown` always takes
-/// the default.
-pub struct SlaCutoffs([DateTime<Utc>; Severity::ALL.len()]);
+/// [`SlaPolicy::window_for`] — its override, else the default, or none at all for a
+/// band switched to No SLA; `Unknown` always takes the default.
+pub struct SlaCutoffs([Option<DateTime<Utc>>; Severity::ALL.len()]);
 
 impl SlaCutoffs {
     pub fn new(policy: &SlaPolicy, now: DateTime<Utc>) -> Self {
-        let mut cutoffs = [now; Severity::ALL.len()];
+        let mut cutoffs = [None; Severity::ALL.len()];
         for severity in Severity::ALL {
-            cutoffs[severity.rank() as usize] = now - Duration::days(policy.days_for(severity));
+            cutoffs[severity.rank() as usize] = policy
+                .window_for(severity)
+                .map(|days| now - Duration::days(days));
         }
         Self(cutoffs)
     }
 
-    pub fn cutoff_for(&self, severity: Severity) -> DateTime<Utc> {
+    /// The band's cutoff, or `None` for a band held to no SLA.
+    pub fn cutoff_for(&self, severity: Severity) -> Option<DateTime<Utc>> {
         self.0[severity.rank() as usize]
     }
 
@@ -294,8 +297,12 @@ impl SlaCutoffs {
     ///
     /// A record nothing has dated can't be proven recent, so it is flagged for
     /// review rather than assumed within SLA (which would understate the backlog).
+    /// A band held to no SLA is never past it — undated or not: there is no target
+    /// for it to have missed.
     pub fn is_aged(&self, r: &PatchRecord<'_>) -> bool {
-        let cutoff = self.cutoff_for(r.severity);
+        let Some(cutoff) = self.cutoff_for(r.severity) else {
+            return false;
+        };
         r.first_seen.map(|t| t < cutoff).unwrap_or(true)
     }
 }
