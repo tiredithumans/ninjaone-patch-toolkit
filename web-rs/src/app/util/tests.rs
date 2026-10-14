@@ -1276,6 +1276,7 @@ fn summary_line_is_tab_aware() {
         failures: 7,
         failing_devices: 5,
         orgs: 3,
+        devices_counted: 512,
         reboot: 12,
     };
     assert_eq!(
@@ -1289,7 +1290,7 @@ fn summary_line_is_tab_aware() {
     );
     assert_eq!(
         summary_line(Tab::Compliance, &c, "2026-06-28"),
-        "3 organizations \u{00b7} 540 devices \u{00b7} generated 2026-06-28"
+        "3 organizations \u{00b7} 512 of 540 devices counted \u{00b7} generated 2026-06-28"
     );
     // Jobs shows dispatch history, not query output, so the query's counts and
     // generation time would be actively misleading there.
@@ -3616,4 +3617,176 @@ fn the_first_seen_note_states_the_record_and_how_much_it_dated() {
         some.contains("12 of 37 pending records are dated by this app's record"),
         "{some}"
     );
+}
+
+// --- Compliance wording: held to the backend's own strings -----------------------
+
+/// The IPC fixture: the backend's `query_patches` summary and its `wording` section.
+fn backend_fixture() -> serde_json::Value {
+    serde_json::from_str(include_str!("../../../tests/backend-ipc.json")).expect("fixture")
+}
+
+/// Every sentence the Compliance tab mirrors from the backend reads exactly as the
+/// backend writes it for the same result — the headline figures, the definitions,
+/// the first-seen line, the missing-organizations note, the SLA policy, the scope
+/// note, the two device-list notes and the legend. The crates share no code; this
+/// is what stops the tab and the exports from describing one figure two ways.
+#[test]
+fn the_wording_matches_the_backend() {
+    use crate::types::QueryResult;
+    let fixture = backend_fixture();
+    let wording = &fixture["wording"];
+    let r: QueryResult =
+        serde_json::from_value(fixture["commands"]["query_patches"].clone()).expect("summary");
+
+    let kpis = compliance_kpis(
+        &r.compliance_total,
+        r.devices_offline,
+        r.devices_unpatchable,
+    );
+    let backend = wording["headline"].as_array().expect("headline");
+    assert_eq!(kpis.len(), backend.len());
+    for (k, b) in kpis.iter().zip(backend) {
+        assert_eq!(k.label, b["label"], "label");
+        assert_eq!(k.value, b["value"], "{} value", k.label);
+        assert_eq!(k.detail, b["detail"], "{} detail", k.label);
+        assert_eq!(k.definition, b["definition"], "{} definition", k.label);
+    }
+
+    let notes = calculation_notes(&r.sla_policy, r.patch_families, &r.first_seen);
+    let backend = wording["calculationNotes"].as_array().expect("notes");
+    assert_eq!(notes.len(), backend.len());
+    for ((term, meaning), b) in notes.iter().zip(backend) {
+        assert_eq!(*term, b[0], "term");
+        assert_eq!(*meaning, b[1], "{term}");
+    }
+
+    assert_eq!(
+        first_seen_note(&r.first_seen).as_deref(),
+        wording["firstSeenNote"].as_str()
+    );
+    assert_eq!(
+        uncounted_orgs_note(&r.uncounted_orgs).as_deref(),
+        wording["uncountedOrgsNote"].as_str()
+    );
+    assert_eq!(sla_policy_summary(&r.sla_policy), wording["slaPolicy"]);
+    assert_eq!(
+        compliance_scope_note(r.devices_offline, r.devices_unpatchable, r.patch_families),
+        wording["scopeNote"]
+    );
+    assert_eq!(WORST_DEVICES_NOTE, wording["worstDevicesNote"]);
+    assert_eq!(OFFLINE_BACKLOG_NOTE, wording["offlineBacklogNote"]);
+    let bands: Vec<&str> = PCT_BANDS.iter().map(|(_, label, _)| *label).collect();
+    assert_eq!(serde_json::json!(bands), wording["pctBands"]);
+}
+
+/// The hand-spelled headers match the backend's `rows::TableColumn` spellings —
+/// the workbook's and the report's — column for column. The in-app first seen →
+/// installed table drops the "Days" its cells carry themselves.
+#[test]
+fn headers_match_the_backend_columns() {
+    let fixture = backend_fixture();
+    let columns = &fixture["wording"]["columns"];
+    let labels =
+        |cols: &[HelpedColumn]| cols.iter().map(|(l, _)| l.to_string()).collect::<Vec<_>>();
+    let backend = |key: &str| -> Vec<String> {
+        columns[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("columns.{key}"))
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(labels(&COMPLIANCE_ORG_HEADERS), backend("compliance"));
+    assert_eq!(labels(&COMPLIANCE_OS_HEADERS), backend("byOs"));
+    assert_eq!(labels(&WORST_HEADERS), backend("worst"));
+    assert_eq!(labels(&OFFLINE_HEADERS), backend("offline"));
+    assert_eq!(labels(&STUCK_HEADERS), backend("stuck"));
+    let without_days: Vec<String> = backend("timeToInstall")
+        .into_iter()
+        .map(|h| h.replace(" (Days)", "").replace(" Days)", ")"))
+        .collect();
+    assert_eq!(labels(&TIME_TO_INSTALL_HEADERS), without_days);
+}
+
+/// Every header that measures something carries a definition.
+#[test]
+fn every_header_is_defined_or_an_identity_column() {
+    for table in [
+        &COMPLIANCE_ORG_HEADERS[..],
+        &COMPLIANCE_OS_HEADERS[..],
+        &WORST_HEADERS[..],
+        &OFFLINE_HEADERS[..],
+        &STUCK_HEADERS[..],
+        &TIME_TO_INSTALL_HEADERS[..],
+        &TREND_ORG_HEADERS[..],
+        &DEVICE_HEALTH_LABELS[..],
+    ] {
+        for (label, help) in table {
+            assert_eq!(
+                help.is_empty(),
+                IDENTITY_COLUMNS.contains(label),
+                "{label}: a measure needs a definition; an identity column needs none"
+            );
+        }
+    }
+}
+
+/// The headline never calls an empty scope compliant, and states both exclusions.
+#[test]
+fn the_kpis_never_call_an_empty_fleet_compliant() {
+    use crate::types::ComplianceBucket;
+    let empty = ComplianceBucket {
+        within_sla_pct: 100.0,
+        fully_patched_pct: 100.0,
+        ..ComplianceBucket::default()
+    };
+    let k = compliance_kpis(&empty, 0, 0);
+    assert_eq!(k[0].value, "\u{2014}");
+    assert_eq!(k[0].detail, "no counted devices");
+    assert_eq!(k[3].detail, "none");
+    let fleet = ComplianceBucket {
+        devices_total: 1_200,
+        devices_within_sla: 1_050,
+        within_sla_pct: 87.5,
+        devices_fully_patched: 600,
+        fully_patched_pct: 50.0,
+        urgent_pending: 3_400,
+        urgent_past_sla: 0,
+        ..ComplianceBucket::default()
+    };
+    let k = compliance_kpis(&fleet, 4, 3);
+    assert_eq!(
+        (k[0].value.as_str(), k[0].detail.as_str()),
+        ("87.5%", "1,050 of 1,200 devices")
+    );
+    assert_eq!(k[1].value, "50.0%");
+    assert_eq!(
+        (k[2].value.as_str(), k[2].detail.as_str()),
+        ("3,400", "none past SLA")
+    );
+    assert_eq!(
+        (k[3].value.as_str(), k[3].detail.as_str()),
+        ("7", "4 offline, 3 non-patchable")
+    );
+}
+
+/// The legend's bands are the bar colours' bands, best first, and each has CSS.
+#[test]
+fn the_within_sla_bands_match_their_colours() {
+    assert_eq!(pct_band_class(99.9), "bar-good");
+    assert_eq!(pct_band_class(95.0), "bar-good");
+    assert_eq!(pct_band_class(94.9), "bar-warn");
+    assert_eq!(pct_band_class(80.0), "bar-warn");
+    assert_eq!(pct_band_class(0.0), "bar-bad");
+    let css = include_str!("../../../styles.css");
+    for (_, _, class) in PCT_BANDS {
+        for selector in [
+            format!(".chart .{class}"),
+            format!(".chart-swatch.{class}"),
+            format!(".kpi-value.{class}"),
+        ] {
+            assert!(css.contains(&selector), "styles.css lacks {selector}");
+        }
+    }
 }

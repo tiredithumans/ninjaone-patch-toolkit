@@ -186,6 +186,8 @@ pub(crate) struct SummaryCounts {
     /// Distinct devices carrying at least one of those failures.
     pub failing_devices: usize,
     pub orgs: usize,
+    /// Devices the compliance figures count (the fleet total's `devices_total`).
+    pub devices_counted: usize,
     pub reboot: usize,
 }
 
@@ -207,9 +209,12 @@ pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts, generated_at: &str) -> S
             group_thousands(c.failures),
             group_thousands(c.failing_devices),
         ),
+        // Counted against in scope, so the line reconciles with the table under it
+        // rather than putting a second, larger device count beside it.
         Tab::Compliance => format!(
-            "{} organizations \u{00b7} {} devices",
+            "{} organizations \u{00b7} {} of {} devices counted",
             group_thousands(c.orgs),
+            group_thousands(c.devices_counted),
             group_thousands(c.devices_total),
         ),
         Tab::Reboot => format!(

@@ -72,14 +72,29 @@ fn bar_height_px(count: usize, max: usize, full: f64) -> f64 {
     }
 }
 
-/// Compliance bar fill class: green at/above 95%, amber at/above 80%, else red.
+/// Within SLA bar fill class, by `util::PCT_BANDS`: 95% or more, 80% to under 95%,
+/// under 80%.
 fn compliance_fill_class(pct: f64) -> &'static str {
-    if pct >= 95.0 {
-        "bar-good"
-    } else if pct >= 80.0 {
-        "bar-warn"
-    } else {
-        "bar-bad"
+    util::pct_band_class(pct)
+}
+
+/// The key under every Within SLA bar chart: what each bar colour means.
+fn pct_legend() -> impl IntoView {
+    view! {
+        <ul class="chart-legend">
+            {util::PCT_BANDS
+                .iter()
+                .map(|&(_, label, class)| {
+                    let swatch = format!("chart-swatch {class}");
+                    view! {
+                        <li>
+                            <span class=swatch aria-hidden="true"></span>
+                            {format!("Within SLA {label}")}
+                        </li>
+                    }
+                })
+                .collect_view()}
+        </ul>
     }
 }
 
@@ -237,6 +252,7 @@ fn compliance_bars(title: &str, items: Vec<(String, f64)>) -> AnyView {
                 })
                 .collect_view()}
         </svg>
+        {pct_legend()}
     }
     .into_any()
 }

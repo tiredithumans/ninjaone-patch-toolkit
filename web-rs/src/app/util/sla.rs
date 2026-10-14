@@ -108,9 +108,12 @@ pub(crate) const TIME_TO_INSTALL_NOTE: &str = "\"First seen\" is NinjaOne's reco
      to the install itself, so these figures are indicative only.";
 
 /// Printed under the offline list: what the data can and cannot say about it.
-pub(crate) const OFFLINE_BACKLOG_NOTE: &str = "These records were collected before the device \
-     went offline and may be stale; the compliance figures exclude these devices. \"Latest \
-     data\" is the newest collection time on the device's records, not a last-contact time.";
+/// Mirrors `rows::OFFLINE_BACKLOG_NOTE`, pinned by the IPC fixture's wording.
+pub(crate) const OFFLINE_BACKLOG_NOTE: &str = "Offline devices still listed with pending patches in \
+     NinjaOne's current feed. These records were collected before the device went offline \
+     and may be out of date, so the compliance figures exclude these devices. \"Latest Patch \
+     Data Collected\" is the newest collection time on the device's records; \"Last \
+     Contact\" is when its agent last checked in.";
 
 /// The SLA window for one severity label: its band's override, else the default,
 /// or `None` for a band held to no SLA. A label with no band (`Unknown`, or anything

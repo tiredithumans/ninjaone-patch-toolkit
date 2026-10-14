@@ -9,9 +9,10 @@ use rust_xlsxwriter::{Color, ExcelDateTime, Format, Workbook, Worksheet};
 use crate::model::PatchRow;
 use crate::rows::{
     ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceSummary,
-    FailureGroup, InstallLatency, OFFLINE_BACKLOG_NOTE, OsCompliance, QueryScope, StuckDevice,
-    TIME_TO_INSTALL_NOTE, TableCell, TableColumn, TimeToInstall, WORST_DEVICES_NOTE, clamp_cell,
-    utc_text,
+    FailureGroup, FirstSeenTracking, InstallLatency, OFFLINE_BACKLOG_NOTE, OsCompliance,
+    PatchFamilies, QueryScope, StuckDevice, TIME_TO_INSTALL_NOTE, TableCell, TableColumn,
+    TimeToInstall, WORST_DEVICES_NOTE, calculation_notes, clamp_cell, headline_figures,
+    uncounted_orgs_note, utc_text,
 };
 use crate::settings::SlaPolicy;
 
@@ -72,7 +73,7 @@ const FAILURE_WIDTHS: [f64; FailureGroup::COLUMNS.len()] =
 const WORST_WIDTHS: [f64; DeviceBacklog::WORST_COLUMNS.len()] =
     [24.0, 22.0, 26.0, 10.0, 15.0, 20.0, 40.0];
 const OFFLINE_WIDTHS: [f64; DeviceBacklog::OFFLINE_COLUMNS.len()] =
-    [24.0, 22.0, 26.0, 26.0, 15.0, 10.0, 40.0];
+    [24.0, 22.0, 26.0, 26.0, 18.0, 15.0, 10.0, 40.0];
 const INSTALL_TIME_WIDTHS: [f64; InstallLatency::COLUMNS.len()] = [14.0, 28.0, 17.0, 34.0, 20.0];
 const DEVICE_WIDTHS: [f64; DeviceSummary::DEVICE_COLUMNS.len()] = [
     24.0, 18.0, 18.0, 22.0, 26.0, 8.0, 24.0, 11.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0,
@@ -118,6 +119,15 @@ pub struct WorkbookMeta<'a> {
     /// The SLA policy the aging figures were computed under — the result's, not
     /// whatever Settings holds at export time.
     pub sla_policy: &'a SlaPolicy,
+    /// The fleet total: the Compliance sheet's last row and the About sheet's
+    /// headline figures.
+    pub compliance_total: &'a ComplianceBucket,
+    /// Organizations with no row on the Compliance sheet, named under it.
+    pub uncounted_orgs: &'a [String],
+    /// What "first seen" means in these numbers, for the Definitions block.
+    pub first_seen: &'a FirstSeenTracking,
+    /// The patch families the rollups cover, for the Definitions block.
+    pub patch_families: PatchFamilies,
 }
 
 /// The per-device and install-time aggregates, each written to its own sheet.
@@ -225,19 +235,42 @@ fn write_workbook_split(
         )?;
     }
     if !compliance.is_empty() {
+        // The fleet total closes the sheet as an "All organizations" row once there
+        // are two organizations to total — device-weighted, so it is not the mean of
+        // the rows above it.
+        let with_total: Vec<ComplianceBucket>;
+        let rows: &[ComplianceBucket] = if compliance.len() >= 2 {
+            with_total = compliance
+                .iter()
+                .chain(std::iter::once(meta.compliance_total))
+                .cloned()
+                .collect();
+            &with_total
+        } else {
+            compliance
+        };
         write_sheet(
             &mut workbook,
             &header,
             "Compliance",
             &ComplianceBucket::COLUMNS,
             &SUMMARY_WIDTHS,
-            compliance,
+            rows,
             false,
         )?;
         // Stated on the sheet itself: a workbook outlives the session it came from,
-        // and a bare "Compliance %" column says nothing about which devices and
-        // which patch families produced it.
-        write_footnotes(&mut workbook, compliance.len(), &[meta.scope_note])?;
+        // and a bare "Within SLA %" column says nothing about which devices and
+        // which patch families produced it — or which organizations it left out.
+        let uncounted = uncounted_orgs_note(meta.uncounted_orgs);
+        let notes: Vec<&str> = [
+            Some(meta.scope_note),
+            uncounted.as_deref(),
+            Some(DEFINITIONS_NOTE),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        write_footnotes(&mut workbook, rows.len(), &notes)?;
     }
     if !compliance_by_os.is_empty() {
         write_sheet(
@@ -249,7 +282,11 @@ fn write_workbook_split(
             compliance_by_os,
             false,
         )?;
-        write_footnotes(&mut workbook, compliance_by_os.len(), &[meta.scope_note])?;
+        write_footnotes(
+            &mut workbook,
+            compliance_by_os.len(),
+            &[meta.scope_note, DEFINITIONS_NOTE],
+        )?;
     }
     if !devices.is_empty() {
         // Every in-scope device, the excluded ones included and labelled: the scope
@@ -327,8 +364,8 @@ fn write_workbook_split(
     for (name, columns, widths, list, note) in [
         (
             "Worst Devices",
-            &DeviceBacklog::WORST_COLUMNS,
-            &WORST_WIDTHS,
+            &DeviceBacklog::WORST_COLUMNS[..],
+            &WORST_WIDTHS[..],
             backlogs.worst_devices,
             WORST_DEVICES_NOTE,
         ),
@@ -397,6 +434,10 @@ fn write_workbook_split(
 /// that depends on the Status selection, so it says when it is blank and why.
 const FAILED_INSTALLS_NOTE: &str = "Failed Installs counts FAILED install-history records in \
      the lookback window, and is blank when the query did not include the Failed status.";
+
+/// Under both compliance sheets: the definitions are on About, not repeated per sheet.
+const DEFINITIONS_NOTE: &str =
+    "What each figure means: see the Definitions block on the About sheet.";
 
 /// The About sheet's statement of the zone every date cell is in. A date-time cell
 /// has no zone of its own, and a reader in UTC−8 would otherwise take a 09:15
@@ -478,6 +519,25 @@ fn write_about_sheet(
     // the date windows narrow only the detail rows. The in-app Compliance tab says
     // so; a workbook that listed "Severity: CRITICAL" beside the Compliance sheet
     // without it read as a critical-only backlog.
+    // The headline figures, as the Compliance tab shows them, so a reader of the
+    // file sees the answer before the provenance.
+    row += 2;
+    sheet
+        .write_string_with_format(row, 0, "Headline", header)
+        .context("write header")?;
+    sheet
+        .write_string_with_format(row, 1, "Value", header)
+        .context("write header")?;
+    for figure in headline_figures(
+        meta.compliance_total,
+        meta.devices_offline,
+        meta.devices_unpatchable,
+    ) {
+        row += 1;
+        sheet.write_string(row, 0, figure.label)?;
+        sheet.write_string(row, 1, format!("{} ({})", figure.value, figure.detail))?;
+    }
+
     for (heading, facets) in [
         ("Filters (every sheet)", &meta.scope.facets),
         (
@@ -499,6 +559,22 @@ fn write_about_sheet(
             // search) — clamped like every other free-text cell.
             sheet.write_string(row, 1, clamp_cell(value.clone()))?;
         }
+    }
+
+    // What every figure means, from the result's own policy, families and
+    // first-seen record — the same definitions the app and the report print.
+    row += 2;
+    sheet
+        .write_string_with_format(row, 0, "Definitions", header)
+        .context("write header")?;
+    sheet
+        .write_string_with_format(row, 1, "Meaning", header)
+        .context("write header")?;
+    for (term, meaning) in calculation_notes(meta.sla_policy, meta.patch_families, meta.first_seen)
+    {
+        row += 1;
+        sheet.write_string(row, 0, term)?;
+        sheet.write_string(row, 1, meaning)?;
     }
 
     sheet.write_string(row + 2, 0, meta.scope_note)?;
@@ -721,8 +797,34 @@ mod tests {
             changes: CHANGES.get_or_init(RunChanges::default),
             instance: "https://eu.ninjarmm.com",
             sla_policy: &SLA,
+            compliance_total: TOTAL.get_or_init(|| ComplianceBucket {
+                organization: ComplianceBucket::TOTAL_LABEL.into(),
+                devices_total: 8,
+                devices_within_sla: 7,
+                within_sla_pct: 87.5,
+                devices_fully_patched: 5,
+                fully_patched_pct: 62.5,
+                urgent_pending: 3,
+                urgent_past_sla: 1,
+                awaiting_approval: 4,
+                approved_not_installed: 2,
+            }),
+            uncounted_orgs: &[],
+            first_seen: FIRST_SEEN.get_or_init(|| FirstSeenTracking {
+                since: Some("2026-04-01 00:00 UTC".into()),
+                since_ts: Some(1_775_001_600),
+                pending_records: 9,
+                from_app_record: 2,
+            }),
+            patch_families: PatchFamilies {
+                os: true,
+                software: true,
+            },
         }
     }
+
+    static TOTAL: std::sync::OnceLock<ComplianceBucket> = std::sync::OnceLock::new();
+    static FIRST_SEEN: std::sync::OnceLock<FirstSeenTracking> = std::sync::OnceLock::new();
 
     static SLA: SlaPolicy = SlaPolicy {
         default_days: 30,
@@ -988,6 +1090,53 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// With two organizations the Compliance sheet ends with the fleet total, then
+    /// names the organizations it has no row for and points to the definitions.
+    #[test]
+    fn the_compliance_sheet_ends_with_the_total_and_names_missing_orgs() {
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = std::env::temp_dir().join("npt-export-total.xlsx");
+        let bucket = |org: &str| ComplianceBucket {
+            organization: org.into(),
+            devices_total: 4,
+            ..meta().compliance_total.clone()
+        };
+        let missing = ["Fabrikam".to_string()];
+        let with_missing = WorkbookMeta {
+            uncounted_orgs: &missing,
+            ..meta()
+        };
+        write_workbook(
+            &path.to_string_lossy(),
+            &[sample_row()],
+            &[bucket("Contoso"), bucket("Northwind")],
+            &[],
+            &[],
+            &[],
+            &no_backlogs(),
+            &ApprovalBacklog::default(),
+            &with_missing,
+        )
+        .unwrap();
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let sheet = wb.worksheet_range("Compliance").unwrap();
+        let col0: Vec<String> = sheet
+            .rows()
+            .map(|r| r.first().map(cell_text).unwrap_or_default())
+            .collect();
+        assert_eq!(col0[1..4], ["Contoso", "Northwind", "All organizations"]);
+        let notes = col0[4..].join("\n");
+        assert!(
+            notes.contains("Fabrikam has no online, patchable device"),
+            "{notes}"
+        );
+        assert!(
+            notes.contains("see the Definitions block on the About sheet"),
+            "{notes}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn writes_readable_workbook_with_headers_and_rows() {
         let dir = std::env::temp_dir();
@@ -1100,6 +1249,16 @@ mod tests {
             // No Installed status in the query: the About sheet says why the
             // Time to Install sheet is absent.
             "Select the Installed status",
+            // The headline figures, then what every figure means.
+            "Headline|Value",
+            "Within SLA|87.5% (7 of 8 devices)",
+            "Fully patched|62.5% (5 of 8 devices)",
+            "Urgent pending|3 (1 past SLA)",
+            "Excluded devices|2 (1 offline, 1 non-patchable)",
+            "Definitions|Meaning",
+            "Within SLA|A counted device with no pending patch past its severity's SLA window.",
+            "First seen|The earlier of NinjaOne's record time",
+            "2 of 9 pending records are dated by this app's record",
         ] {
             assert!(
                 joined.contains(expected),
@@ -1625,6 +1784,8 @@ mod tests {
             oldest_first_seen_ts: Some(1_772_323_200),
             latest_collected: Some("2026-04-01 00:00 UTC".into()),
             latest_collected_ts: Some(1_775_001_600),
+            last_contact: None,
+            last_contact_ts: None,
         };
         let worst = DeviceBacklogList {
             devices: vec![device.clone()],

@@ -14,9 +14,10 @@ so rather than leave two device counts side by side.
 The device must be in the scoped inventory, online, **and** something NinjaOne patch management
 covers (`Device::is_patchable` — an allow list of the Windows/macOS/Linux `nodeClass` values,
 `model::PATCHABLE_NODE_CLASSES`; a device with no class is kept). Offline devices are excluded
-because they report no current patch records, so a zero pending count says nothing about them;
-switches, printers, hypervisors and cloud monitors are excluded for the same reason — they are
-online, carry no patch records, and would otherwise score *compliant*, so 100 servers plus 100
+because whatever current records NinjaOne still holds for them were collected before they went
+offline, so neither a pending count nor a zero says anything current about them (the
+offline-backlog list shows what is there); switches, printers, hypervisors and cloud monitors are
+excluded because they carry no patch records at all and would otherwise score *compliant*, so 100 servers plus 100
 network devices read 25 points better than the servers did. The allow list fails toward exclusion
 (which every surface states as a count) rather than toward a silently higher percentage.
 
@@ -177,16 +178,16 @@ can say "top 25 of N":
   total pending needs no step of its own; the id makes the order total (the accumulator is a
   `HashMap`).
 - **`offline_backlog`** is its deliberate complement: scoped, patchable devices that are offline
-  yet still appear in NinjaOne's current feed with pending records. The "offline devices report
-  no current patch records" line above is why they are excluded from the rollups — a zero says
-  nothing about them — but the whole-fleet feed does carry whatever was last collected for them,
-  and dropping it everywhere made that backlog invisible. The records may be stale; every surface
+  yet still appear in NinjaOne's current feed with pending records. Their records are why they
+  are excluded from the rollups — collected before the device went offline, so nothing about them
+  is current — but dropping them everywhere made that backlog invisible. The records may be stale; every surface
   says so.
-- **No last-contact time.** `Device` deserializes no last-contact field, and the committed spec
-  digest (`docs/api/ninjaone-surface.md`) does not cover the device schema, so none is invented.
-  The list shows `latest_collected` instead — the newest `timestamp` on the device's pending
-  records, NinjaOne's "collected/updated" time — labelled "Latest patch data collected", not
-  "last contact".
+- **Two different clocks, both shown.** "Latest Patch Data Collected" (`latest_collected`) is
+  the newest of NinjaOne's own `timestamp`s on the device's pending records — how current the
+  list is for it — and always reads NinjaOne's time, never the first-seen ledger's. "Last
+  Contact" is `Device::last_contact`, when its agent last checked in — how long it has been gone.
+  The offline exclusion stays (see above); these two let a reader judge how far to trust each
+  row.
 
 ## First seen → installed is indicative only
 
@@ -430,10 +431,43 @@ reads it, and their totals derive from that list. A version that matched on the 
 with a `_ => c.unknown` fallback let a renamed band silently draw Unknown's count twice and
 overflow the bar. See [severity.md](./severity.md).
 
+## Every figure says what it means, in the same words everywhere
+
+A bare "Compliance %" had no definition anywhere in the app (only in `docs/TROUBLESHOOTING.md`,
+and narrower than the code), so the GUI and the exports now say what each figure is, from one
+set of sentences in `rows::wording`:
+
+- **Headline figures** (`headline_figures`): Within SLA, Fully patched, Urgent pending, Excluded
+  devices — value, "n of N", one-line definition. The Compliance tab's KPI tiles, the report's
+  header line, the workbook's About **Headline** block. Over no counted device a percentage is
+  "—", never the empty bucket's 100%.
+- **Definitions** (`calculation_notes`): every term the tab uses, built from the result's own SLA
+  policy, patch families and first-seen record. The tab's collapsed "How these numbers are
+  calculated", the report's closing section, the About **Definitions** block (the compliance
+  sheets point to it).
+- **Column help**: every compliance, device-list, stuck-approvals, time-to-install and Trend
+  header, and the drill-down's health labels, render from `util::column_help`'s per-table
+  `(header, definition)` arrays through `HelpHeaderRow` — a `title=` tooltip with a dotted
+  underline. Per table, because "Approved, Not Installed" counts every approved patch in one table
+  and only the stuck ones in another. The workbook gets no per-column notes; its Definitions block
+  covers them.
+- **The legend**: `PCT_BANDS` (95% or more, 80% to under 95%, under 80%) colours the Within SLA
+  bars in the app and the report, and each draws the key beneath them.
+
+**The crates share no code, so the fixture pins the words.** `ipc_fixture_is_current` writes this
+module's output for the fixture's own result under `wording` — headline, definitions, first-seen
+line, missing-orgs note, SLA policy, scope note, both device-list notes, legend labels — and the
+backend's `COLUMNS` header lists under `wording.columns`. `the_wording_matches_the_backend`
+requires the `util` mirrors to reproduce every string exactly, and
+`headers_match_the_backend_columns` holds the hand-spelled headers to `COLUMNS` (replacing
+"spelled identically by review", which had already let the offline note's "Latest data" drift from
+its own column). `every_header_is_defined_or_an_identity_column` fails a measuring header with no
+definition.
+
 ## Table headers come from `rows::TableColumn` spellings
 
-The Leptos tables are hand-written and are not wired to `COLUMNS`, so they are kept spelled
-identically by review: "Within SLA", "Within SLA %", "Fully Patched", "Fully Patched %",
+The Leptos tables are hand-written and are not wired to `COLUMNS`; the compliance ones are held
+to them by `headers_match_the_backend_columns` (above), the rest by review: "Within SLA", "Within SLA %", "Fully Patched", "Fully Patched %",
 "Urgent Pending", "Urgent Past SLA",
 "Awaiting Approval", "Approved, Not Installed", "Device Role", "Pending Patches", the Failures table's seven columns including "Patch Type", and the
 two device lists (`DeviceBacklog::WORST_COLUMNS` / `OFFLINE_COLUMNS`), and `StuckDevice::COLUMNS`. The in-app first seen →

@@ -723,6 +723,7 @@ fn demo_worst_devices(rows: &[PatchRow]) -> DeviceBacklogList {
                 past_sla: 0,
                 oldest_first_seen: None,
                 latest_collected: None,
+                last_contact: Some(SAMPLE_LAST_CONTACT.to_string()),
             });
         bump(&mut d.pending, &r.severity);
         d.pending_total += 1;
@@ -785,6 +786,7 @@ fn sample_offline_backlog() -> Vec<DeviceBacklog> {
         past_sla: 3,
         oldest_first_seen: Some("2026-04-14 00:00 UTC".to_string()),
         latest_collected: Some("2026-05-02 08:10 UTC".to_string()),
+        last_contact: Some("2026-05-02 08:12 UTC".to_string()),
     }]
 }
 

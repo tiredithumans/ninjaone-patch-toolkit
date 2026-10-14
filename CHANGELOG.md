@@ -42,6 +42,16 @@ version and start a fresh `[Unreleased]`.
 
 ### Added
 
+- **Every compliance figure now says what it means.** The Compliance tab opens with four headline
+  figures — Within SLA, Fully patched, Urgent pending and Excluded devices — each with its "n of
+  N" and a one-line definition. A **How these numbers are calculated** panel defines every term
+  from the result's own SLA policy, and every column header shows its definition when you hover
+  it (dotted underline). The bar charts have a colour key, and the summary line says how many
+  devices the figures count. The report and the workbook's About sheet carry the same headline
+  figures and definitions.
+- **The offline-devices list shows each device's Last Contact** beside the age of its patch
+  data, in the app, the report and the workbook.
+
 - **The app keeps its own record of when each pending patch was first seen.** NinjaOne's only
   date on a patch record is when it last collected the data, which may refresh on every scan — if
   it does, every patch looks a day old and nothing ever shows as past SLA. Ages are now measured

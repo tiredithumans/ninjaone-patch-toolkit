@@ -68,7 +68,8 @@ pub struct DeviceSummary {
 #[serde(rename_all = "camelCase")]
 pub enum RollupScope {
     Included,
-    /// It reports no current patch records, so a zero pending count says nothing.
+    /// Its current patch records were collected before it went offline and may be
+    /// out of date, so neither its pending count nor its zero can be taken as current.
     Offline,
     /// Online, but not something NinjaOne patch management covers.
     NonPatchable,
@@ -340,9 +341,10 @@ impl SlaCutoffs {
 /// own `(unknown)` organization in the severity breakdown while compliance dropped
 /// it, so the two disagreed about how many organizations the fleet even had.
 ///
-/// An offline device can't apply patches and reports no current patch records, so a
-/// zero pending count says nothing about its compliance: it is excluded from the
-/// denominator rather than scored compliant and inflating the headline metric. A
+/// An offline device can't apply patches, and whatever current patch records NinjaOne
+/// still holds for it were collected before it went offline (the offline-backlog list
+/// shows them), so neither its pending count nor a zero says anything current about
+/// it: it is excluded from the denominator rather than scored on stale data. A
 /// device NinjaOne cannot patch at all ([`Device::is_patchable`] — switches,
 /// printers, hypervisors, cloud monitors) is excluded for the same reason: it is
 /// online, carries no patch records, and used to score compliant, so a fleet of

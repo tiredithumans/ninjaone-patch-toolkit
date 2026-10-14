@@ -33,7 +33,14 @@ pub(super) fn SlaPolicyNote() -> impl IntoView {
                 .query
                 .result
                 .with(|r| r.as_ref().and_then(|r| util::first_seen_note(&r.first_seen)))
-                .map(|note| view! { <p class="scope-note">{note}</p> })
+                .map(|note| {
+                    view! {
+                        <p class="scope-note">
+                            <strong>"First seen: "</strong>
+                            {note}
+                        </p>
+                    }
+                })
         }}
     }
 }
@@ -51,9 +58,7 @@ pub(super) fn DeviceBacklogSections() -> impl IntoView {
     view! {
         <section class="compliance-os">
             <h3 class="chart-title">"Worst devices"</h3>
-            <p class="scope-note">
-                "Online devices in scope, ranked by pending patches past their severity's SLA (any severity), then by the most urgent backlog."
-            </p>
+            <p class="scope-note">{util::WORST_DEVICES_NOTE}</p>
             <DeviceBacklogTable kind=DeviceListKind::Worst/>
         </section>
         <section class="compliance-os">
@@ -81,10 +86,11 @@ fn DeviceBacklogTable(kind: DeviceListKind) -> impl IntoView {
         DeviceListKind::Worst => "No online device in scope has a pending patch.",
         DeviceListKind::Offline => "No offline device in scope is listed with pending patches.",
     };
-    // Headers spelled as `rows::DeviceBacklog::{WORST,OFFLINE}_COLUMNS` spell them.
-    let (fourth, fifth, sixth) = match kind {
-        DeviceListKind::Worst => ("Past SLA", "Pending Patches", "Oldest First Seen"),
-        DeviceListKind::Offline => ("Latest Patch Data Collected", "Pending Patches", "Past SLA"),
+    // Spelled as `rows::DeviceBacklog::{WORST,OFFLINE}_COLUMNS`, which
+    // `headers_match_the_backend_columns` holds them to.
+    let columns: &'static [util::HelpedColumn] = match kind {
+        DeviceListKind::Worst => &util::WORST_HEADERS,
+        DeviceListKind::Offline => &util::OFFLINE_HEADERS,
     };
     view! {
         <Show
@@ -94,15 +100,7 @@ fn DeviceBacklogTable(kind: DeviceListKind) -> impl IntoView {
             <div class="table-wrap">
                 <table>
                     <thead>
-                        <tr>
-                            <th scope="col">"Organization"</th>
-                            <th scope="col">"Device"</th>
-                            <th scope="col">"OS"</th>
-                            <th scope="col">{fourth}</th>
-                            <th scope="col">{fifth}</th>
-                            <th scope="col">{sixth}</th>
-                            <th scope="col">"Pending by Severity"</th>
-                        </tr>
+                        <HelpHeaderRow columns=columns/>
                     </thead>
                     <tbody>
                         {move || {
@@ -110,26 +108,28 @@ fn DeviceBacklogTable(kind: DeviceListKind) -> impl IntoView {
                                 .devices
                                 .into_iter()
                                 .map(|d| {
-                                    let (a, b, c) = match kind {
-                                        DeviceListKind::Worst => (
+                                    let middle: Vec<String> = match kind {
+                                        DeviceListKind::Worst => vec![
                                             d.past_sla.to_string(),
                                             d.pending_total.to_string(),
                                             d.oldest_first_seen.clone().unwrap_or_default(),
-                                        ),
-                                        DeviceListKind::Offline => (
+                                        ],
+                                        DeviceListKind::Offline => vec![
                                             d.latest_collected.clone().unwrap_or_default(),
+                                            d.last_contact.clone().unwrap_or_default(),
                                             d.pending_total.to_string(),
                                             d.past_sla.to_string(),
-                                        ),
+                                        ],
                                     };
                                     view! {
                                         <tr>
                                             <td>{d.organization.clone()}</td>
                                             <td>{d.device_name.clone()}</td>
                                             <td>{d.os_name.clone().unwrap_or_default()}</td>
-                                            <td>{a}</td>
-                                            <td>{b}</td>
-                                            <td>{c}</td>
+                                            {middle
+                                                .into_iter()
+                                                .map(|cell| view! { <td>{cell}</td> })
+                                                .collect_view()}
                                             <td>
                                                 <SeverityBreakdownCell counts=d.pending/>
                                             </td>
@@ -205,16 +205,10 @@ pub(super) fn TimeToInstallSection() -> impl IntoView {
                 view! {
                     <div class="table-wrap">
                         <table>
+                            // Spelled as `rows::InstallLatency::COLUMNS`, less the
+                            // "(Days)" the cells here carry themselves.
                             <thead>
-                                <tr>
-                                    // Spelled as `rows::InstallLatency::COLUMNS`, less
-                                    // the "(Days)" the cells here carry themselves.
-                                    <th scope="col">"Breakdown"</th>
-                                    <th scope="col">"Group"</th>
-                                    <th scope="col">"Installs Measured"</th>
-                                    <th scope="col">"First Seen \u{2192} Installed (Median)"</th>
-                                    <th scope="col">"90th Percentile"</th>
-                                </tr>
+                                <HelpHeaderRow columns=&util::TIME_TO_INSTALL_HEADERS/>
                             </thead>
                             <tbody>
                                 {rows

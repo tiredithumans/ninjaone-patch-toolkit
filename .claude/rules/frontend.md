@@ -28,3 +28,7 @@ paths:
   → `docs/design/frontend.md#demo-mode--browserpages-guard`
 - **IPC arg keys equal the Rust handler's parameter names, camelCase** (mirrored here in
   `api.rs`/`types.rs`); see `.claude/rules/ipc-contract.md`.
+- **A compliance-related table header renders from a `util::column_help` array through
+  `HelpHeaderRow`** (tooltip definition, dotted underline); a measuring header without a
+  definition fails `every_header_is_defined_or_an_identity_column`.
+  → `docs/design/compliance.md#every-figure-says-what-it-means-in-the-same-words-everywhere`

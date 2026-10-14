@@ -75,11 +75,28 @@ the location name (the failure is logged as a warning, not surfaced as an error)
 the query; a persistent blank suggests the locations endpoint is unreachable for your
 instance/permissions.
 
-### Compliance % looks too high or excludes devices
+### Within SLA % or Fully patched % looks wrong, or devices are missing
 
-Offline devices are **excluded from the compliance denominator** — they can't apply
-patches and report no current-patch records, so scoring them would distort the metric.
-A device counts as compliant when it has **zero** pending/approved patches.
+Open **How these numbers are calculated** on the Compliance tab; it states the rules
+the numbers on screen were computed under. In short:
+
+- **Counted devices** are online Windows, macOS and Linux devices in the selected scope.
+  Offline devices (their patch records may be out of date) and devices NinjaOne cannot patch
+  are left out; the line under the headline says how many. An organization whose devices are
+  all left out is named under the table rather than shown with a row.
+- **Within SLA** (the headline): a counted device with no pending patch older than its
+  severity's SLA window. **Fully patched**: a counted device with no pending patch at all.
+  Fully patched is never higher than Within SLA.
+- **Pending** is anything NinjaOne has not marked Installed or Rejected — awaiting approval,
+  approved, failed or with no status.
+- A severity with **No SLA** (Settings → Patch SLA; Optional by default) never counts as past
+  SLA, but its patches still stop a device being fully patched.
+- **First seen** is the earlier of NinjaOne's record date and when this app first saw the
+  patch. The app's record starts with your first query on this version, so ages build up from
+  there; the "First seen" line says how many patches it dated.
+- Only the patch families the query fetched are counted (the **Type** filter).
+- A change to the SLA policy applies from the next **Run query**; the result on screen keeps
+  the policy it was computed with.
 
 ## Patch actions
 

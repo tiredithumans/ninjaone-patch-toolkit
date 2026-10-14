@@ -137,20 +137,10 @@ fn OrgDeltaTable(newest: RunRecord, previous: RunRecord) -> impl IntoView {
         view! {
             <div class="table-wrap">
                 <table>
+                    // Spelled as the Compliance tab spells them
+                    // (`rows::ComplianceBucket::COLUMNS`).
                     <thead>
-                        <tr>
-                            // Spelled as the Compliance tab spells them
-                            // (`rows::ComplianceBucket::COLUMNS`).
-                            <th scope="col">"Organization"</th>
-                            <th scope="col">"Within SLA %"</th>
-                            <th scope="col">"Change"</th>
-                            <th scope="col">"Pending Patches"</th>
-                            <th scope="col">"Change"</th>
-                            <th scope="col">"Urgent Pending"</th>
-                            <th scope="col">"Change"</th>
-                            <th scope="col">"Urgent Past SLA"</th>
-                            <th scope="col">"Change"</th>
-                        </tr>
+                        <HelpHeaderRow columns=&util::TREND_ORG_HEADERS/>
                     </thead>
                     <tbody>
                         {deltas

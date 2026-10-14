@@ -1112,6 +1112,32 @@ tbody tr:hover {
   fill: var(--danger);
 }
 
+/* The same bands as legend squares and as the Within SLA headline figure. */
+.chart-swatch.bar-good {
+  background: var(--accent);
+}
+
+.chart-swatch.bar-warn {
+  background: var(--warn);
+}
+
+.chart-swatch.bar-bad {
+  background: var(--danger);
+}
+
+.kpi-value.bar-good {
+  color: var(--accent);
+}
+
+.kpi-value.bar-warn {
+  color: var(--warn);
+}
+
+.kpi-value.bar-bad,
+.kpi-value.kpi-alert {
+  color: var(--danger);
+}
+
 /* Severity segment fills (stacked bar) — solid variants of the .sev-* badges,
    from the same custom properties so the two can no longer disagree. */
 .chart .seg-critical {
@@ -1683,15 +1709,97 @@ tbody tr:hover {
   color: var(--muted);
 }
 
-/* The fleet total under the organization table. */
+/* The Compliance tab's headline figures. */
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin: 12px 0 8px;
+}
+
+.kpi {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.kpi dt {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.kpi dd {
+  margin: 0;
+}
+
+.kpi-value {
+  font-size: 24px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-detail {
+  font-size: 13px;
+}
+
+.kpi-def {
+  margin-top: 4px !important;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* "How these numbers are calculated". */
+.calc-notes {
+  margin: 4px 0 12px;
+  font-size: 13px;
+}
+
+.calc-notes summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.calc-notes dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  margin: 8px 0 0;
+}
+
+.calc-notes dt {
+  color: var(--muted);
+}
+
+.calc-notes dd {
+  margin: 0;
+}
+
+/* A header or label whose definition is in its tooltip. */
+.col-help {
+  text-decoration: underline dotted;
+  text-decoration-color: var(--muted);
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
+/* The fleet total under the organization table: body-cell spacing, set apart by a
+   heavier rule. */
 .total-row th,
 .total-row td {
+  padding: 7px 10px;
   font-weight: 600;
+  white-space: nowrap;
   border-top: 2px solid var(--border);
 }
 
 .total-row th {
   text-align: left;
+}
+
+/* The approvals card follows the organization table directly. */
+.compliance-approvals {
+  margin-top: 16px;
 }
 
 .settings-disabled {

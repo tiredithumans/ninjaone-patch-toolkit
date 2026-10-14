@@ -372,6 +372,9 @@ pub struct DeviceBacklog {
     /// The newest `timestamp` on the device's pending records — a collection time,
     /// not a last-contact time.
     pub latest_collected: Option<String>,
+    /// When the device's agent last checked in.
+    #[serde(default)]
+    pub last_contact: Option<String>,
 }
 
 /// A capped device list plus how many devices qualified. Mirrors

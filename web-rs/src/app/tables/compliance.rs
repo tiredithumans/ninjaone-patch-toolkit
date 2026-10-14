@@ -1,8 +1,94 @@
-//! The Compliance tab: scope note, charts, and the per-organization and per-OS
-//! rollup tables (the organization one drills down to its rows).
+//! The Compliance tab: the headline figures, what they mean, the charts, and the
+//! per-organization and per-OS rollup tables (the organization one drills down to
+//! its rows).
 
 use super::backlog::{DeviceBacklogSections, SlaPolicyNote, TimeToInstallSection};
 use super::*;
+
+/// The four headline figures as tiles, each with its "n of N" and a one-line
+/// definition. Read off the displayed result, like everything else on the tab.
+#[component]
+fn ComplianceKpis() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let kpis = move || {
+        state.query.result.with(|r| {
+            r.as_ref().map(|r| {
+                (
+                    util::compliance_kpis(
+                        &r.compliance_total,
+                        r.devices_offline,
+                        r.devices_unpatchable,
+                    ),
+                    r.compliance_total.clone(),
+                )
+            })
+        })
+    };
+    view! {
+        {move || {
+            kpis()
+                .map(|(kpis, total)| {
+                    let tiles = kpis
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, k)| {
+                            // Within SLA takes its band's colour; the urgent tile turns
+                            // red once anything is past SLA.
+                            let tone = match i {
+                                0 if total.devices_total > 0 => {
+                                    util::pct_band_class(total.within_sla_pct)
+                                }
+                                2 if total.urgent_past_sla > 0 => "kpi-alert",
+                                _ => "",
+                            };
+                            view! {
+                                <div class="kpi">
+                                    <dt>{k.label}</dt>
+                                    <dd class=format!("kpi-value {tone}")>{k.value}</dd>
+                                    <dd class="kpi-detail">{k.detail}</dd>
+                                    <dd class="kpi-def">{k.definition}</dd>
+                                </div>
+                            }
+                        })
+                        .collect_view();
+                    view! { <dl class="kpis">{tiles}</dl> }
+                })
+        }}
+    }
+}
+
+/// "How these numbers are calculated": every term the tab uses, defined from the
+/// displayed result's own policy, families and first-seen record. Collapsed by
+/// default; only its body is reactive, so an auto-refresh does not close it.
+#[component]
+fn CalculationNotes() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let notes = move || {
+        state.query.result.with(|r| {
+            r.as_ref()
+                .map(|r| util::calculation_notes(&r.sla_policy, r.patch_families, &r.first_seen))
+                .unwrap_or_default()
+        })
+    };
+    view! {
+        <details class="calc-notes">
+            <summary>"How these numbers are calculated"</summary>
+            <dl>
+                {move || {
+                    notes()
+                        .into_iter()
+                        .map(|(term, meaning)| {
+                            view! {
+                                <dt>{term}</dt>
+                                <dd>{meaning}</dd>
+                            }
+                        })
+                        .collect_view()
+                }}
+            </dl>
+        </details>
+    }
+}
 
 /// The scope sentence under the Compliance tab's banner. Reads the population and
 /// the patch families off the displayed result, so it always describes the numbers
@@ -81,11 +167,13 @@ pub(super) fn ComplianceTab() -> impl IntoView {
                 // device-tier chip (`filter_chips`), so it is never struck through.
                 filters="Device scope (Org / Location / Role / OS Type / OS name) and patch Type. Status, Severity, Search, First-seen and Installed-within are ignored here."
             />
+            <ComplianceKpis/>
             <ComplianceScopeNote/>
             <SlaPolicyNote/>
+            <CalculationNotes/>
             <ComplianceCharts/>
             <ComplianceRollupTable
-                first_col="Organization"
+                columns=&util::COMPLIANCE_ORG_HEADERS
                 rows=org_rows
                 total=org_total
                 drill=RollupDrill::Organization
@@ -97,7 +185,7 @@ pub(super) fn ComplianceTab() -> impl IntoView {
                 <div class="chart-card">
                     <ComplianceByOsBars/>
                 </div>
-                <ComplianceRollupTable first_col="OS" rows=os_rows/>
+                <ComplianceRollupTable columns=&util::COMPLIANCE_OS_HEADERS rows=os_rows/>
             </section>
             <DeviceBacklogSections/>
             <TimeToInstallSection/>
@@ -172,7 +260,8 @@ enum RollupDrill {
 /// identical columns, differing only in the grouping column's header and values.
 #[component]
 fn ComplianceRollupTable(
-    first_col: &'static str,
+    /// The table's headers and their definitions; the first names the grouping.
+    columns: &'static [util::HelpedColumn],
     #[prop(into)] rows: Signal<Vec<ComplianceRow>>,
     /// The fleet total, drawn as a footer row once there are two rows to total.
     #[prop(optional, into)]
@@ -186,7 +275,14 @@ fn ComplianceRollupTable(
             view! {
                 <tfoot>
                     <tr class="total-row">
-                        <th scope="row">{total.label.clone()}</th>
+                        <th scope="row">
+                            <span
+                                class="col-help"
+                                title="Every counted device once, so its percentages are not the average of the rows above."
+                            >
+                                {total.label.clone()}
+                            </span>
+                        </th>
                         <ComplianceCells row=total/>
                     </tr>
                 </tfoot>
@@ -200,23 +296,10 @@ fn ComplianceRollupTable(
         >
             <div class="table-wrap">
                 <table>
+                    // Spelled as `rows::{ComplianceBucket,OsCompliance}::COLUMNS`, which
+                    // `headers_match_the_backend_columns` holds them to.
                     <thead>
-                        <tr>
-                            <th scope="col">{first_col}</th>
-                            // Canonical spellings from `rows::ComplianceBucket::COLUMNS`.
-                            <th scope="col">"Devices"</th>
-                            <th scope="col">"Within SLA"</th>
-                            <th scope="col">"Within SLA %"</th>
-                            <th scope="col">"Fully Patched"</th>
-                            <th scope="col">"Fully Patched %"</th>
-                            <th scope="col">"Urgent Pending"</th>
-                            <th scope="col">"Urgent Past SLA"</th>
-                            // Vendor status MANUAL vs APPROVED, any severity — see
-                            // `rows::approval_state` for why untyped records are in
-                            // neither.
-                            <th scope="col">"Awaiting Approval"</th>
-                            <th scope="col">"Approved, Not Installed"</th>
-                        </tr>
+                        <HelpHeaderRow columns=columns/>
                     </thead>
                     <tbody>
                         {move || {
@@ -332,13 +415,7 @@ fn StuckApprovals() -> impl IntoView {
                             <div class="table-wrap">
                                 <table>
                                     <thead>
-                                        <tr>
-                                            // Spelled as `rows::StuckDevice::COLUMNS`.
-                                            <th scope="col">"Device"</th>
-                                            <th scope="col">"Organization"</th>
-                                            <th scope="col">"Approved, Not Installed"</th>
-                                            <th scope="col">"Oldest First Seen"</th>
-                                        </tr>
+                                        <HelpHeaderRow columns=&util::STUCK_HEADERS/>
                                     </thead>
                                     <tbody>
                                         {a

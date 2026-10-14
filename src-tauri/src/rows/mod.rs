@@ -9,8 +9,8 @@
 //! aggregates), `backlog` (worst devices + offline backlog), `install_time`
 //! (first seen → installed), `groups` (sort / page / group), `scope` (export
 //! provenance), `table` (the shared column definition), `record` (the per-record
-//! view the rollups read). This file holds the result types every one of them
-//! feeds.
+//! view the rollups read), `wording` (the sentences every surface prints about what
+//! a figure means). This file holds the result types every one of them feeds.
 
 mod backlog;
 mod compliance;
@@ -21,6 +21,7 @@ mod record;
 mod rollups;
 mod scope;
 mod table;
+mod wording;
 
 pub use backlog::*;
 pub use compliance::*;
@@ -31,6 +32,7 @@ pub use record::*;
 pub use rollups::*;
 pub use scope::*;
 pub use table::*;
+pub use wording::*;
 
 use crate::changes::RunChanges;
 use crate::model::PatchRow;
@@ -83,8 +85,8 @@ pub struct QueryResult {
     /// How many of `devices_total` are offline.
     ///
     /// The compliance rollups deliberately exclude offline devices from both halves
-    /// of every bucket (they report no current patch records, so a zero pending count
-    /// says nothing about them) — which means the `Devices` column of the compliance
+    /// of every bucket (their patch records may be out of date, so neither a count nor
+    /// a zero says anything current about them) — which means the `Devices` column of the compliance
     /// table does **not** sum to `devices_total`, and used to have nothing on screen
     /// explaining the gap. Carried so the UI, the workbook and the HTML report can
     /// state the excluded population instead of leaving two different device counts
@@ -168,8 +170,8 @@ pub struct QuerySummary {
     /// How many of `devices_total` are offline.
     ///
     /// The compliance rollups deliberately exclude offline devices from both halves
-    /// of every bucket (they report no current patch records, so a zero pending count
-    /// says nothing about them) — which means the `Devices` column of the compliance
+    /// of every bucket (their patch records may be out of date, so neither a count nor
+    /// a zero says anything current about them) — which means the `Devices` column of the compliance
     /// table does **not** sum to `devices_total`, and used to have nothing on screen
     /// explaining the gap. Carried so the UI, the workbook and the HTML report can
     /// state the excluded population instead of leaving two different device counts

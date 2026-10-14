@@ -121,7 +121,7 @@ changed, so the cache read as a miss while the frontend still rendered the old s
 | FAILED query returns nothing | install window days? | `Failed` routes to install history (`commands/patches.rs`) |
 | Next page blank under "Rows 101–200 of N" | tenant/sign-out since the query? | cache miss; frontend not cleared (`docs/design/query-cache.md`) |
 | Export empty | did a query run on this tenant? | `last_result` miss |
-| Compliance % too high | offline / non-patchable counts in the scope note | `rollup_device` population (`rows/compliance.rs`) |
+| Within SLA / Fully patched % looks wrong | the tab's "How these numbers are calculated"; offline / non-patchable counts; No SLA bands; the "First seen" line's app-dated count | `rollup_device` population, `SlaCutoffs` (`rows/compliance.rs`), `first_seen.rs` |
 | Action buttons greyed out | actions enabled? management grant? blockers? | `actions::plan`, `management_grant` |
 | Job stuck / Unknown | `/activities` type filter, `newerThan` id | `api/activities.rs`, poller |
 | WASM build error | `just web-clippy` | server dep pulled into `web-rs` |

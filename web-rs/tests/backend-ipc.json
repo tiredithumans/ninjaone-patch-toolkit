@@ -830,6 +830,8 @@
           {
             "deviceId": 2,
             "deviceName": "web-02",
+            "lastContact": "2026-06-30 12:00 UTC",
+            "lastContactTs": 1782820800,
             "latestCollected": "2026-06-21 12:00 UTC",
             "latestCollectedTs": 1782043200,
             "oldestFirstSeen": "2026-06-21 12:00 UTC",
@@ -1179,6 +1181,8 @@
           {
             "deviceId": 1,
             "deviceName": "web-01",
+            "lastContact": "2026-06-30 12:00 UTC",
+            "lastContactTs": 1782820800,
             "latestCollected": "2026-06-26 12:00 UTC",
             "latestCollectedTs": 1782475200,
             "oldestFirstSeen": "2026-04-02 12:00 UTC",
@@ -1396,5 +1400,152 @@
       "queryId": 3,
       "stage": "osPatches"
     }
+  },
+  "wording": {
+    "calculationNotes": [
+      [
+        "Counted devices",
+        "Online Windows, macOS and Linux devices in the selected scope. Offline devices are left out because their patch records may be out of date, and devices NinjaOne cannot patch (switches, printers, hypervisors, cloud monitors) have none, so neither is counted as clean."
+      ],
+      [
+        "Pending",
+        "A current patch record NinjaOne has not marked Installed or Rejected: awaiting approval, approved, failed, or with no status. Patch families counted: OS and third-party patches."
+      ],
+      [
+        "Within SLA",
+        "A counted device with no pending patch past its severity's SLA window."
+      ],
+      [
+        "Fully patched",
+        "A counted device with no pending patch at all, of any severity or age."
+      ],
+      [
+        "Urgent",
+        "Critical, Important and Security patches. NinjaOne grades most monthly security updates Security rather than Critical or Important."
+      ],
+      [
+        "Past SLA",
+        "Pending for longer than its severity's SLA window since first seen; a patch with no first-seen time counts as past SLA. SLA policy: 30 days (default); Critical 14 days, Important 30 days, Security 30 days, Moderate 60 days, Recommended 60 days, Low 90 days; no SLA: Optional. A severity with No SLA is never past SLA, but its patches still count as pending."
+      ],
+      [
+        "First seen",
+        "The earlier of NinjaOne's record time and when this app first saw the patch pending (this app's record began 2026-04-02 12:00 UTC); every pending record here is dated by NinjaOne's time."
+      ],
+      [
+        "Approval columns",
+        "NinjaOne's own workflow status, across every severity: Awaiting Approval waits on a person, Approved, Not Installed on the agent. A pending patch with neither status is in neither column."
+      ],
+      [
+        "All organizations",
+        "Every counted device once, so its percentages are not the average of the organization rows."
+      ],
+      [
+        "Percentages",
+        "To one decimal, and never rounded up to 100%: 99.96% shows as 99.9%."
+      ]
+    ],
+    "columns": {
+      "byOs": [
+        "OS",
+        "Devices",
+        "Within SLA",
+        "Within SLA %",
+        "Fully Patched",
+        "Fully Patched %",
+        "Urgent Pending",
+        "Urgent Past SLA",
+        "Awaiting Approval",
+        "Approved, Not Installed"
+      ],
+      "compliance": [
+        "Organization",
+        "Devices",
+        "Within SLA",
+        "Within SLA %",
+        "Fully Patched",
+        "Fully Patched %",
+        "Urgent Pending",
+        "Urgent Past SLA",
+        "Awaiting Approval",
+        "Approved, Not Installed"
+      ],
+      "offline": [
+        "Organization",
+        "Device",
+        "OS",
+        "Latest Patch Data Collected",
+        "Last Contact",
+        "Pending Patches",
+        "Past SLA",
+        "Pending by Severity"
+      ],
+      "reboot": [
+        "Organization",
+        "Location",
+        "Device Role",
+        "Device",
+        "OS",
+        "Pending Patches"
+      ],
+      "stuck": [
+        "Device",
+        "Organization",
+        "Approved, Not Installed",
+        "Oldest First Seen"
+      ],
+      "timeToInstall": [
+        "Breakdown",
+        "Group",
+        "Installs Measured",
+        "First Seen → Installed (Median Days)",
+        "90th Percentile (Days)"
+      ],
+      "worst": [
+        "Organization",
+        "Device",
+        "OS",
+        "Past SLA",
+        "Pending Patches",
+        "Oldest First Seen",
+        "Pending by Severity"
+      ]
+    },
+    "firstSeenNote": "The earlier of NinjaOne's record time and when this app first saw the patch pending (this app's record began 2026-04-02 12:00 UTC); every pending record here is dated by NinjaOne's time.",
+    "headline": [
+      {
+        "definition": "Devices with no pending patch past its severity's SLA window.",
+        "detail": "0 of 1 device",
+        "label": "Within SLA",
+        "value": "0.0%"
+      },
+      {
+        "definition": "Devices with no pending patch of any severity or age.",
+        "detail": "0 of 1 device",
+        "label": "Fully patched",
+        "value": "0.0%"
+      },
+      {
+        "definition": "Critical, Important and Security patches not yet installed.",
+        "detail": "2 past SLA",
+        "label": "Urgent pending",
+        "value": "2"
+      },
+      {
+        "definition": "Offline, or not patchable by NinjaOne, so in no figure here.",
+        "detail": "2 offline, 1 non-patchable",
+        "label": "Excluded devices",
+        "value": "3"
+      }
+    ],
+    "offlineBacklogNote": "Offline devices still listed with pending patches in NinjaOne's current feed. These records were collected before the device went offline and may be out of date, so the compliance figures exclude these devices. \"Latest Patch Data Collected\" is the newest collection time on the device's records; \"Last Contact\" is when its agent last checked in.",
+    "pctBands": [
+      "95% or more",
+      "80% to under 95%",
+      "under 80%"
+    ],
+    "scopeNote": "Compliance covers online Windows, macOS and Linux devices only (2 offline and 1 non-patchable devices excluded).",
+    "slaPolicy": "30 days (default); Critical 14 days, Important 30 days, Security 30 days, Moderate 60 days, Recommended 60 days, Low 90 days; no SLA: Optional",
+    "uncountedOrgsNote": "Fabrikam has no online, patchable device in scope, so it is not in the table.",
+    "worstDevicesNote": "Online Windows, macOS and Linux devices in scope, ranked by pending patches past their severity's SLA (every severity that has one), then by the most urgent backlog."
   }
 }

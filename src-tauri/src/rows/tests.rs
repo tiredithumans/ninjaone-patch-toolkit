@@ -2967,3 +2967,93 @@ fn time_to_install_says_why_it_is_empty() {
     assert!(unusable.overall.is_none());
     assert!(unusable.empty_reason().unwrap().contains("both"));
 }
+
+// --- Wording ---------------------------------------------------------------------
+
+/// An empty scope's headline is "—", never the 100% an empty bucket computes, and
+/// the exclusions are spelled with both counts only when both are present.
+#[test]
+fn the_headline_never_calls_an_empty_fleet_compliant() {
+    let empty = ComplianceBucket::total(&[]);
+    assert!(
+        (empty.within_sla_pct - 100.0).abs() < 1e-9,
+        "the bucket rule"
+    );
+    let h = headline_figures(&empty, 0, 0);
+    assert_eq!(h[0].value, "\u{2014}");
+    assert_eq!(h[0].detail, "no counted devices");
+    assert_eq!(h[3].detail, "none");
+    assert_eq!(headline_figures(&empty, 3, 0)[3].detail, "3 offline");
+    assert_eq!(headline_figures(&empty, 0, 2)[3].detail, "2 non-patchable");
+    assert_eq!(group_thousands(1_234_567), "1,234,567");
+}
+
+/// The definitions name the policy the numbers used, and mention No SLA only when a
+/// band has it.
+#[test]
+fn the_definitions_follow_the_results_policy() {
+    let families = PatchFamilies {
+        os: true,
+        software: false,
+    };
+    let none = calculation_notes(
+        &policy(30, SlaBySeverity::default()),
+        families,
+        &FirstSeenTracking::default(),
+    );
+    let past = |notes: &[(&str, String)]| {
+        notes
+            .iter()
+            .find(|(t, _)| *t == "Past SLA")
+            .unwrap()
+            .1
+            .clone()
+    };
+    assert!(!past(&none).contains("No SLA"), "{}", past(&none));
+    assert!(
+        none.iter()
+            .any(|(t, m)| *t == "Pending" && m.ends_with("OS patches only."))
+    );
+    assert!(
+        none.iter()
+            .any(|(t, m)| *t == "First seen" && m.starts_with("NinjaOne's record time"))
+    );
+    let exempt = calculation_notes(
+        &SlaPolicy::default(),
+        families,
+        &FirstSeenTracking::default(),
+    );
+    assert!(
+        past(&exempt).contains("no SLA: Optional"),
+        "{}",
+        past(&exempt)
+    );
+    assert!(past(&exempt).ends_with("but its patches still count as pending."));
+}
+
+/// A long list of organizations with no row is capped and says how many it left
+/// out; one is named on its own.
+#[test]
+fn the_uncounted_orgs_note_caps_its_list() {
+    assert_eq!(uncounted_orgs_note(&[]), None);
+    assert!(
+        uncounted_orgs_note(&["Acme".into()])
+            .unwrap()
+            .starts_with("Acme has no")
+    );
+    let many: Vec<String> = (1..=14).map(|i| format!("Org {i}")).collect();
+    let note = uncounted_orgs_note(&many).unwrap();
+    assert!(note.starts_with("14 organizations"), "{note}");
+    assert!(note.ends_with("Org 10, and 4 more."), "{note}");
+}
+
+/// A percentage falls in the first band whose bound it reaches.
+#[test]
+fn the_within_sla_bands_split_at_95_and_80() {
+    assert_eq!(pct_band(100.0), 0);
+    assert_eq!(pct_band(95.0), 0);
+    assert_eq!(pct_band(94.99), 1);
+    assert_eq!(pct_band(80.0), 1);
+    assert_eq!(pct_band(79.9), 2);
+    assert_eq!(pct_band(0.0), 2);
+}

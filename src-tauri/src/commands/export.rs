@@ -171,6 +171,10 @@ pub async fn export_patches_xlsx(
                 changes: &result.changes,
                 instance: &result.instance,
                 sla_policy: &result.sla_policy,
+                compliance_total: &result.compliance_total,
+                uncounted_orgs: &result.uncounted_orgs,
+                first_seen: &result.first_seen,
+                patch_families: result.patch_families,
             },
         )
     })

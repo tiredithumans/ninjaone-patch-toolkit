@@ -39,10 +39,13 @@ pub struct DeviceBacklog {
     pub oldest_first_seen_ts: Option<i64>,
     /// The newest `timestamp` among the pending records: NinjaOne's "collected /
     /// updated" time, so the latest point this device's patch data is known to
-    /// reflect. The device inventory this app reads carries no last-contact field,
-    /// so this is the closest honest stand-in for an offline device.
+    /// reflect.
     pub latest_collected: Option<String>,
     pub latest_collected_ts: Option<i64>,
+    /// When the device's agent last checked in (`Device::last_contact`) — for an
+    /// offline device, how long it has been gone, beside how old its data is.
+    pub last_contact: Option<String>,
+    pub last_contact_ts: Option<i64>,
 }
 
 /// A capped, ranked device list plus how many devices qualified in all.
@@ -142,6 +145,8 @@ fn finish(
                 oldest_first_seen_ts: acc.oldest,
                 latest_collected: when(acc.latest),
                 latest_collected_ts: acc.latest,
+                last_contact: fmt_dt(d.last_contact_at()),
+                last_contact_ts: d.last_contact_at().map(|t| t.timestamp()),
             })
         })
         .collect();
@@ -182,13 +187,14 @@ impl DeviceBacklog {
 
     /// The offline-backlog columns. Leads with when the data was collected, because
     /// for an offline device that is what decides how far to trust the rest.
-    pub const OFFLINE_COLUMNS: [TableColumn<DeviceBacklog>; 7] = [
+    pub const OFFLINE_COLUMNS: [TableColumn<DeviceBacklog>; 8] = [
         ("Organization", |d| TableCell::text(&d.organization)),
         ("Device", |d| TableCell::text(&d.device_name)),
         ("OS", |d| TableCell::opt_text(d.os_name.as_deref())),
         ("Latest Patch Data Collected", |d| {
             TableCell::opt_text(d.latest_collected.as_deref())
         }),
+        ("Last Contact", |d| TableCell::DateTime(d.last_contact_ts)),
         ("Pending Patches", |d| TableCell::Count(d.pending_total)),
         ("Past SLA", |d| TableCell::Count(d.past_sla)),
         ("Pending by Severity", |d| {
@@ -197,14 +203,16 @@ impl DeviceBacklog {
     ];
 }
 
-/// Printed under both device lists wherever they are rendered.
+/// Printed under the worst-devices list wherever it is rendered. Mirrored by
+/// `web-rs`'s `util::WORST_DEVICES_NOTE` and pinned by the IPC fixture's wording.
 pub const WORST_DEVICES_NOTE: &str = "Online Windows, macOS and Linux devices in scope, \
-     ranked by pending patches past their severity's SLA (any severity), then by the most \
-     urgent backlog.";
+     ranked by pending patches past their severity's SLA (every severity that has one), then \
+     by the most urgent backlog.";
 
 /// Printed under the offline list: what the data can and cannot say about it.
+/// Mirrored by `web-rs`'s `util::OFFLINE_BACKLOG_NOTE` and pinned like the above.
 pub const OFFLINE_BACKLOG_NOTE: &str = "Offline devices still listed with pending patches in \
      NinjaOne's current feed. These records were collected before the device went offline \
-     and may be stale; the compliance figures exclude these devices. \"Latest patch data \
-     collected\" is the newest collection time on the device's records, not a last-contact \
-     time.";
+     and may be out of date, so the compliance figures exclude these devices. \"Latest Patch \
+     Data Collected\" is the newest collection time on the device's records; \"Last \
+     Contact\" is when its agent last checked in.";

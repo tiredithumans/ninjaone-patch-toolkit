@@ -65,6 +65,11 @@ Violating these silently misreports a fleet.
 - **`PatchRow` strings are interned `Arc<str>`** (`rows::Interner`, `DeviceLabels`); the
   frontend mirrors them as `String`.
   → `docs/design/compliance.md#patchrow-shares-its-repeated-strings-it-does-not-own-them`
-- **Tables render through `rows::TableColumn` `COLUMNS`**; the hand-written Leptos headers match
-  those spellings by review.
+- **Every surface states what a figure means from `rows::wording`** (`headline_figures`,
+  `calculation_notes`, `uncounted_orgs_note`, `FirstSeenTracking::sentence`, `PCT_BANDS`); the
+  `web-rs` `util` mirrors must reproduce the IPC fixture's `wording` section exactly
+  (`the_wording_matches_the_backend`). A new sentence goes in both and in the fixture.
+  → `docs/design/compliance.md#every-figure-says-what-it-means-in-the-same-words-everywhere`
+- **Tables render through `rows::TableColumn` `COLUMNS`**; the compliance-related Leptos headers
+  render from `util::column_help` arrays held to them by `headers_match_the_backend_columns`.
   → `docs/design/compliance.md#table-headers-come-from-rowstablecolumn-spellings`

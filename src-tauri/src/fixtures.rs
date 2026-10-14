@@ -30,12 +30,14 @@ use crate::filter::FilterParams;
 use crate::history::RunRecord;
 use crate::model::{Device, Location, Organization, OsInfo, Patch, PatchStatus, RebootMode, Role};
 use crate::rows::{
-    ComplianceBucket, FirstSeenTracking, GroupBy, InstallWindow, LookupMaps, PatchFamilies,
-    PatchRecord, PatchSource, QueryResult, QuerySummary, SlaCutoffs, build_age_buckets,
-    build_approval_backlog, build_compliance, build_compliance_by_os, build_device_backlogs,
-    build_device_summaries, build_failures, build_groups, build_query_scope, build_rows,
-    build_severity_by_org, build_time_to_install, device_detail, page_rows, rows_by_device,
-    slice_groups, sort_device_summaries, uncounted_orgs,
+    ComplianceBucket, DeviceBacklog, DeviceSummary, FirstSeenTracking, GroupBy, InstallLatency,
+    InstallWindow, LookupMaps, OFFLINE_BACKLOG_NOTE, OsCompliance, PCT_BANDS, PatchFamilies,
+    PatchRecord, PatchSource, QueryResult, QuerySummary, SlaCutoffs, StuckDevice, TableColumn,
+    WORST_DEVICES_NOTE, build_age_buckets, build_approval_backlog, build_compliance,
+    build_compliance_by_os, build_device_backlogs, build_device_summaries, build_failures,
+    build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
+    calculation_notes, compliance_scope_note, device_detail, headline_figures, page_rows,
+    rows_by_device, slice_groups, sort_device_summaries, uncounted_orgs, uncounted_orgs_note,
 };
 use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaExempt, SlaPolicy};
 
@@ -146,6 +148,11 @@ fn patch_at(
         installed_timestamp: None,
         product_identifier: None,
     }
+}
+
+/// A table's header spellings, in order.
+fn headers<T>(columns: &[TableColumn<T>]) -> Vec<&'static str> {
+    columns.iter().map(|(title, _)| *title).collect()
 }
 
 /// Fails unless every field of every shape in the fixture has at least one sample
@@ -682,6 +689,41 @@ fn ipc_fixture_is_current() {
                 dispatched: 1,
                 total: 2,
                 jobs: jobs[1..2].to_vec(),
+            },
+        },
+        // The backend's own sentences for this result, which `web-rs`'s `util`
+        // mirrors must reproduce exactly (`the_wording_matches_the_backend`), and the
+        // headers of every table the frontend hand-spells.
+        "wording": {
+            "headline": headline_figures(
+                &result.compliance_total,
+                result.devices_offline,
+                result.devices_unpatchable,
+            ),
+            "calculationNotes": calculation_notes(
+                &result.sla_policy,
+                result.patch_families,
+                &result.first_seen,
+            ),
+            "uncountedOrgsNote": uncounted_orgs_note(&result.uncounted_orgs),
+            "firstSeenNote": result.first_seen.sentence(),
+            "slaPolicy": result.sla_policy.describe(),
+            "scopeNote": compliance_scope_note(
+                result.devices_offline,
+                result.devices_unpatchable,
+                result.patch_families,
+            ),
+            "worstDevicesNote": WORST_DEVICES_NOTE,
+            "offlineBacklogNote": OFFLINE_BACKLOG_NOTE,
+            "pctBands": PCT_BANDS.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
+            "columns": {
+                "compliance": headers(&ComplianceBucket::COLUMNS),
+                "byOs": headers(&OsCompliance::COLUMNS),
+                "worst": headers(&DeviceBacklog::WORST_COLUMNS),
+                "offline": headers(&DeviceBacklog::OFFLINE_COLUMNS),
+                "stuck": headers(&StuckDevice::COLUMNS),
+                "reboot": headers(&DeviceSummary::COLUMNS),
+                "timeToInstall": headers(&InstallLatency::COLUMNS),
             },
         },
         "enums": {
