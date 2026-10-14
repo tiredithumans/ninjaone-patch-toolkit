@@ -12,12 +12,12 @@ use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
-    DeviceDetail, GroupBy, GroupPage, InstallWindow, LookupMaps, PatchFamilies, PatchSource,
-    QueryResult, QuerySummary, RowSort, SlaCutoffs, apply_device_health, build_age_buckets,
+    DeviceDetail, GroupBy, GroupPage, InstallWindow, LookupMaps, PatchFamilies, PatchRecord,
+    PatchSource, QueryResult, QuerySummary, RowSort, SlaCutoffs, build_age_buckets,
     build_approval_backlog, build_compliance, build_compliance_by_os, build_device_backlogs,
     build_device_summaries, build_failures, build_groups, build_query_scope, build_rows,
-    build_severity_by_org, build_time_to_install, group_member_page, page_rows, pending_counts,
-    slice_groups, sort_device_summaries, sort_order,
+    build_severity_by_org, build_time_to_install, group_member_page, page_rows, slice_groups,
+    sort_device_summaries, sort_order,
 };
 use crate::settings::{MAX_WINDOW_DAYS, SlaPolicy};
 use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
@@ -604,28 +604,43 @@ fn assemble_result(
     //
     // These **borrow** from the `Arc` cache rather than cloning out of it. A whole-fleet
     // third-party feed runs to six figures, and each `Patch` owns six `Option<String>`s,
-    // so cloning the scoped subset — and then cloning it again into `all_current` — cost
-    // millions of allocations per query for data the cache already owns and outlives.
-    // The rollups take `&[&Patch]`, so scoping is now a pointer copy.
+    // so cloning the scoped subset cost millions of allocations per query for data the
+    // cache already owns and outlives.
+    //
+    // One `PatchRecord` view per scoped current patch, OS first: every rollup and both
+    // row sources read it, so each record's effective first seen, severity and pending
+    // verdict are worked out once. A view is a pointer and three small fields, not a
+    // copy of the patch.
     let in_scope = |p: &Patch| {
         !has_scope
             || p.device_id
                 .is_some_and(|id| devices_by_id.contains_key(&id))
     };
-    let scoped_os_current: Vec<&Patch> = if plan.include_os {
-        src.current.os.iter().filter(|p| in_scope(p)).collect()
+    let os_family: &[Patch] = if plan.include_os {
+        &src.current.os
     } else {
-        Vec::new()
+        &[]
     };
-    let scoped_sw_current: Vec<&Patch> = if plan.include_sw {
-        src.current.sw.iter().filter(|p| in_scope(p)).collect()
+    let sw_family: &[Patch] = if plan.include_sw {
+        &src.current.sw
     } else {
-        Vec::new()
+        &[]
     };
+    let mut current: Vec<PatchRecord<'_>> = os_family
+        .iter()
+        .filter(|p| in_scope(p))
+        .map(PatchRecord::vendor)
+        .collect();
+    let os_count = current.len();
+    current.extend(
+        sw_family
+            .iter()
+            .filter(|p| in_scope(p))
+            .map(PatchRecord::vendor),
+    );
+    let (scoped_os_current, scoped_sw_current) = current.split_at(os_count);
 
     // Build detail rows from the scoped current families plus the install history.
-    // The install sets are owned by this call, so they're borrowed into the same
-    // `&[&Patch]` shape the scoped current families use.
     //
     // The lookback window is re-applied here rather than trusted to the server. The
     // `installedAfter` parameter is typed only as `string` in the spec with no stated
@@ -644,6 +659,10 @@ fn assemble_result(
     };
     let os_install_refs: Vec<&Patch> = src.os_installs.iter().filter(within_window).collect();
     let sw_install_refs: Vec<&Patch> = src.sw_installs.iter().filter(within_window).collect();
+    // Install-history records keep NinjaOne's own time: they are not in the current
+    // feed, so nothing else could date them.
+    let os_install_records = PatchRecord::vendor_all(&os_install_refs);
+    let sw_install_records = PatchRecord::vendor_all(&sw_install_refs);
     let mut rows = {
         let mut sources = vec![
             // A current-feed record that omits its status is pending by construction
@@ -653,13 +672,13 @@ fn assemble_result(
             // through the status filter and never became a row, so the Compliance
             // sheet counted patches the Patches sheet could not show.
             PatchSource {
-                patches: &scoped_os_current,
+                records: scoped_os_current,
                 type_label: "OS",
                 status_override: Some(PatchStatus::Pending.api_value()),
                 status_filter: Some(&plan.current_status_set),
             },
             PatchSource {
-                patches: &scoped_sw_current,
+                records: scoped_sw_current,
                 type_label: "SOFTWARE",
                 status_override: Some(PatchStatus::Pending.api_value()),
                 status_filter: Some(&plan.current_status_set),
@@ -682,13 +701,13 @@ fn assemble_result(
                 .install_status
                 .unwrap_or(PatchStatus::Installed.api_value());
             sources.push(PatchSource {
-                patches: &os_install_refs,
+                records: &os_install_records,
                 type_label: "OS",
                 status_override: Some(install_label),
                 status_filter: Some(&plan.install_status_set),
             });
             sources.push(PatchSource {
-                patches: &sw_install_refs,
+                records: &sw_install_records,
                 type_label: "SOFTWARE",
                 status_override: Some(install_label),
                 status_filter: Some(&plan.install_status_set),
@@ -710,15 +729,7 @@ fn assemble_result(
             .then_with(|| crate::rows::cmp_ci(&a.device_name, &b.device_name))
     });
 
-    // Compliance + reboot rollups from the scoped current set. Concatenating the two
-    // families copies pointers, not patches.
-    let all_current: Vec<&Patch> = scoped_os_current
-        .iter()
-        .chain(&scoped_sw_current)
-        .copied()
-        .collect();
-    let counts = pending_counts(&all_current);
-    let mut summaries = build_device_summaries(&scoped_devices, &counts, &maps);
+    // Compliance + reboot rollups from the scoped current set.
     let cutoffs = SlaCutoffs::new(&sla, now);
     // Failed installs per device exist only when the Failed status reached the
     // history endpoints; otherwise the per-device count stays unknown (`None`), not
@@ -738,25 +749,25 @@ fn assemble_result(
                 .filter(|p| p.status.as_deref().unwrap_or(label) == PatchStatus::Failed.api_value())
                 .collect()
         });
-    apply_device_health(
-        &mut summaries,
-        &all_current,
+    let mut summaries = build_device_summaries(
+        &scoped_devices,
+        &current,
         failed_installs.as_deref(),
         &cutoffs,
+        &maps,
     );
     sort_device_summaries(&mut summaries);
-    let compliance = build_compliance(&summaries, &all_current, &devices_by_id, &maps, &cutoffs);
-    let compliance_by_os =
-        build_compliance_by_os(&summaries, &all_current, &devices_by_id, &cutoffs);
+    let compliance = build_compliance(&summaries, &current, &devices_by_id, &maps, &cutoffs);
+    let compliance_by_os = build_compliance_by_os(&summaries, &current, &devices_by_id, &cutoffs);
     let (worst_devices, offline_backlog) =
-        build_device_backlogs(&all_current, &devices_by_id, &maps, &cutoffs);
+        build_device_backlogs(&current, &devices_by_id, &maps, &cutoffs);
 
     // Dashboard/failure rollups. Failures are derived from the FAILED rows already
     // joined (present only when the FAILED status was requested — no extra fetch);
     // the severity/age distributions come from the current pending backlog.
     let failures = build_failures(&rows);
-    let severity_by_org = build_severity_by_org(&all_current, &devices_by_id, &maps);
-    let age_buckets = build_age_buckets(&all_current, &devices_by_id, now);
+    let severity_by_org = build_severity_by_org(&current, &devices_by_id, &maps);
+    let age_buckets = build_age_buckets(&current, &devices_by_id, now);
     let time_to_install =
         build_time_to_install(&rows, plan.statuses.contains(&PatchStatus::Installed));
     // "Stuck" reuses the default SLA window: an approved patch still not installed
@@ -764,8 +775,7 @@ fn assemble_result(
     // knob for the same idea of "too long" would only let the two disagree. The
     // default rather than the per-band policy, because a stuck approval is an agent
     // problem whatever the patch's severity.
-    let approvals =
-        build_approval_backlog(&all_current, &devices_by_id, &maps, sla.default_days, now);
+    let approvals = build_approval_backlog(&current, &devices_by_id, &maps, sla.default_days, now);
 
     let families = PatchFamilies {
         os: plan.include_os,

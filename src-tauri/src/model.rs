@@ -327,9 +327,12 @@ impl Patch {
             .unwrap_or(Severity::Unknown)
     }
 
-    /// When NinjaOne first reported this patch record. Named for what it is — see
-    /// [`Patch::collected_timestamp`]; this is not a release date.
-    pub fn first_seen_at(&self) -> Option<DateTime<Utc>> {
+    /// NinjaOne's own time on this record — when it "collected/updated" it, per the
+    /// spec. Named for what the vendor says it is rather than what the rollups use it
+    /// for: a rollup reads a record's *effective* first seen off
+    /// [`PatchRecord`](crate::rows::PatchRecord), never this directly, so a reader
+    /// that wants detection age cannot pick up a time that may refresh on every scan.
+    pub fn collected_at(&self) -> Option<DateTime<Utc>> {
         self.collected_timestamp.and_then(unix_to_datetime)
     }
 
@@ -1164,8 +1167,8 @@ mod tests {
     #[test]
     fn millisecond_collected_timestamp_normalizes_to_seconds() {
         let secs = 1_700_000_000.0; // 2023-11-14, comfortably in Unix-seconds range
-        let from_secs = patch_collected_at(secs).first_seen_at();
-        let from_millis = patch_collected_at(secs * 1000.0).first_seen_at();
+        let from_secs = patch_collected_at(secs).collected_at();
+        let from_millis = patch_collected_at(secs * 1000.0).collected_at();
         assert!(from_secs.is_some());
         assert_eq!(
             from_secs, from_millis,

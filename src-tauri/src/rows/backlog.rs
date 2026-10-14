@@ -8,11 +8,10 @@ use std::collections::HashMap;
 use chrono::DateTime;
 use serde::Serialize;
 
-use crate::model::{Device, Patch};
+use crate::model::Device;
 
 use super::compliance::{SlaCutoffs, rollup_device};
 use super::join::fmt_dt;
-use super::rollups::is_pending;
 use super::*;
 
 /// How many devices each list carries. Both ride on the summary whole, so they are
@@ -75,15 +74,15 @@ struct Acc {
 ///
 /// Both lists rank the same way — see [`rank`].
 pub fn build_device_backlogs(
-    current_patches: &[&Patch],
+    current: &[PatchRecord<'_>],
     devices_by_id: &HashMap<i64, &Device>,
     maps: &LookupMaps,
     sla: &SlaCutoffs,
 ) -> (DeviceBacklogList, DeviceBacklogList) {
     let mut online: HashMap<i64, Acc> = HashMap::new();
     let mut offline: HashMap<i64, Acc> = HashMap::new();
-    for p in current_patches {
-        let Some(id) = p.device_id.filter(|_| is_pending(p.status.as_deref())) else {
+    for r in current {
+        let Some(id) = r.patch.device_id.filter(|_| r.pending) else {
             continue;
         };
         let list = if rollup_device(devices_by_id, Some(id)).is_some() {
@@ -97,13 +96,18 @@ pub fn build_device_backlogs(
             continue;
         };
         let acc = list.entry(id).or_default();
-        acc.pending.add(p.severity_enum());
-        if sla.is_aged(p) {
+        acc.pending.add(r.severity);
+        if sla.is_aged(r) {
             acc.past_sla += 1;
         }
-        if let Some(seen) = p.first_seen_at().map(|t| t.timestamp()) {
+        // Two different times on purpose: the oldest *effective* first seen is how
+        // long the backlog has been known, while the newest of NinjaOne's own times
+        // is how current the device's data is.
+        if let Some(seen) = r.first_seen.map(|t| t.timestamp()) {
             acc.oldest = Some(acc.oldest.map_or(seen, |o| o.min(seen)));
-            acc.latest = Some(acc.latest.map_or(seen, |l| l.max(seen)));
+        }
+        if let Some(collected) = r.patch.collected_at().map(|t| t.timestamp()) {
+            acc.latest = Some(acc.latest.map_or(collected, |l| l.max(collected)));
         }
     }
     (

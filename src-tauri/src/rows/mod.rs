@@ -8,14 +8,16 @@
 //! rollups + scope note + SLA cutoffs), `rollups` (failures / severity / age
 //! aggregates), `backlog` (worst devices + offline backlog), `install_time`
 //! (first seen → installed), `groups` (sort / page / group), `scope` (export
-//! provenance), `table` (the shared column definition). This file holds the
-//! result types every one of them feeds.
+//! provenance), `table` (the shared column definition), `record` (the per-record
+//! view the rollups read). This file holds the result types every one of them
+//! feeds.
 
 mod backlog;
 mod compliance;
 mod groups;
 mod install_time;
 mod join;
+mod record;
 mod rollups;
 mod scope;
 mod table;
@@ -25,6 +27,7 @@ pub use compliance::*;
 pub use groups::*;
 pub use install_time::*;
 pub use join::*;
+pub use record::*;
 pub use rollups::*;
 pub use scope::*;
 pub use table::*;

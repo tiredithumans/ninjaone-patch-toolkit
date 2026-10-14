@@ -47,7 +47,8 @@ review-time copy; when a domain here feels thin, Read its rule file before judgi
   no direct access to `last_result`.
 - Stores go through `store_last_result_if_current(token, …)` with a token claimed before the
   fetch; `TenantChanged` / `Poisoned` are errors, `Superseded` is not.
-- Rollups take `&[&Patch]`; scoping borrows.
+- Rollups take `&[PatchRecord]`; scoping borrows; ages read `PatchRecord::first_seen`, never
+  `Patch::collected_at`.
 
 **Compliance semantics** (`docs/design/compliance.md`, `docs/design/severity.md`)
 - A new rollup over the current feed uses `rollup_device`; a new facet goes in the right

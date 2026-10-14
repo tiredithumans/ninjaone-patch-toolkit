@@ -28,7 +28,7 @@ Violating these silently misreports a fleet.
 - **Dates are `TableCell::DateTime` (Unix seconds)**: real Excel date-times in UTC; CSV text
   cells are formula-guarded, numbers never. → `docs/design/compliance.md#the-workbook-writes-real-date-times-in-utc`
 - **The Devices sheet and the drill-down read one per-device rollup**
-  (`apply_device_health`); an excluded device's counts are blank, not zero.
+  (`build_device_summaries`); an excluded device's counts are blank, not zero.
   → `docs/design/compliance.md#one-per-device-rollup-for-the-devices-sheet-and-the-drill-down`
 - **`Type` is a device-tier chip** — rollups cover only the fetched families.
   → `docs/design/compliance.md#the-fleet-health-rollups-do-depend-on-the-patch-type-facet`
@@ -49,7 +49,7 @@ Violating these silently misreports a fleet.
   → `docs/design/compliance.md#the-sla-is-per-severity-band`
 - **`format_pct` never rounds up to 100** (caps at 99%; `pct_cell` at one decimal).
   → `docs/design/compliance.md#a-percentage-never-rounds-up-to-100`
-- **There is no patch release date in the API.** `first_seen_at()` is detection time; keep
+- **There is no patch release date in the API.** `PatchRecord::first_seen` is detection time; keep
   "First seen" / "since first seen" naming; fixtures must emit `timestamp`.
   → `docs/design/compliance.md#there-is-no-patch-release-date-in-the-ninjaone-api`
 - **`PatchRow` strings are interned `Arc<str>`** (`rows::Interner`, `DeviceLabels`); the

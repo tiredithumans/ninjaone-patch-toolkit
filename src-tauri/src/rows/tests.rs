@@ -25,10 +25,21 @@ fn sorted_page(
     page_rows(rows, order.as_deref(), offset, limit)
 }
 
-/// Borrows an owned patch fixture into the `&[&Patch]` shape the rollups take.
-/// Production builds these by filtering the `Arc` cache; the tests own theirs.
-fn refs(patches: &[Patch]) -> Vec<&Patch> {
-    patches.iter().collect()
+/// Borrows an owned patch fixture into the `PatchRecord` views the rollups take,
+/// dated by NinjaOne's own time. Production builds these by filtering the `Arc`
+/// cache; the tests own theirs.
+fn refs(patches: &[Patch]) -> Vec<PatchRecord<'_>> {
+    patches.iter().map(PatchRecord::vendor).collect()
+}
+
+/// The device summaries a rollup test needs, built with no failed-install data.
+fn summaries_for(
+    devices: &[&Device],
+    current: &[PatchRecord<'_>],
+    sla: &SlaCutoffs,
+    maps: &LookupMaps,
+) -> Vec<DeviceSummary> {
+    build_device_summaries(devices, current, None, sla, maps)
 }
 
 /// Guards the one hand-maintained pairing left in the severity vocabulary: a
@@ -238,7 +249,7 @@ fn row_timestamps_are_normalised_like_the_dates_beside_them() {
         &by_id,
         &maps(),
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: None,
             status_filter: None,
@@ -281,7 +292,7 @@ fn build_rows_resolves_names_and_applies_os_filter() {
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: None,
             status_filter: None,
@@ -313,7 +324,7 @@ fn first_seen_filter_narrows_rows() {
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: None,
             status_filter: None,
@@ -342,7 +353,7 @@ fn node_class_filter_drops_patches_without_a_matched_device() {
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: None,
             status_filter: None,
@@ -365,7 +376,7 @@ fn install_source_applies_status_override() {
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: Some("INSTALLED"),
             status_filter: None,
@@ -389,7 +400,7 @@ fn manual_status_matches_pending_filter_and_displays_as_pending() {
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: None,
             status_filter: Some(&pending_set),
@@ -420,7 +431,7 @@ fn failed_filter_keeps_failed_installs_and_drops_installed() {
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: Some("INSTALLED"),
             status_filter: Some(&failed_set),
@@ -448,7 +459,7 @@ fn install_filter_falls_back_to_override_for_missing_status() {
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: Some("INSTALLED"),
             status_filter: Some(&installed_set),
@@ -535,7 +546,7 @@ fn row_and_wire_statuses_are_the_enums_vocabulary() {
 }
 
 /// The row join has to agree with the rollups about an untyped current-feed
-/// record: `pending_counts` counts it, so the Pending selection must show it.
+/// record: the device summaries count it, so the Pending selection must show it.
 /// `assemble_result` labels the current sources MANUAL for exactly this.
 #[test]
 fn an_untyped_current_record_is_a_pending_row_under_the_pending_override() {
@@ -547,14 +558,15 @@ fn an_untyped_current_record_is_a_pending_row_under_the_pending_override() {
     untyped.status = None;
     let patches = vec![untyped];
     let refs = refs(&patches);
-    assert_eq!(pending_counts(&refs).get(&1), Some(&1));
+    let summaries = summaries_for(&[&d], &refs, &sla30(), &maps);
+    assert_eq!(summaries[0].pending_count, 1);
 
     let pending_set = HashSet::from([PatchStatus::Pending.api_value()]);
     let rows = build_rows(
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs,
+            records: &refs,
             type_label: "OS",
             status_override: Some(PatchStatus::Pending.api_value()),
             status_filter: Some(&pending_set),
@@ -575,8 +587,7 @@ fn compliance_counts_compliant_and_aged_backlog() {
         patch(1, "MANUAL", "CRITICAL", Some(45)), // pending (MANUAL), aged
         patch(1, "APPROVED", "IMPORTANT", Some(2)), // approved, fresh
     ];
-    let counts = pending_counts(&refs(&current));
-    let summaries = build_device_summaries(&[&d1, &d2], &counts, &maps);
+    let summaries = summaries_for(&[&d1, &d2], &refs(&current), &sla30(), &maps);
     let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets.len(), 1);
     let b = &buckets[0];
@@ -603,8 +614,7 @@ fn an_excluded_devices_backlog_is_excluded_too() {
         patch(1, "MANUAL", "CRITICAL", Some(90)),
         patch(1, "APPROVED", "IMPORTANT", Some(90)),
     ];
-    let counts = pending_counts(&refs(&current));
-    let summaries = build_device_summaries(&[&offline], &counts, &maps);
+    let summaries = summaries_for(&[&offline], &refs(&current), &sla30(), &maps);
     let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert!(
         buckets.is_empty(),
@@ -625,8 +635,7 @@ fn an_orphan_patch_does_not_invent_an_organization() {
     let mut orphan = patch(1, "MANUAL", "CRITICAL", Some(90));
     orphan.device_id = Some(999); // not in the scoped inventory
     let current = vec![orphan];
-    let counts = pending_counts(&refs(&current));
-    let summaries = build_device_summaries(&[&d], &counts, &maps);
+    let summaries = summaries_for(&[&d], &refs(&current), &sla30(), &maps);
     let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets.len(), 1, "only the real organization: {buckets:?}");
     assert_eq!(buckets[0].pending_critical, 0);
@@ -644,9 +653,8 @@ fn a_current_patch_with_no_status_still_counts_as_pending() {
     let mut untyped = patch(1, "MANUAL", "CRITICAL", Some(90));
     untyped.status = None;
     let current = vec![untyped];
-    let counts = pending_counts(&refs(&current));
-    assert_eq!(counts.get(&1).copied(), Some(1));
-    let summaries = build_device_summaries(&[&d], &counts, &maps);
+    let summaries = summaries_for(&[&d], &refs(&current), &sla30(), &maps);
+    assert_eq!(summaries[0].pending_count, 1);
     let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets[0].devices_compliant, 0);
     assert_eq!(buckets[0].pending_critical, 1);
@@ -682,8 +690,7 @@ fn compliance_excludes_offline_devices_from_the_denominator() {
     let by_id = HashMap::from([(1, &online), (2, &offline)]);
     let maps = maps();
     let current = vec![patch(1, "MANUAL", "CRITICAL", Some(1))];
-    let counts = pending_counts(&refs(&current));
-    let summaries = build_device_summaries(&[&online, &offline], &counts, &maps);
+    let summaries = summaries_for(&[&online, &offline], &refs(&current), &sla30(), &maps);
     let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets.len(), 1);
     let b = &buckets[0];
@@ -704,8 +711,7 @@ fn compliance_by_os_groups_devices_and_patches_by_os() {
     let by_id = HashMap::from([(1, &d1), (2, &d2)]);
     let maps = maps();
     let current = vec![patch(1, "MANUAL", "CRITICAL", Some(45))]; // aged, on d1
-    let counts = pending_counts(&refs(&current));
-    let summaries = build_device_summaries(&[&d1, &d2], &counts, &maps);
+    let summaries = summaries_for(&[&d1, &d2], &refs(&current), &sla30(), &maps);
     let buckets = build_compliance_by_os(&summaries, &refs(&current), &by_id, &sla30());
     assert_eq!(buckets.len(), 2, "one bucket per distinct OS");
     // Sorted by OS name (case-insensitive): "Windows 11 Pro" before "Windows Server 2022".
@@ -745,15 +751,14 @@ fn query_summary_trims_to_first_page_and_reboot_subset() {
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: None,
             status_filter: None,
         }],
         &FilterParams::default().prepare(),
     );
-    let counts = pending_counts(&refs(&patches));
-    let devices = build_device_summaries(&[&d1, &d2], &counts, &maps);
+    let devices = summaries_for(&[&d1, &d2], &refs(&patches), &sla30(), &maps);
     let compliance = build_compliance(&devices, &refs(&patches), &by_id, &maps, &sla30());
     let result = QueryResult {
         rows,
@@ -820,7 +825,7 @@ fn unmapped_org_and_missing_device_fall_back_to_placeholders() {
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: None,
             status_filter: None,
@@ -864,7 +869,7 @@ fn rows_share_one_allocation_per_distinct_string() {
         &by_id,
         &maps,
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "OS",
             status_override: None,
             status_filter: None,
@@ -959,11 +964,7 @@ fn devices_ninjaone_cannot_patch_are_excluded_from_every_fleet_health_rollup() {
     let maps = maps();
     let patches = vec![patch(1, "MANUAL", "CRITICAL", Some(5))];
     let refs = refs(&patches);
-    let summaries = build_device_summaries(
-        &devices.iter().collect::<Vec<_>>(),
-        &pending_counts(&refs),
-        &maps,
-    );
+    let summaries = summaries_for(&devices.iter().collect::<Vec<_>>(), &refs, &sla30(), &maps);
 
     let compliance = build_compliance(&summaries, &refs, &by_id, &maps, &sla30());
     let org = &compliance[0];
@@ -1239,7 +1240,7 @@ fn a_software_rows_product_identifier_survives_the_join() {
         &by_id,
         &maps(),
         &[PatchSource {
-            patches: &refs(&patches),
+            records: &refs(&patches),
             type_label: "SOFTWARE",
             status_override: None,
             status_filter: None,
@@ -1775,7 +1776,7 @@ fn a_record_with_no_device_id_gets_the_orphan_sentinel() {
         &HashMap::new(),
         &maps(),
         &[PatchSource {
-            patches: &refs,
+            records: &refs,
             type_label: "OS",
             status_override: None,
             status_filter: None,
@@ -2158,8 +2159,12 @@ fn severity_and_age_rollups_cover_the_same_devices_compliance_does() {
     ];
     let current = refs(&current);
 
-    let counts = pending_counts(&current);
-    let summaries = build_device_summaries(&devices.iter().collect::<Vec<_>>(), &counts, &maps);
+    let summaries = summaries_for(
+        &devices.iter().collect::<Vec<_>>(),
+        &current,
+        &sla30(),
+        &maps,
+    );
     let compliance = build_compliance(&summaries, &current, &by_id, &maps, &sla30());
     let severity = build_severity_by_org(&current, &by_id, &maps);
     let age = build_age_buckets(&current, &by_id, Utc::now());
@@ -2225,15 +2230,13 @@ fn the_approval_split_uses_the_vendor_status_across_every_severity() {
         untyped,
     ];
     let current = refs(&current);
-    let counts = pending_counts(&current);
-    let summaries = build_device_summaries(&[&d1], &counts, &maps);
+    let summaries = summaries_for(&[&d1], &current, &sla30(), &maps);
 
     let org = &build_compliance(&summaries, &current, &by_id, &maps, &sla30())[0];
     assert_eq!(org.awaiting_approval, 2, "MANUAL of any severity");
     assert_eq!(org.approved_not_installed, 1, "APPROVED of any severity");
     assert_eq!(
-        counts.get(&1).copied(),
-        Some(5),
+        summaries[0].pending_count, 5,
         "FAILED and untyped are still pending — just not in either approval column"
     );
     let os = &build_compliance_by_os(&summaries, &current, &by_id, &sla30())[0];
@@ -2297,8 +2300,12 @@ fn stuck_approvals_group_per_device_oldest_first_over_the_rollup_population() {
     assert_eq!(backlog.stuck_devices[2].oldest_first_seen, None);
 
     // The fleet totals are the compliance columns summed: one population.
-    let counts = pending_counts(&current);
-    let summaries = build_device_summaries(&devices.iter().collect::<Vec<_>>(), &counts, &maps);
+    let summaries = summaries_for(
+        &devices.iter().collect::<Vec<_>>(),
+        &current,
+        &sla30(),
+        &maps,
+    );
     let compliance = build_compliance(
         &summaries,
         &current,
@@ -2508,7 +2515,9 @@ fn each_patch_ages_against_its_own_bands_cutoff() {
         ),
         Utc::now(),
     );
-    let aged = |sev: &str, days: i64| sla.is_aged(&patch(1, "MANUAL", sev, Some(days)));
+    let aged = |sev: &str, days: i64| {
+        sla.is_aged(&PatchRecord::vendor(&patch(1, "MANUAL", sev, Some(days))))
+    };
     assert!(aged("CRITICAL", 10), "past the 7-day Critical window");
     assert!(!aged("CRITICAL", 5));
     assert!(!aged("IMPORTANT", 45), "inside the 60-day Important window");
@@ -2521,7 +2530,7 @@ fn each_patch_ages_against_its_own_bands_cutoff() {
     );
     assert!(!aged("something-new", 10));
     assert!(
-        sla.is_aged(&patch(1, "MANUAL", "LOW", None)),
+        sla.is_aged(&PatchRecord::vendor(&patch(1, "MANUAL", "LOW", None))),
         "undated still can't be proven recent"
     );
 }
@@ -2536,8 +2545,7 @@ fn the_compliance_aged_column_uses_the_band_cutoffs() {
         patch(1, "MANUAL", "CRITICAL", Some(10)),
         patch(1, "MANUAL", "IMPORTANT", Some(45)),
     ];
-    let counts = pending_counts(&refs(&current));
-    let summaries = build_device_summaries(&[&d], &counts, &maps);
+    let summaries = summaries_for(&[&d], &refs(&current), &sla30(), &maps);
     let flat = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(flat[0].aged_critical, 1, "30 days flat: only the Important");
     let banded = SlaCutoffs::new(

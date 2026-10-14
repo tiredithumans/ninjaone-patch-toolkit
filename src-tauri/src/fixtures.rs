@@ -30,11 +30,11 @@ use crate::filter::FilterParams;
 use crate::history::RunRecord;
 use crate::model::{Device, Location, Organization, OsInfo, Patch, PatchStatus, RebootMode, Role};
 use crate::rows::{
-    GroupBy, InstallWindow, LookupMaps, PatchFamilies, PatchSource, QueryResult, QuerySummary,
-    SlaCutoffs, apply_device_health, build_age_buckets, build_approval_backlog, build_compliance,
+    GroupBy, InstallWindow, LookupMaps, PatchFamilies, PatchRecord, PatchSource, QueryResult,
+    QuerySummary, SlaCutoffs, build_age_buckets, build_approval_backlog, build_compliance,
     build_compliance_by_os, build_device_backlogs, build_device_summaries, build_failures,
     build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
-    device_detail, page_rows, pending_counts, rows_by_device, slice_groups, sort_device_summaries,
+    device_detail, page_rows, rows_by_device, slice_groups, sort_device_summaries,
 };
 use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaPolicy};
 
@@ -298,10 +298,10 @@ fn ipc_fixture_is_current() {
             )
         },
     ];
-    let os_refs: Vec<&Patch> = os_current.iter().collect();
-    let sw_refs: Vec<&Patch> = sw_current.iter().collect();
-    let install_refs: Vec<&Patch> = installs.iter().collect();
-    let all_current: Vec<&Patch> = os_current.iter().chain(&sw_current).collect();
+    let os_records: Vec<PatchRecord> = os_current.iter().map(PatchRecord::vendor).collect();
+    let sw_records: Vec<PatchRecord> = sw_current.iter().map(PatchRecord::vendor).collect();
+    let install_records: Vec<PatchRecord> = installs.iter().map(PatchRecord::vendor).collect();
+    let all_current: Vec<PatchRecord> = os_records.iter().chain(&sw_records).copied().collect();
     let failed: Vec<&Patch> = installs
         .iter()
         .filter(|p| p.status.as_deref() == Some(PatchStatus::Failed.api_value()))
@@ -310,12 +310,12 @@ fn ipc_fixture_is_current() {
     // Labelled the way `query_patches` labels each feed: a current record is pending
     // unless it says otherwise, an install record installed.
     fn source<'a>(
-        patches: &'a [&'a Patch],
+        records: &'a [PatchRecord<'a>],
         type_label: &'static str,
         status: PatchStatus,
     ) -> PatchSource<'a> {
         PatchSource {
-            patches,
+            records,
             type_label,
             status_override: Some(status.api_value()),
             status_filter: None,
@@ -327,9 +327,9 @@ fn ipc_fixture_is_current() {
         &by_id,
         &maps,
         &[
-            source(&os_refs, "OS", PatchStatus::Pending),
-            source(&sw_refs, "SOFTWARE", PatchStatus::Pending),
-            source(&install_refs, "OS", PatchStatus::Installed),
+            source(&os_records, "OS", PatchStatus::Pending),
+            source(&sw_records, "SOFTWARE", PatchStatus::Pending),
+            source(&install_records, "OS", PatchStatus::Installed),
         ],
         &prepared,
     );
@@ -347,8 +347,8 @@ fn ipc_fixture_is_current() {
         },
     };
     let cutoffs = SlaCutoffs::new(&sla_policy, FIXTURE_NOW);
-    let mut summaries = build_device_summaries(&device_refs, &pending_counts(&all_current), &maps);
-    apply_device_health(&mut summaries, &all_current, Some(&failed), &cutoffs);
+    let mut summaries =
+        build_device_summaries(&device_refs, &all_current, Some(&failed), &cutoffs, &maps);
     sort_device_summaries(&mut summaries);
     let (worst_devices, offline_backlog) =
         build_device_backlogs(&all_current, &by_id, &maps, &cutoffs);
@@ -389,7 +389,7 @@ fn ipc_fixture_is_current() {
         &by_id,
         &maps,
         &[source(
-            &resolved.iter().collect::<Vec<_>>(),
+            &resolved.iter().map(PatchRecord::vendor).collect::<Vec<_>>(),
             "OS",
             PatchStatus::Pending,
         )],

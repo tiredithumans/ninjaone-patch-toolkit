@@ -48,7 +48,7 @@ was already there (the in-app table draws its "offline" chip from it).
 
 `DeviceSummary` carries each in-scope device's share of the fleet-health numbers — pending by
 severity band, pending past SLA (`aged_critical`), failed installs and NinjaOne's `lastContact` —
-filled by `rows::apply_device_health` from the **same unnarrowed current feed** and the same
+filled by `rows::build_device_summaries` from the **same unnarrowed current feed** and the same
 `is_pending` / `counts_toward_backlog` / `is_aged` predicates the compliance rollups use. The
 workbook's **Devices** sheet (`DeviceSummary::DEVICE_COLUMNS`) and the in-app drill-down both read
 it, so neither can grade a device differently from the Compliance sheet that counts it.
@@ -404,7 +404,8 @@ the in-app table reads `device_names` whole.
 Grep the spec: `releaseDate` appears **zero** times. `DeviceOSPatch` / `DeviceSoftwarePatch`
 carry only `installedAt` ("Installation attempt timestamp") and `timestamp` ("Date/Time when
 data was collected/updated"); the non-`Device` `OSPatch`/`SoftwarePatch` variants carry neither.
-`Patch::collected_timestamp` (alias `timestamp`, read via `first_seen_at()`) is therefore
+`Patch::collected_timestamp` (alias `timestamp`, read via `collected_at()` into
+`rows::PatchRecord::first_seen`) is therefore
 **detection time, not publication time**, and everything derived from it —
 `PatchRow.first_seen_ts`/`first_seen_date`, the SLA `aged_critical` rollup, `build_age_buckets`,
 and the `detected_within_days`/`detected_after`/`detected_before` filter window — measures *how

@@ -38,5 +38,5 @@ paths:
   only the requested family is fetched. Stores are epoch-gated and fetches are single-flight per
   family. `force_refresh` is floored backend-side by `FORCE_MIN_INTERVAL`.
   → `docs/design/query-cache.md#whole-fleet-prefetch--client-side-scoping`
-- **Scoping borrows, never clones.** Rollups take `&[&Patch]`; don't reintroduce an owned
+- **Scoping borrows, never clones.** Rollups take `&[rows::PatchRecord]`; don't reintroduce an owned
   `Vec<Patch>`. → `docs/design/query-cache.md#scoping-borrows-never-clones`

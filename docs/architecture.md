@@ -36,7 +36,8 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/rows/                    # join → PatchRow and every rollup off the cached result
 │   ├── mod.rs                   # QueryResult / QuerySummary + re-exports of every submodule
 │   ├── join.rs                  # device↔patch join, Interner, DeviceLabels, build_rows
-│   ├── compliance.rs            # compliance / by-OS / per-device rollups (apply_device_health), rollup_device, scope note, SlaCutoffs
+│   ├── compliance.rs            # compliance / by-OS / per-device rollups (build_device_summaries), rollup_device, scope note, SlaCutoffs
+│   ├── record.rs                # PatchRecord: the per-record view (severity, pending, effective first seen) every rollup reads
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
 │   ├── backlog.rs · install_time.rs  # worst devices / offline backlog; first seen → installed median
 │   ├── groups.rs                # grouping, sorting, paging, device_detail, rows_by_device over the cache
