@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-14
+
 ### Changed
 
 - **The headline compliance figure is now "Within SLA".** A device is Within SLA when none of
