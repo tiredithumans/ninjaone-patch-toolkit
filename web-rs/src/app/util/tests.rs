@@ -1276,6 +1276,7 @@ fn summary_line_is_tab_aware() {
         failures: 7,
         failing_devices: 5,
         orgs: 3,
+        devices_counted: 512,
         reboot: 12,
     };
     assert_eq!(
@@ -1289,7 +1290,7 @@ fn summary_line_is_tab_aware() {
     );
     assert_eq!(
         summary_line(Tab::Compliance, &c, "2026-06-28"),
-        "3 organizations \u{00b7} 540 devices \u{00b7} generated 2026-06-28"
+        "3 organizations \u{00b7} 512 of 540 devices counted \u{00b7} generated 2026-06-28"
     );
     // Jobs shows dispatch history, not query output, so the query's counts and
     // generation time would be actively misleading there.
@@ -1650,14 +1651,15 @@ fn only_ambiguous_location_names_are_qualified_by_organization() {
 }
 
 /// A compliance report must never print "100%" for a fleet that isn't clean.
-/// Mirrors the backend assertion on `rows::format_pct`.
+/// Mirrors the backend assertion on `rows::format_pct`, value for value.
 #[test]
 fn a_compliance_percentage_never_rounds_up_to_a_hundred() {
-    assert_eq!(format_pct(100.0), "100%");
-    assert_eq!(format_pct(99.9), "99%");
-    assert_eq!(format_pct(99.5), "99%");
-    assert_eq!(format_pct(94.6), "95%");
-    assert_eq!(format_pct(0.0), "0%");
+    assert_eq!(format_pct(100.0), "100.0%");
+    assert_eq!(format_pct(99.96), "99.9%");
+    assert_eq!(format_pct(99.9), "99.9%");
+    assert_eq!(format_pct(94.64), "94.6%");
+    assert_eq!(format_pct(87.5), "87.5%");
+    assert_eq!(format_pct(0.04), "0.0%");
 }
 
 /// The scope sentence must name both things a bare percentage hides. Mirrors the
@@ -2479,17 +2481,6 @@ fn group_selection_note_says_how_many_and_whether_capped() {
     );
 }
 
-/// The one-decimal percentage never claims a clean fleet it doesn't have.
-#[test]
-fn format_pct_tenths_never_rounds_up_to_100() {
-    assert_eq!(format_pct_tenths(99.96), "99.9%");
-    assert_eq!(format_pct_tenths(99.94), "99.9%");
-    assert_eq!(format_pct_tenths(99.86), "99.9%");
-    assert_eq!(format_pct_tenths(100.0), "100.0%");
-    assert_eq!(format_pct_tenths(87.26), "87.3%");
-    assert_eq!(format_pct_tenths(0.0), "0.0%");
-}
-
 #[test]
 fn trend_delta_is_signed_exactly_once() {
     assert_eq!(trend_delta_label(12.0, false), "+12");
@@ -2888,7 +2879,8 @@ fn reboot_device(id: i64, name: &str, offline: bool) -> DeviceSummary {
         needs_reboot: true,
         rollup_scope: crate::types::RollupScope::Included,
         pending_by_severity: crate::types::SeverityCounts::default(),
-        aged_critical: 0,
+        past_sla: 0,
+        urgent_past_sla: 0,
         failed_installs: None,
         last_contact: None,
     }
@@ -3239,11 +3231,17 @@ fn every_sla_band_reads_and_writes_its_own_field() {
     }
 }
 
-/// Mirrors `settings::SlaPolicy::describe`, which the exports print.
+/// Mirrors `settings::SlaPolicy::describe`, which the exports print — including
+/// the backend's own tests' strings, so the two spell the policy identically.
 #[test]
 fn the_sla_summary_matches_the_exports() {
-    use crate::types::{SlaBySeverity, SlaPolicy};
+    use crate::types::{SlaBySeverity, SlaExempt, SlaPolicy};
     let mut p = SlaPolicy::default();
+    assert_eq!(
+        sla_policy_summary(&p),
+        "30 days (default); no SLA: Optional"
+    );
+    p.exempt = SlaExempt::NONE;
     assert_eq!(sla_policy_summary(&p), "30 days (default)");
     p.by_severity = SlaBySeverity {
         important: Some(14),
@@ -3254,10 +3252,69 @@ fn the_sla_summary_matches_the_exports() {
         sla_policy_summary(&p),
         "30 days (default); Critical 1 day, Important 14 days"
     );
-    assert_eq!(sla_days_for(&p, "Critical"), 1);
-    assert_eq!(sla_days_for(&p, "important"), 14);
-    assert_eq!(sla_days_for(&p, "Moderate"), 30, "no override");
-    assert_eq!(sla_days_for(&p, "Unknown"), 30, "never overridable");
+    assert_eq!(sla_days_for(&p, "Critical"), Some(1));
+    assert_eq!(sla_days_for(&p, "important"), Some(14));
+    assert_eq!(sla_days_for(&p, "Moderate"), Some(30), "no override");
+    assert_eq!(sla_days_for(&p, "Unknown"), Some(30), "never overridable");
+    p.by_severity.low = Some(90);
+    p.exempt.low = true;
+    p.exempt.optional = true;
+    assert_eq!(
+        sla_policy_summary(&p),
+        "30 days (default); Critical 1 day, Important 14 days; no SLA: Low, Optional"
+    );
+    assert_eq!(
+        sla_days_for(&p, "Low"),
+        None,
+        "its kept override applies to nothing"
+    );
+}
+
+/// Mirrors `rows::SlaCutoffs::is_aged`: undated is past SLA, a No-SLA band never is.
+#[test]
+fn is_past_sla_never_flags_a_no_sla_band() {
+    use crate::types::SlaPolicy;
+    let p = SlaPolicy::default();
+    let now = 100 * 86_400;
+    let days_ago = |d: i64| Some(now - d * 86_400);
+    assert!(is_past_sla(&p, "Critical", days_ago(31), now));
+    assert!(!is_past_sla(&p, "Critical", days_ago(29), now));
+    assert!(
+        is_past_sla(&p, "Critical", None, now),
+        "undated can't be shown recent"
+    );
+    assert!(!is_past_sla(&p, "Optional", days_ago(90), now));
+    assert!(!is_past_sla(&p, "Optional", None, now), "no target to miss");
+    assert!(is_past_sla(&p, "Unknown", days_ago(31), now));
+}
+
+/// The No-SLA switches are index-aligned with the SLA bands, which the Settings
+/// form zips together, and each writes its own wire field.
+#[test]
+fn no_sla_bands_follow_the_sla_bands() {
+    use crate::types::{SlaBySeverity, SlaExempt};
+    for ((a, _, _), (b, _, _)) in SlaBySeverity::BANDS.iter().zip(SlaExempt::BANDS.iter()) {
+        assert_eq!(a, b);
+    }
+    assert_eq!(SlaBySeverity::BANDS.len(), SlaExempt::BANDS.len());
+    for (i, (label, get, set)) in SlaExempt::BANDS.iter().enumerate() {
+        let mut e = SlaExempt::NONE;
+        *set(&mut e) = true;
+        assert!(get(&e), "{label}");
+        let json = serde_json::to_value(e).unwrap();
+        let on: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, v)| v.as_bool() == Some(true))
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(
+            on,
+            [label.to_lowercase()],
+            "band {i} writes only its own field"
+        );
+    }
 }
 
 #[test]
@@ -3323,7 +3380,8 @@ fn drill_device() -> crate::types::DeviceSummary {
         offline: false,
         rollup_scope: crate::types::RollupScope::Included,
         pending_by_severity: Default::default(),
-        aged_critical: 0,
+        past_sla: 0,
+        urgent_past_sla: 0,
         failed_installs: None,
         last_contact: Some("2026-06-26 14:31 UTC".into()),
     }
@@ -3382,8 +3440,24 @@ fn only_an_excluded_device_carries_a_rollup_note() {
     assert!(
         rollup_scope_note(RollupScope::Offline)
             .unwrap()
-            .contains("unknown rather than zero")
+            .contains("rather than read as current")
     );
+}
+
+/// The drill-down says whether a counted device is Within SLA, and how far out it
+/// is when not; an excluded device gets no verdict.
+#[test]
+fn within_sla_label_reads_yes_or_no_with_the_count() {
+    use crate::types::RollupScope;
+    let mut d = reboot_device(1, "srv", false);
+    assert_eq!(within_sla_label(&d).as_deref(), Some("Yes"));
+    d.past_sla = 3;
+    assert_eq!(
+        within_sla_label(&d).as_deref(),
+        Some("No \u{2014} 3 pending past SLA")
+    );
+    d.rollup_scope = RollupScope::Offline;
+    assert_eq!(within_sla_label(&d), None);
 }
 
 #[test]
@@ -3458,4 +3532,261 @@ fn product_names_strip_one_trailing_version_like_the_backend() {
         product_display_name([("Beta Tool 1.0", 2), ("alpha tool 2.0", 2)]),
         "alpha tool"
     );
+}
+
+/// An organization with no counted device is named under the table, never just
+/// missing from it; a long list is capped and says how many it left out.
+#[test]
+fn uncounted_orgs_note_caps_and_pluralises() {
+    assert_eq!(uncounted_orgs_note(&[]), None);
+    assert_eq!(
+        uncounted_orgs_note(&["Acme".into()]).as_deref(),
+        Some("Acme has no online, patchable device in scope, so it is not in the table.")
+    );
+    assert_eq!(
+        uncounted_orgs_note(&["Acme".into(), "Globex".into()]).as_deref(),
+        Some(
+            "2 organizations have no online, patchable device in scope, so they are not in \
+             the table: Acme, Globex."
+        )
+    );
+    let many: Vec<String> = (1..=14).map(|i| format!("Org {i}")).collect();
+    let note = uncounted_orgs_note(&many).unwrap();
+    assert!(note.starts_with("14 organizations"), "{note}");
+    assert!(note.ends_with("Org 10, and 4 more."), "{note}");
+}
+
+/// Runs of the newest run's scope computed under an older method are counted and
+/// left out of the trend; other scopes are not counted at all.
+#[test]
+fn older_method_runs_are_counted_and_left_out() {
+    let at = |at: &str, method: u32, scope: &str| RunRecord {
+        at: at.into(),
+        method,
+        scope_key: scope.into(),
+        devices_in_scope: 10,
+        devices_within_sla: (method > 0).then_some(9),
+        ..RunRecord::default()
+    };
+    let history = [
+        at("1", 0, ""),
+        at("2", 0, ""),
+        at("3", 0, "org=2"),
+        at("4", 1, ""),
+        at("5", 1, ""),
+    ];
+    assert_eq!(older_method_runs(&history), 2);
+    let series = trend_series(&history, 60);
+    assert_eq!(
+        series.iter().map(|r| r.at.as_str()).collect::<Vec<_>>(),
+        ["4", "5"],
+        "only the newest method's runs chart"
+    );
+    assert_eq!(series[0].within_sla_pct(), Some(90.0));
+    assert_eq!(older_method_note(0), None);
+    assert_eq!(
+        older_method_note(1).as_deref(),
+        Some(
+            "1 earlier run of this scope used an older calculation method and is left out of these trends."
+        )
+    );
+    assert!(older_method_note(2).unwrap().starts_with("2 earlier runs"));
+}
+
+/// The first-seen line says what the time is, since when this app has recorded it,
+/// and how many records it dated; with no family in the result it says nothing.
+#[test]
+fn the_first_seen_note_states_the_record_and_how_much_it_dated() {
+    use crate::types::FirstSeenTracking;
+    assert_eq!(first_seen_note(&FirstSeenTracking::default()), None);
+    let mut t = FirstSeenTracking {
+        since: Some("2026-05-18 09:00 UTC".into()),
+        since_ts: Some(1_779_094_800),
+        pending_records: 37,
+        from_app_record: 0,
+    };
+    let none = first_seen_note(&t).unwrap();
+    assert!(none.contains("record began 2026-05-18 09:00 UTC"), "{none}");
+    assert!(
+        none.ends_with("every pending record here is dated by NinjaOne's time."),
+        "{none}"
+    );
+    t.from_app_record = 12;
+    let some = first_seen_note(&t).unwrap();
+    assert!(
+        some.contains("12 of 37 pending records are dated by this app's record"),
+        "{some}"
+    );
+}
+
+// --- Compliance wording: held to the backend's own strings -----------------------
+
+/// The IPC fixture: the backend's `query_patches` summary and its `wording` section.
+fn backend_fixture() -> serde_json::Value {
+    serde_json::from_str(include_str!("../../../tests/backend-ipc.json")).expect("fixture")
+}
+
+/// Every sentence the Compliance tab mirrors from the backend reads exactly as the
+/// backend writes it for the same result — the headline figures, the definitions,
+/// the first-seen line, the missing-organizations note, the SLA policy, the scope
+/// note, the two device-list notes and the legend. The crates share no code; this
+/// is what stops the tab and the exports from describing one figure two ways.
+#[test]
+fn the_wording_matches_the_backend() {
+    use crate::types::QueryResult;
+    let fixture = backend_fixture();
+    let wording = &fixture["wording"];
+    let r: QueryResult =
+        serde_json::from_value(fixture["commands"]["query_patches"].clone()).expect("summary");
+
+    let kpis = compliance_kpis(
+        &r.compliance_total,
+        r.devices_offline,
+        r.devices_unpatchable,
+    );
+    let backend = wording["headline"].as_array().expect("headline");
+    assert_eq!(kpis.len(), backend.len());
+    for (k, b) in kpis.iter().zip(backend) {
+        assert_eq!(k.label, b["label"], "label");
+        assert_eq!(k.value, b["value"], "{} value", k.label);
+        assert_eq!(k.detail, b["detail"], "{} detail", k.label);
+        assert_eq!(k.definition, b["definition"], "{} definition", k.label);
+    }
+
+    let notes = calculation_notes(&r.sla_policy, r.patch_families, &r.first_seen);
+    let backend = wording["calculationNotes"].as_array().expect("notes");
+    assert_eq!(notes.len(), backend.len());
+    for ((term, meaning), b) in notes.iter().zip(backend) {
+        assert_eq!(*term, b[0], "term");
+        assert_eq!(*meaning, b[1], "{term}");
+    }
+
+    assert_eq!(
+        first_seen_note(&r.first_seen).as_deref(),
+        wording["firstSeenNote"].as_str()
+    );
+    assert_eq!(
+        uncounted_orgs_note(&r.uncounted_orgs).as_deref(),
+        wording["uncountedOrgsNote"].as_str()
+    );
+    assert_eq!(sla_policy_summary(&r.sla_policy), wording["slaPolicy"]);
+    assert_eq!(
+        compliance_scope_note(r.devices_offline, r.devices_unpatchable, r.patch_families),
+        wording["scopeNote"]
+    );
+    assert_eq!(WORST_DEVICES_NOTE, wording["worstDevicesNote"]);
+    assert_eq!(OFFLINE_BACKLOG_NOTE, wording["offlineBacklogNote"]);
+    let bands: Vec<&str> = PCT_BANDS.iter().map(|(_, label, _)| *label).collect();
+    assert_eq!(serde_json::json!(bands), wording["pctBands"]);
+}
+
+/// The hand-spelled headers match the backend's `rows::TableColumn` spellings —
+/// the workbook's and the report's — column for column. The in-app first seen →
+/// installed table drops the "Days" its cells carry themselves.
+#[test]
+fn headers_match_the_backend_columns() {
+    let fixture = backend_fixture();
+    let columns = &fixture["wording"]["columns"];
+    let labels =
+        |cols: &[HelpedColumn]| cols.iter().map(|(l, _)| l.to_string()).collect::<Vec<_>>();
+    let backend = |key: &str| -> Vec<String> {
+        columns[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("columns.{key}"))
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(labels(&COMPLIANCE_ORG_HEADERS), backend("compliance"));
+    assert_eq!(labels(&COMPLIANCE_OS_HEADERS), backend("byOs"));
+    assert_eq!(labels(&WORST_HEADERS), backend("worst"));
+    assert_eq!(labels(&OFFLINE_HEADERS), backend("offline"));
+    assert_eq!(labels(&STUCK_HEADERS), backend("stuck"));
+    let without_days: Vec<String> = backend("timeToInstall")
+        .into_iter()
+        .map(|h| h.replace(" (Days)", "").replace(" Days)", ")"))
+        .collect();
+    assert_eq!(labels(&TIME_TO_INSTALL_HEADERS), without_days);
+}
+
+/// Every header that measures something carries a definition.
+#[test]
+fn every_header_is_defined_or_an_identity_column() {
+    for table in [
+        &COMPLIANCE_ORG_HEADERS[..],
+        &COMPLIANCE_OS_HEADERS[..],
+        &WORST_HEADERS[..],
+        &OFFLINE_HEADERS[..],
+        &STUCK_HEADERS[..],
+        &TIME_TO_INSTALL_HEADERS[..],
+        &TREND_ORG_HEADERS[..],
+        &DEVICE_HEALTH_LABELS[..],
+    ] {
+        for (label, help) in table {
+            assert_eq!(
+                help.is_empty(),
+                IDENTITY_COLUMNS.contains(label),
+                "{label}: a measure needs a definition; an identity column needs none"
+            );
+        }
+    }
+}
+
+/// The headline never calls an empty scope compliant, and states both exclusions.
+#[test]
+fn the_kpis_never_call_an_empty_fleet_compliant() {
+    use crate::types::ComplianceBucket;
+    let empty = ComplianceBucket {
+        within_sla_pct: 100.0,
+        fully_patched_pct: 100.0,
+        ..ComplianceBucket::default()
+    };
+    let k = compliance_kpis(&empty, 0, 0);
+    assert_eq!(k[0].value, "\u{2014}");
+    assert_eq!(k[0].detail, "no counted devices");
+    assert_eq!(k[3].detail, "none");
+    let fleet = ComplianceBucket {
+        devices_total: 1_200,
+        devices_within_sla: 1_050,
+        within_sla_pct: 87.5,
+        devices_fully_patched: 600,
+        fully_patched_pct: 50.0,
+        urgent_pending: 3_400,
+        urgent_past_sla: 0,
+        ..ComplianceBucket::default()
+    };
+    let k = compliance_kpis(&fleet, 4, 3);
+    assert_eq!(
+        (k[0].value.as_str(), k[0].detail.as_str()),
+        ("87.5%", "1,050 of 1,200 devices")
+    );
+    assert_eq!(k[1].value, "50.0%");
+    assert_eq!(
+        (k[2].value.as_str(), k[2].detail.as_str()),
+        ("3,400", "none past SLA")
+    );
+    assert_eq!(
+        (k[3].value.as_str(), k[3].detail.as_str()),
+        ("7", "4 offline, 3 non-patchable")
+    );
+}
+
+/// The legend's bands are the bar colours' bands, best first, and each has CSS.
+#[test]
+fn the_within_sla_bands_match_their_colours() {
+    assert_eq!(pct_band_class(99.9), "bar-good");
+    assert_eq!(pct_band_class(95.0), "bar-good");
+    assert_eq!(pct_band_class(94.9), "bar-warn");
+    assert_eq!(pct_band_class(80.0), "bar-warn");
+    assert_eq!(pct_band_class(0.0), "bar-bad");
+    let css = include_str!("../../../styles.css");
+    for (_, _, class) in PCT_BANDS {
+        for selector in [
+            format!(".chart .{class}"),
+            format!(".chart-swatch.{class}"),
+            format!(".kpi-value.{class}"),
+        ] {
+            assert!(css.contains(&selector), "styles.css lacks {selector}");
+        }
+    }
 }

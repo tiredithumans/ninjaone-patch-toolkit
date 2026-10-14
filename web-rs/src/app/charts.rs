@@ -11,7 +11,7 @@
 use leptos::prelude::*;
 
 use super::AppState;
-use super::util::{self, format_pct, format_pct_tenths, group_thousands, severity_raw};
+use super::util::{self, format_pct, group_thousands, severity_raw};
 use crate::types::{OrgSeverity, SeverityCounts};
 
 /// Severity bands in most-to-least-urgent order: display label, the CSS class that
@@ -72,14 +72,29 @@ fn bar_height_px(count: usize, max: usize, full: f64) -> f64 {
     }
 }
 
-/// Compliance bar fill class: green at/above 95%, amber at/above 80%, else red.
+/// Within SLA bar fill class, by `util::PCT_BANDS`: 95% or more, 80% to under 95%,
+/// under 80%.
 fn compliance_fill_class(pct: f64) -> &'static str {
-    if pct >= 95.0 {
-        "bar-good"
-    } else if pct >= 80.0 {
-        "bar-warn"
-    } else {
-        "bar-bad"
+    util::pct_band_class(pct)
+}
+
+/// The key under every Within SLA bar chart: what each bar colour means.
+fn pct_legend() -> impl IntoView {
+    view! {
+        <ul class="chart-legend">
+            {util::PCT_BANDS
+                .iter()
+                .map(|&(_, label, class)| {
+                    let swatch = format!("chart-swatch {class}");
+                    view! {
+                        <li>
+                            <span class=swatch aria-hidden="true"></span>
+                            {format!("Within SLA {label}")}
+                        </li>
+                    }
+                })
+                .collect_view()}
+        </ul>
     }
 }
 
@@ -163,7 +178,7 @@ pub(crate) fn ComplianceCharts() -> impl IntoView {
     view! {
         <div class="charts">
             <div class="chart-card">
-                <h3 class="chart-title">"Compliance by organization"</h3>
+                <h3 class="chart-title">"Within SLA by organization"</h3>
                 <ComplianceBars/>
             </div>
             <div class="chart-card">
@@ -237,6 +252,7 @@ fn compliance_bars(title: &str, items: Vec<(String, f64)>) -> AnyView {
                 })
                 .collect_view()}
         </svg>
+        {pct_legend()}
     }
     .into_any()
 }
@@ -251,12 +267,12 @@ fn ComplianceBars() -> impl IntoView {
                     .map(|r| {
                         r.compliance
                             .iter()
-                            .map(|b| (b.organization.clone(), b.compliance_pct))
+                            .map(|b| (b.organization.clone(), b.within_sla_pct))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
             });
-            compliance_bars("Compliance by organization", items)
+            compliance_bars("Within SLA by organization", items)
         }}
     }
 }
@@ -273,12 +289,12 @@ pub(crate) fn ComplianceByOsBars() -> impl IntoView {
                     .map(|r| {
                         r.compliance_by_os
                             .iter()
-                            .map(|b| (b.os.clone(), b.compliance_pct))
+                            .map(|b| (b.os.clone(), b.within_sla_pct))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
             });
-            compliance_bars("Compliance by OS", items)
+            compliance_bars("Within SLA by OS", items)
         }}
     }
 }
@@ -614,7 +630,7 @@ pub(crate) fn TrendLine(
     // The capped formatter: a compliance of 99.96 must not print as "100.0%".
     let fmt = move |v: f64| {
         if percent {
-            format_pct_tenths(v)
+            format_pct(v)
         } else {
             group_thousands(v.max(0.0).round() as usize)
         }

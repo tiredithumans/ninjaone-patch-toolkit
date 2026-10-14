@@ -10,7 +10,9 @@
 
 mod changelog;
 mod changes;
+mod column_help;
 mod columns;
+mod compliance;
 mod device;
 mod filters;
 mod format;
@@ -28,7 +30,9 @@ mod view_link;
 
 pub(crate) use changelog::*;
 pub(crate) use changes::*;
+pub(crate) use column_help::*;
 pub(crate) use columns::*;
+pub(crate) use compliance::*;
 pub(crate) use device::*;
 pub(crate) use filters::*;
 pub(crate) use format::*;

@@ -9,8 +9,10 @@ use chrono::{DateTime, Utc};
 
 use crate::filter::PreparedFilter;
 use crate::model::{
-    Device, Location, Organization, Patch, PatchRow, PatchStatus, Role, Severity, row_status,
+    Device, Location, Organization, PatchRow, PatchStatus, Role, Severity, row_status,
 };
+
+use super::PatchRecord;
 
 /// Placeholder for a name the join could not resolve — an orphan device, a device
 /// reporting no OS, or a patch whose organization is not in the lookups.
@@ -75,7 +77,9 @@ impl LookupMaps {
 /// One slice of fetched patches tagged with its family and (for installs) a status
 /// to apply when the record omits one.
 pub struct PatchSource<'a> {
-    pub patches: &'a [&'a Patch],
+    /// Read through [`PatchRecord`] so a row's First Seen — and the first-seen
+    /// filter — use the same effective time every rollup does.
+    pub records: &'a [PatchRecord<'a>],
     pub type_label: &'static str,
     pub status_override: Option<&'static str>,
     /// When set, only patches whose raw status (or, if absent, `status_override`)
@@ -198,7 +202,8 @@ pub fn build_rows(
     // value rather than one per row.
     let mut unmapped_severities: BTreeSet<String> = BTreeSet::new();
     for source in sources {
-        for patch in source.patches {
+        for record in source.records {
+            let patch = record.patch;
             if let Some(allowed) = source.status_filter {
                 // Fall back to the source's status_override when a record omits its
                 // own status, so an install record with no status still matches the
@@ -249,7 +254,7 @@ pub fn build_rows(
                 continue;
             }
 
-            let severity = patch.severity_enum();
+            let severity = record.severity;
             // A vendor value this build has no mapping for sinks to the bottom of
             // the severity sort and vanishes whenever the facet is active. The spec
             // declares this field as a free-form string, so the mapping cannot be
@@ -267,7 +272,7 @@ pub fn build_rows(
             if !prepared.severity_allowed(severity) {
                 continue;
             }
-            let first_seen = patch.first_seen_at();
+            let first_seen = record.first_seen;
             let installed = patch.installed_at();
             if !prepared.detected_within_allowed(first_seen.map(|r| r.timestamp())) {
                 continue;
@@ -298,7 +303,7 @@ pub fn build_rows(
                 status: pool.intern(status),
                 first_seen_date: fmt_dt(first_seen),
                 installed_date: fmt_dt(installed),
-                // Normalised through `first_seen_at`/`installed_at` like the dates
+                // Normalised through `collected_at`/`installed_at` like the dates
                 // beside them, NOT read raw off the patch. NinjaOne returns
                 // milliseconds for these on some endpoints, and taking the raw value
                 // made a row disagree with itself: it displayed the correct date

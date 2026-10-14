@@ -36,15 +36,18 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/rows/                    # join → PatchRow and every rollup off the cached result
 │   ├── mod.rs                   # QueryResult / QuerySummary + re-exports of every submodule
 │   ├── join.rs                  # device↔patch join, Interner, DeviceLabels, build_rows
-│   ├── compliance.rs            # compliance / by-OS / per-device rollups (apply_device_health), rollup_device, scope note, SlaCutoffs
+│   ├── compliance.rs            # compliance / by-OS / per-device rollups (build_device_summaries), rollup_device, scope note, SlaCutoffs
+│   ├── record.rs                # PatchRecord: the per-record view (severity, pending, effective first seen) every rollup reads
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
 │   ├── backlog.rs · install_time.rs  # worst devices / offline backlog; first seen → installed median
 │   ├── groups.rs                # grouping, sorting, paging, device_detail, rows_by_device over the cache
 │   ├── scope.rs                 # QueryScope export provenance
 │   ├── table.rs                 # TableCell / TableColumn / format_pct / clamp_cell / join_capped — the shared column definition
+│   ├── wording.rs               # what each figure means: headline figures, definitions, notes, legend (mirrored by web-rs util::compliance)
 │   └── tests.rs
 ├── src/history.rs               # append-only run-history.jsonl (one rollup + per-org line per query) + RunRecord
 ├── src/changes.rs               # per-scope run-snapshots/ → RunChanges (changes since the previous comparable run)
+├── src/first_seen.rs            # per-tenant first-seen/ ledger: when this app first saw each pending patch
 ├── src/export.rs                # rust_xlsxwriter workbook: detail, rollup, Devices, device-list, Stuck Approvals, Changes, About; UTC date cells
 ├── src/csv_export.rs            # detail-row CSV: BOM, CRLF, RFC 4180 quoting, formula-injection guard
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
@@ -72,7 +75,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   ├── shortcuts.rs             # key handler + help dialog (map: util::shortcut_for)
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
-│       └── one file per concern (query, selection, sla, guardrails, changes, shortcuts, view_link, theme, …) + tests.rs
+│       └── one file per concern (query, selection, sla, compliance, column_help, guardrails, changes, shortcuts, view_link, theme, …) + tests.rs
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers, event subscribe, is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend (+ types/tests.rs: decodes backend-ipc.json)

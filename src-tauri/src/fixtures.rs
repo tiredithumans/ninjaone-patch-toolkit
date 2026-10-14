@@ -30,13 +30,16 @@ use crate::filter::FilterParams;
 use crate::history::RunRecord;
 use crate::model::{Device, Location, Organization, OsInfo, Patch, PatchStatus, RebootMode, Role};
 use crate::rows::{
-    GroupBy, InstallWindow, LookupMaps, PatchFamilies, PatchSource, QueryResult, QuerySummary,
-    SlaCutoffs, apply_device_health, build_age_buckets, build_approval_backlog, build_compliance,
+    ComplianceBucket, DeviceBacklog, DeviceSummary, FirstSeenTracking, GroupBy, InstallLatency,
+    InstallWindow, LookupMaps, OFFLINE_BACKLOG_NOTE, OsCompliance, PCT_BANDS, PatchFamilies,
+    PatchRecord, PatchSource, QueryResult, QuerySummary, SlaCutoffs, StuckDevice, TableColumn,
+    WORST_DEVICES_NOTE, build_age_buckets, build_approval_backlog, build_compliance,
     build_compliance_by_os, build_device_backlogs, build_device_summaries, build_failures,
     build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
-    device_detail, page_rows, pending_counts, rows_by_device, slice_groups, sort_device_summaries,
+    calculation_notes, compliance_scope_note, device_detail, headline_figures, page_rows,
+    rows_by_device, slice_groups, sort_device_summaries, uncounted_orgs, uncounted_orgs_note,
 };
-use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaPolicy};
+use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaExempt, SlaPolicy};
 
 /// Writes `fixture` to `path` under `UPDATE_FIXTURES`, and otherwise fails unless the
 /// committed file holds exactly what `fixture` renders to. `path` is relative to
@@ -93,6 +96,9 @@ const INSTANCE: &str = "https://app.ninjarmm.com";
 const ORG_ID: i64 = 10;
 const LOCATION_ID: i64 = 100;
 const ROLE_ID: i64 = 2;
+/// An organization whose only device is offline, so it has no counted device and
+/// the result names it in `uncounted_orgs`.
+const OTHER_ORG_ID: i64 = 11;
 const BATCH_ID: u64 = 7;
 
 /// `days` before [`FIXTURE_NOW`], as the epoch seconds a NinjaOne record carries.
@@ -142,6 +148,11 @@ fn patch_at(
         installed_timestamp: None,
         product_identifier: None,
     }
+}
+
+/// A table's header spellings, in order.
+fn headers<T>(columns: &[TableColumn<T>]) -> Vec<&'static str> {
+    columns.iter().map(|(title, _)| *title).collect()
 }
 
 /// Fails unless every field of every shape in the fixture has at least one sample
@@ -209,10 +220,16 @@ fn assert_every_field_is_exercised(fixture: &Value) {
 /// sample is `Some`, so a field made optional needs a `None` sample added too.
 #[test]
 fn ipc_fixture_is_current() {
-    let orgs = vec![Organization {
-        id: ORG_ID,
-        name: "Contoso".into(),
-    }];
+    let orgs = vec![
+        Organization {
+            id: ORG_ID,
+            name: "Contoso".into(),
+        },
+        Organization {
+            id: OTHER_ORG_ID,
+            name: "Fabrikam".into(),
+        },
+    ];
     let locations = vec![Location {
         id: LOCATION_ID,
         name: "HQ".into(),
@@ -225,11 +242,22 @@ fn ipc_fixture_is_current() {
     }];
     let maps = LookupMaps::build(&orgs, &locations, &roles);
 
-    // One device per `RollupScope`: included, offline, and online but unpatchable.
+    // One device per `RollupScope`: included, offline, and online but unpatchable;
+    // and a second organization whose only device is offline.
     let devices = [
         device(1, "web-01", "WINDOWS_SERVER", "Windows Server 2022", false),
         device(2, "web-02", "WINDOWS_SERVER", "Windows Server 2022", true),
         device(3, "core-sw-01", "NMS_SWITCH", "Cisco IOS XE", false),
+        Device {
+            organization_id: Some(OTHER_ORG_ID),
+            ..device(
+                4,
+                "fab-db-01",
+                "WINDOWS_SERVER",
+                "Windows Server 2019",
+                true,
+            )
+        },
     ];
     let device_refs: Vec<&Device> = devices.iter().collect();
     let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
@@ -298,10 +326,10 @@ fn ipc_fixture_is_current() {
             )
         },
     ];
-    let os_refs: Vec<&Patch> = os_current.iter().collect();
-    let sw_refs: Vec<&Patch> = sw_current.iter().collect();
-    let install_refs: Vec<&Patch> = installs.iter().collect();
-    let all_current: Vec<&Patch> = os_current.iter().chain(&sw_current).collect();
+    let os_records: Vec<PatchRecord> = os_current.iter().map(PatchRecord::vendor).collect();
+    let sw_records: Vec<PatchRecord> = sw_current.iter().map(PatchRecord::vendor).collect();
+    let install_records: Vec<PatchRecord> = installs.iter().map(PatchRecord::vendor).collect();
+    let all_current: Vec<PatchRecord> = os_records.iter().chain(&sw_records).copied().collect();
     let failed: Vec<&Patch> = installs
         .iter()
         .filter(|p| p.status.as_deref() == Some(PatchStatus::Failed.api_value()))
@@ -310,12 +338,12 @@ fn ipc_fixture_is_current() {
     // Labelled the way `query_patches` labels each feed: a current record is pending
     // unless it says otherwise, an install record installed.
     fn source<'a>(
-        patches: &'a [&'a Patch],
+        records: &'a [PatchRecord<'a>],
         type_label: &'static str,
         status: PatchStatus,
     ) -> PatchSource<'a> {
         PatchSource {
-            patches,
+            records,
             type_label,
             status_override: Some(status.api_value()),
             status_filter: None,
@@ -327,9 +355,9 @@ fn ipc_fixture_is_current() {
         &by_id,
         &maps,
         &[
-            source(&os_refs, "OS", PatchStatus::Pending),
-            source(&sw_refs, "SOFTWARE", PatchStatus::Pending),
-            source(&install_refs, "OS", PatchStatus::Installed),
+            source(&os_records, "OS", PatchStatus::Pending),
+            source(&sw_records, "SOFTWARE", PatchStatus::Pending),
+            source(&install_records, "OS", PatchStatus::Installed),
         ],
         &prepared,
     );
@@ -345,10 +373,12 @@ fn ipc_fixture_is_current() {
             low: Some(90),
             optional: Some(90),
         },
+        // The shipped default, so the fixture carries a band with No SLA.
+        exempt: SlaExempt::default(),
     };
     let cutoffs = SlaCutoffs::new(&sla_policy, FIXTURE_NOW);
-    let mut summaries = build_device_summaries(&device_refs, &pending_counts(&all_current), &maps);
-    apply_device_health(&mut summaries, &all_current, Some(&failed), &cutoffs);
+    let mut summaries =
+        build_device_summaries(&device_refs, &all_current, Some(&failed), &cutoffs, &maps);
     sort_device_summaries(&mut summaries);
     let (worst_devices, offline_backlog) =
         build_device_backlogs(&all_current, &by_id, &maps, &cutoffs);
@@ -389,7 +419,7 @@ fn ipc_fixture_is_current() {
         &by_id,
         &maps,
         &[source(
-            &resolved.iter().collect::<Vec<_>>(),
+            &resolved.iter().map(PatchRecord::vendor).collect::<Vec<_>>(),
             "OS",
             PatchStatus::Pending,
         )],
@@ -411,13 +441,21 @@ fn ipc_fixture_is_current() {
         &statuses,
     );
 
+    let compliance = build_compliance(&summaries, &all_current, &by_id, &maps, &cutoffs);
     let result = QueryResult {
-        compliance: build_compliance(&summaries, &all_current, &by_id, &maps, &cutoffs),
+        compliance_total: ComplianceBucket::total(&compliance),
+        uncounted_orgs: uncounted_orgs(&summaries),
+        compliance,
         compliance_by_os: build_compliance_by_os(&summaries, &all_current, &by_id, &cutoffs),
         failures: build_failures(&rows),
         severity_by_org: build_severity_by_org(&all_current, &by_id, &maps),
         age_buckets: build_age_buckets(&all_current, &by_id, FIXTURE_NOW),
         time_to_install: build_time_to_install(&rows, true),
+        first_seen: FirstSeenTracking::build(
+            &all_current,
+            &by_id,
+            Some(FIXTURE_NOW - Duration::days(90)),
+        ),
         approvals: build_approval_backlog(
             &all_current,
             &by_id,
@@ -533,6 +571,7 @@ fn ipc_fixture_is_current() {
         install_window_days: 30,
         sla_days: 30,
         sla_by_severity: sla_policy.by_severity,
+        sla_exempt: sla_policy.exempt,
         has_client_secret: true,
         presets: vec![Preset {
             name: "Critical servers".into(),
@@ -620,7 +659,18 @@ fn ipc_fixture_is_current() {
                 exit_code: Some(0),
                 legacy: false,
             }],
-            "read_run_history": [RunRecord::from_result(&result, INSTANCE)],
+            // A line from before the method was versioned, then the current one: the
+            // frontend must decode both, and leave the older out of the trend.
+            "read_run_history": [
+                RunRecord {
+                    at: fmt_ts(FIXTURE_NOW - Duration::days(1)),
+                    method: 0,
+                    devices_within_sla: None,
+                    pending_total: None,
+                    ..RunRecord::from_result(&result, INSTANCE)
+                },
+                RunRecord::from_result(&result, INSTANCE),
+            ],
             "check_for_update": Some(UpdateInfo {
                 version: "1.4.0".into(),
                 current_version: "1.3.2".into(),
@@ -639,6 +689,41 @@ fn ipc_fixture_is_current() {
                 dispatched: 1,
                 total: 2,
                 jobs: jobs[1..2].to_vec(),
+            },
+        },
+        // The backend's own sentences for this result, which `web-rs`'s `util`
+        // mirrors must reproduce exactly (`the_wording_matches_the_backend`), and the
+        // headers of every table the frontend hand-spells.
+        "wording": {
+            "headline": headline_figures(
+                &result.compliance_total,
+                result.devices_offline,
+                result.devices_unpatchable,
+            ),
+            "calculationNotes": calculation_notes(
+                &result.sla_policy,
+                result.patch_families,
+                &result.first_seen,
+            ),
+            "uncountedOrgsNote": uncounted_orgs_note(&result.uncounted_orgs),
+            "firstSeenNote": result.first_seen.sentence(),
+            "slaPolicy": result.sla_policy.describe(),
+            "scopeNote": compliance_scope_note(
+                result.devices_offline,
+                result.devices_unpatchable,
+                result.patch_families,
+            ),
+            "worstDevicesNote": WORST_DEVICES_NOTE,
+            "offlineBacklogNote": OFFLINE_BACKLOG_NOTE,
+            "pctBands": PCT_BANDS.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
+            "columns": {
+                "compliance": headers(&ComplianceBucket::COLUMNS),
+                "byOs": headers(&OsCompliance::COLUMNS),
+                "worst": headers(&DeviceBacklog::WORST_COLUMNS),
+                "offline": headers(&DeviceBacklog::OFFLINE_COLUMNS),
+                "stuck": headers(&StuckDevice::COLUMNS),
+                "reboot": headers(&DeviceSummary::COLUMNS),
+                "timeToInstall": headers(&InstallLatency::COLUMNS),
             },
         },
         "enums": {

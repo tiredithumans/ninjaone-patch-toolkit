@@ -186,6 +186,8 @@ pub(crate) struct SummaryCounts {
     /// Distinct devices carrying at least one of those failures.
     pub failing_devices: usize,
     pub orgs: usize,
+    /// Devices the compliance figures count (the fleet total's `devices_total`).
+    pub devices_counted: usize,
     pub reboot: usize,
 }
 
@@ -207,9 +209,12 @@ pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts, generated_at: &str) -> S
             group_thousands(c.failures),
             group_thousands(c.failing_devices),
         ),
+        // Counted against in scope, so the line reconciles with the table under it
+        // rather than putting a second, larger device count beside it.
         Tab::Compliance => format!(
-            "{} organizations \u{00b7} {} devices",
+            "{} organizations \u{00b7} {} of {} devices counted",
             group_thousands(c.orgs),
+            group_thousands(c.devices_counted),
             group_thousands(c.devices_total),
         ),
         Tab::Reboot => format!(
@@ -293,28 +298,16 @@ fn excluded_clause(offline: usize, unpatchable: usize) -> String {
     }
 }
 
-/// Formats a compliance percentage at zero decimals **without ever rounding up to
-/// 100%**.
+/// A percentage at one decimal **without ever rounding up to 100%**: `87.5%`,
+/// `99.9%`, `100.0%`.
 ///
-/// Mirrors `src-tauri/src/rows.rs::format_pct`; the two crates share no code, so the
-/// rule is written twice on purpose. Plain `{:.0}%` renders anything from 99.5% up as
-/// `100%`, which is the one rounding error here that changes what an operator does:
-/// a compliance report claiming a clean fleet stops the work. Values below 100 cap at
-/// 99%.
+/// Mirrors `src-tauri/src/rows/table.rs::format_pct`; the two crates share no code,
+/// so the rule is written twice on purpose. Plain `{:.1}` turns 99.96 into
+/// "100.0%", which is the one rounding error here that changes what an operator
+/// does: a compliance report claiming a clean fleet stops the work. Values below
+/// 100 cap at 99.9%. One decimal everywhere — the tab, the Trend tab, the workbook
+/// and the report — so no two surfaces show one figure differently.
 pub(crate) fn format_pct(pct: f64) -> String {
-    let shown = if pct >= 100.0 {
-        100.0
-    } else {
-        pct.round().min(99.0)
-    };
-    format!("{shown:.0}%")
-}
-
-/// [`format_pct`] at one decimal, with the same rule: a value below 100 never
-/// prints as `100.0%`. Plain `{:.1}` turns 99.96 into "100.0%", which is exactly the
-/// clean-fleet claim the zero-decimal formatter exists to refuse; below 100 this
-/// caps at 99.9%. Mirrors the backend's one-decimal `pct_cell`.
-pub(crate) fn format_pct_tenths(pct: f64) -> String {
     let shown = if pct >= 100.0 {
         100.0
     } else {
@@ -412,7 +405,7 @@ pub(crate) fn status_class(status: &str) -> &'static str {
     }
 }
 
-/// Presentation for an "Aged (past SLA)" table cell as (CSS class, label, title).
+/// Presentation for an "Urgent Past SLA" table cell as (CSS class, label, title).
 /// An aged backlog gets a ⚠ prefix so it reads without relying on color.
 pub(crate) fn aged_badge(aged: usize) -> (&'static str, String, &'static str) {
     if aged > 0 {
@@ -448,6 +441,34 @@ pub(crate) fn trend_series(history: &[RunRecord], limit: usize) -> Vec<RunRecord
         series.drain(..series.len() - limit);
     }
     series
+}
+
+/// How many runs of the newest run's scope were computed under an older calculation
+/// method, and so are left out of its trend.
+pub(crate) fn older_method_runs(history: &[RunRecord]) -> usize {
+    let Some(newest) = history.last() else {
+        return 0;
+    };
+    history
+        .iter()
+        .filter(|r| r.same_scope(newest) && r.method < newest.method)
+        .count()
+}
+
+/// The Trend tab's note when [`older_method_runs`] left runs out — right after an
+/// upgrade it is what explains why the history seems to have restarted.
+pub(crate) fn older_method_note(n: usize) -> Option<String> {
+    (n > 0).then(|| {
+        let (runs, verb) = if n == 1 {
+            ("run", "is")
+        } else {
+            ("runs", "are")
+        };
+        format!(
+            "{n} earlier {runs} of this scope used an older calculation method and {verb} \
+             left out of these trends."
+        )
+    })
 }
 
 /// `(x, y)` points in a 0..=1 box for a sparkline over `values`, oldest first.

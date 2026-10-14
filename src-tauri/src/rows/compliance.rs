@@ -13,7 +13,6 @@ use crate::model::{Device, Patch, PatchStatus, Severity};
 use crate::settings::SlaPolicy;
 
 use super::join::UNKNOWN_LABEL;
-use super::rollups::is_pending;
 use super::table::pct_cell;
 use super::*;
 
@@ -40,12 +39,18 @@ pub struct DeviceSummary {
     /// non-patchable devices excluded" means, rather than leaving the reader to infer
     /// it from an Online column and a node class.
     pub rollup_scope: RollupScope,
-    /// Pending current patches ([`is_pending`]) on this device, by severity band.
-    /// Sums to `pending_count`; filled by [`apply_device_health`].
+    /// Pending current patches ([`is_pending`](super::rollups::is_pending)) on this
+    /// device, by severity band. Sums to `pending_count`.
     pub pending_by_severity: SeverityCounts,
-    /// Pending Critical/Important patches first seen longer ago than the SLA window
-    /// (or undated) — [`ComplianceBucket::aged_critical`] for one device.
-    pub aged_critical: usize,
+    /// Pending patches of **any** band past that band's own SLA window (or undated);
+    /// a band with No SLA never counts. Zero is what makes a counted device Within
+    /// SLA — the same predicate, over the same records, as the worst-devices list's
+    /// "Past SLA".
+    pub past_sla: usize,
+    /// Pending urgent (Critical, Important, Security) patches first seen longer ago
+    /// than their SLA window (or undated) — [`ComplianceBucket::urgent_past_sla`] for
+    /// one device.
+    pub urgent_past_sla: usize,
     /// FAILED install-history records for this device inside the lookback window,
     /// or `None` when the query did not ask for the Failed status and so never
     /// fetched them — blank rather than zero, because "no failures" is not something
@@ -63,7 +68,8 @@ pub struct DeviceSummary {
 #[serde(rename_all = "camelCase")]
 pub enum RollupScope {
     Included,
-    /// It reports no current patch records, so a zero pending count says nothing.
+    /// Its current patch records were collected before it went offline and may be
+    /// out of date, so neither its pending count nor its zero can be taken as current.
     Offline,
     /// Online, but not something NinjaOne patch management covers.
     NonPatchable,
@@ -90,12 +96,26 @@ impl RollupScope {
     }
 }
 
+/// One summary per in-scope device, with its share of the fleet-health numbers —
+/// pending count, pending by severity band, pending past SLA and, when they were
+/// fetched, failed installs — from the same unnarrowed current feed the compliance
+/// rollups read, through the same pending, backlog and SLA predicates. One
+/// function, so the Devices sheet and the drill-down cannot grade a device
+/// differently from the Compliance sheet that counts it, and so a summary cannot be
+/// built without its health filled in: the compliance rollups read these counts,
+/// and an unfilled summary would read as a clean device.
+///
+/// `failed_installs` is the FAILED install-history records, or `None` when the query
+/// did not request the Failed status; the summaries then keep `None` rather than
+/// claiming zero. A record whose device is not in `devices` is ignored.
 pub fn build_device_summaries(
     devices: &[&Device],
-    pending_counts: &HashMap<i64, usize>,
+    current: &[PatchRecord<'_>],
+    failed_installs: Option<&[&Patch]>,
+    sla: &SlaCutoffs,
     maps: &LookupMaps,
 ) -> Vec<DeviceSummary> {
-    devices
+    let mut summaries: Vec<DeviceSummary> = devices
         .iter()
         .map(|d| {
             let last_contact = d.last_contact_at();
@@ -108,52 +128,39 @@ pub fn build_device_summaries(
                 os_name: d.os_name(),
                 node_class: d.node_class.clone(),
                 needs_reboot: d.needs_reboot(),
-                pending_count: pending_counts.get(&d.id).copied().unwrap_or(0),
+                pending_count: 0,
                 offline: d.is_offline(),
                 rollup_scope: RollupScope::of(d),
                 pending_by_severity: SeverityCounts::default(),
-                aged_critical: 0,
+                past_sla: 0,
+                urgent_past_sla: 0,
                 failed_installs: None,
                 last_contact: super::join::fmt_dt(last_contact),
                 last_contact_ts: last_contact.map(|t| t.timestamp()),
             }
         })
-        .collect()
-}
-
-/// Fills each summary's per-device health — pending by severity band, pending past
-/// SLA and, when they were fetched, failed installs — from the same unnarrowed
-/// current feed the compliance rollups read, through the same [`is_pending`],
-/// backlog and SLA predicates. One function, so the Devices sheet and the
-/// drill-down cannot grade a device differently from the Compliance sheet that
-/// counts it.
-///
-/// `failed_installs` is the FAILED install-history records, or `None` when the query
-/// did not request the Failed status; the summaries then keep `None` rather than
-/// claiming zero. A patch whose device is not in `summaries` is ignored.
-pub fn apply_device_health(
-    summaries: &mut [DeviceSummary],
-    current_patches: &[&Patch],
-    failed_installs: Option<&[&Patch]>,
-    sla: &SlaCutoffs,
-) {
+        .collect();
     let index: HashMap<i64, usize> = summaries
         .iter()
         .enumerate()
         .map(|(i, s)| (s.device_id, i))
         .collect();
     let slot = |id: Option<i64>| id.and_then(|id| index.get(&id).copied());
-    for p in current_patches {
-        let Some(i) = slot(p.device_id) else {
-            continue;
-        };
-        if !is_pending(p.status.as_deref()) {
+    for r in current {
+        if !r.pending {
             continue;
         }
+        let Some(i) = slot(r.patch.device_id) else {
+            continue;
+        };
         let s = &mut summaries[i];
-        s.pending_by_severity.add(p.severity_enum());
-        if counts_toward_backlog(p) && sla.is_aged(p) {
-            s.aged_critical += 1;
+        s.pending_count += 1;
+        s.pending_by_severity.add(r.severity);
+        if sla.is_aged(r) {
+            s.past_sla += 1;
+            if counts_toward_backlog(r) {
+                s.urgent_past_sla += 1;
+            }
         }
     }
     if let Some(failed) = failed_installs {
@@ -167,6 +174,7 @@ pub fn apply_device_health(
             s.failed_installs = Some(n);
         }
     }
+    summaries
 }
 
 /// The order the Devices sheet and the reboot list read in: organization, then
@@ -181,17 +189,25 @@ pub fn sort_device_summaries(summaries: &mut [DeviceSummary]) {
 }
 
 /// Per-organization compliance rollup for the summary view and Excel summary sheet.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComplianceBucket {
     pub organization: String,
+    /// Counted devices: in scope, online and patchable ([`rollup_device`]).
     pub devices_total: usize,
-    pub devices_compliant: usize,
-    pub compliance_pct: f64,
-    pub pending_critical: usize,
-    /// Pending Critical/Important patches first seen longer ago than the SLA
-    /// window — the backlog that has aged past target.
-    pub aged_critical: usize,
+    /// Counted devices with no pending patch past its band's SLA window
+    /// ([`DeviceSummary::past_sla`] is zero) — the headline figure.
+    pub devices_within_sla: usize,
+    pub within_sla_pct: f64,
+    /// Counted devices with no pending patch at all, of any severity or age.
+    pub devices_fully_patched: usize,
+    pub fully_patched_pct: f64,
+    /// Pending urgent patches — Critical, Important or Security
+    /// ([`Severity::is_urgent`]).
+    pub urgent_pending: usize,
+    /// The subset of `urgent_pending` first seen longer ago than its band's SLA
+    /// window — the urgent backlog that has aged past target.
+    pub urgent_past_sla: usize,
     /// Patches, of any severity, NinjaOne holds for an approval decision (vendor
     /// status `MANUAL`) — waiting on a person. See [`approval_state`].
     pub awaiting_approval: usize,
@@ -204,9 +220,10 @@ pub struct ComplianceBucket {
 #[derive(Default)]
 struct ComplianceAcc {
     total: usize,
-    compliant: usize,
-    pending_critical: usize,
-    aged_critical: usize,
+    within_sla: usize,
+    fully_patched: usize,
+    urgent_pending: usize,
+    urgent_past_sla: usize,
     awaiting_approval: usize,
     approved_not_installed: usize,
 }
@@ -218,7 +235,7 @@ struct ComplianceAcc {
 /// The distinction matters because the two ends of the pipeline stall for
 /// different reasons: `MANUAL` (NinjaOne's "Pending", i.e. pending approval) is
 /// waiting on a person, `APPROVED` is waiting on the agent. Both count as pending
-/// in [`is_pending`], so the compliance percentage cannot tell them apart.
+/// in [`is_pending`](super::rollups::is_pending), so the compliance percentage cannot tell them apart.
 ///
 /// Deliberately *not* the row status. `assemble_result` gives the current sources
 /// `status_override = MANUAL` so an untyped record matches the Pending selection
@@ -227,7 +244,7 @@ struct ComplianceAcc {
 /// rollups take the raw cached records (the override only ever reaches
 /// `build_rows`), so an untyped, `FAILED` or never-seen status is pending but in
 /// **neither** column, and the two columns can sum to less than the pending count.
-/// Compared exactly, like [`is_pending`]: `status` is free-form in the spec, and
+/// Compared exactly, like [`is_pending`](super::rollups::is_pending): `status` is free-form in the spec, and
 /// this crate has only ever seen it upper-case.
 pub(super) fn approval_state(status: Option<&str>) -> Option<ApprovalState> {
     match status.and_then(PatchStatus::from_api_value) {
@@ -246,60 +263,66 @@ pub(super) enum ApprovalState {
     Approved,
 }
 
-impl ComplianceAcc {
-    /// Compliant share. An empty bucket is 100%, not 0% — it has no devices to be
-    /// non-compliant.
-    fn pct(&self) -> f64 {
-        if self.total == 0 {
-            100.0
-        } else {
-            (self.compliant as f64 / self.total as f64) * 100.0
-        }
+/// `n` as a percentage of `total`. An empty bucket is 100%, not 0% — it has no
+/// devices to fall short — which no bucket built from devices can be; the fleet
+/// total over an empty scope can, and every surface prints "—" for it instead.
+fn share(n: usize, total: usize) -> f64 {
+    if total == 0 {
+        100.0
+    } else {
+        n as f64 * 100.0 / total as f64
     }
 }
 
-/// Whether a current-patch record belongs to the backlog the compliance rollups
-/// track: not yet installed, and at least Important.
+/// Whether a current-patch record belongs to the urgent backlog the compliance
+/// rollups track: not yet installed, and Critical, Important or Security
+/// ([`Severity::is_urgent`]).
 ///
-/// Pending is [`is_pending`]'s exclude list — every status except `REJECTED` and
-/// `INSTALLED` counts, not only NinjaOne's usual `MANUAL`/`APPROVED`. The rank
-/// threshold deliberately excludes `Security` and `Recommended`, which are NinjaOne
-/// *classifications* rather than urgency grades.
-fn counts_toward_backlog(p: &Patch) -> bool {
-    is_pending(p.status.as_deref()) && p.severity_enum().rank() >= Severity::Important.rank()
+/// Pending is [`is_pending`](super::rollups::is_pending)'s exclude list — every
+/// status except `REJECTED` and `INSTALLED` counts, not only NinjaOne's usual
+/// `MANUAL`/`APPROVED`.
+fn counts_toward_backlog(r: &PatchRecord<'_>) -> bool {
+    r.pending && r.severity.is_urgent()
 }
 
-/// The SLA cutoff for every severity band at one instant: a patch first seen
-/// before its band's cutoff is past SLA.
+/// The SLA cutoff for every severity band at one instant: a record first seen
+/// before its band's cutoff is past SLA. A band held to no SLA has no cutoff.
 ///
 /// Computed once per query rather than once per patch, indexed by
 /// [`Severity::rank`] and sized from [`Severity::ALL`], which lists every variant at
 /// its rank, so every slot is filled. Each band's window comes from
-/// [`SlaPolicy::days_for`] — its override, else the default; `Unknown` always takes
-/// the default.
-pub struct SlaCutoffs([DateTime<Utc>; Severity::ALL.len()]);
+/// [`SlaPolicy::window_for`] — its override, else the default, or none at all for a
+/// band switched to No SLA; `Unknown` always takes the default.
+pub struct SlaCutoffs([Option<DateTime<Utc>>; Severity::ALL.len()]);
 
 impl SlaCutoffs {
     pub fn new(policy: &SlaPolicy, now: DateTime<Utc>) -> Self {
-        let mut cutoffs = [now; Severity::ALL.len()];
+        let mut cutoffs = [None; Severity::ALL.len()];
         for severity in Severity::ALL {
-            cutoffs[severity.rank() as usize] = now - Duration::days(policy.days_for(severity));
+            cutoffs[severity.rank() as usize] = policy
+                .window_for(severity)
+                .map(|days| now - Duration::days(days));
         }
         Self(cutoffs)
     }
 
-    pub fn cutoff_for(&self, severity: Severity) -> DateTime<Utc> {
+    /// The band's cutoff, or `None` for a band held to no SLA.
+    pub fn cutoff_for(&self, severity: Severity) -> Option<DateTime<Utc>> {
         self.0[severity.rank() as usize]
     }
 
-    /// Whether a pending patch has aged past its band's SLA cutoff.
+    /// Whether a pending record has aged past its band's SLA cutoff, measured from
+    /// its effective first seen ([`PatchRecord::first_seen`]).
     ///
-    /// A patch NinjaOne has never timestamped can't be proven recent, so it is
-    /// flagged for review rather than assumed within SLA (which would understate
-    /// the backlog).
-    pub fn is_aged(&self, p: &Patch) -> bool {
-        let cutoff = self.cutoff_for(p.severity_enum());
-        p.first_seen_at().map(|r| r < cutoff).unwrap_or(true)
+    /// A record nothing has dated can't be proven recent, so it is flagged for
+    /// review rather than assumed within SLA (which would understate the backlog).
+    /// A band held to no SLA is never past it — undated or not: there is no target
+    /// for it to have missed.
+    pub fn is_aged(&self, r: &PatchRecord<'_>) -> bool {
+        let Some(cutoff) = self.cutoff_for(r.severity) else {
+            return false;
+        };
+        r.first_seen.map(|t| t < cutoff).unwrap_or(true)
     }
 }
 
@@ -318,9 +341,10 @@ impl SlaCutoffs {
 /// own `(unknown)` organization in the severity breakdown while compliance dropped
 /// it, so the two disagreed about how many organizations the fleet even had.
 ///
-/// An offline device can't apply patches and reports no current patch records, so a
-/// zero pending count says nothing about its compliance: it is excluded from the
-/// denominator rather than scored compliant and inflating the headline metric. A
+/// An offline device can't apply patches, and whatever current patch records NinjaOne
+/// still holds for it were collected before it went offline (the offline-backlog list
+/// shows them), so neither its pending count nor a zero says anything current about
+/// it: it is excluded from the denominator rather than scored on stale data. A
 /// device NinjaOne cannot patch at all ([`Device::is_patchable`] — switches,
 /// printers, hypervisors, cloud monitors) is excluded for the same reason: it is
 /// online, carries no patch records, and used to score compliant, so a fleet of
@@ -347,7 +371,7 @@ pub(super) fn rollup_device<'a>(
 /// allocates only when a bucket is first created, rather than once per patch.
 fn accumulate_compliance<'a>(
     summaries: &'a [DeviceSummary],
-    current_patches: &'a [&Patch],
+    current: &[PatchRecord<'a>],
     devices_by_id: &HashMap<i64, &'a Device>,
     sla: &SlaCutoffs,
     device_key: impl Fn(&'a DeviceSummary) -> Cow<'a, str>,
@@ -369,19 +393,22 @@ fn accumulate_compliance<'a>(
             None => by_key.entry(key.into_owned()).or_default(),
         };
         acc.total += 1;
+        if s.past_sla == 0 {
+            acc.within_sla += 1;
+        }
         if s.pending_count == 0 {
-            acc.compliant += 1;
+            acc.fully_patched += 1;
         }
     }
 
-    for p in current_patches {
-        let Some(device) = rollup_device(devices_by_id, p.device_id) else {
+    for r in current {
+        let Some(device) = rollup_device(devices_by_id, r.patch.device_id) else {
             continue;
         };
         // The approval split counts every severity (it describes the workflow, not
-        // the urgency); the SLA backlog only Important and above.
-        let approval = approval_state(p.status.as_deref());
-        let backlog = counts_toward_backlog(p);
+        // the urgency); the SLA backlog only the urgent bands.
+        let approval = approval_state(r.patch.status.as_deref());
+        let backlog = counts_toward_backlog(r);
         if approval.is_none() && !backlog {
             continue;
         }
@@ -396,9 +423,9 @@ fn accumulate_compliance<'a>(
             None => {}
         }
         if backlog {
-            acc.pending_critical += 1;
-            if sla.is_aged(p) {
-                acc.aged_critical += 1;
+            acc.urgent_pending += 1;
+            if sla.is_aged(r) {
+                acc.urgent_past_sla += 1;
             }
         }
     }
@@ -407,18 +434,18 @@ fn accumulate_compliance<'a>(
 }
 
 /// Computes per-org compliance from device summaries and the current (pending/
-/// approved) patches. `sla` flags aged Critical/Important backlog, each patch
+/// approved) patches. `sla` flags aged urgent backlog, each patch
 /// against its own band's cutoff.
 pub fn build_compliance(
     summaries: &[DeviceSummary],
-    current_patches: &[&Patch],
+    current: &[PatchRecord<'_>],
     devices_by_id: &HashMap<i64, &Device>,
     maps: &LookupMaps,
     sla: &SlaCutoffs,
 ) -> Vec<ComplianceBucket> {
     let by_org = accumulate_compliance(
         summaries,
-        current_patches,
+        current,
         devices_by_id,
         sla,
         |s| Cow::Borrowed(s.organization.as_str()),
@@ -430,16 +457,66 @@ pub fn build_compliance(
         .map(|(organization, a)| ComplianceBucket {
             organization,
             devices_total: a.total,
-            devices_compliant: a.compliant,
-            compliance_pct: a.pct(),
-            pending_critical: a.pending_critical,
-            aged_critical: a.aged_critical,
+            devices_within_sla: a.within_sla,
+            within_sla_pct: share(a.within_sla, a.total),
+            devices_fully_patched: a.fully_patched,
+            fully_patched_pct: share(a.fully_patched, a.total),
+            urgent_pending: a.urgent_pending,
+            urgent_past_sla: a.urgent_past_sla,
             awaiting_approval: a.awaiting_approval,
             approved_not_installed: a.approved_not_installed,
         })
         .collect();
     buckets.sort_by_cached_key(|b| b.organization.to_lowercase());
     buckets
+}
+
+impl ComplianceBucket {
+    /// The label the fleet-wide total carries in its organization column.
+    pub const TOTAL_LABEL: &'static str = "All organizations";
+
+    /// The fleet-wide figures: every organization's counts summed and both
+    /// percentages recomputed from the sums, so the total is device-weighted — a
+    /// 2-device org at 50% does not pull a 200-device org at 100% down to 75%. Exact,
+    /// because every counted device and record lands in exactly one organization
+    /// (both halves of [`accumulate_compliance`] key by the same org-name lookup).
+    pub fn total(buckets: &[ComplianceBucket]) -> Self {
+        let sum = |f: fn(&ComplianceBucket) -> usize| buckets.iter().map(f).sum::<usize>();
+        let devices_total = sum(|b| b.devices_total);
+        let devices_within_sla = sum(|b| b.devices_within_sla);
+        let devices_fully_patched = sum(|b| b.devices_fully_patched);
+        Self {
+            organization: Self::TOTAL_LABEL.to_string(),
+            devices_total,
+            devices_within_sla,
+            within_sla_pct: share(devices_within_sla, devices_total),
+            devices_fully_patched,
+            fully_patched_pct: share(devices_fully_patched, devices_total),
+            urgent_pending: sum(|b| b.urgent_pending),
+            urgent_past_sla: sum(|b| b.urgent_past_sla),
+            awaiting_approval: sum(|b| b.awaiting_approval),
+            approved_not_installed: sum(|b| b.approved_not_installed),
+        }
+    }
+}
+
+/// Organizations with devices in scope but none counted — every one offline or not
+/// patchable — so they have no row in the compliance table at all. Named so every
+/// surface can say where they went rather than let an organization silently vanish.
+/// Case-insensitively sorted, like the table.
+pub fn uncounted_orgs(summaries: &[DeviceSummary]) -> Vec<String> {
+    let mut counted: HashMap<&str, bool> = HashMap::new();
+    for s in summaries {
+        *counted.entry(s.organization.as_str()).or_default() |=
+            s.rollup_scope == RollupScope::Included;
+    }
+    let mut out: Vec<String> = counted
+        .into_iter()
+        .filter(|(_, any)| !any)
+        .map(|(org, _)| org.to_string())
+        .collect();
+    out.sort_by(|a, b| cmp_ci(a, b));
+    out
 }
 
 /// Per-OS compliance rollup (grouped by the device's reported OS name) for the
@@ -450,27 +527,29 @@ pub fn build_compliance(
 pub struct OsCompliance {
     pub os: String,
     pub devices_total: usize,
-    pub devices_compliant: usize,
-    pub compliance_pct: f64,
-    pub pending_critical: usize,
-    pub aged_critical: usize,
+    pub devices_within_sla: usize,
+    pub within_sla_pct: f64,
+    pub devices_fully_patched: usize,
+    pub fully_patched_pct: f64,
+    pub urgent_pending: usize,
+    pub urgent_past_sla: usize,
     pub awaiting_approval: usize,
     pub approved_not_installed: usize,
 }
 
 /// Computes compliance grouped by OS name, mirroring [`build_compliance`] (offline
-/// devices excluded from the denominator; pending Critical/Important counted, and
+/// devices excluded from the denominator; pending urgent patches counted, and
 /// flagged aged when older than the SLA window or undated). Devices and patches with
 /// no reported OS fall under "(unknown)".
 pub fn build_compliance_by_os(
     summaries: &[DeviceSummary],
-    current_patches: &[&Patch],
+    current: &[PatchRecord<'_>],
     devices_by_id: &HashMap<i64, &Device>,
     sla: &SlaCutoffs,
 ) -> Vec<OsCompliance> {
     let by_os = accumulate_compliance(
         summaries,
-        current_patches,
+        current,
         devices_by_id,
         sla,
         |s| Cow::Borrowed(s.os_name.as_deref().unwrap_or(UNKNOWN_LABEL)),
@@ -482,32 +561,18 @@ pub fn build_compliance_by_os(
         .map(|(os, a)| OsCompliance {
             os,
             devices_total: a.total,
-            devices_compliant: a.compliant,
-            compliance_pct: a.pct(),
-            pending_critical: a.pending_critical,
-            aged_critical: a.aged_critical,
+            devices_within_sla: a.within_sla,
+            within_sla_pct: share(a.within_sla, a.total),
+            devices_fully_patched: a.fully_patched,
+            fully_patched_pct: share(a.fully_patched, a.total),
+            urgent_pending: a.urgent_pending,
+            urgent_past_sla: a.urgent_past_sla,
             awaiting_approval: a.awaiting_approval,
             approved_not_installed: a.approved_not_installed,
         })
         .collect();
     buckets.sort_by_cached_key(|b| b.os.to_lowercase());
     buckets
-}
-
-/// Counts current pending patches ([`is_pending`] — anything not `REJECTED` or
-/// `INSTALLED`) per device for compliance and the reboot/summary views. Shares [`is_pending`] with every other pending rollup, so
-/// the device's pending count, the severity breakdown and the age histogram cannot
-/// disagree about which records are pending.
-pub fn pending_counts(current_patches: &[&Patch]) -> HashMap<i64, usize> {
-    let mut counts: HashMap<i64, usize> = HashMap::new();
-    for p in current_patches {
-        if is_pending(p.status.as_deref())
-            && let Some(id) = p.device_id
-        {
-            *counts.entry(id).or_default() += 1;
-        }
-    }
-    counts
 }
 
 impl DeviceSummary {
@@ -538,7 +603,7 @@ impl DeviceSummary {
     /// current patch records, so a 0 there would read as "clean" when it means
     /// "unknown", which is the exact misreading the exclusion exists to prevent.
     /// The band columns are one per [`SeverityCounts::BANDS`] entry, in its order.
-    pub const DEVICE_COLUMNS: [TableColumn<DeviceSummary>; 19] = [
+    pub const DEVICE_COLUMNS: [TableColumn<DeviceSummary>; 21] = [
         ("Organization", |d| TableCell::text(&d.organization)),
         ("Location", |d| TableCell::opt_text(d.location.as_deref())),
         ("Device Role", |d| {
@@ -552,6 +617,10 @@ impl DeviceSummary {
         ("Compliance Scope", |d| {
             TableCell::text(d.rollup_scope.label())
         }),
+        ("Within SLA", |d| match d.rollup_scope {
+            RollupScope::Included => TableCell::text(if d.past_sla == 0 { "Yes" } else { "No" }),
+            RollupScope::Offline | RollupScope::NonPatchable => TableCell::Text(String::new()),
+        }),
         (DEVICE_BAND_HEADERS[0], band_cell::<0>),
         (DEVICE_BAND_HEADERS[1], band_cell::<1>),
         (DEVICE_BAND_HEADERS[2], band_cell::<2>),
@@ -560,7 +629,8 @@ impl DeviceSummary {
         (DEVICE_BAND_HEADERS[5], band_cell::<5>),
         (DEVICE_BAND_HEADERS[6], band_cell::<6>),
         (DEVICE_BAND_HEADERS[7], band_cell::<7>),
-        ("Aged (past SLA)", |d| included_count(d, d.aged_critical)),
+        ("Past SLA", |d| included_count(d, d.past_sla)),
+        ("Urgent Past SLA", |d| included_count(d, d.urgent_past_sla)),
         ("Failed Installs", |d| match d.failed_installs {
             Some(n) => TableCell::Count(n),
             None => TableCell::Text(String::new()),
@@ -603,15 +673,17 @@ fn included_count(d: &DeviceSummary, n: usize) -> TableCell {
 
 impl ComplianceBucket {
     /// The per-organization compliance columns.
-    pub const COLUMNS: [TableColumn<ComplianceBucket>; 8] = [
+    pub const COLUMNS: [TableColumn<ComplianceBucket>; 10] = [
         ("Organization", |b| TableCell::Text(b.organization.clone())),
         ("Devices", |b| TableCell::Count(b.devices_total)),
-        ("Compliant", |b| TableCell::Count(b.devices_compliant)),
-        ("Compliance %", |b| pct_cell(b.compliance_pct)),
-        ("Pending Critical/Important", |b| {
-            TableCell::Count(b.pending_critical)
+        ("Within SLA", |b| TableCell::Count(b.devices_within_sla)),
+        ("Within SLA %", |b| pct_cell(b.within_sla_pct)),
+        ("Fully Patched", |b| {
+            TableCell::Count(b.devices_fully_patched)
         }),
-        ("Aged (past SLA)", |b| TableCell::Count(b.aged_critical)),
+        ("Fully Patched %", |b| pct_cell(b.fully_patched_pct)),
+        ("Urgent Pending", |b| TableCell::Count(b.urgent_pending)),
+        ("Urgent Past SLA", |b| TableCell::Count(b.urgent_past_sla)),
         ("Awaiting Approval", |b| {
             TableCell::Count(b.awaiting_approval)
         }),
@@ -624,15 +696,17 @@ impl ComplianceBucket {
 impl OsCompliance {
     /// The per-OS compliance columns. Same shape as [`ComplianceBucket::COLUMNS`]
     /// apart from the leading identity column.
-    pub const COLUMNS: [TableColumn<OsCompliance>; 8] = [
+    pub const COLUMNS: [TableColumn<OsCompliance>; 10] = [
         ("OS", |b| TableCell::Text(b.os.clone())),
         ("Devices", |b| TableCell::Count(b.devices_total)),
-        ("Compliant", |b| TableCell::Count(b.devices_compliant)),
-        ("Compliance %", |b| pct_cell(b.compliance_pct)),
-        ("Pending Critical/Important", |b| {
-            TableCell::Count(b.pending_critical)
+        ("Within SLA", |b| TableCell::Count(b.devices_within_sla)),
+        ("Within SLA %", |b| pct_cell(b.within_sla_pct)),
+        ("Fully Patched", |b| {
+            TableCell::Count(b.devices_fully_patched)
         }),
-        ("Aged (past SLA)", |b| TableCell::Count(b.aged_critical)),
+        ("Fully Patched %", |b| pct_cell(b.fully_patched_pct)),
+        ("Urgent Pending", |b| TableCell::Count(b.urgent_pending)),
+        ("Urgent Past SLA", |b| TableCell::Count(b.urgent_past_sla)),
         ("Awaiting Approval", |b| {
             TableCell::Count(b.awaiting_approval)
         }),

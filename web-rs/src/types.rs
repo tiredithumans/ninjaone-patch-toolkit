@@ -179,9 +179,13 @@ pub struct DeviceSummary {
     pub rollup_scope: RollupScope,
     #[serde(default)]
     pub pending_by_severity: SeverityCounts,
-    /// Pending Critical/Important past the SLA window (or undated).
+    /// Pending patches of any band past that band's SLA window (or undated); zero is
+    /// what makes a counted device Within SLA.
     #[serde(default)]
-    pub aged_critical: usize,
+    pub past_sla: usize,
+    /// Pending urgent (Critical, Important, Security) past the SLA window (or undated).
+    #[serde(default)]
+    pub urgent_past_sla: usize,
     /// `None` when the query did not include the Failed status — unknown, not zero.
     #[serde(default)]
     pub failed_installs: Option<usize>,
@@ -214,16 +218,23 @@ pub struct DeviceDetail {
     pub rows_total: usize,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+/// One organization's compliance figures, or — as `QueryResult::compliance_total` —
+/// the device-weighted fleet total. Mirrors `rows::ComplianceBucket`.
+#[derive(Clone, Debug, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct ComplianceBucket {
     pub organization: String,
+    /// Counted devices: in scope, online and patchable.
     pub devices_total: usize,
-    pub devices_compliant: usize,
-    pub compliance_pct: f64,
-    pub pending_critical: usize,
-    pub aged_critical: usize,
+    /// Counted devices with no pending patch past its severity's SLA window.
+    pub devices_within_sla: usize,
+    pub within_sla_pct: f64,
+    /// Counted devices with no pending patch at all.
+    pub devices_fully_patched: usize,
+    pub fully_patched_pct: f64,
+    pub urgent_pending: usize,
+    pub urgent_past_sla: usize,
     /// Pending approval (vendor status `MANUAL`), any severity.
     #[serde(default)]
     pub awaiting_approval: usize,
@@ -240,10 +251,12 @@ pub struct ComplianceBucket {
 pub struct OsCompliance {
     pub os: String,
     pub devices_total: usize,
-    pub devices_compliant: usize,
-    pub compliance_pct: f64,
-    pub pending_critical: usize,
-    pub aged_critical: usize,
+    pub devices_within_sla: usize,
+    pub within_sla_pct: f64,
+    pub devices_fully_patched: usize,
+    pub fully_patched_pct: f64,
+    pub urgent_pending: usize,
+    pub urgent_past_sla: usize,
     #[serde(default)]
     pub awaiting_approval: usize,
     #[serde(default)]
@@ -359,6 +372,9 @@ pub struct DeviceBacklog {
     /// The newest `timestamp` on the device's pending records — a collection time,
     /// not a last-contact time.
     pub latest_collected: Option<String>,
+    /// When the device's agent last checked in.
+    #[serde(default)]
+    pub last_contact: Option<String>,
 }
 
 /// A capped device list plus how many devices qualified. Mirrors
@@ -397,6 +413,18 @@ pub struct TimeToInstall {
     pub excluded_records: usize,
 }
 
+/// Since when this app has kept its own first-seen record, and how many pending
+/// records it dated. Mirrors `rows::FirstSeenTracking`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(rename_all = "camelCase", default)]
+pub struct FirstSeenTracking {
+    pub since: Option<String>,
+    pub since_ts: Option<i64>,
+    pub pending_records: usize,
+    pub from_app_record: usize,
+}
+
 /// Per-severity SLA overrides in days; `None` = use the default. Mirrors
 /// `settings::SlaBySeverity` and round-trips through the Settings panel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +460,60 @@ impl SlaBySeverity {
     ];
 }
 
+/// The bands held to no SLA. Mirrors `settings::SlaExempt`, including its default:
+/// Optional only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SlaExempt {
+    pub critical: bool,
+    pub important: bool,
+    pub security: bool,
+    pub moderate: bool,
+    pub recommended: bool,
+    pub low: bool,
+    pub optional: bool,
+}
+
+impl Default for SlaExempt {
+    fn default() -> Self {
+        Self {
+            optional: true,
+            ..Self::NONE
+        }
+    }
+}
+
+/// One band's No-SLA switch: its label, and how to read and write it.
+pub type SlaExemptBand = (
+    &'static str,
+    fn(&SlaExempt) -> bool,
+    fn(&mut SlaExempt) -> &mut bool,
+);
+
+impl SlaExempt {
+    pub const NONE: Self = Self {
+        critical: false,
+        important: false,
+        security: false,
+        moderate: false,
+        recommended: false,
+        low: false,
+        optional: false,
+    };
+
+    /// Every switchable band, index-aligned with [`SlaBySeverity::BANDS`]
+    /// (`no_sla_bands_follow_the_sla_bands` pins it). `Unknown` has no switch.
+    pub const BANDS: [SlaExemptBand; 7] = [
+        ("Critical", |s| s.critical, |s| &mut s.critical),
+        ("Important", |s| s.important, |s| &mut s.important),
+        ("Security", |s| s.security, |s| &mut s.security),
+        ("Moderate", |s| s.moderate, |s| &mut s.moderate),
+        ("Recommended", |s| s.recommended, |s| &mut s.recommended),
+        ("Low", |s| s.low, |s| &mut s.low),
+        ("Optional", |s| s.optional, |s| &mut s.optional),
+    ];
+}
+
 /// The SLA policy a result was computed under. Mirrors `settings::SlaPolicy`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
@@ -439,6 +521,7 @@ impl SlaBySeverity {
 pub struct SlaPolicy {
     pub default_days: i64,
     pub by_severity: SlaBySeverity,
+    pub exempt: SlaExempt,
 }
 
 impl Default for SlaPolicy {
@@ -446,6 +529,7 @@ impl Default for SlaPolicy {
         Self {
             default_days: 30,
             by_severity: SlaBySeverity::default(),
+            exempt: SlaExempt::default(),
         }
     }
 }
@@ -521,6 +605,12 @@ pub struct QueryResult {
     /// Only the devices flagged for reboot (all the reboot view needs).
     pub reboot_devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// The device-weighted fleet total of `compliance`, labelled "All organizations".
+    #[serde(default)]
+    pub compliance_total: ComplianceBucket,
+    /// Organizations in scope with no counted device, so with no row in `compliance`.
+    #[serde(default)]
+    pub uncounted_orgs: Vec<String>,
     /// Compliance grouped by OS name (the "Compliance by OS" section).
     pub compliance_by_os: Vec<OsCompliance>,
     /// FAILED-install rollup (empty unless the FAILED status was queried).
@@ -538,6 +628,9 @@ pub struct QueryResult {
     /// First seen → installed, by organization and severity.
     #[serde(default)]
     pub time_to_install: TimeToInstall,
+    /// How this result's first-seen times were arrived at.
+    #[serde(default)]
+    pub first_seen: FirstSeenTracking,
     /// The SLA policy this result's aging figures were computed under — may differ
     /// from Settings if the policy changed since.
     #[serde(default)]
@@ -599,6 +692,8 @@ pub struct SettingsView {
     pub sla_days: i64,
     #[serde(default)]
     pub sla_by_severity: SlaBySeverity,
+    #[serde(default)]
+    pub sla_exempt: SlaExempt,
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
@@ -740,6 +835,7 @@ pub struct SaveSettingsArgs {
     pub install_window_days: i64,
     pub sla_days: i64,
     pub sla_by_severity: SlaBySeverity,
+    pub sla_exempt: SlaExempt,
     pub client_secret: Option<String>,
     pub clear_secret: bool,
     pub auto_check_updates: bool,
@@ -1228,11 +1324,22 @@ pub struct RunRecord {
     pub devices_total: usize,
     pub devices_offline: usize,
     pub devices_unpatchable: usize,
+    /// Fully patched devices (the backend's key predates the rename).
     pub devices_compliant: usize,
     pub devices_in_scope: usize,
+    /// Within SLA devices; `None` on lines from before calculation method 1.
+    pub devices_within_sla: Option<usize>,
+    /// Pending records over the counted devices; `None` on lines from before
+    /// method 1, which recorded only `rows_total` — a different number.
+    pub pending_total: Option<usize>,
+    /// The backend's `history::METHOD` the line was computed under; 0 when older.
+    pub method: u32,
     pub rows_total: usize,
-    pub pending_critical: usize,
-    pub aged_critical: usize,
+    /// Under the backend's original keys, which every line on disk carries.
+    #[serde(rename = "pendingCritical")]
+    pub urgent_pending: usize,
+    #[serde(rename = "agedCritical")]
+    pub urgent_past_sla: usize,
     pub failures: usize,
     pub needs_reboot: usize,
     pub os_patches: bool,
@@ -1261,30 +1368,41 @@ pub struct OrgRun {
     pub devices_in_scope: usize,
     #[serde(rename = "c")]
     pub devices_compliant: usize,
+    #[serde(rename = "w")]
+    pub devices_within_sla: Option<usize>,
     #[serde(rename = "p")]
     pub pending: usize,
     #[serde(rename = "pc")]
-    pub pending_critical: usize,
+    pub urgent_pending: usize,
     #[serde(rename = "ac")]
-    pub aged_critical: usize,
+    pub urgent_past_sla: usize,
+}
+
+/// `n` as a percentage of a non-empty `total`; `None` for an empty one.
+fn share(n: usize, total: usize) -> Option<f64> {
+    (total > 0).then(|| n as f64 * 100.0 / total as f64)
 }
 
 impl OrgRun {
-    /// Same rule as [`RunRecord::compliance_pct`]: an empty org has no percentage.
-    pub fn compliance_pct(&self) -> Option<f64> {
-        (self.devices_in_scope > 0)
-            .then(|| self.devices_compliant as f64 * 100.0 / self.devices_in_scope as f64)
+    /// Same rule as [`RunRecord::within_sla_pct`].
+    pub fn within_sla_pct(&self) -> Option<f64> {
+        share(self.devices_within_sla?, self.devices_in_scope)
     }
 }
 
 impl RunRecord {
-    /// Compliance over the population the rollups cover. `None` for an empty scope
+    /// Within SLA over the population the rollups cover. `None` for an empty scope
     /// rather than 0% — an empty scope is not a fleet at zero compliance, and
-    /// charting it as one is the same class of lie as rounding 99.5% up to 100.
-    /// The backend stores only the two counts; the percentage is derived here.
-    pub fn compliance_pct(&self) -> Option<f64> {
-        (self.devices_in_scope > 0)
-            .then(|| self.devices_compliant as f64 * 100.0 / self.devices_in_scope as f64)
+    /// charting it as one is the same class of lie as rounding 99.95% up to 100 —
+    /// and `None` on a line that predates the figure. The backend stores only the
+    /// counts; the percentage is derived here.
+    pub fn within_sla_pct(&self) -> Option<f64> {
+        share(self.devices_within_sla?, self.devices_in_scope)
+    }
+
+    /// Fully patched over the same population, under the same empty-scope rule.
+    pub fn fully_patched_pct(&self) -> Option<f64> {
+        share(self.devices_compliant, self.devices_in_scope)
     }
 
     /// Which families these numbers cover, in the same words `PatchFamilies::label`
@@ -1297,8 +1415,16 @@ impl RunRecord {
         .label()
     }
 
-    /// Whether two records measured the same thing, and so belong on one trend line.
+    /// Whether two records measured the same thing, and so belong on one trend line:
+    /// the same scope *and* the same calculation method, since a change in what a
+    /// figure means would otherwise chart as the fleet moving.
     pub fn comparable_with(&self, other: &Self) -> bool {
+        self.same_scope(other) && self.method == other.method
+    }
+
+    /// Whether two records measured the same tenant, families and facets — the same
+    /// question asked, though perhaps under different calculation methods.
+    pub fn same_scope(&self, other: &Self) -> bool {
         self.instance == other.instance
             && self.os_patches == other.os_patches
             && self.software_patches == other.software_patches

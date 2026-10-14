@@ -119,6 +119,12 @@ pub(crate) fn severity_rank(sev: &str) -> u8 {
     }
 }
 
+/// Whether a pending patch of this severity is urgent — Critical, Important or
+/// Security. Mirrors `model::Severity::is_urgent`, for the demo's rollups.
+pub(crate) fn is_urgent(sev: &str) -> bool {
+    severity_rank(sev) >= severity_rank("Security")
+}
+
 /// Severity ordinal (0 = most urgent) — the exact inverse of [`severity_rank`].
 ///
 /// `Security` and `Recommended` were once missing, so both fell through to the

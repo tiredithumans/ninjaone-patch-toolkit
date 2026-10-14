@@ -4,7 +4,7 @@ use tauri::State;
 use crate::error::UiError;
 use crate::settings::{
     ActionSettings, MAX_ACTION_CONCURRENCY, MAX_DEVICES_PER_ACTION_CEILING, MAX_WINDOW_DAYS,
-    Preset, Settings, SlaBySeverity, is_cleartext_remote,
+    Preset, Settings, SlaBySeverity, SlaExempt, is_cleartext_remote,
 };
 use crate::state::AppState;
 
@@ -17,6 +17,7 @@ pub struct SettingsView {
     pub install_window_days: i64,
     pub sla_days: i64,
     pub sla_by_severity: SlaBySeverity,
+    pub sla_exempt: SlaExempt,
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
@@ -41,6 +42,7 @@ fn view(state: &AppState) -> SettingsView {
         install_window_days: s.install_window_days,
         sla_days: s.sla_days,
         sla_by_severity: s.sla_by_severity,
+        sla_exempt: s.sla_exempt,
         has_client_secret: state.auth.has_client_secret(),
         presets: s.presets,
         auto_check_updates: s.auto_check_updates,
@@ -66,6 +68,10 @@ pub struct SaveSettingsArgs {
     /// overrides — the single `sla_days` window applies to every band, as before.
     #[serde(default)]
     pub sla_by_severity: SlaBySeverity,
+    /// Bands held to no SLA. Omitted by a frontend that predates the switch, which
+    /// then saves the default (Optional only).
+    #[serde(default)]
+    pub sla_exempt: SlaExempt,
     /// New secret to store; ignored when empty/None unless `clear_secret` is set.
     #[serde(default)]
     pub client_secret: Option<String>,
@@ -90,6 +96,7 @@ impl std::fmt::Debug for SaveSettingsArgs {
             .field("install_window_days", &self.install_window_days)
             .field("sla_days", &self.sla_days)
             .field("sla_by_severity", &self.sla_by_severity)
+            .field("sla_exempt", &self.sla_exempt)
             .field(
                 "client_secret",
                 &self.client_secret.as_ref().map(|_| "<redacted>"),
@@ -239,6 +246,7 @@ fn merge_settings(
     next.install_window_days = args.install_window_days;
     next.sla_days = args.sla_days;
     next.sla_by_severity = args.sla_by_severity;
+    next.sla_exempt = args.sla_exempt;
     next.auto_check_updates = args.auto_check_updates;
     next.actions = args.actions;
     next.actions.run_as = next.actions.run_as.trim().to_string();
@@ -397,7 +405,8 @@ pub async fn delete_preset(
 mod tests {
     use super::{
         ActionSettings, MAX_WINDOW_DAYS, SaveEffects, SaveSettingsArgs, Settings, SlaBySeverity,
-        merge_settings, require_https_instance, validate_action_settings, validate_settings_input,
+        SlaExempt, merge_settings, require_https_instance, validate_action_settings,
+        validate_settings_input,
     };
 
     #[test]
@@ -429,6 +438,7 @@ mod tests {
             install_window_days,
             sla_days,
             sla_by_severity: SlaBySeverity::default(),
+            sla_exempt: SlaExempt::default(),
             client_secret: None,
             clear_secret: false,
             auto_check_updates: true,

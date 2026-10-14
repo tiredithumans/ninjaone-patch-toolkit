@@ -61,6 +61,19 @@ const MAX_ORGS: usize = 100;
 /// two rows of it. Two hundred lines leaves room for other scopes run in between.
 const ORG_DETAIL_RECORDS: usize = 200;
 
+/// The calculation method a run's fleet-health figures were computed under. A run
+/// is only charted against runs of the same method (`RunRecord::comparable_with` in
+/// `web-rs`), because a change in what a figure *means* would otherwise read as the
+/// fleet moving.
+///
+/// - **0** — every line written before the field existed: "compliant" was zero
+///   pending of any severity, the urgent backlog was Critical and Important only,
+///   and every band had an SLA window.
+/// - **1** — Within SLA is recorded, Security counts as urgent, a band can have No
+///   SLA (Optional by default), and first seen is the earlier of NinjaOne's time and
+///   this app's own first observation.
+pub const METHOD: u32 = 1;
+
 /// Serializes every append and trim in this process.
 ///
 /// Queries overlap by design (an auto-refresh tick during a manual Run), and each
@@ -92,17 +105,34 @@ pub struct RunRecord {
     pub devices_total: usize,
     pub devices_offline: usize,
     pub devices_unpatchable: usize,
-    /// Devices with no pending patches, over the `rows::rollup_device` population —
-    /// the same numerator and denominator the Compliance tab shows.
+    /// Devices with no pending patches (Fully patched), over the
+    /// `rows::rollup_device` population — the same numerator and denominator the
+    /// Compliance tab shows.
     pub devices_compliant: usize,
     pub devices_in_scope: usize,
+    /// Devices Within SLA, over the same population. `None` on lines written before
+    /// [`METHOD`] 1.
+    #[serde(default)]
+    pub devices_within_sla: Option<usize>,
+    /// Pending records of every severity over the same population — the fleet
+    /// backlog. `None` on lines written before [`METHOD`] 1, which recorded only
+    /// `rows_total`, a different number.
+    #[serde(default)]
+    pub pending_total: Option<usize>,
+    /// The [`METHOD`] this line's figures were computed under; 0 on older lines.
+    #[serde(default)]
+    pub method: u32,
     /// Detail rows the query produced, across **every** selected status and after
     /// the patch facets (severity, search, first-seen window) — not only pending
     /// rows. Comparable across runs only under the same [`scope_key`](Self::scope_key).
     pub rows_total: usize,
-    /// Pending criticals, and the subset past the SLA window.
-    pub pending_critical: usize,
-    pub aged_critical: usize,
+    /// Pending urgent patches (Critical, Important and — from calculation method 1 —
+    /// Security), and the subset past the SLA window. Stored under their original
+    /// keys so every line already on disk still reads.
+    #[serde(rename = "pendingCritical")]
+    pub urgent_pending: usize,
+    #[serde(rename = "agedCritical")]
+    pub urgent_past_sla: usize,
     /// Distinct patches with at least one FAILED install.
     pub failures: usize,
     /// Devices flagged as needing a reboot.
@@ -141,20 +171,23 @@ pub struct OrgRun {
     pub devices_in_scope: usize,
     #[serde(rename = "c", default)]
     pub devices_compliant: usize,
+    /// Devices Within SLA; `None` on lines written before [`METHOD`] 1.
+    #[serde(rename = "w", default)]
+    pub devices_within_sla: Option<usize>,
     /// Pending patches of every severity (`rows::build_severity_by_org`).
     #[serde(rename = "p", default)]
     pub pending: usize,
     #[serde(rename = "pc", default)]
-    pub pending_critical: usize,
+    pub urgent_pending: usize,
     #[serde(rename = "ac", default)]
-    pub aged_critical: usize,
+    pub urgent_past_sla: usize,
 }
 
 impl RunRecord {
     /// Projects a completed result. `instance` comes from settings rather than the
     /// result, which carries no tenant of its own.
     pub fn from_result(result: &QueryResult, instance: &str) -> Self {
-        let devices_compliant = result.compliance.iter().map(|c| c.devices_compliant).sum();
+        let total = &result.compliance_total;
         let pending_by_org: std::collections::HashMap<&str, usize> = result
             .severity_by_org
             .iter()
@@ -166,13 +199,14 @@ impl RunRecord {
             .map(|c| OrgRun {
                 organization: c.organization.clone(),
                 devices_in_scope: c.devices_total,
-                devices_compliant: c.devices_compliant,
+                devices_compliant: c.devices_fully_patched,
+                devices_within_sla: Some(c.devices_within_sla),
                 pending: pending_by_org
                     .get(c.organization.as_str())
                     .copied()
                     .unwrap_or(0),
-                pending_critical: c.pending_critical,
-                aged_critical: c.aged_critical,
+                urgent_pending: c.urgent_pending,
+                urgent_past_sla: c.urgent_past_sla,
             })
             .collect();
         orgs.sort_by(|a, b| {
@@ -182,18 +216,27 @@ impl RunRecord {
         });
         let orgs_total = orgs.len();
         orgs.truncate(MAX_ORGS);
-        let devices_in_scope = result.compliance.iter().map(|c| c.devices_total).sum();
+
         Self {
             at: result.generated_at.clone(),
             instance: instance.to_string(),
             devices_total: result.devices_total,
             devices_offline: result.devices_offline,
             devices_unpatchable: result.devices_unpatchable,
-            devices_compliant,
-            devices_in_scope,
+            devices_compliant: total.devices_fully_patched,
+            devices_in_scope: total.devices_total,
+            devices_within_sla: Some(total.devices_within_sla),
+            pending_total: Some(
+                result
+                    .severity_by_org
+                    .iter()
+                    .map(|o| o.counts.total())
+                    .sum(),
+            ),
+            method: METHOD,
             rows_total: result.rows.len(),
-            pending_critical: result.compliance.iter().map(|c| c.pending_critical).sum(),
-            aged_critical: result.compliance.iter().map(|c| c.aged_critical).sum(),
+            urgent_pending: total.urgent_pending,
+            urgent_past_sla: total.urgent_past_sla,
             failures: result.failures.len(),
             needs_reboot: result.devices.iter().filter(|d| d.needs_reboot).count(),
             os_patches: result.patch_families.os,
@@ -348,9 +391,12 @@ mod tests {
             devices_unpatchable: 3,
             devices_compliant: compliant,
             devices_in_scope: scope,
+            devices_within_sla: Some(compliant),
+            pending_total: Some(40),
+            method: METHOD,
             rows_total: 40,
-            pending_critical: 7,
-            aged_critical: 2,
+            urgent_pending: 7,
+            urgent_past_sla: 2,
             failures: 1,
             needs_reboot: 4,
             os_patches: true,
@@ -486,6 +532,26 @@ mod tests {
         assert_eq!(parsed[0].scope_key, "");
     }
 
+    /// A line from before the calculation method was versioned reads back as method
+    /// 0 with no Within SLA or pending total — never as a method-1 line whose
+    /// figures happen to be zero — and keeps its urgent counts under the keys it was
+    /// written with.
+    #[test]
+    fn a_record_from_before_the_method_version_reads_as_method_zero() {
+        let mut old = serde_json::to_value(rec("2026-01-01 00:00:00 UTC", 5, 10)).unwrap();
+        let obj = old.as_object_mut().unwrap();
+        for key in ["method", "devicesWithinSla", "pendingTotal"] {
+            obj.remove(key);
+        }
+        assert_eq!(obj["pendingCritical"], 7, "the original on-disk key");
+        let parsed = parse(&old.to_string());
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].method, 0);
+        assert_eq!(parsed[0].devices_within_sla, None);
+        assert_eq!(parsed[0].pending_total, None);
+        assert_eq!(parsed[0].urgent_pending, 7);
+    }
+
     /// Lines written before the per-org rollup existed read back with none.
     #[test]
     fn a_record_from_before_the_org_rollup_still_parses() {
@@ -504,9 +570,10 @@ mod tests {
             organization: "Contoso".into(),
             devices_in_scope: 10,
             devices_compliant: 5,
+            devices_within_sla: Some(8),
             pending: 3,
-            pending_critical: 1,
-            aged_critical: 0,
+            urgent_pending: 1,
+            urgent_past_sla: 0,
         };
         let mut records: Vec<RunRecord> = (0..ORG_DETAIL_RECORDS + 3)
             .map(|i| RunRecord {
@@ -527,10 +594,12 @@ mod tests {
         let bucket = |i: usize| ComplianceBucket {
             organization: format!("org-{i:03}"),
             devices_total: i,
-            devices_compliant: i / 2,
-            compliance_pct: 50.0,
-            pending_critical: 1,
-            aged_critical: 0,
+            devices_within_sla: i / 2,
+            within_sla_pct: 50.0,
+            devices_fully_patched: i / 2,
+            fully_patched_pct: 50.0,
+            urgent_pending: 1,
+            urgent_past_sla: 0,
             awaiting_approval: 0,
             approved_not_installed: 0,
         };
@@ -538,6 +607,8 @@ mod tests {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: (1..=MAX_ORGS + 5).map(bucket).collect(),
+            compliance_total: Default::default(),
+            uncounted_orgs: Vec::new(),
             compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: vec![OrgSeverity {
@@ -552,6 +623,7 @@ mod tests {
             worst_devices: Default::default(),
             offline_backlog: Default::default(),
             time_to_install: Default::default(),
+            first_seen: Default::default(),
             sla_policy: Default::default(),
             instance: String::new(),
             approvals: Default::default(),
@@ -599,6 +671,8 @@ mod tests {
                 rows: Vec::new(),
                 devices: Vec::new(),
                 compliance: Vec::new(),
+                compliance_total: Default::default(),
+                uncounted_orgs: Vec::new(),
                 compliance_by_os: Vec::new(),
                 failures: Vec::new(),
                 severity_by_org: Vec::new(),
@@ -606,6 +680,7 @@ mod tests {
                 worst_devices: Default::default(),
                 offline_backlog: Default::default(),
                 time_to_install: Default::default(),
+                first_seen: Default::default(),
                 sla_policy: Default::default(),
                 instance: "https://app.ninjarmm.com".into(),
                 approvals: Default::default(),

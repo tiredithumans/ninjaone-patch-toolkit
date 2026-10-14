@@ -28,7 +28,7 @@ Violating these silently misreports a fleet.
 - **Dates are `TableCell::DateTime` (Unix seconds)**: real Excel date-times in UTC; CSV text
   cells are formula-guarded, numbers never. → `docs/design/compliance.md#the-workbook-writes-real-date-times-in-utc`
 - **The Devices sheet and the drill-down read one per-device rollup**
-  (`apply_device_health`); an excluded device's counts are blank, not zero.
+  (`build_device_summaries`); an excluded device's counts are blank, not zero.
   → `docs/design/compliance.md#one-per-device-rollup-for-the-devices-sheet-and-the-drill-down`
 - **`Type` is a device-tier chip** — rollups cover only the fetched families.
   → `docs/design/compliance.md#the-fleet-health-rollups-do-depend-on-the-patch-type-facet`
@@ -45,16 +45,31 @@ Violating these silently misreports a fleet.
   query returns (never detached); the baseline is served from the last snapshot this process
   saved when the scope matches, remembered only once it is on disk.
   → `docs/design/compliance.md#changes-since-the-previous-comparable-run`
-- **SLA aging is per band** (`SlaCutoffs` from the result's `SlaPolicy`).
+- **SLA aging is per band** (`SlaCutoffs` from the result's `SlaPolicy`); a band with No SLA
+  (`SlaExempt`, Optional by default, never `Unknown`) is never past SLA, undated or not.
   → `docs/design/compliance.md#the-sla-is-per-severity-band`
-- **`format_pct` never rounds up to 100** (caps at 99%; `pct_cell` at one decimal).
+- **Within SLA is the headline** (`DeviceSummary::past_sla == 0`, the worst-devices predicate);
+  Fully patched (`pending_count == 0`) beside it; `compliance_total` is device-weighted and
+  `uncounted_orgs` names the orgs with no row.
+  → `docs/design/compliance.md#within-sla-is-the-headline-fully-patched-is-the-strict-figure-beside-it`
+- **Percentages are one decimal everywhere and never round up to 100** (`round_pct` caps at
+  99.9; `format_pct`, `pct_cell` and the `web-rs` mirror share the rule).
   → `docs/design/compliance.md#a-percentage-never-rounds-up-to-100`
-- **There is no patch release date in the API.** `first_seen_at()` is detection time; keep
+- **There is no patch release date in the API.** `PatchRecord::first_seen` is detection time; keep
   "First seen" / "since first seen" naming; fixtures must emit `timestamp`.
+- **First seen is the earlier of NinjaOne's time and `crate::first_seen`'s record** (identity
+  `changes::write_patch_key`; undated stays undated; merged from the whole fetched feed per family
+  at its own fetch time; saved only on `StoreOutcome::Stored`; offline devices carried over).
+  → `docs/design/compliance.md#this-app-keeps-its-own-first-seen-record`
   → `docs/design/compliance.md#there-is-no-patch-release-date-in-the-ninjaone-api`
 - **`PatchRow` strings are interned `Arc<str>`** (`rows::Interner`, `DeviceLabels`); the
   frontend mirrors them as `String`.
   → `docs/design/compliance.md#patchrow-shares-its-repeated-strings-it-does-not-own-them`
-- **Tables render through `rows::TableColumn` `COLUMNS`**; the hand-written Leptos headers match
-  those spellings by review.
+- **Every surface states what a figure means from `rows::wording`** (`headline_figures`,
+  `calculation_notes`, `uncounted_orgs_note`, `FirstSeenTracking::sentence`, `PCT_BANDS`); the
+  `web-rs` `util` mirrors must reproduce the IPC fixture's `wording` section exactly
+  (`the_wording_matches_the_backend`). A new sentence goes in both and in the fixture.
+  → `docs/design/compliance.md#every-figure-says-what-it-means-in-the-same-words-everywhere`
+- **Tables render through `rows::TableColumn` `COLUMNS`**; the compliance-related Leptos headers
+  render from `util::column_help` arrays held to them by `headers_match_the_backend_columns`.
   → `docs/design/compliance.md#table-headers-come-from-rowstablecolumn-spellings`

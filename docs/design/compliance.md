@@ -14,9 +14,10 @@ so rather than leave two device counts side by side.
 The device must be in the scoped inventory, online, **and** something NinjaOne patch management
 covers (`Device::is_patchable` — an allow list of the Windows/macOS/Linux `nodeClass` values,
 `model::PATCHABLE_NODE_CLASSES`; a device with no class is kept). Offline devices are excluded
-because they report no current patch records, so a zero pending count says nothing about them;
-switches, printers, hypervisors and cloud monitors are excluded for the same reason — they are
-online, carry no patch records, and would otherwise score *compliant*, so 100 servers plus 100
+because whatever current records NinjaOne still holds for them were collected before they went
+offline, so neither a pending count nor a zero says anything current about them (the
+offline-backlog list shows what is there); switches, printers, hypervisors and cloud monitors are
+excluded because they carry no patch records at all and would otherwise score *compliant*, so 100 servers plus 100
 network devices read 25 points better than the servers did. The allow list fails toward exclusion
 (which every surface states as a count) rather than toward a silently higher percentage.
 
@@ -47,8 +48,8 @@ was already there (the in-app table draws its "offline" chip from it).
 ## One per-device rollup for the Devices sheet and the drill-down
 
 `DeviceSummary` carries each in-scope device's share of the fleet-health numbers — pending by
-severity band, pending past SLA (`aged_critical`), failed installs and NinjaOne's `lastContact` —
-filled by `rows::apply_device_health` from the **same unnarrowed current feed** and the same
+severity band, urgent pending past SLA (`urgent_past_sla`), failed installs and NinjaOne's `lastContact` —
+filled by `rows::build_device_summaries` from the **same unnarrowed current feed** and the same
 `is_pending` / `counts_toward_backlog` / `is_aged` predicates the compliance rollups use. The
 workbook's **Devices** sheet (`DeviceSummary::DEVICE_COLUMNS`) and the in-app drill-down both read
 it, so neither can grade a device differently from the Compliance sheet that counts it.
@@ -135,14 +136,25 @@ valid); `Settings::sla_policy()` clamps again, because a hand-edited file reache
 `Duration::days`, which panics on overflow.
 
 - **Cut once per query, per band.** `rows::SlaCutoffs` precomputes one cutoff per `Severity`
-  (indexed by `rank()`, unique per variant) and `is_aged` reads the patch's own band. Undated
-  patches still count as aged.
-- **Two "past SLA" figures, on purpose.** The compliance tables' "Aged (past SLA)" stays the
-  Critical/Important subset of the column beside it ("Pending Critical/Important"), so the two
-  still reconcile. The worst-devices and offline lists' "Past SLA" counts *every* pending record
-  against its own band's window — that is what the overrides for Moderate/Low/Optional are for.
-  With the default policy (30 days everywhere) an old Optional backlog therefore counts; set a
-  longer window for the low bands if that is not the target.
+  (indexed by `rank()`, unique per variant) and `is_aged` reads the record's own band. Undated
+  records still count as aged — unless the band has No SLA (below).
+- **A band can be held to no SLA at all** (`Settings.sla_exempt`, `SlaExempt`; the Settings
+  panel's "No SLA" box beside each band). `SlaPolicy::window_for` returns `None` for it and
+  `SlaCutoffs` has no cutoff, so `is_aged` is false — undated or not, since there is no target to
+  have missed. Its records are still *pending*, so they still break Fully patched; only the
+  past-SLA figures ignore them. **Optional is on by default**, and `SlaExempt` is its own struct
+  rather than a sentinel inside `SlaBySeverity` for that reason: `Settings::save` writes every
+  override band, so files on disk already hold `"optional": null`, and a sentinel could not tell
+  "never set" from "cleared" — existing installs would never have picked up the default. Its
+  struct-level `#[serde(default)]` keeps the default for every band a partial block omits.
+  `Unknown` has no switch: an unrated patch cannot be shown to be unimportant. `describe()` names
+  the exempt bands in a closing `no SLA: …` clause and drops any override they kept. Stuck
+  approvals ignore the switch (see below).
+- **Two "past SLA" figures, on purpose.** The compliance tables' "Urgent Past SLA" stays the
+  urgent subset of the column beside it ("Urgent Pending" — Critical, Important or Security,
+  `Severity::is_urgent`), so the two still reconcile. The worst-devices and offline lists' "Past SLA" counts *every* pending record
+  against its own band's window — that is what the overrides for Moderate/Low are for, and why
+  Optional defaults to No SLA.
 - **The result carries the policy it was computed with** (`QueryResult`/`QuerySummary`
   `sla_policy`). An export after a settings change states the numbers' policy, not the new one,
   and the Compliance tab prints it for the same reason.
@@ -150,7 +162,7 @@ valid); `Settings::sla_policy()` clamps again, because a hand-edited file reache
   assembled; only an instance/client-id change invalidates fleet data. The next **Run query** — a
   re-filter over the warm cache, no refetch — reflects the new policy; the result on screen keeps
   its own until then.
-- The run history's `aged_critical` is recorded under whatever policy each run used, so a trend
+- The run history's `urgent_past_sla` is recorded under whatever policy each run used, so a trend
   across a policy change moves for that reason alone.
 
 ## Worst devices and the offline backlog
@@ -166,16 +178,16 @@ can say "top 25 of N":
   total pending needs no step of its own; the id makes the order total (the accumulator is a
   `HashMap`).
 - **`offline_backlog`** is its deliberate complement: scoped, patchable devices that are offline
-  yet still appear in NinjaOne's current feed with pending records. The "offline devices report
-  no current patch records" line above is why they are excluded from the rollups — a zero says
-  nothing about them — but the whole-fleet feed does carry whatever was last collected for them,
-  and dropping it everywhere made that backlog invisible. The records may be stale; every surface
+  yet still appear in NinjaOne's current feed with pending records. Their records are why they
+  are excluded from the rollups — collected before the device went offline, so nothing about them
+  is current — but dropping them everywhere made that backlog invisible. The records may be stale; every surface
   says so.
-- **No last-contact time.** `Device` deserializes no last-contact field, and the committed spec
-  digest (`docs/api/ninjaone-surface.md`) does not cover the device schema, so none is invented.
-  The list shows `latest_collected` instead — the newest `timestamp` on the device's pending
-  records, NinjaOne's "collected/updated" time — labelled "Latest patch data collected", not
-  "last contact".
+- **Two different clocks, both shown.** "Latest Patch Data Collected" (`latest_collected`) is
+  the newest of NinjaOne's own `timestamp`s on the device's pending records — how current the
+  list is for it — and always reads NinjaOne's time, never the first-seen ledger's. "Last
+  Contact" is `Device::last_contact`, when its agent last checked in — how long it has been gone.
+  The offline exclusion stays (see above); these two let a reader judge how far to trust each
+  row.
 
 ## First seen → installed is indicative only
 
@@ -282,13 +294,19 @@ previous one, and three decisions shape what the numbers mean.
   (interned: device and patch tables, items as index pairs — ~11 bytes a pending row) rather than
   bare hashes. Failed items use the same form; they are few.
 
-Patch identity is `changes::patch_key`: an OS patch is its normalized KB, anything else its
-lowercased title. It is the one place to adopt `productIdentifier` for third-party patches.
+Patch identity is `changes::patch_key` (built from a raw record by `changes::write_patch_key`,
+which the first-seen ledger uses, so the two cannot disagree): an OS patch is its normalized KB, a
+third-party patch its **product** (`productIdentifier`, shared by every version), anything else
+its lowercased title. Keyed by title, a superseding version ("Chrome …55" → "…66") was a new patch:
+the diff listed it as resolved-and-new, and its age restarted, so a device that never updated
+Chrome never went past SLA. `SNAPSHOT_VERSION` 2 marks the change; a version-1 baseline reads as
+no previous run. OS cumulative updates still restart with each new KB — the API carries no
+product-line identity for them.
 
 The baseline advances only when a result **wins the cache** (`StoreOutcome::Stored`); a
 superseded run is older than the one that won, and writing it would roll the baseline back. The
 write is atomic (temp + rename, 0600) on a blocking thread, and `query_patches` awaits it before
-returning (`save_baseline_if_stored`). It used to be detached, so a query started right after
+returning (`persist_if_stored`). It used to be detached, so a query started right after
 (an auto-refresh tick, a quick re-run) could load the baseline before the save landed and diff
 against the run before last. The snapshot that write landed is also kept in memory
 (`changes::LastSaved`, one slot) as the next baseline for the same tenant and scope, so a refresh
@@ -300,6 +318,17 @@ not written and says so (`too_large`). Consequence worth knowing: every stored r
 baseline, so re-running the same scope over a warm cache reports "no changes since" the run
 seconds earlier — "since the previous run", literally.
 
+**The run history is versioned by calculation method** (`history::METHOD`, stored per line as
+`method`; lines from before it read as 0). `RunRecord::comparable_with` in `web-rs` requires the
+same method as well as the same scope (`same_scope`), so a change in what a figure *means* — Within
+SLA replacing zero-pending, Security joining the urgent backlog, No SLA, the first-seen ledger —
+never charts as the fleet moving; the Trend tab says how many runs of the scope it left out
+(`util::older_method_note`). A new rule that changes a recorded figure bumps `METHOD`. Within SLA
+and the fleet's pending count (`pending_total`, from `severity_by_org`) are recorded from method
+1: the "Pending patches" card used to plot `rows_total`, the detail-row count after every patch
+filter, which is not the backlog. The urgent fields keep their original on-disk keys
+(`pendingCritical`/`agedCritical`, `pc`/`ac`).
+
 The Trend tab's per-organization table reads `history::RunRecord::orgs` (the Compliance tab's
 per-org rows plus each org's pending count), capped at the 100 largest organizations per line so
 an MSP's history file stays bounded; `read_run_history` returns that detail only for the newest
@@ -310,7 +339,7 @@ lead with the change against that previous run; the change over the whole series
 
 Both compliance rollups carry `awaiting_approval` (vendor status `MANUAL`, NinjaOne's "Pending") and
 `approved_not_installed` (`APPROVED`), over the same `rollup_device` population and across **every**
-severity — the split describes the workflow, not the urgency, unlike the Critical/Important SLA
+severity — the split describes the workflow, not the urgency, unlike the urgent SLA
 columns beside it. They matter because the two stall for different reasons: `MANUAL` waits on a
 person, `APPROVED` on the agent, and `is_pending` scores both the same.
 
@@ -327,15 +356,49 @@ summed, one population — plus the **stuck approvals**: per device, the `APPROV
 more than the default SLA days (`SlaPolicy::default_days`) ago, oldest first. No operator decision is holding those up, so they point at
 agents (never-opening maintenance windows, a broken patch engine) rather than at a backlog. The
 threshold is the SLA window because that is already this app's "too long" knob; a second one would
-only let the two disagree. An undated approved patch counts as stuck, the same rule `is_aged` uses.
+only let the two disagree. It is the *default* window for every band, and it ignores No SLA: an
+approval is an explicit decision to install, so an approved Optional patch that never installs is
+exactly the agent symptom this list exists for. An undated approved patch counts as stuck, the same rule `is_aged` uses.
 The workbook writes every stuck device on a **Stuck Approvals** sheet with the threshold as a
 footnote; the report and the Compliance tab show the oldest ones and say how many more there are.
 
-## "Compliant" and "Pending Critical/Important" grade differently, on purpose
+## Within SLA is the headline; Fully patched is the strict figure beside it
 
-Compliant is `pending_count == 0` over patches of *any* severity (`is_pending`), while the two
-SLA columns count only rank ≥ Important (`counts_toward_backlog`). A row can legitimately read
-"10 devices · 4 compliant · 0 pending Critical/Important".
+Every compliance table carries two device counts over the same `rollup_device` population:
+
+- **Within SLA** — `DeviceSummary::past_sla == 0`: no pending record, of any band, first seen
+  longer ago than its band's window (`SlaCutoffs::is_aged`; a No-SLA band never counts). This
+  is the headline: it measures the fleet against the policy the operator set. "Zero pending"
+  alone failed a device for an Optional patch nobody intends to approve and for a Critical
+  found an hour ago, so on a real Windows fleet it hovered near zero and moved for reasons that
+  were not a patching backlog.
+- **Fully patched** — `pending_count == 0` over *any* severity and age (`is_pending`); the old
+  "Compliant". Kept because "nothing outstanding at all" is still a question worth answering, and
+  because Fully patched ≤ Within SLA always, so the gap is the in-window backlog.
+
+`past_sla` is the very count the worst-devices list ranks by (`DeviceBacklog::past_sla`, the same
+`is_aged` over the same records), so a device is Within SLA exactly when it would show Past SLA
+0 there — `within_sla_counts_devices_with_nothing_past_its_window` pins it.
+
+The two urgent columns grade differently again: they count only Critical, Important and Security
+records (`counts_toward_backlog`, `Severity::is_urgent`). A row can legitimately read "10 devices ·
+9 within SLA · 4 fully patched · 0 urgent pending".
+
+### The fleet total is device-weighted
+
+`QueryResult.compliance_total` (`ComplianceBucket::total`, labelled "All organizations") sums the
+organizations' counts and recomputes both percentages from the sums — never the mean of the
+rows, which would let a 2-device org weigh as much as a 2,000-device one. It is exact because both
+halves of `accumulate_compliance` key by the same org-name lookup, so every counted device and
+record lands in one organization. An empty scope's total is 100% by the bucket rule, so every
+surface prints "—" when `devices_total` is 0. The run history reads its fleet figures from it.
+
+### Organizations with no counted device are named
+
+An organization whose devices are all offline or non-patchable gets no bucket (a bucket with no
+devices once read "0 devices · 100% compliant"), so it used to vanish from the table without a
+word. `QueryResult.uncounted_orgs` (`rows::uncounted_orgs`) names them, and the tab prints
+`util::uncounted_orgs_note` under the table (capped at ten names).
 
 ## `rows::is_pending` is an exclude list
 
@@ -355,9 +418,11 @@ sheet and missing from the Patches sheet.
 
 ## A percentage never rounds up to 100
 
-`rows::format_pct` (and its `web-rs` mirror) caps anything below 100 at 99%, and `pct_cell` does
-the same at one decimal. Plain `{:.0}%` prints "100%" from 99.5% up, so 199 of 200 devices
-patched reads as a clean fleet — the one rounding error here that changes what an operator does.
+Every percentage is one decimal on every surface — `rows::format_pct` and `pct_cell` share
+`round_pct`, the report prints number cells `{:.1}`, and the `web-rs` `format_pct` mirrors it (the
+tab once showed 0 decimals beside the Trend tab's 1). Anything below 100 caps at 99.9. Plain
+rounding prints "100.0%" from 99.95% up, so 1,999 of 2,000 devices patched reads as a clean fleet —
+the one rounding error here that changes what an operator does.
 
 ## Enumerate bands through an accessor list, never by matching a label string
 
@@ -366,10 +431,44 @@ reads it, and their totals derive from that list. A version that matched on the 
 with a `_ => c.unknown` fallback let a renamed band silently draw Unknown's count twice and
 overflow the bar. See [severity.md](./severity.md).
 
+## Every figure says what it means, in the same words everywhere
+
+A bare "Compliance %" had no definition anywhere in the app (only in `docs/TROUBLESHOOTING.md`,
+and narrower than the code), so the GUI and the exports now say what each figure is, from one
+set of sentences in `rows::wording`:
+
+- **Headline figures** (`headline_figures`): Within SLA, Fully patched, Urgent pending, Excluded
+  devices — value, "n of N", one-line definition. The Compliance tab's KPI tiles, the report's
+  header line, the workbook's About **Headline** block. Over no counted device a percentage is
+  "—", never the empty bucket's 100%.
+- **Definitions** (`calculation_notes`): every term the tab uses, built from the result's own SLA
+  policy, patch families and first-seen record. The tab's collapsed "How these numbers are
+  calculated", the report's closing section, the About **Definitions** block (the compliance
+  sheets point to it).
+- **Column help**: every compliance, device-list, stuck-approvals, time-to-install and Trend
+  header, and the drill-down's health labels, render from `util::column_help`'s per-table
+  `(header, definition)` arrays through `HelpHeaderRow` — a `title=` tooltip with a dotted
+  underline. Per table, because "Approved, Not Installed" counts every approved patch in one table
+  and only the stuck ones in another. The workbook gets no per-column notes; its Definitions block
+  covers them.
+- **The legend**: `PCT_BANDS` (95% or more, 80% to under 95%, under 80%) colours the Within SLA
+  bars in the app and the report, and each draws the key beneath them.
+
+**The crates share no code, so the fixture pins the words.** `ipc_fixture_is_current` writes this
+module's output for the fixture's own result under `wording` — headline, definitions, first-seen
+line, missing-orgs note, SLA policy, scope note, both device-list notes, legend labels — and the
+backend's `COLUMNS` header lists under `wording.columns`. `the_wording_matches_the_backend`
+requires the `util` mirrors to reproduce every string exactly, and
+`headers_match_the_backend_columns` holds the hand-spelled headers to `COLUMNS` (replacing
+"spelled identically by review", which had already let the offline note's "Latest data" drift from
+its own column). `every_header_is_defined_or_an_identity_column` fails a measuring header with no
+definition.
+
 ## Table headers come from `rows::TableColumn` spellings
 
-The Leptos tables are hand-written and are not wired to `COLUMNS`, so they are kept spelled
-identically by review: "Compliance %", "Pending Critical/Important", "Aged (past SLA)",
+The Leptos tables are hand-written and are not wired to `COLUMNS`; the compliance ones are held
+to them by `headers_match_the_backend_columns` (above), the rest by review: "Within SLA", "Within SLA %", "Fully Patched", "Fully Patched %",
+"Urgent Pending", "Urgent Past SLA",
 "Awaiting Approval", "Approved, Not Installed", "Device Role", "Pending Patches", the Failures table's seven columns including "Patch Type", and the
 two device lists (`DeviceBacklog::WORST_COLUMNS` / `OFFLINE_COLUMNS`), and `StuckDevice::COLUMNS`. The in-app first seen →
 installed table drops `InstallLatency::COLUMNS`' "(Days)" suffixes because its cells carry the
@@ -383,7 +482,7 @@ two lists agreeing by convention. `export.rs` renders every one through one `wri
 contributes only the width arrays, each length-tied to its `COLUMNS.len()`; `report.rs` renders
 through one `write_table`; the CSV writes `DETAIL_COLUMNS` through `csv_export::write_csv`. The
 drill-down dialog's hand-written labels reuse these spellings ("Device Role", "Pending Patches",
-"Aged (past SLA)").
+"Urgent Past SLA").
 Before this the two had diverged: the report dropped `Patch Type` from the failures table, and
 hardcoded the reboot table's headers as "Role"/"Pending patches" against the workbook's "Device
 Role"/"Pending Patches".
@@ -404,9 +503,10 @@ the in-app table reads `device_names` whole.
 Grep the spec: `releaseDate` appears **zero** times. `DeviceOSPatch` / `DeviceSoftwarePatch`
 carry only `installedAt` ("Installation attempt timestamp") and `timestamp` ("Date/Time when
 data was collected/updated"); the non-`Device` `OSPatch`/`SoftwarePatch` variants carry neither.
-`Patch::collected_timestamp` (alias `timestamp`, read via `first_seen_at()`) is therefore
+`Patch::collected_timestamp` (alias `timestamp`, read via `collected_at()` into
+`rows::PatchRecord::first_seen`) is therefore
 **detection time, not publication time**, and everything derived from it —
-`PatchRow.first_seen_ts`/`first_seen_date`, the SLA `aged_critical` rollup, `build_age_buckets`,
+`PatchRow.first_seen_ts`/`first_seen_date`, the SLA `urgent_past_sla` rollup, `build_age_buckets`,
 and the `detected_within_days`/`detected_after`/`detected_before` filter window — measures *how
 long we have known about the patch*. The UI says so ("First seen", "Pending past SLA", "Pending
 patch age (since first seen)"); keep the naming honest if you touch these.
@@ -417,6 +517,43 @@ fleet — and the wiremock fixtures fed `releaseDate`, so CI proved only that th
 **Fixtures must emit `timestamp`.** Undated pending patches get their own `Unknown` age bucket
 rather than inflating `181+ days`; they still count as aged in the SLA rollup (`unwrap_or(true)`
 — can't prove recent).
+
+## This app keeps its own first-seen record
+
+`timestamp` is "Date/Time when data was collected/updated", and nothing in the spec says whether
+a rescan refreshes it. If it does, every pending record looks a day old and nothing is ever past
+SLA — the same ~0-breaches failure the old `releaseDate` alias produced, with nothing on screen
+to show it. Rather than bet the headline figure on which kind of time the vendor sends,
+`crate::first_seen` keeps a per-tenant record of the fetch at which each pending
+`(device, patch)` first appeared in the current feed, and every rollup ages a record from
+`rows::PatchRecord::first_seen` = **the earlier of the two** (`PatchRecord::observed`). When
+NinjaOne's time is the older one nothing changes; when it is not, this record is. Rules:
+
+- **One identity:** `changes::write_patch_key`, the changes diff's own key — a third-party patch
+  by product, so a superseding version keeps its age.
+- **Undated stays undated.** A record NinjaOne never dated already counts as past SLA; dating it
+  from this record would only make it younger. So the record can only make a record older, never
+  newer, and never lowers a past-SLA count.
+- **Merged from the whole fetched feed, per family, at that family's own fetch time**
+  (`CurrentPatches::{os,sw}_fetched_at`; the combined `fetched_at` is the older family's). An
+  org-scoped query sees every org's records (the feed is whole-fleet), so it can stamp them and
+  can never prune them for being out of view. A family the query did not fetch is untouched.
+- **Pruned when no longer pending**, except for devices offline in the inventory — their absence
+  proves nothing, the `rollup_device` reasoning — so a deleted device's records fall out and a
+  sleeping laptop's do not. A feed no newer than the last one merged (`merged_at`) is skipped, and
+  a feed with no pending record never prunes a non-empty record.
+- **Persisted like the run snapshots:** one file per tenant under `first-seen/` (tenant stamped
+  inside and checked on load), atomic temp + rename, 0600, written only on
+  `StoreOutcome::Stored` and awaited (`persist_if_stored`), the last-written copy held in memory
+  (`SLOT`) as the next base. Capped at a million entries per family (the newest dropped first)
+  and 8 tenants / 128 MiB. Unreferenced keys are not written.
+- **It only knows what this install has seen.** It starts at the first query after the upgrade,
+  is per machine (two operators keep two records), and a patch that disappears and returns starts
+  over. Every surface that defines "first seen" says so: `QueryResult.first_seen`
+  (`rows::FirstSeenTracking`) carries since when the record has been kept and how many of the
+  counted pending records it dated — a count that climbs run after run *is* the evidence that
+  NinjaOne's times reset. Install-history records keep NinjaOne's time; time to install is not
+  re-dated.
 
 ## `PatchRow` shares its repeated strings; it does not own them
 

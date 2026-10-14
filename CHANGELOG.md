@@ -11,6 +11,69 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The headline compliance figure is now "Within SLA".** A device is Within SLA when none of
+  its pending patches has been pending longer than its severity's SLA window. The old figure —
+  no pending patch of any severity or age — is still shown beside it as **Fully patched**. Both
+  appear in the Compliance and By OS tables, the workbook's Compliance sheets and the report; the
+  bar charts now plot Within SLA. The Devices sheet and the device drill-down say whether each
+  device is Within SLA and how many of its patches are past SLA.
+- **The organization table ends with an "All organizations" row**: the fleet's figures,
+  weighted by device rather than averaged across organizations.
+- **Organizations with no online, patchable device are named under the table** instead of
+  silently missing from it.
+- **The Trend tab charts Within SLA and Fully patched, and "Pending patches" is now the real
+  pending count** (it used to chart the number of rows the query returned, after every filter).
+  Runs recorded before this release were calculated differently, so they are left out of the
+  trend and the tab says how many; the trend restarts from your first run on this version.
+- **Percentages show one decimal everywhere** (87.5%, never rounded up to 100%), so the Compliance
+  tab, the Trend tab, the workbook and the report agree.
+- **A third-party update is tracked per product, not per version.** When a newer version of, say,
+  Chrome replaces the pending one, "Changes since last run" no longer reports one resolved and one
+  new patch, and the patch keeps its age. The first run after upgrading reports no previous run
+  to compare with.
+- **Security patches now count as urgent.** The compliance tables' backlog columns are renamed
+  **Urgent Pending** and **Urgent Past SLA** (formerly "Pending Critical/Important" and "Aged
+  (past SLA)") and now count Critical, Important *and* Security patches. NinjaOne grades most
+  monthly OS security updates `security`, not Critical or Important, so these columns used to leave
+  most of them out. Expect both numbers to rise; the Devices sheet, the device drill-down and the
+  Trend tab use the new names.
+
+### Added
+
+- **Every compliance figure now says what it means.** The Compliance tab opens with four headline
+  figures — Within SLA, Fully patched, Urgent pending and Excluded devices — each with its "n of
+  N" and a one-line definition. A **How these numbers are calculated** panel defines every term
+  from the result's own SLA policy, and every column header shows its definition when you hover
+  it (dotted underline). The bar charts have a colour key, and the summary line says how many
+  devices the figures count. The report and the workbook's About sheet carry the same headline
+  figures and definitions.
+- **The offline-devices list shows each device's Last Contact** beside the age of its patch
+  data, in the app, the report and the workbook.
+
+- **The app keeps its own record of when each pending patch was first seen.** NinjaOne's only
+  date on a patch record is when it last collected the data, which may refresh on every scan — if
+  it does, every patch looks a day old and nothing ever shows as past SLA. Ages are now measured
+  from the earlier of NinjaOne's date and the first time this app saw the patch pending. The record
+  starts with your first query on this version, so ages build up from then: if NinjaOne's dates do
+  refresh, expect Within SLA to fall about one SLA window (30 days by default) after upgrading as
+  real backlog starts to count. The Compliance tab says how many pending patches the app's record
+  dated, which shows which kind of date NinjaOne is sending.
+
+- **A "No SLA" switch for each severity in Settings → Patch SLA.** A severity switched to No SLA
+  never counts as past SLA; its patches still count as pending. **Optional is switched on by
+  default, including on existing installs**, so an optional backlog nobody intends to install
+  (driver and feature packs) stops counting against the SLA. Untick it to restore the old
+  behavior. Unrated (Unknown) patches always keep the default window. The SLA policy line on the
+  Compliance tab, the report and the workbook names the bands with no SLA.
+
+### Security
+
+- **Updated the TLS library (`rustls` 0.23.46)** for RUSTSEC-2026-0346 to 0349: TLS secrets in
+  debug output, a downgrade of later connections' key exchange, unbounded certificate
+  decompression, and data sent to the wrong server after an ECH rejection.
+
 ## [0.15.4] - 2026-10-10
 
 ### Fixed

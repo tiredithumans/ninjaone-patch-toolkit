@@ -8,26 +8,31 @@
 //! rollups + scope note + SLA cutoffs), `rollups` (failures / severity / age
 //! aggregates), `backlog` (worst devices + offline backlog), `install_time`
 //! (first seen → installed), `groups` (sort / page / group), `scope` (export
-//! provenance), `table` (the shared column definition). This file holds the
-//! result types every one of them feeds.
+//! provenance), `table` (the shared column definition), `record` (the per-record
+//! view the rollups read), `wording` (the sentences every surface prints about what
+//! a figure means). This file holds the result types every one of them feeds.
 
 mod backlog;
 mod compliance;
 mod groups;
 mod install_time;
 mod join;
+mod record;
 mod rollups;
 mod scope;
 mod table;
+mod wording;
 
 pub use backlog::*;
 pub use compliance::*;
 pub use groups::*;
 pub use install_time::*;
 pub use join::*;
+pub use record::*;
 pub use rollups::*;
 pub use scope::*;
 pub use table::*;
+pub use wording::*;
 
 use crate::changes::RunChanges;
 use crate::model::PatchRow;
@@ -43,6 +48,12 @@ pub struct QueryResult {
     pub rows: Vec<PatchRow>,
     pub devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// The fleet-wide figures (`ComplianceBucket::total` of `compliance`) —
+    /// device-weighted, labelled "All organizations".
+    pub compliance_total: ComplianceBucket,
+    /// Organizations in scope with no counted device ([`uncounted_orgs`]), which
+    /// therefore have no row in `compliance`.
+    pub uncounted_orgs: Vec<String>,
     /// Compliance grouped by OS name (the Compliance tab's "Compliance by OS").
     pub compliance_by_os: Vec<OsCompliance>,
     /// FAILED-install rollup (empty unless the FAILED status was queried).
@@ -57,6 +68,8 @@ pub struct QueryResult {
     pub offline_backlog: DeviceBacklogList,
     /// First seen → installed, by organization and severity.
     pub time_to_install: TimeToInstall,
+    /// How this result's first-seen times were arrived at (`crate::first_seen`).
+    pub first_seen: FirstSeenTracking,
     /// The SLA policy the aging figures were computed under — stamped at assembly,
     /// so an export after a settings change still states the policy its numbers
     /// used.
@@ -72,8 +85,8 @@ pub struct QueryResult {
     /// How many of `devices_total` are offline.
     ///
     /// The compliance rollups deliberately exclude offline devices from both halves
-    /// of every bucket (they report no current patch records, so a zero pending count
-    /// says nothing about them) — which means the `Devices` column of the compliance
+    /// of every bucket (their patch records may be out of date, so neither a count nor
+    /// a zero says anything current about them) — which means the `Devices` column of the compliance
     /// table does **not** sum to `devices_total`, and used to have nothing on screen
     /// explaining the gap. Carried so the UI, the workbook and the HTML report can
     /// state the excluded population instead of leaving two different device counts
@@ -126,6 +139,10 @@ pub struct QuerySummary {
     /// device list stays in the cache for export.
     pub reboot_devices: Vec<DeviceSummary>,
     pub compliance: Vec<ComplianceBucket>,
+    /// See [`QueryResult::compliance_total`].
+    pub compliance_total: ComplianceBucket,
+    /// See [`QueryResult::uncounted_orgs`].
+    pub uncounted_orgs: Vec<String>,
     /// Compliance grouped by OS name (the Compliance tab's "Compliance by OS").
     pub compliance_by_os: Vec<OsCompliance>,
     /// FAILED-install rollup — small (one entry per failing patch), so it ships
@@ -141,6 +158,8 @@ pub struct QuerySummary {
     pub offline_backlog: DeviceBacklogList,
     /// See [`QueryResult::time_to_install`].
     pub time_to_install: TimeToInstall,
+    /// See [`QueryResult::first_seen`].
+    pub first_seen: FirstSeenTracking,
     /// See [`QueryResult::sla_policy`]. The Compliance tab states it, since the
     /// policy in Settings may have changed since this result was computed.
     pub sla_policy: SlaPolicy,
@@ -151,8 +170,8 @@ pub struct QuerySummary {
     /// How many of `devices_total` are offline.
     ///
     /// The compliance rollups deliberately exclude offline devices from both halves
-    /// of every bucket (they report no current patch records, so a zero pending count
-    /// says nothing about them) — which means the `Devices` column of the compliance
+    /// of every bucket (their patch records may be out of date, so neither a count nor
+    /// a zero says anything current about them) — which means the `Devices` column of the compliance
     /// table does **not** sum to `devices_total`, and used to have nothing on screen
     /// explaining the gap. Carried so the UI, the workbook and the HTML report can
     /// state the excluded population instead of leaving two different device counts
@@ -198,6 +217,8 @@ impl QuerySummary {
                 .cloned()
                 .collect(),
             compliance: result.compliance.clone(),
+            compliance_total: result.compliance_total.clone(),
+            uncounted_orgs: result.uncounted_orgs.clone(),
             compliance_by_os: result.compliance_by_os.clone(),
             failures: result.failures.clone(),
             severity_by_org: result.severity_by_org.clone(),
@@ -205,6 +226,7 @@ impl QuerySummary {
             worst_devices: result.worst_devices.clone(),
             offline_backlog: result.offline_backlog.clone(),
             time_to_install: result.time_to_install.clone(),
+            first_seen: result.first_seen.clone(),
             sla_policy: result.sla_policy,
             approvals: result.approvals.capped(STUCK_DEVICES_SUMMARY_CAP),
             devices_total: result.devices_total,

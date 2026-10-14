@@ -10,7 +10,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::model::{Device, Patch, PatchRow, PatchStatus, Severity, row_status};
+use crate::model::{Device, PatchRow, PatchStatus, Severity, row_status};
 
 use super::compliance::{ApprovalState, approval_state, rollup_device};
 use super::join::{ORPHAN_DEVICE_ID, fmt_dt};
@@ -205,7 +205,7 @@ pub struct AgeBucket {
 /// and the opposite of what [`is_aged`] does with an undated patch. An untyped record
 /// is pending for the same reason: the feed is defined as the patches with no
 /// installation attempt, so absence of a status cannot mean "done".
-pub(super) fn is_pending(status: Option<&str>) -> bool {
+pub(crate) fn is_pending(status: Option<&str>) -> bool {
     !matches!(
         status.and_then(PatchStatus::from_api_value),
         Some(PatchStatus::Rejected | PatchStatus::Installed)
@@ -301,7 +301,7 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
 /// `INSTALLED`) by org and MSRC severity for
 /// the dashboard's severity breakdown. Sorted by organization name.
 pub fn build_severity_by_org(
-    current_patches: &[&Patch],
+    current: &[PatchRecord<'_>],
     devices_by_id: &HashMap<i64, &Device>,
     maps: &LookupMaps,
 ) -> Vec<OrgSeverity> {
@@ -311,19 +311,19 @@ pub fn build_severity_by_org(
     // `org_name_str` is the same lookup without the allocation, and is what the rest
     // of this file already uses for exactly this reason.
     let mut by_org: HashMap<&str, SeverityCounts> = HashMap::new();
-    for p in current_patches {
-        if !is_pending(p.status.as_deref()) {
+    for r in current {
+        if !r.pending {
             continue;
         }
         // The same population the compliance rollups describe — see
         // [`rollup_device`]. This breakdown is charted directly beneath compliance in
         // the HTML report, so counting a wider set here made the two sections
         // disagree about the fleet without saying so.
-        let Some(device) = rollup_device(devices_by_id, p.device_id) else {
+        let Some(device) = rollup_device(devices_by_id, r.patch.device_id) else {
             continue;
         };
         let org = maps.org_name_str(device.organization_id);
-        by_org.entry(org).or_default().add(p.severity_enum());
+        by_org.entry(org).or_default().add(r.severity);
     }
     let mut out: Vec<OrgSeverity> = by_org
         .into_iter()
@@ -359,25 +359,25 @@ const AGE_BUCKET_LABELS: [&str; 6] = [
 /// Index of the undated bucket in [`AGE_BUCKET_LABELS`].
 const AGE_BUCKET_UNKNOWN: usize = 5;
 
-/// Builds the pending-patch age histogram from how long NinjaOne has been reporting
-/// each pending patch (see [`Patch::collected_timestamp`] — the API exposes no
-/// release date, so this measures detection age, not time-since-publication).
+/// Builds the pending-patch age histogram from each pending record's effective first
+/// seen ([`PatchRecord::first_seen`] — the API exposes no release date, so this
+/// measures detection age, not time-since-publication).
 ///
 /// Over the same population as every other fleet-health rollup ([`rollup_device`]),
 /// which is why it needs the device inventory at all: it used to take only the
 /// patches, so it was the one rollup that structurally *could not* apply the
 /// exclusion the others do.
 pub fn build_age_buckets(
-    current_patches: &[&Patch],
+    current: &[PatchRecord<'_>],
     devices_by_id: &HashMap<i64, &Device>,
     now: DateTime<Utc>,
 ) -> Vec<AgeBucket> {
     let mut counts = [0usize; 6];
-    for p in current_patches {
-        if !is_pending(p.status.as_deref()) || rollup_device(devices_by_id, p.device_id).is_none() {
+    for r in current {
+        if !r.pending || rollup_device(devices_by_id, r.patch.device_id).is_none() {
             continue;
         }
-        let idx = match p.first_seen_at() {
+        let idx = match r.first_seen {
             None => AGE_BUCKET_UNKNOWN,
             Some(seen) => match (now - seen).num_days().max(0) {
                 0..=30 => 0,
@@ -477,7 +477,7 @@ impl ApprovalBacklog {
 /// more than `stuck_after_days` ago. An undated approved patch counts as stuck, the
 /// same rule the SLA-aged column applies: it cannot be shown to be recent.
 pub fn build_approval_backlog(
-    current_patches: &[&Patch],
+    current: &[PatchRecord<'_>],
     devices_by_id: &HashMap<i64, &Device>,
     maps: &LookupMaps,
     stuck_after_days: i64,
@@ -494,15 +494,15 @@ pub fn build_approval_backlog(
         ..ApprovalBacklog::default()
     };
     let mut stuck: HashMap<i64, Acc<'_>> = HashMap::new();
-    for p in current_patches {
-        let Some(device) = rollup_device(devices_by_id, p.device_id) else {
+    for r in current {
+        let Some(device) = rollup_device(devices_by_id, r.patch.device_id) else {
             continue;
         };
-        match approval_state(p.status.as_deref()) {
+        match approval_state(r.patch.status.as_deref()) {
             Some(ApprovalState::Awaiting) => out.awaiting_approval += 1,
             Some(ApprovalState::Approved) => {
                 out.approved_not_installed += 1;
-                let seen = p.first_seen_at();
+                let seen = r.first_seen;
                 if seen.is_none_or(|t| t < cutoff) {
                     out.stuck_patches += 1;
                     let acc = stuck.entry(device.id).or_insert(Acc {

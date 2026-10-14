@@ -40,6 +40,7 @@ pub(crate) fn Results() -> impl IntoView {
                     failures: r.failures.len(),
                     failing_devices: util::failing_device_count(&r.failures),
                     orgs: r.compliance.len(),
+                    devices_counted: r.compliance_total.devices_total,
                     reboot: r.reboot_devices.len(),
                 };
                 summary_line(tab, &c, &r.generated_at)
@@ -293,5 +294,32 @@ fn ScopeBanner(
             </p>
             <p class="scope-banner-filters">{filters}</p>
         </div>
+    }
+}
+
+/// A table's header row from its [`util::HelpedColumn`]s: every header that measures
+/// something carries its definition as a tooltip, with a dotted underline saying so.
+#[component]
+fn HelpHeaderRow(columns: &'static [util::HelpedColumn]) -> impl IntoView {
+    view! {
+        <tr>
+            {columns
+                .iter()
+                .map(|&(label, help)| {
+                    if help.is_empty() {
+                        view! { <th scope="col">{label}</th> }.into_any()
+                    } else {
+                        view! {
+                            <th scope="col">
+                                <span class="col-help" title=help>
+                                    {label}
+                                </span>
+                            </th>
+                        }
+                            .into_any()
+                    }
+                })
+                .collect_view()}
+        </tr>
     }
 }

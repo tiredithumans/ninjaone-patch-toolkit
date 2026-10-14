@@ -20,15 +20,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::app::util::{
-    date_to_epoch, median, nearest_rank, product_display_name, severity_rank, sla_days_for,
-    strip_version_token,
+    date_to_epoch, is_past_sla, is_urgent, median, nearest_rank, product_display_name,
+    severity_rank, strip_version_token,
 };
 use crate::types::QueryResult;
 use crate::types::{
     AgeBucket, ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceDetail,
-    DeviceSummary, FailureGroup, FilterParams, GroupBy, InstallLatency, Location, NodeClass,
-    OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup, PatchRow, Role,
-    RollupScope, SeverityCounts, SlaBySeverity, SlaPolicy, StuckDevice, TimeToInstall,
+    DeviceSummary, FailureGroup, FilterParams, FirstSeenTracking, GroupBy, InstallLatency,
+    Location, NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup,
+    PatchRow, Role, RollupScope, SeverityCounts, SlaBySeverity, SlaExempt, SlaPolicy, StuckDevice,
+    TimeToInstall,
 };
 use crate::types::{ChangeItem, RunChanges};
 
@@ -277,34 +278,66 @@ fn sample_compliance() -> Vec<ComplianceBucket> {
         ComplianceBucket {
             organization: "Contoso Ltd".to_string(),
             devices_total: 18,
-            devices_compliant: 12,
-            compliance_pct: 66.7,
-            pending_critical: 5,
-            aged_critical: 2,
+            devices_within_sla: 16,
+            within_sla_pct: 88.9,
+            devices_fully_patched: 12,
+            fully_patched_pct: 66.7,
+            urgent_pending: 5,
+            urgent_past_sla: 2,
             awaiting_approval: 6,
             approved_not_installed: 7,
         },
         ComplianceBucket {
             organization: "Northwind Traders".to_string(),
             devices_total: 14,
-            devices_compliant: 11,
-            compliance_pct: 78.6,
-            pending_critical: 3,
-            aged_critical: 1,
+            devices_within_sla: 13,
+            within_sla_pct: 92.9,
+            devices_fully_patched: 11,
+            fully_patched_pct: 78.6,
+            urgent_pending: 3,
+            urgent_past_sla: 1,
             awaiting_approval: 4,
             approved_not_installed: 3,
         },
         ComplianceBucket {
             organization: "Fabrikam Inc".to_string(),
             devices_total: 10,
-            devices_compliant: 9,
-            compliance_pct: 90.0,
-            pending_critical: 1,
-            aged_critical: 0,
+            devices_within_sla: 10,
+            within_sla_pct: 100.0,
+            devices_fully_patched: 9,
+            fully_patched_pct: 90.0,
+            urgent_pending: 1,
+            urgent_past_sla: 0,
             awaiting_approval: 2,
             approved_not_installed: 1,
         },
     ]
+}
+
+/// The fleet total of the (org-narrowed) buckets: summed counts and recomputed
+/// percentages, like the backend's `ComplianceBucket::total`.
+fn compliance_total(buckets: &[ComplianceBucket]) -> ComplianceBucket {
+    let sum = |f: fn(&ComplianceBucket) -> usize| buckets.iter().map(f).sum::<usize>();
+    let total = sum(|b| b.devices_total);
+    let share = |n: usize| {
+        if total == 0 {
+            100.0
+        } else {
+            n as f64 * 100.0 / total as f64
+        }
+    };
+    ComplianceBucket {
+        organization: "All organizations".to_string(),
+        devices_total: total,
+        devices_within_sla: sum(|b| b.devices_within_sla),
+        within_sla_pct: share(sum(|b| b.devices_within_sla)),
+        devices_fully_patched: sum(|b| b.devices_fully_patched),
+        fully_patched_pct: share(sum(|b| b.devices_fully_patched)),
+        urgent_pending: sum(|b| b.urgent_pending),
+        urgent_past_sla: sum(|b| b.urgent_past_sla),
+        awaiting_approval: sum(|b| b.awaiting_approval),
+        approved_not_installed: sum(|b| b.approved_not_installed),
+    }
 }
 
 /// The approval backlog for the demo: totals summed from the (org-narrowed)
@@ -343,50 +376,72 @@ fn sample_approvals(
 /// computation in a real deployment; the demo keeps it static (and, unlike the
 /// per-org rollups, does not narrow it by organization — the sample carries no
 /// per-org OS split).
-/// Per-OS compliance over the rows actually on screen. A device counts as
-/// compliant when none of its visible rows is a pending patch, mirroring the
-/// backend's `build_compliance_by_os`, which likewise derives from the scoped set
-/// rather than from a fixed table.
+/// Per-OS compliance over the rows actually on screen. A device is fully patched
+/// when none of its visible rows is a pending patch, and within SLA when none is
+/// past its band's window — mirroring the backend's `build_compliance_by_os`, which
+/// likewise derives from the scoped set rather than from a fixed table.
 fn scoped_compliance_by_os(rows: &[PatchRow]) -> Vec<OsCompliance> {
-    // os -> (all devices, devices with a pending row, pending critical/important,
-    // awaiting approval, approved-not-installed)
-    type Acc = (BTreeSet<i64>, BTreeSet<i64>, usize, usize, usize);
+    #[derive(Default)]
+    struct Acc {
+        devices: BTreeSet<i64>,
+        pending: BTreeSet<i64>,
+        past_sla: BTreeSet<i64>,
+        urgent: usize,
+        urgent_past_sla: usize,
+        awaiting: usize,
+        approved: usize,
+    }
     let mut by_os: BTreeMap<String, Acc> = BTreeMap::new();
     for r in rows {
         let os = r.os_name.clone().unwrap_or_else(|| "(unknown)".to_string());
         let e = by_os.entry(os).or_default();
-        e.0.insert(r.device_id);
-        if r.status == "PENDING" {
-            e.1.insert(r.device_id);
-            e.3 += 1;
-            if matches!(r.severity.as_str(), "Critical" | "Important") {
-                e.2 += 1;
+        e.devices.insert(r.device_id);
+        if matches!(r.status.as_str(), "PENDING" | "APPROVED") {
+            e.pending.insert(r.device_id);
+            let past = is_past_sla(
+                &DEMO_SLA,
+                &r.severity,
+                r.first_seen_date.as_deref().and_then(date_to_epoch),
+                SAMPLE_NOW_EPOCH,
+            );
+            if past {
+                e.past_sla.insert(r.device_id);
             }
-        }
-        if r.status == "APPROVED" {
-            e.4 += 1;
+            if is_urgent(&r.severity) {
+                e.urgent += 1;
+                e.urgent_past_sla += usize::from(past);
+            }
+            if r.status == "PENDING" {
+                e.awaiting += 1;
+            } else {
+                e.approved += 1;
+            }
         }
     }
     by_os
         .into_iter()
-        .map(|(os, (devices, pending, critical, awaiting, approved))| {
-            let total = devices.len();
-            let compliant = total - pending.len();
+        .map(|(os, a)| {
+            let total = a.devices.len();
+            let share = |n: usize| {
+                if total == 0 {
+                    100.0
+                } else {
+                    n as f64 / total as f64 * 100.0
+                }
+            };
+            let within = total - a.past_sla.len();
+            let fully = total - a.pending.len();
             OsCompliance {
                 os,
                 devices_total: total,
-                devices_compliant: compliant,
-                compliance_pct: if total == 0 {
-                    100.0
-                } else {
-                    compliant as f64 / total as f64 * 100.0
-                },
-                pending_critical: critical,
-                // The sample carries no SLA breach detail; the real backend
-                // computes this from first-seen age.
-                aged_critical: 0,
-                awaiting_approval: awaiting,
-                approved_not_installed: approved,
+                devices_within_sla: within,
+                within_sla_pct: share(within),
+                devices_fully_patched: fully,
+                fully_patched_pct: share(fully),
+                urgent_pending: a.urgent,
+                urgent_past_sla: a.urgent_past_sla,
+                awaiting_approval: a.awaiting,
+                approved_not_installed: a.approved,
             }
         })
         .collect()
@@ -435,6 +490,7 @@ fn sample_device_summary(device_id: i64, failed_queried: bool) -> Option<DeviceS
     let first = rows.first()?;
     let mut counts = SeverityCounts::default();
     let mut aged = 0;
+    let mut past_sla = 0;
     let mut failed = 0;
     let mut pending = 0;
     for r in &rows {
@@ -444,17 +500,18 @@ fn sample_device_summary(device_id: i64, failed_queried: bool) -> Option<DeviceS
             _ => {
                 pending += 1;
                 bump(&mut counts, &r.severity);
-                let backlog = severity_rank(&r.severity) >= severity_rank("Important");
-                let old = r
-                    .first_seen_date
-                    .as_deref()
-                    .and_then(date_to_epoch)
-                    // Per band, like `SlaCutoffs` and the demo's worst devices.
-                    .is_none_or(|seen| {
-                        seen < SAMPLE_NOW_EPOCH - sla_days_for(&DEMO_SLA, &r.severity) * 86_400
-                    });
-                if backlog && old {
-                    aged += 1;
+                // Per band, like `SlaCutoffs` and the demo's worst devices.
+                let old = is_past_sla(
+                    &DEMO_SLA,
+                    &r.severity,
+                    r.first_seen_date.as_deref().and_then(date_to_epoch),
+                    SAMPLE_NOW_EPOCH,
+                );
+                if old {
+                    past_sla += 1;
+                    if is_urgent(&r.severity) {
+                        aged += 1;
+                    }
                 }
             }
         }
@@ -472,7 +529,8 @@ fn sample_device_summary(device_id: i64, failed_queried: bool) -> Option<DeviceS
         // Every sample device is a Windows, macOS or Linux agent.
         rollup_scope: RollupScope::Included,
         pending_by_severity: counts,
-        aged_critical: aged,
+        past_sla,
+        urgent_past_sla: aged,
         failed_installs: failed_queried.then_some(failed),
         last_contact: Some(SAMPLE_LAST_CONTACT.to_string()),
     })
@@ -618,6 +676,10 @@ const DEMO_SLA: SlaPolicy = SlaPolicy {
         low: None,
         optional: None,
     },
+    exempt: SlaExempt {
+        optional: true,
+        ..SlaExempt::NONE
+    },
 };
 
 /// Mirrors the backend's cap on each device list.
@@ -661,12 +723,12 @@ fn demo_worst_devices(rows: &[PatchRow]) -> DeviceBacklogList {
                 past_sla: 0,
                 oldest_first_seen: None,
                 latest_collected: None,
+                last_contact: Some(SAMPLE_LAST_CONTACT.to_string()),
             });
         bump(&mut d.pending, &r.severity);
         d.pending_total += 1;
         let seen = r.first_seen_date.as_deref().and_then(date_to_epoch);
-        let sla_secs = sla_days_for(&DEMO_SLA, &r.severity) * 86_400;
-        if seen.is_none_or(|s| s < SAMPLE_NOW_EPOCH - sla_secs) {
+        if is_past_sla(&DEMO_SLA, &r.severity, seen, SAMPLE_NOW_EPOCH) {
             d.past_sla += 1;
         }
         // YYYY-MM-DD compares chronologically as text.
@@ -724,6 +786,7 @@ fn sample_offline_backlog() -> Vec<DeviceBacklog> {
         past_sla: 3,
         oldest_first_seen: Some("2026-04-14 00:00 UTC".to_string()),
         latest_collected: Some("2026-05-02 08:10 UTC".to_string()),
+        last_contact: Some("2026-05-02 08:12 UTC".to_string()),
     }]
 }
 
@@ -899,6 +962,9 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64], statuses: &[String]) -> Que
         rows_total: rows.len(),
         rows,
         reboot_devices,
+        compliance_total: compliance_total(&compliance),
+        // Every sample organization has an online device.
+        uncounted_orgs: Vec::new(),
         compliance,
         compliance_by_os,
         failures,
@@ -910,6 +976,14 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64], statuses: &[String]) -> Que
             devices: offline,
         },
         time_to_install,
+        // As a desktop install would read a few weeks after upgrading, with NinjaOne
+        // re-stamping its records: the app's own record dates some of them.
+        first_seen: FirstSeenTracking {
+            since: Some("2026-05-18 09:00 UTC".to_string()),
+            since_ts: Some(1_779_094_800),
+            pending_records: 37,
+            from_app_record: 12,
+        },
         sla_policy: DEMO_SLA,
         approvals,
         devices_total,
@@ -1236,10 +1310,19 @@ mod tests {
             summed + r.devices_offline + r.devices_unpatchable,
             "the scope note's reconciliation: in-rollup + offline + non-patchable"
         );
-        assert!(
+        assert!(r.compliance.iter().all(|b| {
+            b.devices_fully_patched <= b.devices_within_sla
+                && b.devices_within_sla <= b.devices_total
+        }));
+        // The fleet total is the organizations summed, never their mean.
+        let total = &r.compliance_total;
+        assert_eq!(total.devices_total, summed);
+        assert_eq!(
+            total.devices_within_sla,
             r.compliance
                 .iter()
-                .all(|b| b.devices_compliant <= b.devices_total)
+                .map(|b| b.devices_within_sla)
+                .sum::<usize>()
         );
     }
 

@@ -11,6 +11,8 @@ fn empty_summary() -> QuerySummary {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: Vec::new(),
+            compliance_total: Default::default(),
+            uncounted_orgs: Vec::new(),
             compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: Vec::new(),
@@ -18,6 +20,7 @@ fn empty_summary() -> QuerySummary {
             worst_devices: Default::default(),
             offline_backlog: Default::default(),
             time_to_install: Default::default(),
+            first_seen: Default::default(),
             sla_policy: Default::default(),
             instance: "https://app.ninjarmm.com".into(),
             approvals: Default::default(),
@@ -56,7 +59,7 @@ async fn a_stored_run_returns_only_after_its_baseline_is_saved() {
 
     let saved = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&saved);
-    save_baseline_if_stored(&StoreOutcome::Stored, move || {
+    persist_if_stored(&StoreOutcome::Stored, "test", move || {
         std::thread::sleep(std::time::Duration::from_millis(200));
         flag.store(true, Ordering::SeqCst);
     })
@@ -75,7 +78,7 @@ async fn a_stored_run_returns_only_after_its_baseline_is_saved() {
     ] {
         let wrote = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&wrote);
-        save_baseline_if_stored(&outcome, move || flag.store(true, Ordering::SeqCst)).await;
+        persist_if_stored(&outcome, "test", move || flag.store(true, Ordering::SeqCst)).await;
         tokio::task::yield_now().await;
         assert!(!wrote.load(Ordering::SeqCst));
     }
@@ -408,6 +411,8 @@ async fn fleet_current_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPatches>
         os: Arc::new(c.fleet_os_patches(None, None, None).await?),
         sw: Arc::new(Vec::new()),
         fetched_at: fixed_now(),
+        os_fetched_at: Some(fixed_now()),
+        sw_fetched_at: Some(fixed_now()),
     })
 }
 
@@ -417,7 +422,14 @@ async fn fleet_current_both_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPat
         os: Arc::new(c.fleet_os_patches(None, None, None).await?),
         sw: Arc::new(c.fleet_software_patches(None, None, None).await?),
         fetched_at: fixed_now(),
+        os_fetched_at: Some(fixed_now()),
+        sw_fetched_at: Some(fixed_now()),
     })
+}
+
+/// An empty first-seen ledger: every record is dated by NinjaOne's time alone.
+async fn no_ledger() -> anyhow::Result<Arc<TenantLedger>> {
+    Ok(Arc::new(TenantLedger::empty("https://app.ninjarmm.com\n")))
 }
 
 fn args(patch_type: PatchType, statuses: Vec<PatchStatus>) -> PatchQueryArgs {
@@ -503,6 +515,7 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
         async { Ok::<_, anyhow::Error>(lookups()) },
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -511,7 +524,8 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
         &progress,
     )
     .await
-    .expect("query");
+    .expect("query")
+    .result;
 
     // Only the MANUAL patch survives the Pending filter, displayed as PENDING.
     assert_eq!(result.rows.len(), 1);
@@ -529,16 +543,16 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
     assert_eq!(summary.reboot_devices[0].device_id, 10);
 
     // Compliance: both online, both carry a pending/approved patch → 0% compliant.
-    // The MANUAL Critical (aged) lands in pending_critical AND aged_critical; the
+    // The MANUAL Critical (aged) lands in urgent_pending AND urgent_past_sla; the
     // APPROVED Low is below the Important rank so neither counts it.
     assert_eq!(result.compliance.len(), 1);
     let alpha = &result.compliance[0];
     assert_eq!(&*alpha.organization, "Alpha");
     assert_eq!(alpha.devices_total, 2);
-    assert_eq!(alpha.devices_compliant, 0);
-    assert_eq!(alpha.compliance_pct, 0.0);
-    assert_eq!(alpha.pending_critical, 1);
-    assert_eq!(alpha.aged_critical, 1);
+    assert_eq!(alpha.devices_fully_patched, 0);
+    assert_eq!(alpha.fully_patched_pct, 0.0);
+    assert_eq!(alpha.urgent_pending, 1);
+    assert_eq!(alpha.urgent_past_sla, 1);
 }
 
 #[tokio::test]
@@ -589,6 +603,7 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         async { Ok::<_, anyhow::Error>(lookups()) },
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -597,7 +612,8 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         &progress,
     )
     .await
-    .expect("query");
+    .expect("query")
+    .result;
 
     // Exactly the install-history INSTALLED record — the current MANUAL row and
     // the FAILED install are both excluded.
@@ -672,6 +688,7 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
         async { Ok::<_, anyhow::Error>(lookups()) },
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -683,7 +700,8 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
         &progress,
     )
     .await
-    .expect("query");
+    .expect("query")
+    .result;
 
     let mut statuses: Vec<(Option<&str>, &str)> = result
         .rows
@@ -701,11 +719,11 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
     let org = &result.compliance[0];
     assert_eq!(org.devices_total, 1);
     assert_eq!(
-        org.devices_compliant, 0,
+        org.devices_fully_patched, 0,
         "two pending CRITICAL patches make the device non-compliant"
     );
     assert_eq!(
-        org.pending_critical, 2,
+        org.urgent_pending, 2,
         "REJECTED is the only status excluded"
     );
     assert_eq!(result.devices[0].pending_count, 2);
@@ -758,6 +776,7 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         async { Ok::<_, anyhow::Error>(lookups()) },
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -766,7 +785,8 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         &progress,
     )
     .await
-    .expect("query");
+    .expect("query")
+    .result;
 
     let mut kbs: Vec<&str> = result.rows.iter().filter_map(|r| r.kb.as_deref()).collect();
     kbs.sort();
@@ -842,6 +862,7 @@ async fn a_custom_install_range_is_pushed_down_and_reapplied_client_side() {
         async { Ok::<_, anyhow::Error>(lookups()) },
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -850,7 +871,8 @@ async fn a_custom_install_range_is_pushed_down_and_reapplied_client_side() {
         &progress,
     )
     .await
-    .expect("query");
+    .expect("query")
+    .result;
 
     let mut kbs: Vec<&str> = result.rows.iter().filter_map(|r| r.kb.as_deref()).collect();
     kbs.sort();
@@ -923,6 +945,7 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
         async { Ok::<_, anyhow::Error>(lookups()) },
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -931,7 +954,8 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
         &progress,
     )
     .await
-    .expect("query");
+    .expect("query")
+    .result;
 
     assert_eq!(result.failures.len(), 2, "one group per failing patch");
     let top = &result.failures[0];
@@ -1001,6 +1025,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
                 async { Ok::<_, anyhow::Error>(lookups()) },
                 fleet_devices_via(&client(server)),
                 fleet_current_via(&client(server)),
+                no_ledger(),
                 30,
                 SlaPolicy::default(),
                 "https://app.ninjarmm.com".into(),
@@ -1010,6 +1035,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
             )
             .await
             .expect("query")
+            .result
         }
     };
 
@@ -1034,7 +1060,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
         "the bands sum to the pending count (REJECTED is in neither)"
     );
     assert_eq!(
-        zeta.aged_critical, 1,
+        zeta.urgent_past_sla, 1,
         "the 90-day-old CRITICAL, not the LOW"
     );
     assert_eq!(zeta.failed_installs, Some(1), "FAILED only, not INSTALLED");
@@ -1043,7 +1069,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
 
     let beta = &result.devices[1];
     assert_eq!(beta.pending_by_severity.important, 1);
-    assert_eq!(beta.aged_critical, 0, "first seen today is within SLA");
+    assert_eq!(beta.urgent_past_sla, 0, "first seen today is within SLA");
     assert_eq!(beta.failed_installs, Some(0), "queried, and none failed");
 
     let alpha = &result.devices[0];
@@ -1110,6 +1136,7 @@ async fn a_query_records_the_facets_it_ran_under() {
         async { Ok::<_, anyhow::Error>(lookups()) },
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1118,7 +1145,8 @@ async fn a_query_records_the_facets_it_ran_under() {
         &progress,
     )
     .await
-    .expect("query");
+    .expect("query")
+    .result;
 
     // Both tiers, flattened: the tiering itself is pinned in `rows.rs`.
     let facets: Vec<(&str, &str)> = result
@@ -1193,6 +1221,7 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
         async { Ok::<_, anyhow::Error>(lookups()) },
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1201,7 +1230,8 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
         &progress,
     )
     .await
-    .expect("a FAILED-only query must send status=FAILED to the install endpoint");
+    .expect("a FAILED-only query must send status=FAILED to the install endpoint")
+    .result;
 
     assert_eq!(result.rows.len(), 1);
     assert_eq!(&*result.rows[0].status, "FAILED");
@@ -1250,6 +1280,7 @@ async fn installed_and_failed_query_omits_the_server_side_status_filter() {
         async { Ok::<_, anyhow::Error>(lookups()) },
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1261,7 +1292,8 @@ async fn installed_and_failed_query_omits_the_server_side_status_filter() {
         &progress,
     )
     .await
-    .expect("an INSTALLED+FAILED query must omit the server-side status filter");
+    .expect("an INSTALLED+FAILED query must omit the server-side status filter")
+    .result;
 
     // Both records survive: one INSTALLED, one FAILED.
     assert_eq!(result.rows.len(), 2);
@@ -1314,8 +1346,11 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
                 os: os_current,
                 sw: Arc::new(Vec::new()),
                 fetched_at: fixed_now(),
+                os_fetched_at: Some(fixed_now()),
+                sw_fetched_at: Some(fixed_now()),
             })
         },
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1324,7 +1359,8 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
         &progress,
     )
     .await
-    .expect("query");
+    .expect("query")
+    .result;
 
     assert_eq!(
         result.devices_total, 1,
@@ -1339,8 +1375,144 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
         "only Alpha in the compliance roll"
     );
     assert_eq!(&*result.compliance[0].organization, "Alpha");
-    assert_eq!(result.compliance[0].pending_critical, 1);
+    assert_eq!(result.compliance[0].urgent_pending, 1);
 }
+/// NinjaOne stamps every record "now" — the case the ledger exists for. A record
+/// this app first saw 60 days ago is aged from then: past its 30-day SLA, in the
+/// 31–60 day bucket, its row's First Seen 60 days back, and counted as dated by the
+/// app's record. A record the app has never seen keeps NinjaOne's time.
+#[tokio::test]
+async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
+    let devices = Arc::new(vec![dev(10, 1)]);
+    let seen_before = cur(10, "KB1", "MANUAL", "CRITICAL");
+    let os_current = Arc::new(vec![
+        seen_before.clone(),
+        cur(10, "KB2", "MANUAL", "CRITICAL"),
+    ]);
+    let lookups = Arc::new(LookupSet {
+        orgs: vec![Organization {
+            id: 1,
+            name: "Alpha".into(),
+        }],
+        locations: vec![],
+        roles: vec![],
+    });
+    let sixty_days_ago = fixed_now() - Duration::days(60);
+    let ledger = TenantLedger::recorded("t", &[seen_before], sixty_days_ago);
+
+    let http = reqwest::Client::new();
+    let api = NinjaApiClient::new(
+        http.clone(),
+        AuthState::seeded(http, "http://127.0.0.1:0".into(), "t"),
+    );
+    let progress = |_: &'static str, _: usize| {};
+    let run = run_query(
+        &api,
+        async { Ok::<_, anyhow::Error>(lookups) },
+        async { Ok::<_, anyhow::Error>(devices) },
+        async {
+            Ok::<_, anyhow::Error>(CurrentPatches {
+                os: os_current,
+                sw: Arc::new(Vec::new()),
+                fetched_at: fixed_now(),
+                os_fetched_at: Some(fixed_now()),
+                sw_fetched_at: None,
+            })
+        },
+        async { Ok(Arc::new(ledger)) },
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        args(PatchType::Os, vec![PatchStatus::Pending]),
+        fixed_now(),
+        &progress,
+    )
+    .await
+    .expect("query");
+    let result = run.result;
+
+    let org = &result.compliance[0];
+    assert_eq!(org.urgent_pending, 2);
+    assert_eq!(
+        org.urgent_past_sla, 1,
+        "KB1, by the app's 60-day-old record"
+    );
+    assert_eq!(org.devices_within_sla, 0);
+    assert_eq!(result.age_buckets[1].label, "31-60 days");
+    assert_eq!(result.age_buckets[1].count, 1);
+    assert_eq!(result.age_buckets[0].count, 1, "KB2 keeps NinjaOne's time");
+    let kb1 = result
+        .rows
+        .iter()
+        .find(|r| r.kb.as_deref() == Some("KB1"))
+        .unwrap();
+    assert_eq!(kb1.first_seen_ts, Some(sixty_days_ago.timestamp()));
+    assert_eq!(result.first_seen.pending_records, 2);
+    assert_eq!(result.first_seen.from_app_record, 1);
+    assert_eq!(result.first_seen.since_ts, Some(sixty_days_ago.timestamp()));
+
+    // The observation is the whole fetched family at its own fetch time, for the
+    // ledger to merge once the result is stored; the unfetched family is absent.
+    let (feed, at) = run.observation.os.expect("OS was fetched");
+    assert_eq!(feed.len(), 2);
+    assert_eq!(at, fixed_now());
+    assert!(run.observation.sw.is_none());
+}
+
+/// An org-scoped query hands the ledger the whole fleet's feed, not its slice, so
+/// it can never prune another organization's records for being out of view.
+#[tokio::test]
+async fn a_scoped_query_observes_the_whole_fleets_feed() {
+    let devices = Arc::new(vec![dev(10, 1), dev(20, 2)]);
+    let os_current = Arc::new(vec![
+        cur(10, "KB1", "MANUAL", "CRITICAL"),
+        cur(20, "KB2", "MANUAL", "CRITICAL"),
+    ]);
+    let lookups = Arc::new(LookupSet {
+        orgs: vec![],
+        locations: vec![],
+        roles: vec![],
+    });
+    let mut a = args(PatchType::Os, vec![PatchStatus::Pending]);
+    a.filter.organization_ids = vec![1];
+    let http = reqwest::Client::new();
+    let api = NinjaApiClient::new(
+        http.clone(),
+        AuthState::seeded(http, "http://127.0.0.1:0".into(), "t"),
+    );
+    let progress = |_: &'static str, _: usize| {};
+    let run = run_query(
+        &api,
+        async { Ok::<_, anyhow::Error>(lookups) },
+        async { Ok::<_, anyhow::Error>(devices) },
+        async {
+            Ok::<_, anyhow::Error>(CurrentPatches {
+                os: os_current,
+                sw: Arc::new(Vec::new()),
+                fetched_at: fixed_now(),
+                os_fetched_at: Some(fixed_now()),
+                sw_fetched_at: None,
+            })
+        },
+        no_ledger(),
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        a,
+        fixed_now(),
+        &progress,
+    )
+    .await
+    .expect("query");
+    assert_eq!(run.result.rows.len(), 1, "the result is scoped");
+    assert_eq!(
+        run.observation.os.expect("fetched").0.len(),
+        2,
+        "the observation is not"
+    );
+    assert_eq!(run.observation.devices.len(), 2);
+}
+
 /// `status` is not required on an install record. Under the single-status
 /// pushdown the server has already filtered, so labelling an untyped record
 /// INSTALLED on a FAILED-only query meant the client-side FAILED backstop then
@@ -1477,6 +1649,7 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
         async { Ok::<_, anyhow::Error>(lookups()) },
         fleet_devices_via(&client(&server)),
         fleet_current_both_via(&client(&server)),
+        no_ledger(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1485,7 +1658,8 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
         &progress,
     )
     .await
-    .expect("query");
+    .expect("query")
+    .result;
 
     // One row per family; the APPROVED third-party record is filtered out.
     assert_eq!(result.rows.len(), 2, "both families must reach build_rows");
@@ -1513,11 +1687,11 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
     let alpha = &result.compliance[0];
     assert_eq!(alpha.devices_total, 2);
     assert_eq!(
-        alpha.devices_compliant, 0,
+        alpha.devices_fully_patched, 0,
         "a device whose only pending patch is third-party is not compliant"
     );
     assert_eq!(
-        alpha.pending_critical, 2,
+        alpha.urgent_pending, 2,
         "the CRITICAL third-party patch counts toward the backlog beside the OS one"
     );
 

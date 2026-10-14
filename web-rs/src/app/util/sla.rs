@@ -1,7 +1,7 @@
 //! The SLA policy, the per-device backlog lists and the first-seen → installed
 //! table: parsing the per-band inputs and the sentences these surfaces print.
 
-use crate::types::{DeviceBacklogList, SlaBySeverity, SlaPolicy, TimeToInstall};
+use crate::types::{DeviceBacklogList, SlaBySeverity, SlaExempt, SlaPolicy, TimeToInstall};
 
 /// Upper bound for every day window, matching the backend's `MAX_WINDOW_DAYS`.
 pub(crate) const MAX_SLA_DAYS: i64 = 3650;
@@ -26,20 +26,30 @@ fn days(n: i64) -> &'static str {
 }
 
 /// One line naming the policy, e.g. `30 days (default); Critical 7 days, Important
-/// 14 days`. Mirrors `settings::SlaPolicy::describe` so the in-app line reads the
-/// same as the exports' — both crates are tested.
+/// 14 days; no SLA: Optional`. Mirrors `settings::SlaPolicy::describe` so the in-app
+/// line reads the same as the exports' — both crates are tested.
 pub(crate) fn sla_policy_summary(policy: &SlaPolicy) -> String {
     let d = policy.default_days;
     let mut out = format!("{d} {} (default)", days(d));
-    let overrides: Vec<String> = SlaBySeverity::BANDS
-        .iter()
-        .filter_map(|(label, get, _)| {
+    let bands = SlaBySeverity::BANDS.iter().zip(SlaExempt::BANDS.iter());
+    let overrides: Vec<String> = bands
+        .clone()
+        .filter(|(_, (_, exempt, _))| !exempt(&policy.exempt))
+        .filter_map(|((label, get, _), _)| {
             get(&policy.by_severity).map(|n| format!("{label} {n} {}", days(n)))
         })
         .collect();
     if !overrides.is_empty() {
         out.push_str("; ");
         out.push_str(&overrides.join(", "));
+    }
+    let exempt: Vec<&str> = bands
+        .filter(|(_, (_, exempt, _))| exempt(&policy.exempt))
+        .map(|((label, _, _), _)| *label)
+        .collect();
+    if !exempt.is_empty() {
+        out.push_str("; no SLA: ");
+        out.push_str(&exempt.join(", "));
     }
     out
 }
@@ -98,19 +108,41 @@ pub(crate) const TIME_TO_INSTALL_NOTE: &str = "\"First seen\" is NinjaOne's reco
      to the install itself, so these figures are indicative only.";
 
 /// Printed under the offline list: what the data can and cannot say about it.
-pub(crate) const OFFLINE_BACKLOG_NOTE: &str = "These records were collected before the device \
-     went offline and may be stale; the compliance figures exclude these devices. \"Latest \
-     data\" is the newest collection time on the device's records, not a last-contact time.";
+/// Mirrors `rows::OFFLINE_BACKLOG_NOTE`, pinned by the IPC fixture's wording.
+pub(crate) const OFFLINE_BACKLOG_NOTE: &str = "Offline devices still listed with pending patches in \
+     NinjaOne's current feed. These records were collected before the device went offline \
+     and may be out of date, so the compliance figures exclude these devices. \"Latest Patch \
+     Data Collected\" is the newest collection time on the device's records; \"Last \
+     Contact\" is when its agent last checked in.";
 
-/// The SLA window for one severity label: its band's override, else the default.
-/// A label with no overridable band (`Unknown`, or anything unmapped) takes the
-/// default, as in the backend.
-pub(crate) fn sla_days_for(policy: &SlaPolicy, severity: &str) -> i64 {
-    SlaBySeverity::BANDS
+/// The SLA window for one severity label: its band's override, else the default,
+/// or `None` for a band held to no SLA. A label with no band (`Unknown`, or anything
+/// unmapped) takes the default, as in the backend's `SlaPolicy::window_for`.
+pub(crate) fn sla_days_for(policy: &SlaPolicy, severity: &str) -> Option<i64> {
+    let band = SlaBySeverity::BANDS
         .iter()
-        .find(|(label, _, _)| label.eq_ignore_ascii_case(severity))
-        .and_then(|(_, get, _)| get(&policy.by_severity))
-        .unwrap_or(policy.default_days)
+        .zip(SlaExempt::BANDS.iter())
+        .find(|((label, _, _), _)| label.eq_ignore_ascii_case(severity));
+    match band {
+        Some((_, (_, exempt, _))) if exempt(&policy.exempt) => None,
+        Some(((_, get, _), _)) => Some(get(&policy.by_severity).unwrap_or(policy.default_days)),
+        None => Some(policy.default_days),
+    }
+}
+
+/// Whether a pending record first seen at `first_seen` (Unix seconds) is past its
+/// band's SLA at `now`. Mirrors `rows::SlaCutoffs::is_aged`: an undated record
+/// cannot be shown to be recent, and a band held to no SLA is never past it.
+pub(crate) fn is_past_sla(
+    policy: &SlaPolicy,
+    severity: &str,
+    first_seen: Option<i64>,
+    now: i64,
+) -> bool {
+    match sla_days_for(policy, severity) {
+        None => false,
+        Some(days) => first_seen.is_none_or(|t| t < now - days * 86_400),
+    }
 }
 
 /// The median of an ascending slice (the mean of the two middle values for an

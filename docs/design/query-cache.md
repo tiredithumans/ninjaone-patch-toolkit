@@ -251,10 +251,13 @@ whole-fleet caches are tenant-scoped, so `clear_lookups_cache` drops them too.
 
 ### Scoping borrows, never clones
 
-`run_query` filters the cached `Arc`s into `Vec<&Patch>`, and the rollups (`pending_counts`,
-`build_compliance`, `build_compliance_by_os`, `build_severity_by_org`, `build_age_buckets`) plus
-`PatchSource.patches` all take `&[&Patch]`. A whole-fleet third-party feed runs to six figures and
-each `Patch` owns **eight** `Option<String>`s, so cloning the scoped subset — and again into
-`all_current` — costs millions of allocations per query for data the cache already owns and
-outlives. Keep new rollups on `&[&Patch]`; don't reintroduce an owned `Vec<Patch>` to make a
-signature more convenient.
+`assemble_result` filters the cached `Arc`s into one `Vec<rows::PatchRecord>` — a borrowed view
+per scoped record (the `&Patch`, its parsed severity, its pending verdict and its effective first
+seen), OS first — and the rollups (`build_device_summaries`, `build_compliance`,
+`build_compliance_by_os`, `build_severity_by_org`, `build_age_buckets`, `build_device_backlogs`,
+`build_approval_backlog`) plus `PatchSource.records` all take `&[PatchRecord]`. A whole-fleet
+third-party feed runs to six figures and each `Patch` owns **eight** `Option<String>`s, so cloning
+the scoped subset costs millions of allocations per query for data the cache already owns and
+outlives. Keep new rollups on `&[PatchRecord]`; don't reintroduce an owned `Vec<Patch>` to make a
+signature more convenient, and don't read `Patch::collected_at` for an age — the view's
+`first_seen` is the one decision about which time a record is aged from.

@@ -171,6 +171,10 @@ pub async fn export_patches_xlsx(
                 changes: &result.changes,
                 instance: &result.instance,
                 sla_policy: &result.sla_policy,
+                compliance_total: &result.compliance_total,
+                uncounted_orgs: &result.uncounted_orgs,
+                first_seen: &result.first_seen,
+                patch_families: result.patch_families,
             },
         )
     })
@@ -457,6 +461,8 @@ mod tests {
             rows: Vec::new(),
             devices: Vec::new(),
             compliance: Vec::new(),
+            compliance_total: Default::default(),
+            uncounted_orgs: Vec::new(),
             compliance_by_os: Vec::new(),
             failures: Vec::new(),
             severity_by_org: Vec::new(),
@@ -464,6 +470,7 @@ mod tests {
             worst_devices: Default::default(),
             offline_backlog: Default::default(),
             time_to_install: Default::default(),
+            first_seen: Default::default(),
             sla_policy: Default::default(),
             instance: "https://app.ninjarmm.com".into(),
             approvals: Default::default(),

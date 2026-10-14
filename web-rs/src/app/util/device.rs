@@ -11,8 +11,8 @@ pub(crate) fn rollup_scope_note(scope: RollupScope) -> Option<&'static str> {
     match scope {
         RollupScope::Included => None,
         RollupScope::Offline => Some(
-            "Excluded from compliance: offline devices report no current patch records, \
-             so their pending counts are unknown rather than zero.",
+            "Excluded from compliance: the device is offline, so its patch records may be \
+             out of date — its counts are left out rather than read as current.",
         ),
         RollupScope::NonPatchable => Some(
             "Excluded from compliance: NinjaOne patch management does not cover this \
@@ -46,6 +46,15 @@ pub(crate) fn device_facts(d: &DeviceSummary) -> Vec<(&'static str, String)> {
             if d.needs_reboot { "Yes" } else { "No" }.to_string(),
         ),
     ]
+}
+
+/// Whether a counted device is Within SLA — "Yes", or "No — 3 pending past SLA" —
+/// or `None` for a device outside the rollups, which shows its exclusion instead.
+pub(crate) fn within_sla_label(d: &DeviceSummary) -> Option<String> {
+    (d.rollup_scope == RollupScope::Included).then(|| match d.past_sla {
+        0 => "Yes".to_string(),
+        n => format!("No \u{2014} {n} pending past SLA"),
+    })
 }
 
 /// The failed-installs figure, which is unknown — not zero — unless the query

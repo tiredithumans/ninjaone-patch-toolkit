@@ -262,6 +262,7 @@ fn save_args(
         install_window_days: state.settings.f_install_days.get_untracked(),
         sla_days: state.settings.f_sla.get_untracked(),
         sla_by_severity: state.settings.f_sla_by_severity.get_untracked(),
+        sla_exempt: state.settings.f_sla_exempt.get_untracked(),
         client_secret,
         clear_secret,
         auto_check_updates: state.settings.f_auto_update.get_untracked(),
@@ -269,21 +270,25 @@ fn save_args(
     }
 }
 
-/// The SLA policy: a default window plus an optional override per severity band.
+/// The SLA policy: a default window, an optional override per severity band, and a
+/// "No SLA" switch per band.
 ///
-/// A blank band uses the default. Saving here clears no cache — the policy is read
-/// when a query is assembled, so the next Run query (a re-filter over the cached
-/// fleet data, no refetch) reflects it; the result on screen keeps the policy it
-/// was computed with, which the Compliance tab states.
+/// A blank band uses the default. A band switched to No SLA disables its days input
+/// but keeps the typed value, so switching it back restores the window. Saving here
+/// clears no cache — the policy is read when a query is assembled, so the next Run
+/// query (a re-filter over the cached fleet data, no refetch) reflects it; the
+/// result on screen keeps the policy it was computed with, which the Compliance tab
+/// states.
 #[component]
 fn SlaSettingsFields() -> impl IntoView {
     let state = expect_context::<AppState>();
     let bands = state.settings.f_sla_by_severity;
+    let exempt = state.settings.f_sla_exempt;
     view! {
         <fieldset class="settings-sla">
             <legend>"Patch SLA"</legend>
             <p class="settings-hint">
-                "How long a pending patch may stay pending after NinjaOne first reports it. Leave a severity blank to use the default. Applies from the next Run query."
+                "How long a patch may stay pending after it is first seen before it counts as past SLA. Leave a severity blank to use the default. Tick No SLA for a severity that should never count as past SLA — its patches still count as pending, so a device with them is not fully patched. Unrated (Unknown) patches always use the default. Applies from the next Run query."
             </p>
             <div class="grid">
                 <label>
@@ -306,29 +311,53 @@ fn SlaSettingsFields() -> impl IntoView {
                 </label>
                 {SlaBySeverity::BANDS
                     .iter()
-                    .map(|&(label, get, set)| {
+                    .zip(SlaExempt::BANDS.iter())
+                    .map(|(&(label, get, set), &(_, is_exempt, set_exempt))| {
+                        let no_sla = move || exempt.with(is_exempt);
                         view! {
-                            <label>
-                                {format!("{label} (days)")}
-                                <input
-                                    type="number"
-                                    min="1"
-                                    max="3650"
-                                    placeholder=move || {
-                                        format!("default ({})", state.settings.f_sla.get())
-                                    }
-                                    prop:value=move || {
-                                        bands.with(get).map(|d| d.to_string()).unwrap_or_default()
-                                    }
-                                    on:change=move |ev| {
-                                        let raw = event_target_value(&ev);
-                                        bands.update(|b| {
-                                            let slot = set(b);
-                                            *slot = util::parse_optional_days(&raw, *slot);
-                                        });
-                                    }
-                                />
-                            </label>
+                            <div class="sla-band">
+                                <label class:settings-disabled=no_sla>
+                                    {format!("{label} (days)")}
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        max="3650"
+                                        prop:disabled=no_sla
+                                        placeholder=move || {
+                                            if no_sla() {
+                                                "no SLA".to_string()
+                                            } else {
+                                                format!("default ({})", state.settings.f_sla.get())
+                                            }
+                                        }
+                                        prop:value=move || {
+                                            bands.with(get).map(|d| d.to_string()).unwrap_or_default()
+                                        }
+                                        on:change=move |ev| {
+                                            let raw = event_target_value(&ev);
+                                            bands.update(|b| {
+                                                let slot = set(b);
+                                                *slot = util::parse_optional_days(&raw, *slot);
+                                            });
+                                        }
+                                    />
+                                </label>
+                                <label
+                                    class="inline sla-none"
+                                    title="Patches of this severity never count as past SLA"
+                                >
+                                    <input
+                                        type="checkbox"
+                                        aria-label=format!("No SLA for {label}")
+                                        prop:checked=no_sla
+                                        on:change=move |ev| {
+                                            let on = event_target_checked(&ev);
+                                            exempt.update(|e| *set_exempt(e) = on);
+                                        }
+                                    />
+                                    "No SLA"
+                                </label>
+                            </div>
                         }
                     })
                     .collect_view()}

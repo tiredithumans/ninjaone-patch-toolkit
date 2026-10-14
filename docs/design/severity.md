@@ -17,8 +17,11 @@ charts. Anything `from_raw` fails to map becomes `Unknown` (rank 0), which both 
 every other patch in the severity sort **and** makes it unreachable from the severity facet; that
 is why an unmapped value reads as "those patches don't exist". `SEVERITY_OPTIONS`
 (`web-rs/src/app.rs`) must therefore cover the whole vocabulary including `UNKNOWN`. Ranks are
-ordered so `Security`/`Recommended` fall **below** `Important`, keeping them out of the
-`rank() >= Important.rank()` compliance/SLA rollups.
+ordered so `Security`/`Recommended` fall **below** `Important` in the sort, but urgency is its
+own rule: `Severity::is_urgent()` (rank ≥ `Security`) puts **Security** in the urgent backlog the
+compliance tables count ("Urgent Pending" / "Urgent Past SLA"). The engine vocabulary has no
+`important` at all and `security` is its largest OS bucket, so the old rank ≥ Important threshold
+left an engine-graded fleet's urgent backlog at its Criticals alone. Recommended stays out.
 
 ## Adding a value — the full checklist
 
@@ -31,10 +34,11 @@ ordered so `Security`/`Recommended` fall **below** `Important`, keeping them out
 7. `SEVERITY_OPTIONS` (`web-rs/src/app.rs`).
 8. The CSS.
 9. `demo.rs`.
-10. `SlaBySeverity` — its field, `BANDS` and `get` (`settings.rs`; `get` is an exhaustive match, so
-    the backend fails to compile) **and** the `web-rs/src/types.rs` mirror's field and `BANDS`
-    (nothing fails there — `every_sla_band_reads_and_writes_its_own_field` only checks the ones
-    listed). `SeverityCounts::bump` is exhaustive too.
+10. `SlaBySeverity` **and** `SlaExempt` — each one's field, `BANDS` and `get` (`settings.rs`; both
+    `get`s are exhaustive matches, so the backend fails to compile) **and** the
+    `web-rs/src/types.rs` mirrors' fields and `BANDS` (nothing fails there —
+    `every_sla_band_reads_and_writes_its_own_field` and `no_sla_bands_follow_the_sla_bands` only
+    check the ones listed). `SeverityCounts::bump` is exhaustive too.
 
 The CSS end of this is guarded: the eight band colors are `--sev-*` / `--sev-*-fg` custom
 properties defined once on `:root`, and the three rule families (`.sev-*`, `.chart .seg-*`,

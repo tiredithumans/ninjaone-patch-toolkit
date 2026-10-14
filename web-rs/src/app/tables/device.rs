@@ -220,8 +220,9 @@ fn DeviceHealth(device: DeviceSummary) -> impl IntoView {
             view! { <span class=sev_class(label)>{format!("{label} {}", read(&counts))}</span> }
         })
         .collect_view();
-    let (aged_class, aged_label, aged_title) = aged_badge(device.aged_critical);
+    let (aged_class, aged_label, aged_title) = aged_badge(device.urgent_past_sla);
     let failed = util::failed_installs_label(device.failed_installs);
+    let within_sla = util::within_sla_label(&device).unwrap_or_default();
     view! {
         <dl class="device-facts">{facts}</dl>
         {match excluded {
@@ -236,25 +237,37 @@ fn DeviceHealth(device: DeviceSummary) -> impl IntoView {
                             bands.into_any()
                         }}
                     </div>
+                    // Labels and their definitions from `util::DEVICE_HEALTH_LABELS`,
+                    // in its order.
                     <dl class="device-facts">
-                        <div class="device-fact">
-                            <dt>"Pending Patches"</dt>
-                            <dd>{device.pending_count}</dd>
-                        </div>
-                        <div class="device-fact">
-                            <dt>"Aged (past SLA)"</dt>
-                            <dd>
-                                <span class=aged_class title=aged_title>{aged_label}</span>
-                            </dd>
-                        </div>
-                        <div class="device-fact">
-                            <dt>"Failed installs"</dt>
-                            <dd>{failed}</dd>
-                        </div>
+                        <HealthFact col=util::DEVICE_HEALTH_LABELS[0]>
+                            {device.pending_count}
+                        </HealthFact>
+                        <HealthFact col=util::DEVICE_HEALTH_LABELS[1]>{within_sla}</HealthFact>
+                        <HealthFact col=util::DEVICE_HEALTH_LABELS[2]>
+                            <span class=aged_class title=aged_title>{aged_label}</span>
+                        </HealthFact>
+                        <HealthFact col=util::DEVICE_HEALTH_LABELS[3]>{failed}</HealthFact>
                     </dl>
                 }
                     .into_any()
             }
         }}
+    }
+}
+
+/// One of the drill-down's health figures, its label carrying its definition.
+#[component]
+fn HealthFact(col: util::HelpedColumn, children: Children) -> impl IntoView {
+    let (label, help) = col;
+    view! {
+        <div class="device-fact">
+            <dt>
+                <span class="col-help" title=help>
+                    {label}
+                </span>
+            </dt>
+            <dd>{children()}</dd>
+        </div>
     }
 }
