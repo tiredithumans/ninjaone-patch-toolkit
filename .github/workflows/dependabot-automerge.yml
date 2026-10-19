@@ -7,7 +7,8 @@ name: Dependabot auto-merge
 #
 # Known gap: a merge made through GITHUB_TOKEN starts no `push` workflows, so
 # pages.yml does not redeploy the demo for an auto-merged web-rs bump. The next
-# human merge touching web-rs, or a manual dispatch, deploys it.
+# release (pages.yml also runs on `release: published`), the next human merge
+# touching web-rs, or a manual dispatch deploys it.
 on: pull_request
 
 permissions:
