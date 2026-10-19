@@ -2,4 +2,13 @@
 # Only list advisories with a written justification AND a revisit condition.
 
 [advisories]
-ignore = []
+ignore = [
+    # zip < 9 extract() symlink / permission-bit advisories. The only zip < 9 left
+    # is the one tauri-plugin-updater pins (`zip = "^4"`, still so in 2.14.0). It
+    # extracts an update archive only after its minisign signature verifies, so a
+    # crafted archive never reaches extract().
+    # Revisit: drop all three once `cargo tree -i zip` shows no 4.x.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+]

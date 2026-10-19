@@ -11,6 +11,12 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Security
+
+- Excel export now uses zip 9, clearing RUSTSEC-2026-0367, -0368 and -0369. The auto-updater
+  still bundles zip 4 until Tauri ships a fix; it only unpacks updates whose signature has
+  already been verified.
+
 ## [0.16.0] - 2026-10-14
 
 ### Changed

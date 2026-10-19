@@ -215,7 +215,7 @@ fn write_workbook_split(
     // and nothing else writes to these sheets (no footnotes).
     let mut chunks = rows.chunks(rows_per_sheet.max(1));
     fill_sheet(
-        workbook.add_worksheet_with_low_memory(),
+        workbook.add_worksheet_with_low_memory()?,
         &header,
         "Patches",
         &DETAIL_COLUMNS,
@@ -225,7 +225,7 @@ fn write_workbook_split(
     )?;
     for (i, chunk) in chunks.enumerate() {
         fill_sheet(
-            workbook.add_worksheet_with_low_memory(),
+            workbook.add_worksheet_with_low_memory()?,
             &header,
             &format!("Patches ({})", i + 2),
             &DETAIL_COLUMNS,
