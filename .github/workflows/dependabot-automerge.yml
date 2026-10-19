@@ -1,0 +1,38 @@
+name: Dependabot auto-merge
+
+# Turns on GitHub auto-merge for Dependabot's minor and patch PRs, so they land
+# once the required checks on `main` pass and sit open when one fails (a build
+# break, a new advisory). Majors stay manual: dependabot.yml gives each its own
+# PR so a breaking upgrade gets a review.
+#
+# Known gap: a merge made through GITHUB_TOKEN starts no `push` workflows, so
+# pages.yml does not redeploy the demo for an auto-merged web-rs bump. The next
+# human merge touching web-rs, or a manual dispatch, deploys it.
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  automerge:
+    name: Enable auto-merge
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # No checkout: nothing from the PR runs here, only the GitHub API.
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+      # A grouped PR reports its largest bump; anything other than minor or patch
+      # (major, or a type Dependabot could not tell) is left for a person.
+      - name: Enable auto-merge
+        if: >-
+          steps.meta.outputs.update-type == 'version-update:semver-minor' ||
+          steps.meta.outputs.update-type == 'version-update:semver-patch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --merge "$PR_URL"

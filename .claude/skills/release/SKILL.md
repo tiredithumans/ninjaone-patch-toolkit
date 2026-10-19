@@ -28,9 +28,10 @@ Then refresh both lockfiles so they record the crate's own new version. Any buil
 (`just verify` below is enough); there is no `cargo update --precise` step for a path crate.
 Confirm with `git diff --stat` that both `Cargo.lock` files changed.
 
-Regenerate the license notice: `just licenses` (needs `cargo-about`). The CI
-`Third-party licenses` job fails a PR whose `THIRD-PARTY-LICENSES.md` is stale, and the
-lockfile refresh above can change it.
+Regenerate the license notice: `just licenses` (needs `cargo-about`). Dependency bumps since
+the last release (Dependabot's auto-merged ones included) leave it stale on purpose; the CI
+`Third-party licenses` job fails a `release/*` PR whose copy is stale, and `release.yml`
+refuses the tag.
 
 ## 2. Roll the changelog
 
