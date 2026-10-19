@@ -6424,13 +6424,13 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [tauri-build 2.7.1](https://github.com/tauri-apps/tauri)
+- [tauri-build 2.7.2](https://github.com/tauri-apps/tauri)
 - [tauri-codegen 2.7.1](https://github.com/tauri-apps/tauri)
 - [tauri-macros 2.7.1](https://github.com/tauri-apps/tauri)
 - [tauri-runtime-wry 2.12.1](https://github.com/tauri-apps/tauri)
 - [tauri-runtime 2.12.1](https://github.com/tauri-apps/tauri)
 - [tauri-utils 2.10.1](https://github.com/tauri-apps/tauri)
-- [tauri 2.12.1](https://github.com/tauri-apps/tauri)
+- [tauri 2.12.2](https://github.com/tauri-apps/tauri)
 
 ```
 MIT License
@@ -7337,7 +7337,7 @@ Used by:
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)
 - [jni-sys-macros 0.4.1](https://github.com/jni-rs/jni-sys)
 - [jni 0.22.4](https://github.com/jni-rs/jni-rs)
-- [minisign-verify 0.2.5](https://github.com/jedisct1/rust-minisign-verify)
+- [minisign-verify 0.3.0](https://github.com/jedisct1/rust-minisign-verify)
 - [ndk-context 0.1.1](https://github.com/rust-windowing/android-ndk-rs)
 - [ndk-sys 0.6.0+11769913](https://github.com/rust-mobile/ndk)
 - [ndk 0.9.0](https://github.com/rust-mobile/ndk)
@@ -7362,9 +7362,9 @@ Used by:
 - [r-efi 6.0.0](https://github.com/r-efi/r-efi)
 - [rust_xlsxwriter 0.100.0](https://github.com/jmcnamara/rust_xlsxwriter)
 - [rustls-platform-verifier-android 0.2.0](https://github.com/rustls/rustls-platform-verifier)
-- [tauri-plugin-dialog 2.8.1](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin-fs 2.6.0](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin-updater 2.13.1](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-dialog 2.8.2](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-fs 2.7.1](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-updater 2.13.3](https://github.com/tauri-apps/plugins-workspace)
 - [tauri-plugin 2.7.1](https://github.com/tauri-apps/tauri)
 - [webview2-com-macros 0.8.1](https://github.com/wravery/webview2-rs)
 - [webview2-com-sys 0.39.1](https://github.com/wravery/webview2-rs)
@@ -7742,7 +7742,7 @@ Used by:
 - [serde_core 1.0.229](https://github.com/serde-rs/serde)
 - [serde_derive 1.0.229](https://github.com/serde-rs/serde)
 - [serde_derive_internals 0.29.1](https://github.com/serde-rs/serde)
-- [serde_json 1.0.151](https://github.com/serde-rs/json)
+- [serde_json 1.0.154](https://github.com/serde-rs/json)
 - [serde_repr 0.1.21](https://github.com/dtolnay/serde-repr)
 - [servo_arc 0.4.3](https://github.com/servo/stylo)
 - [simd_cesu8 1.2.0](https://github.com/seancroach/simd_cesu8)
