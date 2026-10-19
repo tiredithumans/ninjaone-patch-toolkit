@@ -47,10 +47,13 @@ every crate statically linked into the bundle, from **both** trees (the wasm fro
 embedded in the binary). `just licenses` runs cargo-about once per crate — they share no
 workspace or lockfile — with `about.hbs` (preamble + backend) and `about-web.hbs` (frontend),
 against the committed lockfiles, and concatenates the two; this repo's own `publish = false`
-crates are ignored so the file does not churn on a version bump. The job re-runs the recipe and
-fails on any diff, and first runs `scripts/check-license-lists.sh`, which fails when about.toml's
-`accepted` and deny.toml's `allow` lists disagree. A dependency bump therefore needs
-`just licenses` committed alongside it. The recipe is `[unix]`: PowerShell redirection would
+crates are ignored so the file does not churn on a version bump. The job first runs
+`scripts/check-license-lists.sh`, which fails when about.toml's `accepted` and deny.toml's
+`allow` lists disagree, then re-runs the recipe, which fails on a license about.toml does not
+accept. A diff fails only a `release/*` PR; on any other PR it is a notice. The notice matters
+in what ships, and failing every dependency bump on it kept Dependabot PRs from auto-merging
+(`dependabot-automerge.yml`, minor and patch only). The release skill regenerates the file, and
+`release.yml`'s `verify` job refuses a tag whose copy is stale. The recipe is `[unix]`: PowerShell redirection would
 rewrite encoding and line endings.
 
 ## NinjaOne API contract (`ninjaone-contract` job)

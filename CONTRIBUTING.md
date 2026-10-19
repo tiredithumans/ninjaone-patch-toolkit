@@ -46,8 +46,8 @@ just verify            # the Rust gates CI runs, in CI's order
 
 CI also runs a few gates `verify` does not (dependency audit, license notice,
 workflow and shell lint, commit subjects); they are listed in
-[docs/design/ci.md](./docs/design/ci.md). If you bumped a dependency, run
-`just licenses` and commit `THIRD-PARTY-LICENSES.md`.
+[docs/design/ci.md](./docs/design/ci.md). `THIRD-PARTY-LICENSES.md` is regenerated at
+release time, so a dependency bump does not need to touch it.
 
 - **Keep changes focused.** Solve one logical thing per PR; smaller diffs review
   faster and break less.

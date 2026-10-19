@@ -365,13 +365,22 @@ jobs:
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: just,cargo-about
+      # Regenerating always runs, so a crate under a license about.toml doesn't
+      # accept still fails every PR. Staleness only fails a release PR: the notice
+      # matters in what ships, and failing every dependency bump on it kept
+      # Dependabot PRs from auto-merging. release.yml refuses a stale tag too.
       - name: THIRD-PARTY-LICENSES.md is current
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           just licenses
           if ! git diff --quiet -- THIRD-PARTY-LICENSES.md; then
-            echo "THIRD-PARTY-LICENSES.md is stale — run 'just licenses' and commit." >&2
             git diff --stat -- THIRD-PARTY-LICENSES.md >&2
-            exit 1
+            if [[ "$HEAD_REF" == release/* ]]; then
+              echo "THIRD-PARTY-LICENSES.md is stale — run 'just licenses' and commit." >&2
+              exit 1
+            fi
+            echo "::notice::THIRD-PARTY-LICENSES.md is stale; the next release regenerates it."
           fi
 
   ninjaone-contract:
