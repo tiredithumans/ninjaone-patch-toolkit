@@ -3,6 +3,12 @@ name: Pages
 # Publishes the Leptos/WASM frontend to GitHub Pages as a live demo. With no Tauri
 # backend in a browser, the app detects this (api::is_tauri) and renders bundled
 # sample data instead of calling IPC — sign-in / live query / export are disabled.
+#
+# A release redeploys from its tag, so the demo always matches the shipped
+# version. The push trigger alone misses changes merged by Dependabot
+# auto-merge: a merge made with GITHUB_TOKEN starts no workflows. The
+# github-pages environment admits `main` and `v*` tags (tags are protected by
+# the "Protect release tags" ruleset).
 on:
   push:
     branches: [main]
@@ -10,6 +16,8 @@ on:
       - "web-rs/**"
       - "justfile"
       - ".github/workflows/pages.yml"
+  release:
+    types: [published]
   workflow_dispatch:
 
 # Least-privilege by default. Only `deploy` holds the two scopes publishing needs:
