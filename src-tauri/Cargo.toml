@@ -57,7 +57,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "for
 # `constant_memory` lets the detail sheets stream rows to a temp file instead of
 # holding every cell until `save` (see `export::write_workbook_split`). It adds
 # `tempfile`, which the lockfile already carries for other crates.
-rust_xlsxwriter = { version = "0.99", features = ["constant_memory"] }
+rust_xlsxwriter = { version = "0.100", features = ["constant_memory"] }
 serde = { version = "1.0", features = ["derive"] }
 # `raw_value` lets the paginated fetchers look at the `{ results, cursor }` wrapper
 # without parsing the rows inside it, so a six-figure patch feed is deserialized
@@ -75,7 +75,7 @@ url = "2.5"
 urlencoding = "2.1"
 
 [dev-dependencies]
-calamine = "0.36"
+calamine = "0.37"
 wiremock = "0.6"
 
 [profile.release]
