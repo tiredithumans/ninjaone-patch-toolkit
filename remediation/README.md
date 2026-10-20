@@ -152,11 +152,15 @@ contract from both sides:
   into each case's `expect`. They also cover rejected input, environment fallback and exit-code
   folding, and check that the two scripts' copies of the parser are identical.
 
-Run the Pester suites on any machine with PowerShell 7 or Windows PowerShell 5.1 and Pester 5:
+Run the Pester suites on any machine with PowerShell 7 or Windows PowerShell 5.1 and Pester 5
+or later: `just pester` (PowerShell 7) or `just pester powershell` (Windows PowerShell 5.1), or
+directly:
 
 ```powershell
 Invoke-Pester -Path remediation/tests -Output Detailed
 ```
+
+CI's `pester` job runs them under both interpreters on Windows for every code change.
 
 The suites dot-source the scripts, which only defines their functions. They never call the
 Windows Update Agent, so they also run on Linux and macOS under `pwsh`.

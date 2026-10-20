@@ -69,6 +69,16 @@ web-clippy:
 test:
     cargo test --manifest-path src-tauri/Cargo.toml
 
+# The remediation scripts' Pester suites (remediation/tests): the receiving end of the
+# parameter contract `test` pins from the Rust side. Needs PowerShell and Pester 5+.
+# `shell` picks the interpreter: `pwsh` (PowerShell 7) or `powershell` (Windows
+# PowerShell 5.1, what NinjaOne runs the scripts under). CI runs both; not in `verify`,
+# which is the Rust gate and must not start requiring PowerShell. `-ExecutionPolicy
+# Bypass` (this process only): Windows PowerShell's client default refuses any `-File`.
+[doc("Run the remediation scripts' Pester suites (shell: pwsh or powershell).")]
+pester shell="pwsh":
+    {{shell}} -NoProfile -ExecutionPolicy Bypass -File scripts/run-pester.ps1
+
 # Regenerate the backend-written fixtures under web-rs/tests/ after a deliberate
 # wire change (backend-ipc.json, backend-grouping.json). Their diff is the change
 # to review; the frontend tests then hold the mirrors to it.
