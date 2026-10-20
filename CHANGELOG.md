@@ -11,6 +11,12 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Security
+
+- **Updated certificate verification (`rustls-webpki` 0.103.16, `webpki-root-certs` 1.0.10)**
+  for RUSTSEC-2026-0382 and -0383: distrusted intermediate certificates, including emSign's,
+  could be accepted.
+
 ### Removed
 
 - **The Jobs tab's Refresh button.** The list already updates live as jobs change, so the
