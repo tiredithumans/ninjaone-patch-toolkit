@@ -86,7 +86,8 @@ pub struct PlanInput<'a> {
     /// of a script-running kind; see [`DryRunSupport`].
     pub dry_run_support: DryRunSupport,
     /// The *cached* whole-fleet current patches of the family a native apply
-    /// installs, or `None` when that cache is cold (and for every other kind). The
+    /// installs or a remediation targets, or `None` when that cache is cold (and for
+    /// every other kind). Only a native apply's preview reads it here. The
     /// planner never fetches: a plan that paged a six-figure feed to draw a preview
     /// would make the confirm dialog wait on it.
     pub current_patches: Option<CachedFamily<'a>>,
@@ -226,8 +227,75 @@ pub fn apply_preview(
     })
 }
 
+/// The warning for ticked patches NinjaOne has REJECTED on the device a remediation
+/// would send them to, or `None` when there are none (or `kind` is not a remediation).
+///
+/// A rejection is NinjaOne's record that someone decided against the patch, and a
+/// remediation script installs whatever it is told regardless — nothing on the write
+/// path read the status, so the dialog said nothing. It warns rather than blocks: an
+/// operator may mean to override it. Matched by KB number for OS patches and by
+/// title for software, the same identities the targets are sent as.
+pub fn rejected_targets_warning(
+    kind: ActionKind,
+    eligible: &[PlannedTarget],
+    device_targets: &HashMap<i64, Vec<String>>,
+    patches: &[Patch],
+) -> Option<String> {
+    if !kind.is_remediation() {
+        return None;
+    }
+    let os = uses_kb_encoding(kind);
+    let identity = |target: &str| -> Option<String> {
+        if os {
+            kb_number(target).map(str::to_string)
+        } else {
+            Some(target.to_string())
+        }
+    };
+    let rejected_status = PatchStatus::Rejected.api_value();
+    let rejected: HashSet<(i64, String)> = patches
+        .iter()
+        .filter(|p| {
+            p.status
+                .as_deref()
+                .is_some_and(|s| s.trim().eq_ignore_ascii_case(rejected_status))
+        })
+        .filter_map(|p| {
+            let key = if os {
+                p.kb_number.as_deref().and_then(identity)
+            } else {
+                p.name.clone()
+            };
+            Some((p.device_id?, key?))
+        })
+        .collect();
+    let found: Vec<String> = eligible
+        .iter()
+        .flat_map(|t| {
+            device_targets
+                .get(&t.device_id)
+                .into_iter()
+                .flatten()
+                .filter(|target| {
+                    identity(target).is_some_and(|key| rejected.contains(&(t.device_id, key)))
+                })
+                .map(move |target| format!("{}: {target}", t.device_name))
+        })
+        .collect();
+    if found.is_empty() {
+        return None;
+    }
+    let shown: Vec<&str> = found.iter().map(String::as_str).collect();
+    Some(format!(
+        "{} selected patch(es) are REJECTED in NinjaOne ({}). The remediation script installs \
+         them anyway, overriding that rejection — untick them to respect it.",
+        found.len(),
+        summarize_names(&shown)
+    ))
+}
+
 /// "OS" or "software", for the messages about a patch family.
-fn patch_family_label(kind: ActionKind) -> &'static str {
+pub(crate) fn patch_family_label(kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::SoftwarePatchScan
         | ActionKind::SoftwarePatchApply
@@ -276,10 +344,20 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
         // an action dispatched now can restart the machine hours later when it
         // reconnects — long after the operator stopped watching.
         if offline && !(input.include_offline && s.allow_offline_targets) {
+            // Two switches gate this, and the reason names the one that is off: the
+            // action bar's checkbox was offered whatever Settings said, so "device is
+            // offline" alone left an operator who had ticked it with no way forward.
+            let reason = if s.allow_offline_targets {
+                "device is offline — tick \"Include offline devices\" to queue the action \
+                 until it reconnects"
+            } else {
+                "device is offline — offline targets are switched off in Settings → Patch \
+                 actions"
+            };
             skipped.push(SkippedTarget {
                 device_id: *id,
                 device_name: name,
-                reason: "device is offline — NinjaOne would queue this until it reconnects".into(),
+                reason: reason.into(),
             });
             continue;
         }

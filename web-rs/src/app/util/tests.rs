@@ -4,9 +4,9 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, ActionSettings, AuthStatus, DeviceSummary, JobReport, JobRequest, JobState,
-    Location, Organization, PatchFamilies, PatchGroup, PatchRow, RebootChoice, RebootMode, RowSort,
-    RowSortKey, RunRecord,
+    ActionKind, ActionRequest, ActionSettings, AuthStatus, DeviceSummary, JobReport, JobRequest,
+    JobState, Location, Organization, PatchFamilies, PatchGroup, PatchRow, PlannedTarget,
+    RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -1104,21 +1104,27 @@ fn an_optional_script_id_clears_on_blank_and_holds_on_garbage() {
 #[test]
 fn the_disabled_reason_names_the_most_fundamental_obstacle_first() {
     let blocked = Some("Sign in to run patch actions.".to_string());
+    let rows = SelectionSource::PatchRows;
     assert_eq!(
-        action_disabled_reason(blocked.clone(), 0, true).as_deref(),
+        action_disabled_reason(blocked.clone(), rows, 0, true).as_deref(),
         Some("Sign in to run patch actions."),
         "auth outranks both selection and dispatch state"
     );
     assert_eq!(
-        action_disabled_reason(None, 0, true).as_deref(),
-        Some("Select at least one device first"),
+        action_disabled_reason(None, rows, 0, true).as_deref(),
+        Some("Select at least one patch row first"),
         "an empty selection outranks an in-flight dispatch"
     );
+    // The Needs Reboot tab selects devices, so it asks for one.
     assert_eq!(
-        action_disabled_reason(None, 3, true).as_deref(),
-        Some("An action is already being dispatched")
+        action_disabled_reason(None, SelectionSource::Devices, 0, false).as_deref(),
+        Some("Select at least one device first")
     );
-    assert_eq!(action_disabled_reason(None, 3, false), None);
+    assert_eq!(
+        action_disabled_reason(None, rows, 3, true).as_deref(),
+        Some("Wait for the current plan or dispatch to finish")
+    );
+    assert_eq!(action_disabled_reason(None, rows, 3, false), None);
 }
 
 #[test]
@@ -1434,13 +1440,76 @@ fn job_mode_label_distinguishes_dispatch_kinds() {
         job_mode_label(&job(ActionKind::Reboot, false)),
         "Live + reboot"
     );
+    // NinjaOne's own policy decides whether a native apply restarts.
     assert_eq!(
         job_mode_label(&job(ActionKind::OsPatchApply, false)),
-        "Live + reboot"
+        "Live (may reboot)"
     );
+    // A script restarts only when it was told to: rebootBehavior is on the request.
+    let mut never = job(ActionKind::OsPatchRemediate, false);
+    never.request = Some(JobRequest::default());
+    assert_eq!(job_mode_label(&never), "Live");
+    let mut auto = never.clone();
+    auto.request = Some(JobRequest {
+        reboot: RebootChoice::Auto,
+        ..JobRequest::default()
+    });
+    assert_eq!(job_mode_label(&auto), "Live + restart if pending");
     // A preview applies — and reboots — nothing, so it wins over the reboot
     // indication rather than reading "Live + reboot" for a run that does neither.
     assert_eq!(job_mode_label(&job(ActionKind::Reboot, true)), "Dry run");
+}
+
+#[test]
+fn a_job_row_names_the_patches_it_was_sent() {
+    let mut j = job(ActionKind::SoftwarePatchRemediate, false);
+    assert_eq!(job_targets_summary(&j), None, "no recorded request");
+    j.request = Some(JobRequest::default());
+    assert_eq!(job_targets_summary(&j), None, "an empty list is no list");
+
+    j.request = Some(JobRequest {
+        targets: vec!["7-Zip 24.08".into(), "Zoom 6.2".into()],
+        ..JobRequest::default()
+    });
+    let (short, full) = job_targets_summary(&j).unwrap();
+    assert_eq!(short, "7-Zip 24.08, Zoom 6.2");
+    assert_eq!(full, short);
+
+    j.request = Some(JobRequest {
+        targets: ["KB1", "KB2", "KB3", "KB4", "KB5"]
+            .map(String::from)
+            .to_vec(),
+        ..JobRequest::default()
+    });
+    let (short, full) = job_targets_summary(&j).unwrap();
+    assert_eq!(short, "KB1, KB2, KB3, and 2 more");
+    assert_eq!(full, "KB1, KB2, KB3, KB4, KB5");
+}
+
+/// The reference scripts' codes, and only for the kinds that run them.
+#[test]
+fn remediation_exit_codes_are_explained_only_for_remediation_jobs() {
+    for (code, short) in [
+        (0, "done"),
+        (1, "bad input"),
+        (2, "nothing matched"),
+        (3, "incomplete"),
+        (4, "restart held back"),
+        (5, "environment error"),
+        (10, "no install mechanism"),
+    ] {
+        assert_eq!(
+            remediation_exit_meaning(ActionKind::OsPatchRemediate, code).map(|m| m.0),
+            Some(short),
+            "{code}"
+        );
+    }
+    assert_eq!(
+        remediation_exit_meaning(ActionKind::OsPatchRemediate, 7),
+        None
+    );
+    // A hand-picked script defines its own codes.
+    assert_eq!(remediation_exit_meaning(ActionKind::Script, 4), None);
 }
 
 #[test]
@@ -1976,6 +2045,112 @@ fn remediation_summary_counts_distinct_patches_not_dispatches() {
     );
 }
 
+/// OS rows with no KB (macOS, Linux) are dropped from "Selected OS"; the bar says
+/// so rather than showing a target count smaller than what was ticked.
+#[test]
+fn ticked_os_rows_without_a_kb_are_called_out() {
+    let no_kb = SelectedPatch {
+        kb: None,
+        name: "macOS Sonoma 14.7".into(),
+        is_os: true,
+    };
+    let selected = BTreeMap::from([
+        (1, selection(vec![os("KB5040434"), no_kb.clone()])),
+        (2, selection(vec![no_kb, sw("7-Zip 24.08")])),
+    ]);
+    let note = untargetable_os_note(&selected).expect("two rows lack a KB");
+    assert!(
+        note.starts_with("2 ticked OS row(s) have no KB number"),
+        "{note}"
+    );
+
+    // Software rows never carry a KB and are targeted by title: not counted.
+    let fine = BTreeMap::from([(1, selection(vec![os("KB1"), sw("7-Zip 24.08")]))]);
+    assert_eq!(untargetable_os_note(&fine), None);
+}
+
+fn planned(id: i64, name: &str) -> PlannedTarget {
+    PlannedTarget {
+        device_id: id,
+        device_name: name.into(),
+        organization: "Org".into(),
+        offline: false,
+    }
+}
+
+/// The confirm dialog's targets in words: software travels base64-encoded, so
+/// without these lines the operator could not read what a device would install.
+#[test]
+fn target_lines_spell_out_each_devices_own_targets_in_plan_order() {
+    let eligible = vec![planned(2, "srv-b"), planned(1, "srv-a")];
+    let mut req = ActionRequest::new(ActionKind::SoftwarePatchRemediate, vec![1, 2]);
+    req.device_targets = BTreeMap::from([
+        (1, vec!["Google Chrome 141.0.7390.55".to_string()]),
+        (2, vec!["7-Zip 24.08".to_string(), "Zoom 6.2".to_string()]),
+    ]);
+    assert_eq!(
+        target_lines(&req, &eligible),
+        vec![
+            "srv-b → 7-Zip 24.08, Zoom 6.2".to_string(),
+            "srv-a → Google Chrome 141.0.7390.55".to_string(),
+        ]
+    );
+
+    // A KB-targeted script names the device it would send an empty list.
+    let mut script = ActionRequest::new(ActionKind::Script, vec![1, 2]);
+    script.device_targets = BTreeMap::from([(1, vec!["KB5040434".to_string()])]);
+    assert_eq!(
+        target_lines(&script, &eligible),
+        vec![
+            "srv-b → nothing — an empty list".to_string(),
+            "srv-a → KB5040434".to_string(),
+        ]
+    );
+    // ...but typed parameters are sent verbatim, so there is no list to describe.
+    script.parameters = Some("-Verbose".into());
+    assert!(target_lines(&script, &eligible).is_empty());
+
+    // A native endpoint sends no list at all.
+    let mut apply = ActionRequest::new(ActionKind::OsPatchApply, vec![1, 2]);
+    apply.device_targets = req.device_targets.clone();
+    assert!(target_lines(&apply, &eligible).is_empty());
+}
+
+/// Dry run or live is said up front, and a native action planned with Dry run
+/// ticked says it runs for real anyway.
+#[test]
+fn the_confirm_dialog_says_whether_it_is_a_dry_run() {
+    let (text, wide) = confirm_mode_line(ActionKind::OsPatchRemediate, true, true).unwrap();
+    assert!(text.starts_with("Dry run") && !wide, "{text}");
+    let (text, wide) = confirm_mode_line(ActionKind::SoftwarePatchRemediate, false, false).unwrap();
+    assert!(text.starts_with("Live") && wide, "{text}");
+    for kind in [ActionKind::OsPatchApply, ActionKind::Reboot] {
+        let (text, wide) = confirm_mode_line(kind, false, true).unwrap();
+        assert!(text.contains("doesn't apply") && wide, "{kind:?}: {text}");
+        assert_eq!(confirm_mode_line(kind, false, false), None, "{kind:?}");
+    }
+    // A scan changes nothing either way.
+    assert_eq!(
+        confirm_mode_line(ActionKind::OsPatchScan, false, true),
+        None
+    );
+}
+
+#[test]
+fn the_dispatch_toast_says_where_a_dry_runs_report_is() {
+    assert_eq!(dispatch_toast(3, 0, false), "Dispatched to 3 device(s)");
+    assert_eq!(
+        dispatch_toast(3, 1, false),
+        "Dispatched to 3 device(s); 1 skipped"
+    );
+    let dry = dispatch_toast(2, 1, true);
+    assert!(
+        dry.starts_with("Dry run sent to 2 device(s); 1 skipped"),
+        "{dry}"
+    );
+    assert!(dry.contains("NinjaOne activity"), "{dry}");
+}
+
 #[test]
 fn kb_targeting_summary_says_per_device() {
     let targets = BTreeMap::from([
@@ -2225,50 +2400,28 @@ fn a_blank_run_as_is_omitted_rather_than_sent_empty() {
     assert_eq!(req.parameters, None);
 }
 
-/// These four predicates decide whether the operator sees a confirmation dialog
+/// These predicates decide whether the operator sees a confirmation dialog
 /// and how the blast radius is described. They are a hand-mirrored copy of the
 /// backend's `actions::ActionKind` with a doc comment as the only drift guard,
 /// in a crate that had no test module outside this file — so a drifted mirror
 /// silently dropped the warning that distinguishes Apply-all from Apply-selected.
 #[test]
 fn the_mirrored_action_predicates_match_the_backend_table() {
-    // kind, is_mutating, can_reboot, is_remediation, runs_a_script, exceeds_selection
+    // kind, is_mutating, is_remediation, runs_a_script, exceeds_selection
     let table = [
-        (ActionKind::OsPatchScan, false, false, false, false, false),
-        (
-            ActionKind::SoftwarePatchScan,
-            false,
-            false,
-            false,
-            false,
-            false,
-        ),
+        (ActionKind::OsPatchScan, false, false, false, false),
+        (ActionKind::SoftwarePatchScan, false, false, false, false),
         // The two native applies are the only kinds that reach past the selection:
         // NinjaOne has no per-patch apply endpoint.
-        (ActionKind::OsPatchApply, true, true, false, false, true),
-        (
-            ActionKind::SoftwarePatchApply,
-            true,
-            true,
-            false,
-            false,
-            true,
-        ),
-        (ActionKind::OsPatchRemediate, true, true, true, true, false),
-        (
-            ActionKind::SoftwarePatchRemediate,
-            true,
-            true,
-            true,
-            true,
-            false,
-        ),
-        (ActionKind::Reboot, true, true, false, false, false),
-        (ActionKind::Script, true, true, false, true, false),
+        (ActionKind::OsPatchApply, true, false, false, true),
+        (ActionKind::SoftwarePatchApply, true, false, false, true),
+        (ActionKind::OsPatchRemediate, true, true, true, false),
+        (ActionKind::SoftwarePatchRemediate, true, true, true, false),
+        (ActionKind::Reboot, true, false, false, false),
+        (ActionKind::Script, true, false, true, false),
     ];
-    for (kind, mutating, reboot, remediation, script, wide) in table {
+    for (kind, mutating, remediation, script, wide) in table {
         assert_eq!(kind.is_mutating(), mutating, "{kind:?} is_mutating");
-        assert_eq!(kind.can_reboot(), reboot, "{kind:?} can_reboot");
         assert_eq!(
             kind.is_remediation(),
             remediation,

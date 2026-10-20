@@ -32,7 +32,7 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
     let rows_source = source == SelectionSource::PatchRows;
 
     // One disabled reason for every button, so the tooltip always explains itself.
-    let disabled_reason = move || action_disabled_reason(blocked(), counts().0, busy());
+    let disabled_reason = move || action_disabled_reason(blocked(), source, counts().0, busy());
 
     // The per-device targets of the two remediation kinds, computed once per
     // selection change and shared by their buttons and the target chips rather
@@ -171,6 +171,13 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                             })
                             .collect_view()
                     }}
+                    {move || {
+                        state
+                            .actions
+                            .selected
+                            .with(util::untargetable_os_note)
+                            .map(|note| view! { <span class="action-options-note">{note}</span> })
+                    }}
                 </div>
             </Show>
 
@@ -181,15 +188,31 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
             <Show when=any>
                 <div class="action-bar-options">
                     <span class="action-options-label">"Applies to every action"</span>
+                    // Disabled rather than hidden while Settings forbids offline
+                    // targets: the backend would skip them whatever this says, and
+                    // the note says where the switch is.
                     <label class="checkbox">
                         <input
                             type="checkbox"
-                            prop:checked=move || state.actions.include_offline.get()
+                            prop:disabled=move || {
+                                !state.settings.f_actions.with(util::offline_targets_offered)
+                            }
+                            prop:checked=move || {
+                                state.actions.include_offline.get()
+                                    && state.settings.f_actions.with(util::offline_targets_offered)
+                            }
                             on:change=move |ev| {
                                 state.actions.include_offline.set(event_target_checked(&ev))
                             }
                         />
                         "Include offline devices"
+                        <Show when=move || {
+                            !state.settings.f_actions.with(util::offline_targets_offered)
+                        }>
+                            <span class="action-options-note">
+                                "(switched off in Settings → Patch actions)"
+                            </span>
+                        </Show>
                     </label>
                     // Rendered only while the window is enforced and Settings permits
                     // overriding it; the backend decides whether the window is actually
@@ -262,7 +285,7 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                                     )
                             }
                         />
-                        "Restart the device after installing"
+                        "Restart afterwards if a restart is pending"
                     </label>
                     <label class="checkbox">
                         <input
@@ -270,7 +293,7 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                             prop:checked=move || state.actions.dry_run.get()
                             on:change=move |ev| state.actions.dry_run.set(event_target_checked(&ev))
                         />
-                        "Dry run (the script reports what it would install)"
+                        "Dry run (installs nothing; the script lists what it would install in its NinjaOne activity)"
                     </label>
                     // A dry run is only real for a script that reads `dryRun`; say
                     // which of the scripts this checkbox reaches cannot, rather than
@@ -462,6 +485,12 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
             let needs_typed =
                 util::needs_typed_confirmation(blocked, kind, pending.request.reboot_mode);
             let dry_run = plan.dry_run;
+            let mode_line = util::confirm_mode_line(
+                kind,
+                dry_run,
+                state.actions.dry_run.get_untracked(),
+            );
+            let target_lines = util::target_lines(&pending.request, &plan.eligible);
             let expected = device_count.to_string();
             // Created per dialog, so its cleanup (focus back to the opener) runs
             // when this plan's view is dropped, not when the component is.
@@ -515,6 +544,18 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                         } else {
                             "confirm-radius"
                         }>{kind.blast_radius()}</p>
+                        // Dry run or live, said up front: the heading reads the same
+                        // either way, and Dry run reaches only the script-driven kinds.
+                        {mode_line
+                            .map(|(text, wide)| {
+                                view! {
+                                    <p class=if wide {
+                                        "confirm-radius confirm-radius-wide"
+                                    } else {
+                                        "confirm-radius"
+                                    }>{text}</p>
+                                }
+                            })}
                         // A bypassed window is as consequential as the reach, so it
                         // gets the same treatment rather than a line among warnings.
                         {plan
@@ -561,6 +602,25 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                             .map(|w| view! { <li>{w.clone()}</li> })
                                             .collect_view()}
                                     </ul>
+                                }
+                            })}
+
+                        // The targets in words, above the literal string: for software
+                        // that string is base64, which no operator can check.
+                        {(!target_lines.is_empty())
+                            .then(|| {
+                                view! {
+                                    <>
+                                        <p class="modal-label">
+                                            "What each device will be told to install"
+                                        </p>
+                                        <ul class="modal-target-lines">
+                                            {target_lines
+                                                .into_iter()
+                                                .map(|line| view! { <li>{line}</li> })
+                                                .collect_view()}
+                                        </ul>
+                                    </>
                                 }
                             })}
 
@@ -1088,11 +1148,37 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                                     </button>
                                                 }
                                             });
+                                        // The reference scripts' exit codes, in
+                                        // words: NinjaOne returns no output, and a
+                                        // bare `4` read as a failed install.
+                                        let meaning = j
+                                            .exit_code
+                                            .and_then(|c| util::remediation_exit_meaning(j.kind, c));
+                                        let exit_help = meaning.map(|(_, long)| long);
+                                        let exit_text = match (j.exit_code, meaning) {
+                                            (Some(c), Some((short, _))) => format!("{c} · {short}"),
+                                            (Some(c), None) => c.to_string(),
+                                            (None, _) => String::new(),
+                                        };
                                         view! {
                                             <tr>
                                                 <td>{j.device_name.clone()}</td>
                                                 <td>{j.organization.clone()}</td>
-                                                <td>{j.detail.clone()}</td>
+                                                <td>
+                                                    {j.detail.clone()}
+                                                    // Which patches this device was
+                                                    // sent — the point of a selective
+                                                    // install, and on no other surface
+                                                    // once the dialog closed.
+                                                    {util::job_targets_summary(&j)
+                                                        .map(|(short, full)| {
+                                                            view! {
+                                                                <span class="job-targets" title=full>
+                                                                    {short}
+                                                                </span>
+                                                            }
+                                                        })}
+                                                </td>
                                                 <td>{job_mode_label(&j)}</td>
                                                 <td>
                                                     // NinjaOne v2 exposes no script
@@ -1106,12 +1192,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                                         {j.state.label()}
                                                     </span>
                                                 </td>
-                                                <td>
-                                                    {j
-                                                        .exit_code
-                                                        .map(|c| c.to_string())
-                                                        .unwrap_or_default()}
-                                                </td>
+                                                <td title=exit_help>{exit_text}</td>
                                                 <td>{j.dispatched_at.clone()}</td>
                                                 <td>{format_duration(j.duration_seconds)}</td>
                                                 <td>{retry}</td>

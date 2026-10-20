@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::types::{FailureGroup, JobReport, PatchFamilies, RunRecord};
+use crate::types::{ActionKind, FailureGroup, JobReport, PatchFamilies, RebootChoice, RunRecord};
 
 use super::super::Tab;
 
@@ -242,13 +242,28 @@ pub(crate) fn is_fleet_tab(tab: Tab) -> bool {
 
 /// Short mode label for a dispatched job. A dry run applies — and reboots —
 /// nothing, so it wins over the reboot indication.
+///
+/// The restart clause says what the job was sent, not what any install might do:
+/// it read "Live + reboot" for every live install because `can_reboot()` is true
+/// for every mutating kind, so a script told `rebootBehavior=Never` looked like it
+/// had restarted the device. A native apply restarts per NinjaOne's own policy,
+/// which the toolkit neither sets nor sees.
 pub(crate) fn job_mode_label(job: &JobReport) -> &'static str {
     if job.dry_run {
-        "Dry run"
-    } else if job.kind.can_reboot() {
-        "Live + reboot"
-    } else {
-        "Live"
+        return "Dry run";
+    }
+    match job.kind {
+        ActionKind::Reboot => "Live + reboot",
+        kind if kind.exceeds_selection() => "Live (may reboot)",
+        kind if kind.runs_a_script()
+            && job
+                .request
+                .as_ref()
+                .is_some_and(|r| r.reboot == RebootChoice::Auto) =>
+        {
+            "Live + restart if pending"
+        }
+        _ => "Live",
     }
 }
 

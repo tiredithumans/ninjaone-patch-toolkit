@@ -131,16 +131,52 @@ pub(super) fn parameters_preview(
     )
 }
 
-/// Eligible devices that would be dispatched to with no target list of their own.
+/// Eligible devices that would be dispatched to with no target list of their own —
+/// no entry, or an empty one.
 pub(super) fn untargeted_names<'a>(
     eligible: &'a [PlannedTarget],
     device_targets: &HashMap<i64, Vec<String>>,
 ) -> Vec<&'a str> {
     eligible
         .iter()
-        .filter(|t| !device_targets.contains_key(&t.device_id))
+        .filter(|t| {
+            !device_targets
+                .get(&t.device_id)
+                .is_some_and(|targets| !targets.is_empty())
+        })
         .map(|t| t.device_name.as_str())
         .collect()
+}
+
+/// The blocker for a remediation that would reach a device with nothing of its own
+/// to install, or `None`.
+///
+/// `plan()` only sees the batch's targets as a whole, so a request naming a device
+/// it held no targets for passed every check, and the dispatch-site refusal tested
+/// the composed string — which is never empty, since it always carries
+/// `rebootBehavior` and `dryRun`. The script then ran with an empty list. The
+/// frontend never builds such a request; the backend is the boundary. When nothing
+/// at all is targeted, `plan()`'s own "No patches selected" already says so.
+pub(super) fn untargeted_remediation_blocker(
+    kind: ActionKind,
+    eligible: &[PlannedTarget],
+    device_targets: &HashMap<i64, Vec<String>>,
+    any_targets: bool,
+) -> Option<String> {
+    if !kind.is_remediation() || !any_targets {
+        return None;
+    }
+    let empty = untargeted_names(eligible, device_targets);
+    (!empty.is_empty()).then(|| {
+        format!(
+            "{} device(s) have no selected {} patches, so the remediation script would run there \
+             with an empty list and install nothing ({}). Clear the selection and tick the patch \
+             rows again.",
+            empty.len(),
+            crate::actions::patch_family_label(kind),
+            summarize_names(&empty)
+        )
+    })
 }
 
 /// Lives beside `plan()` now, which needs it for the Apply-all preview warning.
@@ -199,12 +235,15 @@ pub(super) fn dry_run_support(
     }
 }
 
-/// The patch family a native apply installs, whose cached current patches feed the
-/// Apply-all preview. `None` for every other kind.
-fn applied_family(kind: ActionKind) -> Option<PatchType> {
+/// The patch family whose cached current patches a plan reads: the backlog a native
+/// apply installs (the Apply-all preview) or the records a remediation's targets are
+/// checked against (the REJECTED warning). `None` for every other kind.
+fn cached_family(kind: ActionKind) -> Option<PatchType> {
     match kind {
-        ActionKind::OsPatchApply => Some(PatchType::Os),
-        ActionKind::SoftwarePatchApply => Some(PatchType::Software),
+        ActionKind::OsPatchApply | ActionKind::OsPatchRemediate => Some(PatchType::Os),
+        ActionKind::SoftwarePatchApply | ActionKind::SoftwarePatchRemediate => {
+            Some(PatchType::Software)
+        }
         _ => None,
     }
 }
@@ -262,8 +301,9 @@ pub(super) async fn build_plan(
     } else {
         DryRunSupport::NotChecked
     };
-    // Read-only peek at the whole-fleet cache: the preview never triggers a fetch.
-    let cached = applied_family(req.kind).and_then(|f| state.cached_current_patches(f));
+    // Read-only peek at the whole-fleet cache: neither the preview nor the REJECTED
+    // check ever triggers a fetch.
+    let cached = cached_family(req.kind).and_then(|f| state.cached_current_patches(f));
     let mut p = plan(PlanInput {
         kind: req.kind,
         device_ids: &req.device_ids,
@@ -293,6 +333,26 @@ pub(super) async fn build_plan(
     if req.kind == ActionKind::Script && req.script_id.is_none() && req.script_uid.is_none() {
         p.blockers
             .push("No script selected. Choose one from the automation library.".into());
+    }
+    if let Some(blocker) = untargeted_remediation_blocker(
+        req.kind,
+        &p.eligible,
+        &req.device_targets,
+        !targets.is_empty(),
+    ) {
+        p.blockers.push(blocker);
+    }
+    // A cold cache is no warning rather than a guess: the rows the operator ticked
+    // showed each patch's status.
+    if let Some((patches, _)) = &cached
+        && let Some(warning) = crate::actions::rejected_targets_warning(
+            req.kind,
+            &p.eligible,
+            &req.device_targets,
+            patches,
+        )
+    {
+        p.warnings.push(warning);
     }
     // A hand-picked script with KB targeting on, dispatched to a device that has
     // nothing ticked, receives an empty allow list. Not a blocker — the operator

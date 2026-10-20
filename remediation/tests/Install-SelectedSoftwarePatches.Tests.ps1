@@ -45,6 +45,23 @@ Describe 'Install-SelectedSoftwarePatches.ps1 source' {
         Get-ParserRegion $scriptPath |
             Should -BeExactly (Get-ParserRegion (Join-Path $remediationDir 'Install-SelectedWindowsUpdates.ps1'))
     }
+
+    # A missing space once fused the reason code and the comment switch (`p:4:1/c`), which
+    # shutdown.exe rejects, so rebootBehavior=Auto never restarted anything. Nothing here runs
+    # shutdown.exe, so the arguments are checked as the parser sees them.
+    It 'passes shutdown.exe its reason code and comment as separate switches' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
+        $calls = @($ast.FindAll({
+                    param($n)
+                    $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'shutdown.exe'
+                }, $true))
+        $calls.Count | Should -BeGreaterThan 0
+        foreach ($call in $calls) {
+            $words = @($call.CommandElements | ForEach-Object { $_.Extent.Text })
+            $words -contains '/c' | Should -BeTrue
+            $words[$words.IndexOf('/d') + 1] | Should -Match '^p:\d+:\d+$'
+        }
+    }
 }
 
 Describe 'the toolkit parameter contract (fixture shared with build_parameters)' {

@@ -26,8 +26,9 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   replayed. → `docs/design/actions.md#replaysafetyactonce-on-every-post`
 - **"Apply all" (native endpoint) and "Apply selected" (library script) are different
   `ActionKind`s** under different `ACTION_GROUPS` headings. Don't collapse them. Remediation
-  script ids resolve from Settings, never the request; an unset id or an empty target list is a
-  `plan()` blocker. → `docs/design/actions.md#there-is-no-per-kb-apply-endpoint-so-there-are-two-apply-paths-and-the-ui-names-both`
+  script ids resolve from Settings, never the request; an unset id or an empty target list —
+  batch-wide (`plan()`) or for any one device (`build_plan`) — is a blocker. A ticked REJECTED
+  patch is a warning, not a blocker. → `docs/design/actions.md#there-is-no-per-kb-apply-endpoint-so-there-are-two-apply-paths-and-the-ui-names-both`
 - **Selection is per patch row; dispatch is per device with per-device targets**
   (`util::targets_by_device` → `ActionRequest.device_targets` → `per_device_parameters`). Ticking
   a row must not tick the device's other rows. No batch-wide `targets` field. Needs Reboot has

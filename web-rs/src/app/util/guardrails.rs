@@ -87,6 +87,57 @@ pub(crate) fn window_override_offered(a: &ActionSettings) -> bool {
     a.enabled && a.require_maintenance_window && a.allow_window_override
 }
 
+/// Whether the action bar offers "Include offline devices": Settings allows offline
+/// targets. Without that, the backend skips every offline device whatever the
+/// checkbox says, so offering it promised something the plan would ignore.
+pub(crate) fn offline_targets_offered(a: &ActionSettings) -> bool {
+    a.allow_offline_targets
+}
+
+/// The confirm dialog's line saying whether this dispatch is a dry run, or live —
+/// `(text, emphasized)`, or `None` when there is nothing to say (a scan).
+///
+/// The heading reads the same either way, and Dry run is on by default but reaches
+/// only the script-driven kinds, so a native apply or a reboot planned with it
+/// ticked runs for real. `dry_run_ticked` is the action bar's checkbox.
+pub(crate) fn confirm_mode_line(
+    kind: ActionKind,
+    plan_dry_run: bool,
+    dry_run_ticked: bool,
+) -> Option<(&'static str, bool)> {
+    if plan_dry_run {
+        return Some((
+            "Dry run — nothing is installed or restarted. The script lists what it would \
+             install in its NinjaOne activity.",
+            false,
+        ));
+    }
+    if kind.runs_a_script() {
+        return Some(("Live — this runs for real, not as a dry run.", true));
+    }
+    (kind.is_mutating() && dry_run_ticked).then_some((
+        "Dry run doesn't apply to this action — it runs for real.",
+        true,
+    ))
+}
+
+/// The toast after a dispatch. A dry run says where its report is: NinjaOne's v2 API
+/// returns no script output, so it is not anywhere in this app.
+pub(crate) fn dispatch_toast(dispatched: usize, skipped: usize, dry_run: bool) -> String {
+    let mut msg = if dry_run {
+        format!("Dry run sent to {dispatched} device(s)")
+    } else {
+        format!("Dispatched to {dispatched} device(s)")
+    };
+    if skipped > 0 {
+        msg.push_str(&format!("; {skipped} skipped"));
+    }
+    if dry_run && dispatched > 0 {
+        msg.push_str(". Each script's report is in its NinjaOne activity.");
+    }
+    msg
+}
+
 /// Why `kind` cannot be dispatched as a dry run, if the UI can already tell.
 ///
 /// A dry run only appends `dryRun=true` to the composed parameters; a script that
@@ -159,7 +210,7 @@ pub(crate) fn apply_preview_summary(p: &ApplyPreview) -> String {
     }
     out.push('.');
     if let Some(at) = &p.data_fetched_at {
-        out.push_str(&format!(" Per patch data fetched {at}."));
+        out.push_str(&format!(" Patch data fetched {at}."));
     }
     out
 }

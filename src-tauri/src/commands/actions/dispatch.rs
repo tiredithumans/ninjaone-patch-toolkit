@@ -420,9 +420,15 @@ async fn send_action(
             };
             // An empty allow list would install nothing while reporting success, so
             // it fails here too rather than only in `plan()` — same defense-in-depth
-            // as the dry-run refusal above.
+            // as the dry-run refusal above. It reads the device's own targets: the
+            // composed string always carries `rebootBehavior` and `dryRun`, so testing
+            // it for emptiness never refused anything.
             let params = ctx.parameters.get(&device_id).map_or("", String::as_str);
-            if ctx.kind.is_remediation() && params.is_empty() {
+            let targeted = ctx
+                .job_requests
+                .get(&device_id)
+                .is_some_and(|r| !r.targets.is_empty());
+            if ctx.kind.is_remediation() && !targeted {
                 return Err(anyhow::anyhow!(
                     "refusing to dispatch \"{}\" with no target list for this device",
                     ctx.kind.label()

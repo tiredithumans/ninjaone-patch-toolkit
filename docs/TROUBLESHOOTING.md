@@ -127,10 +127,10 @@ patches.
 
 ### The script ran but nothing was installed
 
-Check the exit code in the **Jobs** tab. `Install-CriticalSecurityUpdates.ps1` returns **1**
-for a *configuration* error — meaning it never received its parameters. Either the library
-entry is missing the **String / Overridable** `kbAllowList`, `rebootBehavior` and `dryRun`
-script variables, or the script has no `param()` block to catch positional arguments.
+Check the exit code in the **Jobs** tab, which shows its meaning beside it for an "Apply selected"
+job. Exit **1** usually means the script never received its parameters: the library entry is
+missing the **String / Overridable** script variables (`kbAllowList` or `productAllowListB64`,
+plus `rebootBehavior` and `dryRun`).
 
 With the reference scripts in [`remediation/`](../remediation/README.md#exit-codes), each exit
 code means something specific:
@@ -138,15 +138,15 @@ code means something specific:
 - **1**: bad or empty input.
 - **2**: none of the listed KBs is offered to the device.
 - **3**: at least one KB failed, is hidden, or wasn't offered.
-- **4**: the updates installed, but `rebootBehavior=Never` held back a required restart.
+- **4**: a restart is pending and `rebootBehavior=Never` held it back. For OS patches it may have
+  been pending before this run.
 - **5**: the Windows Update Agent or elevation failed.
 - **10**: the software script has no install mechanism configured yet, so it installed nothing.
   This is by design.
 
-Also confirm you configured the right script: two files in `ninjaone-scripts` share the name
-`Install-CriticalSecurityUpdates.ps1`, and only the one under `Windows/Install/` accepts
-command-line arguments. Binding by numeric **ID** rather than name avoids picking the wrong
-one.
+Also confirm the IDs in **Settings → Patch actions** point at the library entries you imported
+from `remediation/`: the toolkit binds by numeric **ID**, so a similarly named library script
+under another ID is never the one that runs.
 
 ### A job is stuck on "Running"
 

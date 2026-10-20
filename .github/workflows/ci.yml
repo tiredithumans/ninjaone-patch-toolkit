@@ -315,6 +315,38 @@ jobs:
       - name: hook self-tests
         run: .claude/hooks/test.sh
 
+  # The remediation scripts' Pester suites — the receiving end of the parameter
+  # contract `build_parameters` pins from the Rust side. Nothing ran them, so the
+  # shared fixture bound only one side and a broken `shutdown.exe` call shipped.
+  # Windows, so they run under Windows PowerShell 5.1 (what NinjaOne runs the scripts
+  # with) as well as PowerShell 7.
+  pester:
+    name: Remediation scripts (Pester)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: just
+      # Pinned, and installed once per interpreter: each has its own CurrentUser
+      # module path. -SkipPublisherCheck because Windows ships Pester 3.4 under a
+      # different signing certificate.
+      - name: Install Pester (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+          Install-Module Pester -RequiredVersion 6.2.0 -Repository PSGallery -Scope CurrentUser -Force -SkipPublisherCheck
+      - name: Install Pester (PowerShell 7)
+        shell: pwsh
+        run: Install-Module Pester -RequiredVersion 6.2.0 -Repository PSGallery -Scope CurrentUser -Force -SkipPublisherCheck
+      - name: Pester (Windows PowerShell 5.1)
+        run: just pester powershell
+      - name: Pester (PowerShell 7)
+        run: just pester pwsh
+
   commits:
     name: Conventional commits
     runs-on: ubuntu-latest

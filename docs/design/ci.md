@@ -77,6 +77,23 @@ script or `ci.yml` changed — a vendor outage cannot block unrelated work.
   for contributors who never ran `just setup`. PR-only: PRs land as merge commits, so every
   non-merge commit on `main` already passed it.
 
+## Remediation scripts (`pester` job)
+
+The Pester suites in `remediation/tests` are the scripts' half of the parameter contract
+(`remediation/tests/fixtures/parameter-contract.json`; the Rust half is
+`build_parameters_matches_the_reference_script_fixture` in `just test`). Nothing ran them before
+this job, so the fixture bound one side only, and a `shutdown.exe` call that Windows rejects
+shipped in the software script. The job runs on Windows, under Windows PowerShell 5.1 (what
+NinjaOne runs the scripts with) and PowerShell 7, with Pester pinned (`Install-Module
+-RequiredVersion`, per interpreter, since each has its own module path). Both legs call
+`just pester <shell>`, which runs `scripts/run-pester.ps1`. Gated on `changes.code` like the Rust
+jobs. Locally: `just pester` with Pester 5+ installed; it is not in `verify`, which must not need
+PowerShell.
+
+`scripts/run-pester.ps1` imports Pester with `Import-Module`, not `#Requires -Modules`: with that
+line, `pwsh -File` exited 0 whatever the script's own `exit` said, so a failing run would have
+passed. It reads the verdict off the run result rather than Pester's `Run.Exit`.
+
 ## CodeQL (GitHub-side)
 
 Rust security queries, build-mode `none` (`.github/workflows/codeql.yml`), plus a light job for the
