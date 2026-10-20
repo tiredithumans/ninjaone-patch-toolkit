@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-10-20
+
 ### Fixed
 
 - **Patch apply, scan and reboot jobs no longer end "Timed out" after 45 minutes when NinjaOne
