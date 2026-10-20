@@ -17,10 +17,16 @@ version and start a fresh `[Unreleased]`.
   failed before it left the app with *encode plan_action: Map key is not a string and cannot be
   an object key* — the per-device target list was keyed by device id as a number, which the IPC
   serializer refuses. The keys are now sent as strings.
+- **A patch feed can no longer end early on an empty page.** NinjaOne's cursor announces the
+  scan's total, and in the field the OS feed answered the second page of a 6,721-row scan with
+  no rows at all; the fetch took that as the end and every rollup ran on 5,000 of them. An empty
+  page short of the announced total is now re-read, and one that stays empty fails the query
+  instead of returning a partial fleet as complete.
 - The log now records, for each paged NinjaOne fetch, how long it took and what the server's
   cursor said about the scan when it opened (`count`, `expires`, the first page's actual size),
-  so a fetch that fails or crawls on a very large feed can be diagnosed from the diagnostics
-  folder.
+  plus how long each query spent fetching, assembling, comparing with the previous run and
+  saving — so a slow or failing query on a very large feed can be diagnosed from the
+  diagnostics folder.
 
 ### Security
 

@@ -80,6 +80,33 @@ Note also that `REPORTING_PAGE_SIZE = 5000` rests on the envelope branch tolerat
 cap, **not** on a documented ceiling: the four patch endpoints declare `pageSize` with no maximum
 (the `maximum: 10000` in the spec is on `/queries/logged-on-users`, which this app never calls).
 
+## An empty page short of the cursor's announced `count` is re-read, then an error
+
+NinjaOne's cursor object carries `count` beside `name` and `offset`. The spec says nothing about
+what it measures; the field logs did: a 6,721-row OS feed and a 559,210-row software feed both
+opened with exactly their final row count in `count`. The normal end of a scan is a *non-empty*
+last page under a terminal cursor (`exit="cursor exhausted"`), not an empty page.
+
+Then one day the OS feed opened with `count=6721`, served 5000 rows, and answered the next request
+— 79 ms later — with zero rows. The envelope branch took any empty page as the end, so the fetch
+returned 5000 rows as the whole feed and every rollup ran on 74% of the OS patches; the next
+query, two minutes later, got all 6,721. `get_paginated_reporting` now keeps the first cursor's
+`count` (`cursor_count`) and, on an empty page while `all.len() < count`, re-sends the same cursor
+name after a short fixed pause (`EMPTY_PAGE_REREADS` × `EMPTY_PAGE_REREAD_DELAY` — the position is
+server-side state, so this just asks for the page again). A page that stays empty is reported like
+the other stalls. An empty page at or past the count, or from an endpoint that announces none, ends
+the scan exactly as before (`an_empty_page_at_or_without_an_announced_count_ends_the_scan`).
+
+A **terminal cursor** short of the count is only a warning
+(`an_exhausted_cursor_short_of_the_count_is_a_warning_not_an_error`): the count is taken when the
+scan opens, and on a live tenant a patch installed mid-scan legitimately leaves the feed a row
+shorter than announced. The server ending the scan is its own statement that this is the end; the
+shortfall is logged so a real undercount is visible.
+
+The first page also logs the cursor raw (`cursor opened`: `count`, `expires`, and the first page's
+actual length next to the size requested). `expires` is epoch seconds and has sat 120 s after the
+open on every cursor seen, which bounds how slow a scan may run before the server forgets it.
+
 ## An unreadable `cursor` is an error, not end-of-pages
 
 `next_cursor` returns `Result<Option<String>>` and bails on a shape it cannot interpret (an object

@@ -1148,3 +1148,150 @@ fn assert_redirect_named(err: &str, origin: &str) {
         "the Location path leaked: {err}"
     );
 }
+
+/// A scripted `/queries/*` server: one response per request, in order, so a test
+/// can state exactly which pages a scan was handed. The row is a software patch
+/// built from the vendor's keys; only its count per page matters here.
+struct ScriptedPages {
+    pages: Vec<serde_json::Value>,
+    served: std::sync::atomic::AtomicUsize,
+}
+
+impl ScriptedPages {
+    fn new(pages: Vec<serde_json::Value>) -> Self {
+        Self {
+            pages,
+            served: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl wiremock::Respond for ScriptedPages {
+    fn respond(&self, _: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let n = self
+            .served
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match self.pages.get(n) {
+            Some(body) => wiremock::ResponseTemplate::new(200).set_body_json(body),
+            // Past the script: a loop that keeps asking fails loudly here rather
+            // than hanging the test.
+            None => wiremock::ResponseTemplate::new(404),
+        }
+    }
+}
+
+fn rows(n: usize) -> serde_json::Value {
+    let rows: Vec<_> = (0..n)
+        .map(|i| {
+            crate::model::software_patch_json(
+                i as i64,
+                "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "7-Zip 24.09",
+                "RECOMMENDED",
+                "APPROVED",
+            )
+        })
+        .collect();
+    serde_json::Value::Array(rows)
+}
+
+async fn scan_software(pages: Vec<serde_json::Value>) -> (Result<Vec<Patch>>, usize) {
+    use crate::auth::AuthState;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .respond_with(ScriptedPages::new(pages))
+        .mount(&server)
+        .await;
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let client = NinjaApiClient::new(http, auth);
+    let result = client.fleet_software_patches(None, None, None).await;
+    let requests = server.received_requests().await.unwrap_or_default().len();
+    (result, requests)
+}
+
+/// The field case: the cursor announced 6721 rows, the first page held 5000 and the
+/// next request answered with none. Taking that as the end ran every rollup on
+/// three quarters of the OS feed. The same cursor name is asked again, and the rows
+/// it then yields are kept.
+#[tokio::test]
+async fn an_empty_page_short_of_the_announced_count_is_re_read_not_the_end() {
+    let (result, requests) = scan_software(vec![
+        json!({ "results": rows(2), "cursor": { "name": "scan", "offset": 2, "count": 3 } }),
+        json!({ "results": [], "cursor": { "name": "scan", "offset": 2, "count": 3 } }),
+        json!({ "results": rows(1), "cursor": { "name": "", "offset": 3, "count": 3 } }),
+    ])
+    .await;
+    assert_eq!(result.expect("the scan completes").len(), 3);
+    assert_eq!(
+        requests, 3,
+        "one re-read of the empty page, then the last page"
+    );
+}
+
+/// A page that stays empty while rows are still announced is a stall, reported like
+/// the other stalls: the rows in hand are a partial fleet.
+#[tokio::test]
+async fn an_empty_page_that_stays_empty_short_of_the_count_is_an_error() {
+    let empty = json!({ "results": [], "cursor": { "name": "scan", "offset": 2, "count": 3 } });
+    let (result, requests) = scan_software(vec![
+        json!({ "results": rows(2), "cursor": { "name": "scan", "offset": 2, "count": 3 } }),
+        empty.clone(),
+        empty.clone(),
+        empty,
+    ])
+    .await;
+    let err = result.expect_err("a persistent short read must be reported");
+    assert!(
+        err.to_string().contains("2 of the 3 rows"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(requests, 1 + 1 + EMPTY_PAGE_REREADS as usize);
+}
+
+/// An empty page once every announced row has arrived is the end it always was —
+/// no re-read, no error — as is one from an endpoint that announces no count.
+#[tokio::test]
+async fn an_empty_page_at_or_without_an_announced_count_ends_the_scan() {
+    let (at_count, requests) = scan_software(vec![
+        json!({ "results": rows(2), "cursor": { "name": "scan", "offset": 2, "count": 2 } }),
+        json!({ "results": [], "cursor": { "name": "scan", "offset": 2, "count": 2 } }),
+    ])
+    .await;
+    assert_eq!(at_count.expect("ends").len(), 2);
+    assert_eq!(requests, 2, "no re-read when the count is met");
+
+    let (no_count, requests) = scan_software(vec![
+        json!({ "results": rows(2), "cursor": "scan" }),
+        json!({ "results": [], "cursor": "scan" }),
+    ])
+    .await;
+    assert_eq!(no_count.expect("ends").len(), 2);
+    assert_eq!(requests, 2, "no re-read when nothing was announced");
+}
+
+/// A terminal cursor under fewer rows than announced is the server ending the scan,
+/// which a patch installed mid-scan legitimately produces; it is logged, not failed.
+#[tokio::test]
+async fn an_exhausted_cursor_short_of_the_count_is_a_warning_not_an_error() {
+    let (result, _) = scan_software(vec![json!({
+        "results": rows(2),
+        "cursor": { "name": "", "offset": 2, "count": 5 },
+    })])
+    .await;
+    assert_eq!(result.expect("the server ended the scan").len(), 2);
+}
+
+#[test]
+fn cursor_count_reads_only_a_non_negative_integer() {
+    assert_eq!(cursor_count(Some(&json!({ "count": 6721 }))), Some(6721));
+    assert_eq!(cursor_count(Some(&json!({ "count": -1 }))), None);
+    assert_eq!(cursor_count(Some(&json!({ "count": "6721" }))), None);
+    assert_eq!(cursor_count(Some(&json!({ "name": "scan" }))), None);
+    assert_eq!(cursor_count(Some(&json!("scan"))), None);
+    assert_eq!(cursor_count(None), None);
+}
