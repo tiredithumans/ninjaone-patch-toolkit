@@ -155,6 +155,13 @@ is offline, or a long install, will sit in *Running* until then — that is expe
 hang. Hover the status to get the NinjaOne activity/job ID and look the run up in the
 console; the v2 API exposes no script output, so that is where the detail lives.
 
+### Every "Apply all" job ends "Timed out"
+
+Before the fix in this release, the toolkit didn't recognise the codes NinjaOne uses to report a
+finished patch scan, apply or reboot, so those jobs waited the full 45 minutes and then said
+*Timed out* even when NinjaOne had finished them in minutes. Rows already in the Jobs tab keep
+their old status; check the device's activity feed in NinjaOne for their real outcome.
+
 ### A job says "Unknown"
 
 The dispatch request timed out **after** the body was sent, so NinjaOne may or may not have

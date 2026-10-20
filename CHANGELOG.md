@@ -11,6 +11,13 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Patch apply, scan and reboot jobs no longer end "Timed out" after 45 minutes when NinjaOne
+  finished them.** NinjaOne reports these as separate start and end activities with their own
+  status codes, which the Jobs tab didn't recognise. Jobs now settle when the run ends and show
+  that activity's ID. A single patch failing to install no longer counts as the end of the run.
+
 ### Removed
 
 - **The Jobs tab's Refresh button.** The list already updates live as jobs change, so the

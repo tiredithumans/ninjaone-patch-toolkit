@@ -1,7 +1,7 @@
 //! Resolving a dispatched job from the `/activities` feed: `match_activity`, `advance_job`.
 
 use super::*;
-use crate::model::{Activity, ActivityOutcome};
+use crate::model::{Activity, ActivityOutcome, NATIVE_END_CODES};
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 
@@ -41,12 +41,111 @@ fn is_action_activity(kind: ActionKind, activity_type: Option<&str>) -> bool {
     }
 }
 
+/// The kind-prefixed `statusCode`s one run of a native `kind` writes: its start
+/// and its end (see [`NATIVE_END_CODES`]). Scripts write the bare lifecycle codes
+/// instead, so they have none.
+fn native_run_codes(kind: ActionKind) -> &'static [&'static str] {
+    match kind {
+        ActionKind::OsPatchScan => &[
+            "PATCH_MANAGEMENT_SCAN_STARTED",
+            "PATCH_MANAGEMENT_SCAN_COMPLETED",
+            "PATCH_MANAGEMENT_FAILURE",
+        ],
+        ActionKind::OsPatchApply => &[
+            "PATCH_MANAGEMENT_APPLY_PATCH_STARTED",
+            "PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED",
+            "PATCH_MANAGEMENT_FAILURE",
+        ],
+        ActionKind::SoftwarePatchScan => &[
+            "SOFTWARE_PATCH_MANAGEMENT_SCAN_STARTED",
+            "SOFTWARE_PATCH_MANAGEMENT_SCAN_COMPLETED",
+        ],
+        ActionKind::SoftwarePatchApply => &[
+            "SOFTWARE_PATCH_MANAGEMENT_APPLY_PATCH_STARTED",
+            "SOFTWARE_PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED",
+        ],
+        ActionKind::Reboot => &["SYSTEM_REBOOTED"],
+        ActionKind::Script | ActionKind::OsPatchRemediate | ActionKind::SoftwarePatchRemediate => {
+            &[]
+        }
+    }
+}
+
+/// Whether an activity's `statusCode` can belong to a run of `kind`: a bare
+/// lifecycle code, or one of the kind's own [`native_run_codes`]. An activity with
+/// no code stays eligible, as before.
+///
+/// The type alone let an apply bind to whatever `PATCH_MANAGEMENT` activity came
+/// first — a per-patch `PATCH_MANAGEMENT_INSTALLED`, an approval, a scheduled scan —
+/// none of which ever turns terminal, so the job sat on it until the timeout.
+fn is_run_code(kind: ActionKind, code: Option<&str>) -> bool {
+    code.is_none_or(|code| {
+        matches!(
+            code,
+            "STARTED"
+                | "IN_PROCESS"
+                | "COMPLETED"
+                | "CANCEL_REQUESTED"
+                | "FAILED"
+                | "TIMED_OUT"
+                | "CANCELED"
+                | "CANCELLED"
+                | "BLOCKED"
+                | "EVALUATION_FAILURE"
+        ) || native_run_codes(kind).contains(&code)
+    })
+}
+
+/// The terminal activity that ends the run `started` began, if the feed has it yet.
+///
+/// A native run's start and end are separate activities (see [`NATIVE_END_CODES`]),
+/// so a job bound to its `…_STARTED` activity would otherwise never see it finish.
+/// The end shares the start's series uid when it has one; without one it is the
+/// earliest unclaimed end of this kind at or after the start. Only a series uid or
+/// a native start code opens this path: a script bound to its own activity id
+/// keeps resolving through that activity alone.
+fn end_of_run<'a>(
+    activities: &'a [Activity],
+    job: &JobReport,
+    started: &Activity,
+    claimed: &HashSet<i64>,
+) -> Option<&'a Activity> {
+    let series = started.series_uid.as_deref();
+    let native_start = started
+        .status_code
+        .as_deref()
+        .is_some_and(|c| native_run_codes(job.kind).contains(&c) && !NATIVE_END_CODES.contains(&c));
+    if series.is_none() && !native_start {
+        return None;
+    }
+    let from = started.activity_time.unwrap_or(0.0);
+    activities
+        .iter()
+        .filter(|a| a.id != started.id && a.is_terminal())
+        .filter(|a| a.activity_time.unwrap_or(0.0) >= from)
+        .filter(|a| a.id.is_none_or(|id| !claimed.contains(&id)))
+        .filter(|a| match series {
+            Some(uid) => a.series_uid.as_deref() == Some(uid),
+            None => {
+                is_action_activity(job.kind, a.activity_type.as_deref())
+                    && is_run_code(job.kind, a.status_code.as_deref())
+            }
+        })
+        .min_by(|a, b| {
+            a.activity_time
+                .unwrap_or(0.0)
+                .total_cmp(&b.activity_time.unwrap_or(0.0))
+        })
+}
+
 /// Finds the activity that corresponds to a dispatched job.
 ///
 /// Three tiers, most to least certain: the exact activity id the dispatch returned,
 /// the activity series uid, then the newest activity on that device since dispatch
-/// of a type the job's kind emits (see [`is_action_activity`]). The middle tier is what makes an id-less dispatch response usable —
-/// several tenants return only a `jobUid`.
+/// of a type and code the job's kind emits (see [`is_action_activity`],
+/// [`is_run_code`]). The middle tier is what makes an id-less dispatch response
+/// usable — several tenants return only a `jobUid`. A first or middle tier match
+/// that has not ended yields the run's end once the feed has it ([`end_of_run`]).
 ///
 /// `claimed` carries the activity ids already bound to *other* jobs, and only the
 /// third tier consults it. That tier is pure heuristic — device + activity type +
@@ -64,14 +163,23 @@ pub fn match_activity<'a>(
     if let Some(id) = job.activity_id
         && let Some(a) = activities.iter().find(|a| a.id == Some(id))
     {
-        return Some(a);
+        if a.is_terminal() {
+            return Some(a);
+        }
+        return Some(end_of_run(activities, job, a, claimed).unwrap_or(a));
     }
-    if let Some(uid) = job.series_uid.as_deref()
-        && let Some(a) = activities
+    if let Some(uid) = job.series_uid.as_deref() {
+        // A series holds the run's start as well as its end; the end decides.
+        let mut series = activities
             .iter()
-            .find(|a| a.series_uid.as_deref() == Some(uid))
-    {
-        return Some(a);
+            .filter(|a| a.series_uid.as_deref() == Some(uid));
+        if let Some(a) = series
+            .clone()
+            .find(|a| a.is_terminal())
+            .or_else(|| series.next())
+        {
+            return Some(a);
+        }
     }
     // Allow a little slack around the dispatch timestamp for clock skew between
     // this machine and the NinjaOne backend.
@@ -79,6 +187,7 @@ pub fn match_activity<'a>(
     activities
         .iter()
         .filter(|a| is_action_activity(job.kind, a.activity_type.as_deref()))
+        .filter(|a| is_run_code(job.kind, a.status_code.as_deref()))
         .filter(|a| a.activity_time.unwrap_or(0.0) >= floor)
         // An activity with no id cannot be tracked, so it cannot be excluded either;
         // it stays eligible exactly as before.
@@ -114,7 +223,10 @@ pub fn advance_job(
                 ActivityOutcome::TimedOut => JobState::TimedOut,
                 ActivityOutcome::Failed(code) => JobState::Failed(code),
             };
-            if job.activity_id.is_none() {
+            // The activity that settled the job, which for a native run is its end
+            // rather than the start it was bound to: that is the one worth looking
+            // up in the console.
+            if a.id.is_some() {
                 job.activity_id = a.id;
             }
             if job.series_uid.is_none() {

@@ -1243,6 +1243,163 @@ fn back_to_back_os_and_software_applies_resolve_to_their_own_activities() {
     assert!(matches!(sw.state, JobState::Failed(_)), "{:?}", sw.state);
 }
 
+/// NinjaOne writes a native apply as separate activities, each with a
+/// kind-prefixed code: the start, one per patch, then the end. The job used to bind
+/// whichever came first and never saw any of them as terminal, so every apply
+/// read "Timed out" after 45 minutes however quickly it really finished.
+#[test]
+fn a_native_apply_settles_on_its_completion_activity() {
+    let now = Utc::now();
+    let ts = now.timestamp();
+    let mut j = JobReport {
+        kind: ActionKind::OsPatchApply,
+        ..job(None, None, ts - 60)
+    };
+    let started = activity(json!({
+        "id": 300, "activityType": "PATCH_MANAGEMENT", "activityTime": (ts - 50) as f64,
+        "statusCode": "PATCH_MANAGEMENT_APPLY_PATCH_STARTED",
+    }));
+    let mut claimed = HashSet::new();
+
+    advance_job(&mut j, std::slice::from_ref(&started), now, &mut claimed);
+    assert_eq!(j.state, JobState::Running);
+    assert_eq!(j.activity_id, Some(300));
+
+    // A later tick: per-patch noise, then the run's end.
+    let list = vec![
+        activity(json!({
+            "id": 303, "activityType": "PATCH_MANAGEMENT", "activityTime": ts as f64,
+            "statusCode": "PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED", "activityResult": "SUCCESS",
+        })),
+        activity(json!({
+            "id": 302, "activityType": "PATCH_MANAGEMENT", "activityTime": (ts - 10) as f64,
+            "statusCode": "PATCH_MANAGEMENT_INSTALL_FAILED", "activityResult": "FAILURE",
+        })),
+        activity(json!({
+            "id": 301, "activityType": "PATCH_MANAGEMENT", "activityTime": (ts - 20) as f64,
+            "statusCode": "PATCH_MANAGEMENT_INSTALLED", "activityResult": "SUCCESS",
+        })),
+        started,
+    ];
+    advance_job(&mut j, &list, now, &mut claimed);
+    assert_eq!(j.state, JobState::Completed);
+    assert_eq!(
+        j.activity_id,
+        Some(303),
+        "the activity that settled the job is the one to look up"
+    );
+}
+
+/// The end arrives with no `activityResult`: the code alone says it succeeded.
+#[test]
+fn a_native_completion_code_without_a_result_is_a_success() {
+    let now = Utc::now();
+    let ts = now.timestamp();
+    for (kind, ty, code) in [
+        (
+            ActionKind::OsPatchScan,
+            "PATCH_MANAGEMENT",
+            "PATCH_MANAGEMENT_SCAN_COMPLETED",
+        ),
+        (
+            ActionKind::SoftwarePatchApply,
+            "SOFTWARE_PATCH_MANAGEMENT",
+            "SOFTWARE_PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED",
+        ),
+        (
+            ActionKind::SoftwarePatchScan,
+            "SOFTWARE_PATCH_MANAGEMENT",
+            "SOFTWARE_PATCH_MANAGEMENT_SCAN_COMPLETED",
+        ),
+        (ActionKind::Reboot, "SYSTEM", "SYSTEM_REBOOTED"),
+    ] {
+        let mut j = JobReport {
+            kind,
+            ..job(None, None, ts - 10)
+        };
+        let list = vec![activity(json!({
+            "id": 1, "activityType": ty, "activityTime": ts as f64, "statusCode": code,
+        }))];
+        advance_job(&mut j, &list, now, &mut HashSet::new());
+        assert_eq!(j.state, JobState::Completed, "{kind:?}");
+    }
+}
+
+/// A run-level failure ends an OS apply as failed; one KB failing does not.
+#[test]
+fn only_the_run_level_failure_ends_a_native_apply() {
+    let now = Utc::now();
+    let ts = now.timestamp();
+    let apply = || JobReport {
+        kind: ActionKind::OsPatchApply,
+        ..job(None, None, ts - 10)
+    };
+
+    let mut per_patch = apply();
+    let list = vec![activity(json!({
+        "id": 1, "activityType": "PATCH_MANAGEMENT", "activityTime": ts as f64,
+        "statusCode": "PATCH_MANAGEMENT_INSTALL_FAILED",
+    }))];
+    advance_job(&mut per_patch, &list, now, &mut HashSet::new());
+    assert!(!per_patch.state.is_terminal(), "{:?}", per_patch.state);
+    assert_eq!(
+        per_patch.activity_id, None,
+        "per-patch rows are not the run"
+    );
+
+    let mut failed = apply();
+    let list = vec![activity(json!({
+        "id": 2, "activityType": "PATCH_MANAGEMENT", "activityTime": ts as f64,
+        "statusCode": "PATCH_MANAGEMENT_FAILURE",
+    }))];
+    advance_job(&mut failed, &list, now, &mut HashSet::new());
+    assert_eq!(
+        failed.state,
+        JobState::Failed("PATCH_MANAGEMENT_FAILURE".into())
+    );
+}
+
+/// A scan's codes never resolve an apply, nor the other way round: both write
+/// `PATCH_MANAGEMENT` activities to the same device.
+#[test]
+fn an_apply_ignores_a_scan_on_the_same_device() {
+    let now = Utc::now();
+    let ts = now.timestamp();
+    let mut j = JobReport {
+        kind: ActionKind::OsPatchApply,
+        ..job(None, None, ts - 10)
+    };
+    let list = vec![activity(json!({
+        "id": 1, "activityType": "PATCH_MANAGEMENT", "activityTime": ts as f64,
+        "statusCode": "PATCH_MANAGEMENT_SCAN_COMPLETED",
+    }))];
+    advance_job(&mut j, &list, now, &mut HashSet::new());
+    assert!(!j.state.is_terminal());
+    assert_eq!(j.activity_id, None);
+}
+
+/// A series holds its run's start and end; the end decides even when the feed
+/// lists the start first.
+#[test]
+fn a_series_match_prefers_its_terminal_activity() {
+    let now = Utc::now().timestamp();
+    let j = job(None, Some("uid-s"), now);
+    let list = vec![
+        activity(
+            json!({ "id": 1, "seriesUid": "uid-s", "statusCode": "STARTED",
+                         "activityTime": now as f64 }),
+        ),
+        activity(
+            json!({ "id": 2, "seriesUid": "uid-s", "statusCode": "COMPLETED",
+                         "activityTime": (now + 5) as f64 }),
+        ),
+    ];
+    assert_eq!(
+        match_activity(&list, &j, &HashSet::new()).and_then(|a| a.id),
+        Some(2)
+    );
+}
+
 /// `statusCode` is the enumerated lifecycle and `activityResult` is the outcome;
 /// a COMPLETED activity carrying FAILURE is a failed job, not a successful one.
 #[test]
