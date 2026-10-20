@@ -67,7 +67,7 @@ productAllowListB64=R29vZ2xlIENocm9tZSAxNDEuMC43MzkwLjU1fDctWmlw rebootBehavior=
 |---|---|
 | `kbAllowList` | Comma-separated KB numbers, digits only, with no `KB` prefix and no spaces. The scripts also accept an optional `KB`/`kb` prefix when you run them by hand. Any other character, an empty entry or an empty list makes the script exit `1`. |
 | `productAllowListB64` | Standard base64 (RFC 4648 alphabet `A–Z a–z 0–9 + /`, with `=` padding, not URL-safe) of the **UTF-8** bytes of the selected patches' NinjaOne titles joined by `\|`, e.g. `Google Chrome 141.0.7390.55\|7-Zip`. Titles are NinjaOne's own strings, including the version, and are passed through verbatim. The list is encoded because NinjaOne splits `parameters` on spaces. A title that itself contains `\|` can't be told apart from two titles. |
-| `rebootBehavior` | `Never` or `Auto` (`RebootChoice::script_value`). `Auto` schedules a restart 60 seconds after the script finishes, but only when an install asks for one. The delay lets the NinjaOne agent report the result first. `Never` never restarts the device. |
+| `rebootBehavior` | `Never` or `Auto` (`RebootChoice::script_value`). `Auto` schedules a restart 60 seconds after the script finishes whenever a restart is pending at that point. For the OS script that includes a restart that was already pending before the run (it reads Windows Update's pending-restart flag first); the software script restarts only for its own installs. The delay lets the NinjaOne agent report the result first. `Never` never restarts the device. In the app this is **Restart afterwards if a restart is pending**. |
 | `dryRun` | `true` or `false`. With `true`, the script only reports what it would install. |
 
 How the scripts read it:
@@ -99,7 +99,7 @@ for that run.
 | `1` | Bad input: the parameters are missing, malformed or empty, or not valid base64/UTF-8. The script changed nothing. |
 | `2` | Nothing matched: none of the listed patches is offered to this device or installed on it. |
 | `3` | Incomplete: at least one listed patch failed to download or install, is hidden on the device, or wasn't offered while others were. |
-| `4` | Installed, but a restart is needed and `rebootBehavior=Never` suppressed it. NinjaOne will probably show the run as failed so that the pending restart is visible. |
+| `4` | A restart is pending and `rebootBehavior=Never` held it back. For the OS script the restart may have been pending before this run, so the code can appear even when nothing new was installed. NinjaOne will probably show the run as failed so that the pending restart is visible. |
 | `5` | Environment error: the Windows Update Agent is unavailable, the search failed, another install is in progress, the session isn't elevated, or the software install hook threw an error. |
 | `10` | Software script only: no install mechanism is configured, so nothing was installed. |
 

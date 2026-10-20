@@ -223,8 +223,8 @@ differently:
 
 | Setting | Script variables it must declare | How targets are passed |
 |---|---|---|
-| **OS patch script ID** | `kbAllowList`, `rebootBehavior`, `dryRun` (String/Overridable) | `kbAllowList=5034123,5034567` — comma‑separated KB numbers |
-| **Software patch script ID** | `productAllowListB64`, `rebootBehavior`, `dryRun` | `productAllowListB64=<base64>` — titles joined by `\|`, then base64‑encoded |
+| **OS remediation script ID** | `kbAllowList`, `rebootBehavior`, `dryRun` (String/Overridable) | `kbAllowList=5034123,5034567` — comma‑separated KB numbers |
+| **Software remediation script ID** | `productAllowListB64`, `rebootBehavior`, `dryRun` | `productAllowListB64=<base64>` — titles joined by `\|`, then base64‑encoded |
 
 Third‑party patches carry no KB number, which is why software targets are matched by **product
 title** and base64‑encoded: NinjaOne splits the `parameters` string on spaces, and product

@@ -275,8 +275,8 @@ pub(crate) fn remediation_exit_meaning(
         ),
         4 => (
             "restart held back",
-            "Installed, but a restart is pending and rebootBehavior=Never held it back. The \
-             pending restart may predate this run.",
+            "A restart is pending and rebootBehavior=Never held it back. For OS patches it may \
+             have been pending before this run.",
         ),
         5 => (
             "environment error",
