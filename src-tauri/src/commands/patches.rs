@@ -197,8 +197,13 @@ pub async fn query_patches(
     .await
     .map_err(UiError::from)?;
 
+    // Timed with the fetch and the assembly (logged in `run_query`): on a six-figure
+    // feed the fetch takes tens of seconds, and without these three numbers side by
+    // side there was no telling whether a slow query was NinjaOne or this process.
+    let diff_started = std::time::Instant::now();
     let (result, snapshot) =
         diff_against_previous_run(result, tenant.clone(), statuses, install_days).await?;
+    let diff_ms = diff_started.elapsed().as_millis();
 
     // Hand the frontend a lightweight summary (first page + rollups) and keep the
     // full result in the tenant-stamped cache for paging (`get_patch_rows`) and
@@ -213,11 +218,18 @@ pub async fn query_patches(
     tokio::task::spawn_blocking(move || crate::history::record(&entry));
 
     let outcome = state.store_last_result_if_current(token, result);
+    let persist_started = std::time::Instant::now();
     tokio::join!(
         persist_if_stored(&outcome, "run snapshot", move || changes::save(snapshot)),
         persist_if_stored(&outcome, "first-seen ledger", move || {
             first_seen::commit(&tenant, observation)
         }),
+    );
+    tracing::info!(
+        qid,
+        diff_ms,
+        persist_ms = persist_started.elapsed().as_millis(),
+        "query stored"
     );
     summary_for(outcome, summary, qid)
 }
@@ -533,6 +545,7 @@ where
     let p_os_inst = |n: usize| progress("osInstalls", n);
     let p_sw_inst = |n: usize| progress("swInstalls", n);
     let patch_df_ref = plan.patch_df.as_deref();
+    let fetch_started = std::time::Instant::now();
 
     // `join!`, not `try_join!`. `try_join!` drops the other futures the moment one
     // returns `Err`, and the two most expensive legs here — the whole-fleet device
@@ -587,6 +600,7 @@ where
     let sw_installs = sw_installs?;
 
     // Fetches done; the rest is the in-memory scope + join/rollup.
+    let fetch_ms = fetch_started.elapsed().as_millis();
     progress("joining", 0);
     // Only the families this query asked for: a family left cached from an earlier
     // query is merged by the query that next asks for it.
@@ -623,11 +637,20 @@ where
     // runs for seconds with no `.await` in it. Left inline it held a tokio worker for
     // that whole time, stalling unrelated IPC commands and the job poller. Everything
     // it needs is owned and `Send`, so moving it is just a `spawn_blocking`.
+    let assemble_started = std::time::Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || {
         assemble_result(&plan, src, sla, instance, now)
     })
     .await
     .context("join/rollup task failed")?;
+    // Fetch (a cache hit reads as ~0) and assembly side by side, with the row count
+    // they produced; `query stored` in `query_patches` adds the diff and the saves.
+    tracing::info!(
+        rows = result.rows.len(),
+        fetch_ms,
+        assemble_ms = assemble_started.elapsed().as_millis(),
+        "query assembled"
+    );
     Ok(QueryRun {
         result,
         observation,
