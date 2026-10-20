@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-20
+
 ### Fixed
 
 - **"Apply selected OS/software patches" dispatches again.** Every selected-patch dispatch
