@@ -11,7 +11,10 @@
 //! same way except integers above 2^53, which a JS number cannot hold (no id or
 //! count here comes near), and integral floats, which reach JS as plain numbers —
 //! `serde_wasm_bindgen` would read `18.0` into an integer field where `serde_json`
-//! refuses, so this side is the stricter one.
+//! refuses, so this side is the stricter one. On the *encode* side the gap runs the
+//! other way: `serde_json` stringifies an integer map key, `serde_wasm_bindgen`
+//! rejects it, so an id-keyed map an `ipc!` wrapper sends must spell its keys as
+//! strings itself (`types::string_keys`) — nothing here can catch one that doesn't.
 
 use std::collections::BTreeSet;
 
@@ -271,4 +274,19 @@ fn the_mirrored_enums_spell_exactly_the_backends_variants() {
         .map(|s| spelled(serde_json::to_value(s).expect("serialize a job state")["state"].clone()))
         .collect();
     assert_eq!(states, backend("jobState"), "JobState");
+}
+
+/// The per-device targets go over IPC as a JSON object keyed by the device id as a
+/// *string*. This pins the shape `string_keys` produces; see the module note for why
+/// `serde_json` alone cannot prove the wasm serializer accepts it.
+#[test]
+fn action_request_targets_are_keyed_by_the_device_id_spelled_as_a_string() {
+    let mut req = ActionRequest::new(ActionKind::SoftwarePatchRemediate, vec![7]);
+    req.device_targets
+        .insert(7, vec!["Google Chrome 141.0.7390.55".to_string()]);
+    let sent = serde_json::to_value(&req).expect("serialize an action request");
+    assert_eq!(
+        sent["deviceTargets"],
+        serde_json::json!({ "7": ["Google Chrome 141.0.7390.55"] })
+    );
 }

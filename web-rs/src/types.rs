@@ -1238,8 +1238,9 @@ pub struct ActionRequest {
     pub kind: ActionKind,
     pub device_ids: Vec<i64>,
     /// Device id → the ticked KBs (OS) or product titles (software) that device
-    /// should install. Serialized with string keys because JSON object keys are
-    /// strings; the backend's `HashMap<i64, _>` deserializes them.
+    /// should install. Sent with string keys (see [`string_keys`]); the backend's
+    /// `HashMap<i64, _>` reads them back.
+    #[serde(serialize_with = "string_keys")]
     pub device_targets: BTreeMap<i64, Vec<String>>,
     pub script_id: Option<i64>,
     pub script_uid: Option<String>,
@@ -1253,6 +1254,20 @@ pub struct ActionRequest {
     pub override_window: bool,
     pub dry_run: bool,
     pub confirm_token: Option<String>,
+}
+
+/// Writes an id-keyed map as a JSON object whose keys are the ids spelled out.
+///
+/// `serde_json` stringifies an integer map key on its own, which is why the field
+/// looked fine in every native test. The serializer the app actually sends through
+/// (`api::args_of`, `serde_wasm_bindgen`'s JSON-compatible mode) refuses any
+/// non-string key — "Map key is not a string and cannot be an object key" — so every
+/// "Install only the selected patches" dispatch failed before it left the webview.
+fn string_keys<S: serde::Serializer>(
+    map: &BTreeMap<i64, Vec<String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_map(map.iter().map(|(id, targets)| (id.to_string(), targets)))
 }
 
 impl ActionRequest {
