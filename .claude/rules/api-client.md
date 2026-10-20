@@ -13,6 +13,9 @@ paths:
   (`name` is a stable handle; the position rides in `offset`). **A stall is an error, not a short
   read; an unreadable cursor is an error, not end-of-pages; 5xx/connect retries are
   `Idempotent`-only.** → `docs/design/api-client.md#both-pagination-branches-require-forward-progress--and-neither-may-stop-quietly`
+- **An empty page short of the cursor's announced `count` is re-read, then an error; a terminal
+  cursor short of it is a warning.** NinjaOne's normal end is a non-empty last page.
+  → `docs/design/api-client.md#an-empty-page-short-of-the-cursors-announced-count-is-re-read-then-an-error`
 - **reqwest has `default-features = false`; keep `gzip`, `http2`, `system-proxy`, `charset`.**
   → `docs/design/api-client.md#reqwests-default-features-are-off-so-every-one-it-drops-must-be-re-added-explicitly`
 - **Verify endpoint shapes/params/enums against the spec, never from memory:**

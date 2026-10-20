@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{NinjaApiClient, ReplaySafety};
 use crate::error::truncate_body;
@@ -40,6 +40,20 @@ pub(super) const REPORTING_PAGE_SIZE: u32 = 5000;
 /// [`DEFAULT_PAGE_SIZE`] and 50M at [`REPORTING_PAGE_SIZE`] — far beyond any fleet,
 /// so reaching it means the endpoint is misbehaving, not that the fleet is large.
 const MAX_PAGES: u32 = 10_000;
+
+/// How many times an empty page is re-read while the cursor's `count` says rows
+/// remain, and how long to wait before each re-read.
+///
+/// NinjaOne's normal end of a scan is a *non-empty* last page under a terminal
+/// cursor. In the field the OS feed opened with `count=6721`, served 5000 rows, and
+/// then answered the very next request — 79 ms later — with zero rows; the loop
+/// took that as the end and every rollup ran on 74% of the fleet's OS patches. The
+/// position is server-side state keyed by the cursor name, so re-sending the same
+/// name simply asks for the page again; a short pause covers the lag the symptom
+/// suggests, and the delay is fixed rather than exponential because these pauses sit
+/// inside a scan that otherwise runs at a few hundred milliseconds per page.
+pub(super) const EMPTY_PAGE_REREADS: u8 = 2;
+const EMPTY_PAGE_REREAD_DELAY: std::time::Duration = std::time::Duration::from_millis(750);
 
 /// Sink for incremental pagination progress: invoked with the cumulative row
 /// count after each page is accumulated. Callers that don't stream progress to
@@ -114,6 +128,11 @@ impl NinjaApiClient {
         // rides along so a slow fetch can be read as rows per second from the log.
         let mut pages: u32 = 0;
         let started = std::time::Instant::now();
+        // The scan's size as the server announced it on the first cursor, when the
+        // endpoint announces one. It is what lets an empty page be told apart from
+        // the end of the feed — see [`EMPTY_PAGE_REREADS`].
+        let mut announced_total: Option<usize> = None;
+        let mut empty_rereads: u8 = 0;
 
         loop {
             let mut query: Vec<(&str, String)> = base_query.to_vec();
@@ -196,7 +215,8 @@ impl NinjaApiClient {
                     if let Some(report) = on_progress {
                         report(all.len());
                     }
-                    if pages == 1 {
+                    if announced_total.is_none() {
+                        announced_total = cursor_count(next.as_ref());
                         log_cursor_opened(path, page_len, next.as_ref());
                     }
                     // No rows on this page means the cursor is exhausted even if the
@@ -204,7 +224,33 @@ impl NinjaApiClient {
                     // *before* the cursor is interpreted, so a terminal
                     // `{"cursor": {}}` ends the fetch rather than tripping the
                     // malformed-shape error below.
+                    //
+                    // Unless the server itself said more rows exist. Then the page is
+                    // re-read a couple of times, and one that stays empty is reported
+                    // like any other stall: the rows in hand are a partial fleet.
                     if page_len == 0 {
+                        if let Some(total) = announced_total
+                            && all.len() < total
+                        {
+                            if empty_rereads < EMPTY_PAGE_REREADS {
+                                empty_rereads += 1;
+                                warn!(
+                                    path,
+                                    rows = all.len(),
+                                    total,
+                                    reread = empty_rereads,
+                                    "empty page before the announced count; re-reading the cursor"
+                                );
+                                tokio::time::sleep(EMPTY_PAGE_REREAD_DELAY).await;
+                                continue;
+                            }
+                            bail!(
+                                "{path} returned an empty page at {} of the {total} rows its cursor \
+                                 announced, {EMPTY_PAGE_REREADS} re-reads included; stopping rather \
+                                 than reporting a partial fleet as complete",
+                                all.len()
+                            );
+                        }
                         info!(
                             path,
                             rows = all.len(),
@@ -247,6 +293,22 @@ impl NinjaApiClient {
                             cursor = Some(c);
                         }
                         None => {
+                            // A warning, not an error: the count was taken when the
+                            // scan opened, and on a live tenant a patch installed
+                            // mid-scan leaves the feed one row shorter than announced.
+                            // The server ending the scan under a terminal cursor is
+                            // its own statement that this is the end; the shortfall
+                            // is recorded so a real undercount is visible in the log.
+                            if let Some(total) = announced_total
+                                && all.len() < total
+                            {
+                                warn!(
+                                    path,
+                                    rows = all.len(),
+                                    total,
+                                    "cursor exhausted short of the announced count"
+                                );
+                            }
                             info!(
                                 path,
                                 rows = all.len(),
@@ -424,11 +486,28 @@ pub(super) fn parse_page<T: DeserializeOwned>(bytes: &[u8]) -> Result<PageBody<T
     }
 }
 
+/// The scan's total row count as the cursor announces it, when it does.
+///
+/// The spec types `count` as an `int32` and says nothing about what it measures; the
+/// field logs settled it: a 6,721-row OS feed and a 559,210-row software feed both
+/// opened with exactly their final row count in `count`, on every page. A missing,
+/// non-integer or negative value is simply "not announced", and the loop then
+/// behaves as it did before the field was read at all.
+pub(super) fn cursor_count(cursor: Option<&Value>) -> Option<usize> {
+    let Some(Value::Object(obj)) = cursor else {
+        return None;
+    };
+    obj.get("count")
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+}
+
 /// Logs what the server said about the scan it just opened, verbatim.
 ///
 /// NinjaOne's cursor object carries `count` and `expires` beside the `name` and
-/// `offset` the loop reads; the spec types them (`int32`, `double`) but says nothing
-/// about what they measure, so they are logged raw rather than interpreted. A
+/// `offset` the loop reads. `expires` is epoch seconds and sat 120 s after the open
+/// on every cursor seen so far; `count` is the scan's total ([`cursor_count`]).
+/// Logged raw rather than interpreted, so a change in either shows as itself. A
 /// six-figure feed is a hundred sequential pages, and a failure deep into one cannot
 /// otherwise be told apart from a cursor that stopped being valid partway through —
 /// nor can "the server capped the page" be told from "the fleet is that size"
