@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::types::{
-    ActionKind, ActionRequest, AuthStatus, DeviceRows, DeviceSummary, PatchRow, RebootChoice,
-    RebootMode,
+    ActionKind, ActionRequest, AuthStatus, DeviceRows, DeviceSummary, PatchRow, PlannedTarget,
+    RebootChoice, RebootMode,
 };
 
 use super::super::state::{DeviceSelection, SelectedPatch};
@@ -396,6 +396,56 @@ pub(crate) fn kb_targeting_summary(targets: &BTreeMap<i64, Vec<String>>) -> Stri
     )
 }
 
+/// Ticked OS rows that carry no KB number, which "Install only the selected OS
+/// patches" cannot send — it targets by KB, and macOS and Linux OS patches have none.
+/// They are dropped from its list by [`targets_by_device`]; this is what lets the
+/// action bar say so instead of showing a count smaller than what was ticked.
+pub(crate) fn untargetable_os_note(selected: &BTreeMap<i64, DeviceSelection>) -> Option<String> {
+    let n = selected
+        .values()
+        .flat_map(|d| d.patches.values())
+        .filter(|p| p.is_os && p.kb.as_deref().is_none_or(|k| k.trim().is_empty()))
+        .count();
+    (n > 0).then(|| {
+        format!(
+            "{} ticked OS row(s) have no KB number, so \"Selected OS\" can't send them.",
+            group_thousands(n)
+        )
+    })
+}
+
+/// What each device will be told to install, one line per eligible device in plan
+/// order: `srv-01 → KB5040434, KB5039212`.
+///
+/// The confirm dialog's parameter block is the literal string sent, and for software
+/// that is base64 — the operator could not read which products a device would get.
+/// These are the same targets in words, read from the request the backend composes
+/// them from. Empty when the request sends no allow list: a native endpoint, or a
+/// script sent hand-typed parameters.
+pub(crate) fn target_lines(request: &ActionRequest, eligible: &[PlannedTarget]) -> Vec<String> {
+    let composes = request.kind.is_remediation()
+        || (request.kind == ActionKind::Script
+            && !request.device_targets.is_empty()
+            && request
+                .parameters
+                .as_deref()
+                .is_none_or(|p| p.trim().is_empty()));
+    if !composes {
+        return Vec::new();
+    }
+    eligible
+        .iter()
+        .map(|t| {
+            let targets = request
+                .device_targets
+                .get(&t.device_id)
+                .filter(|v| !v.is_empty())
+                .map_or_else(|| "nothing — an empty list".to_string(), |v| v.join(", "));
+            format!("{} → {targets}", t.device_name)
+        })
+        .collect()
+}
+
 /// Why a specific action is unavailable, beyond the reasons that block all of them.
 ///
 /// Separate from [`action_disabled_reason`] because these depend on the kind and on
@@ -501,22 +551,33 @@ pub(crate) fn action_button_reason(
 /// name the most *fundamental* obstacle, so "sign in" outranks "select a device",
 /// which outranks "an action is already running". Reordering these silently tells
 /// an operator to pick devices when the real problem is that they are signed out.
-/// `blocked` is [`action_blocked_reason`]'s verdict.
+/// `blocked` is [`action_blocked_reason`]'s verdict. `busy` covers planning as well
+/// as dispatching — both hold the one in-flight slot.
 pub(crate) fn action_disabled_reason(
     blocked: Option<String>,
+    source: SelectionSource,
     selected_devices: usize,
-    dispatching: bool,
+    busy: bool,
 ) -> Option<String> {
     if blocked.is_some() {
         return blocked;
     }
     if selected_devices == 0 {
-        return Some("Select at least one device first".to_string());
+        return Some(nothing_selected_reason(source).to_string());
     }
-    if dispatching {
-        return Some("An action is already being dispatched".to_string());
+    if busy {
+        return Some("Wait for the current plan or dispatch to finish".to_string());
     }
     None
+}
+
+/// What to select before anything can be dispatched, in the words of the tab the
+/// action bar is on: the Patches tab selects patch rows, not devices.
+pub(crate) fn nothing_selected_reason(source: SelectionSource) -> &'static str {
+    match source {
+        SelectionSource::PatchRows => "Select at least one patch row first",
+        SelectionSource::Devices => "Select at least one device first",
+    }
 }
 
 /// The action bar's selection summary. `None` when nothing is selected, so the

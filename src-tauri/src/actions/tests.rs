@@ -89,12 +89,38 @@ fn plan_skips_offline_devices_unless_opted_in() {
     assert_eq!(p.eligible.len(), 1);
     assert_eq!(p.skipped.len(), 1);
     assert!(p.skipped[0].reason.contains("offline"));
+    // Settings forbid offline targets, so ticking the checkbox would not help: the
+    // reason names the setting, not the checkbox.
+    for include_offline in [false, true] {
+        let p = plan(PlanInput {
+            include_offline,
+            ..input(ActionKind::OsPatchApply, &ids, &devices, &names, &settings)
+        });
+        assert!(
+            p.skipped[0].reason.contains("switched off in Settings"),
+            "{:?}",
+            p.skipped[0].reason
+        );
+    }
 
     // Opting in requires BOTH the per-request flag and the setting.
     let opted = ActionSettings {
         allow_offline_targets: true,
         ..ActionSettings::default()
     };
+    // Allowed but not asked for: the reason points at the checkbox.
+    let p = plan(input(
+        ActionKind::OsPatchApply,
+        &ids,
+        &devices,
+        &names,
+        &opted,
+    ));
+    assert!(
+        p.skipped[0].reason.contains("Include offline devices"),
+        "{:?}",
+        p.skipped[0].reason
+    );
     let p = plan(PlanInput {
         include_offline: true,
         ..input(ActionKind::OsPatchApply, &ids, &devices, &names, &opted)
@@ -468,6 +494,77 @@ fn apply_preview_counts_approved_and_pending_manual_per_device() {
             "{kind:?} installs no approved backlog"
         );
     }
+}
+
+fn sw_patch(device_id: i64, title: &str, status: &str) -> Patch {
+    serde_json::from_value(json!({
+        "id": format!("{device_id}-{title}"),
+        "productIdentifier": "7b1d0f2e-0000-4000-8000-000000000001",
+        "title": title,
+        "impact": "HIGH",
+        "status": status,
+        "type": "PATCH",
+        "deviceId": device_id,
+        "timestamp": 1_750_000_000.0,
+    }))
+    .expect("software patch")
+}
+
+/// A remediation installs whatever it is told, so a ticked patch NinjaOne has
+/// REJECTED on that device is named — matched by KB for OS (prefix or not) and by
+/// title for software, only on the device it is sent to.
+#[test]
+fn a_remediation_names_the_rejected_patches_it_would_install() {
+    let eligible = vec![planned(1, "srv-a"), planned(2, "srv-b")];
+    let os = vec![
+        os_patch(1, "KB5040434", "rejected"), // case-insensitive
+        os_patch(1, "KB5041580", "MANUAL"),
+        os_patch(2, "KB5041580", "REJECTED"), // rejected only where not targeted
+    ];
+    let targets = HashMap::from([
+        (1, vec!["KB5040434".to_string(), "KB5041580".to_string()]),
+        (2, vec!["KB5039212".to_string()]),
+    ]);
+    let w = rejected_targets_warning(ActionKind::OsPatchRemediate, &eligible, &targets, &os)
+        .expect("one rejected target");
+    assert!(w.starts_with("1 selected patch(es) are REJECTED"), "{w}");
+    assert!(w.contains("srv-a: KB5040434"), "{w}");
+    assert!(!w.contains("KB5041580"), "{w}");
+
+    // A record whose KB carries no prefix still matches a prefixed target.
+    let bare = vec![os_patch(2, "5039212", "REJECTED")];
+    assert!(
+        rejected_targets_warning(ActionKind::OsPatchRemediate, &eligible, &targets, &bare)
+            .is_some_and(|w| w.contains("srv-b: KB5039212"))
+    );
+
+    let sw = vec![
+        sw_patch(2, "Google Chrome 141.0.7390.55", "REJECTED"),
+        sw_patch(2, "7-Zip 24.08", "APPROVED"),
+    ];
+    let titles = HashMap::from([(
+        2,
+        vec![
+            "Google Chrome 141.0.7390.55".to_string(),
+            "7-Zip 24.08".to_string(),
+        ],
+    )]);
+    let w = rejected_targets_warning(ActionKind::SoftwarePatchRemediate, &eligible, &titles, &sw)
+        .expect("the rejected title");
+    assert!(w.contains("srv-b: Google Chrome 141.0.7390.55"), "{w}");
+    assert!(!w.contains("7-Zip"), "{w}");
+
+    // Nothing rejected, or not a remediation: no warning.
+    assert!(
+        rejected_targets_warning(
+            ActionKind::SoftwarePatchRemediate,
+            &eligible,
+            &titles,
+            &sw[1..]
+        )
+        .is_none()
+    );
+    assert!(rejected_targets_warning(ActionKind::OsPatchApply, &eligible, &targets, &os).is_none());
 }
 
 #[test]

@@ -9,7 +9,7 @@ use super::confirm::{canonical_parameters, request_hash};
 use super::dispatch::{action_detail, carries_dry_run_flag, invalidate_after, record_dispatch};
 use super::plan::{
     composed_targets, dry_run_support, parameters_preview, per_device_parameters, resolve_run_as,
-    summarize_names, untargeted_names,
+    summarize_names, untargeted_names, untargeted_remediation_blocker,
 };
 use super::*;
 use crate::actions::{PlannedTarget, RebootChoice, fmt_ts};
@@ -437,6 +437,58 @@ fn untargeted_devices_are_named_and_capped() {
         "srv-2, srv-3, srv-4, srv-5, srv-6, and 2 more"
     );
     assert_eq!(summarize_names(&["a", "b"]), "a, b");
+
+    // An entry with an empty list is no target list either.
+    let emptied = HashMap::from([(1, vec!["KB1".to_string()]), (2, Vec::new())]);
+    assert_eq!(untargeted_names(&eligible[..2], &emptied), vec!["srv-2"]);
+}
+
+/// A remediation that reaches a device with nothing of its own to install is
+/// refused, naming the device — the dispatch-site check tested the composed string,
+/// which is never empty, so this was the only place it could be caught.
+#[test]
+fn a_remediation_reaching_an_untargeted_device_is_blocked() {
+    let eligible: Vec<PlannedTarget> = [(1, "srv-a"), (2, "srv-b")]
+        .into_iter()
+        .map(|(id, name)| PlannedTarget {
+            device_id: id,
+            device_name: name.into(),
+            organization: "Contoso".into(),
+            offline: false,
+        })
+        .collect();
+    let partial = HashMap::from([(1, vec!["KB5040434".to_string()])]);
+
+    for kind in [
+        ActionKind::OsPatchRemediate,
+        ActionKind::SoftwarePatchRemediate,
+    ] {
+        let b = untargeted_remediation_blocker(kind, &eligible, &partial, true)
+            .expect("srv-b has nothing to install");
+        assert!(b.contains("srv-b") && !b.contains("srv-a"), "{b}");
+    }
+    let full = HashMap::from([
+        (1, vec!["KB5040434".to_string()]),
+        (2, vec!["KB5041580".to_string()]),
+    ]);
+    assert!(
+        untargeted_remediation_blocker(ActionKind::OsPatchRemediate, &eligible, &full, true)
+            .is_none()
+    );
+    // Nothing targeted at all is `plan()`'s "No patches selected", not a second
+    // blocker; a hand-picked script keeps its untargeted devices (a warning).
+    assert!(
+        untargeted_remediation_blocker(
+            ActionKind::OsPatchRemediate,
+            &eligible,
+            &HashMap::new(),
+            false
+        )
+        .is_none()
+    );
+    assert!(
+        untargeted_remediation_blocker(ActionKind::Script, &eligible, &partial, true).is_none()
+    );
 }
 
 /// The point of the remediation kinds: a device is told to install the patches
@@ -464,8 +516,8 @@ fn remediation_parameters_are_scoped_to_each_device() {
     req.parameters = Some("kbAllowList=999".into());
     assert_eq!(per_device_parameters(&req), params);
 
-    // A device with nothing ticked gets an empty list, which `plan()` blocks and
-    // `send_action` refuses — it must never silently inherit another device's.
+    // A device with nothing ticked gets an empty list, which `build_plan` blocks
+    // and `send_action` refuses — it must never silently inherit another device's.
     let mut partial = request(ActionKind::OsPatchRemediate, vec![1, 2]);
     partial.device_targets = HashMap::from([(1, vec!["KB5040434".into()])]);
     assert_eq!(

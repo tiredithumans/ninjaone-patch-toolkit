@@ -329,7 +329,7 @@ function Invoke-SoftwareRemediation {
         if ($request.RebootBehavior -eq 'Auto') {
             # A delayed restart lets this script exit and the NinjaOne agent report the result
             # before the machine goes down.
-            & shutdown.exe /r /t 60 /d p:4:1/c 'NinjaOne Patch Toolkit: restarting to finish installing software updates.' | Out-Host
+            & shutdown.exe /r /t 60 /d p:4:1 /c 'NinjaOne Patch Toolkit: restarting to finish installing software updates.' | Out-Host
             if ($LASTEXITCODE -eq 0) {
                 $rebootScheduled = $true
                 Write-Host 'REBOOT           : restart scheduled in 60 seconds (rebootBehavior=Auto).'

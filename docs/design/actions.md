@@ -33,8 +33,32 @@ The remediation script ids live in `settings.actions.{os,software}_patch_script_
 resolved **backend-side** from Settings (`actions::remediation_script_id`), never taken from the
 request — the kind carries guardrails a hand-picked `Script` doesn't. An unset id is a `plan()`
 blocker, and so is an empty target list (a script with an empty allow list reports success having
-installed nothing). `AutomationScript::accepts_kb_allow_list` still gates the per-KB checkbox on
-the hand-driven `ScriptPicker` path.
+installed nothing) — batch-wide in `plan()`, and per device in `build_plan`
+(`untargeted_remediation_blocker`). `plan()` sees the targets only flattened, so a request naming
+a device it held no targets for used to pass, and `send_action`'s refusal tested the composed
+string, which always carries `rebootBehavior` and `dryRun` and so was never empty; it now reads
+the device's own recorded targets. `AutomationScript::accepts_kb_allow_list` still gates the
+per-KB checkbox on the hand-driven `ScriptPicker` path, and a tick left on while the picked script
+declares no `kbAllowList` (the checkbox hidden) is not sent.
+
+### A REJECTED target is named, not refused
+
+A remediation script installs whatever it is told, and nothing on the write path read a patch's
+status, so a patch NinjaOne records as REJECTED could be ticked and installed with no word in the
+dialog. `build_plan` peeks the same cached current patches the Apply-all preview reads and
+`actions::rejected_targets_warning` names each ticked patch rejected on the device it is sent to
+(KB number for OS, title for software). A warning, not a blocker: overriding a rejection can be
+deliberate. A cold cache adds nothing rather than guessing; the rows ticked showed each status.
+
+### The confirm dialog says the targets in words
+
+The parameter block is the literal string sent, and stays: the toolkit never sends a string the
+operator has not seen. For software that string is base64, so above it the dialog lists each
+eligible device's targets as titles or KBs (`util::target_lines`, read from the same
+`device_targets` the backend composes from). It also states first whether the dispatch is a dry
+run or live (`util::confirm_mode_line`) — the heading reads the same either way, and Dry run,
+on by default, reaches only the script-driven kinds, so a native apply or reboot planned with it
+ticked says it runs for real.
 
 ### The parameter encoding is chosen by kind
 
@@ -191,11 +215,24 @@ plus a Retry that re-opens the same plan → confirm dialog (below). `Run
 as`, `Restart the device after installing` and `Dry run` are rendered **once** and reach every
 `runs_a_script()` kind — they mean the same thing for a remediation install and a hand-picked
 script, and duplicating the controls across two tabs while they wrote the same signals meant
-ticking "Dry run" in the Jobs tab silently changed what an Apply button did. Each options row
-carries a label naming the actions it reaches: the native endpoints take no parameters, have no
+ticking "Dry run" in the Jobs tab silently changed what an Apply button did. (The labels now read
+`Restart afterwards if a restart is pending` — the OS script also acts on a restart pending from
+before the run — and `Dry run (installs nothing; …)`, which says the report is in NinjaOne's
+activity, since v2 returns no script output.) Each options row carries a label naming the actions
+it reaches: the native endpoints take no parameters, have no
 preview mode and run as NinjaOne's agent, so an unlabelled "Dry run" beside them reads as
 protection they cannot give. The maintenance-window override sits in the "Applies to every
 action" row for the same reason: it is one choice about the next dispatch, not a per-button one.
+So does "Include offline devices", which is disabled while Settings forbids offline targets
+(`util::offline_targets_offered`) and only then sent: `plan()` needs both switches, and it used to
+be offered regardless and then ignored. An offline device's skip reason names whichever switch is
+off.
+
+The Jobs tab shows each row's targets (`util::job_targets_summary`, from its `JobRequest`), a Mode
+that says what the job was sent rather than what any install might do (`job_mode_label`: only a
+reboot, a native apply, or a script sent `rebootBehavior=Auto` mentions a restart), and, for a
+remediation, the reference scripts' meaning of its exit code (`util::remediation_exit_meaning`,
+the `remediation/README.md` table).
 
 ## A retry is a re-plan, never a replay
 

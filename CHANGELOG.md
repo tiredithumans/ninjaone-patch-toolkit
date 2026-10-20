@@ -11,6 +11,38 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Restart afterwards" now works for the software remediation script.** A missing space in
+  its `shutdown.exe` call (`/d p:4:1/c`) made Windows reject the restart, so `rebootBehavior=Auto`
+  never restarted anything. Re-import `remediation/Install-SelectedSoftwarePatches.ps1` into the
+  NinjaOne library to pick it up.
+- An "Apply selected" request that names a device with no selected patches of its own is now
+  refused before anything is sent, instead of running the script there with an empty list.
+- **"Include offline devices" is disabled while Settings → Patch actions doesn't allow offline
+  targets.** It used to be offered and then ignored. An offline device's skip reason now says
+  which switch is off.
+- The Jobs tab's **Mode** no longer reads "Live + reboot" for every install. It now says
+  "Live + restart if pending" only when the script was told to restart, and "Live (may reboot)"
+  for the install-all actions, where NinjaOne's own policy decides.
+
+### Changed
+
+- **The confirm dialog lists what each device will be told to install**, as KB numbers or product
+  titles, above the exact parameter string (which for software patches is unreadable base64). Its
+  first lines also say whether this is a dry run or a live run. If Dry run is ticked but the action
+  doesn't support it, the dialog says it will run for real.
+- The confirm dialog warns when a selected patch is **REJECTED in NinjaOne**: "Apply selected"
+  installs it anyway.
+- The action bar notes ticked OS patches that have no KB number (such as macOS updates), which
+  "Selected OS" can't send.
+- Each Jobs row shows the patches that device was sent. For "Apply selected" jobs, the exit code
+  comes with its meaning, e.g. "4 · restart held back", with the full explanation on hover.
+- Clearer wording: the Dry run checkbox and the post-dispatch message say a dry run's report is in
+  NinjaOne's activity for the run. The restart checkbox now reads **Restart afterwards if a restart
+  is pending**, because the OS script also restarts for a restart that was already pending. The
+  docs describe exit code 4 the same way.
+
 ## [0.17.0] - 2026-10-20
 
 ### Fixed
