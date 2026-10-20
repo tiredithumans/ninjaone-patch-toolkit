@@ -11,6 +11,17 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Apply selected OS/software patches" dispatches again.** Every selected-patch dispatch
+  failed before it left the app with *encode plan_action: Map key is not a string and cannot be
+  an object key* — the per-device target list was keyed by device id as a number, which the IPC
+  serializer refuses. The keys are now sent as strings.
+- The log now records, for each paged NinjaOne fetch, how long it took and what the server's
+  cursor said about the scan when it opened (`count`, `expires`, the first page's actual size),
+  so a fetch that fails or crawls on a very large feed can be diagnosed from the diagnostics
+  folder.
+
 ### Security
 
 - Excel export now uses zip 9, clearing RUSTSEC-2026-0367, -0368 and -0369. The auto-updater

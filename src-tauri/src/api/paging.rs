@@ -110,8 +110,10 @@ impl NinjaApiClient {
         let mut after: Option<i64> = None;
         // Reported at every exit. A short read is otherwise indistinguishable from a
         // complete one at every call site above this function, and a whole-fleet feed
-        // that stops early understates every number derived from it.
+        // that stops early understates every number derived from it. The elapsed time
+        // rides along so a slow fetch can be read as rows per second from the log.
         let mut pages: u32 = 0;
+        let started = std::time::Instant::now();
 
         loop {
             let mut query: Vec<(&str, String)> = base_query.to_vec();
@@ -159,7 +161,14 @@ impl NinjaApiClient {
                     // the largest id seen; stop if it can't move forward (no id, or
                     // no new rows) so a misbehaving endpoint can't loop forever.
                     if len < page_size as usize {
-                        info!(path, rows = all.len(), pages, exit = "short page", "paged");
+                        info!(
+                            path,
+                            rows = all.len(),
+                            pages,
+                            elapsed_s = started.elapsed().as_secs(),
+                            exit = "short page",
+                            "paged"
+                        );
                         return Ok(all);
                     }
                     match max_id {
@@ -187,13 +196,23 @@ impl NinjaApiClient {
                     if let Some(report) = on_progress {
                         report(all.len());
                     }
+                    if pages == 1 {
+                        log_cursor_opened(path, page_len, next.as_ref());
+                    }
                     // No rows on this page means the cursor is exhausted even if the
                     // server echoes a stale token — stop to avoid a loop. Checked
                     // *before* the cursor is interpreted, so a terminal
                     // `{"cursor": {}}` ends the fetch rather than tripping the
                     // malformed-shape error below.
                     if page_len == 0 {
-                        info!(path, rows = all.len(), pages, exit = "empty page", "paged");
+                        info!(
+                            path,
+                            rows = all.len(),
+                            pages,
+                            elapsed_s = started.elapsed().as_secs(),
+                            exit = "empty page",
+                            "paged"
+                        );
                         return Ok(all);
                     }
                     match next_cursor(next.as_ref())? {
@@ -232,6 +251,7 @@ impl NinjaApiClient {
                                 path,
                                 rows = all.len(),
                                 pages,
+                                elapsed_s = started.elapsed().as_secs(),
                                 exit = "cursor exhausted",
                                 "paged"
                             );
@@ -240,7 +260,14 @@ impl NinjaApiClient {
                     }
                 }
                 PageBody::Empty => {
-                    info!(path, rows = all.len(), pages, exit = "empty body", "paged");
+                    info!(
+                        path,
+                        rows = all.len(),
+                        pages,
+                        elapsed_s = started.elapsed().as_secs(),
+                        exit = "empty body",
+                        "paged"
+                    );
                     return Ok(all);
                 }
             }
@@ -395,6 +422,28 @@ pub(super) fn parse_page<T: DeserializeOwned>(bytes: &[u8]) -> Result<PageBody<T
             truncate_body(&String::from_utf8_lossy(trimmed))
         ),
     }
+}
+
+/// Logs what the server said about the scan it just opened, verbatim.
+///
+/// NinjaOne's cursor object carries `count` and `expires` beside the `name` and
+/// `offset` the loop reads; the spec types them (`int32`, `double`) but says nothing
+/// about what they measure, so they are logged raw rather than interpreted. A
+/// six-figure feed is a hundred sequential pages, and a failure deep into one cannot
+/// otherwise be told apart from a cursor that stopped being valid partway through —
+/// nor can "the server capped the page" be told from "the fleet is that size"
+/// without the first page's actual length next to the size requested.
+fn log_cursor_opened(path: &str, first_page_rows: usize, cursor: Option<&Value>) {
+    let Some(Value::Object(obj)) = cursor else {
+        return;
+    };
+    info!(
+        path,
+        first_page_rows,
+        count = ?obj.get("count"),
+        expires = ?obj.get("expires"),
+        "cursor opened"
+    );
 }
 
 /// One page-to-page cursor: the token the next request echoes back, plus the
