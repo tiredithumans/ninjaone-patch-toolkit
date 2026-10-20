@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{ActionRequest, JobReport, JobRequest, JobState};
+use crate::types::{ActionKind, ActionRequest, JobReport, JobRequest, JobState};
 
 /// Upserts `incoming` into `jobs` by job id: a known id is replaced in place (the
 /// row arrives already advanced), an unknown one is appended — except that a row
@@ -213,4 +213,81 @@ pub(crate) fn retryable_batches(jobs: &[JobReport]) -> Vec<RetryBatch> {
         .rev()
         .filter(|b| b.job_ids.len() > 1)
         .collect()
+}
+
+/// What a job was told to install, for its Jobs row: `(short, full)`, the first
+/// three targets then "and N more", with the whole list for the tooltip. `None`
+/// when it was sent no list (a native endpoint, a reboot, a script sent hand-typed
+/// parameters).
+///
+/// Selective patching is the point of the remediation kinds, and once dispatched
+/// the per-device list existed only on the job's recorded request.
+pub(crate) fn job_targets_summary(job: &JobReport) -> Option<(String, String)> {
+    const SHOWN: usize = 3;
+    let targets = &job.request.as_ref()?.targets;
+    if targets.is_empty() {
+        return None;
+    }
+    let full = targets.join(", ");
+    let short = if targets.len() > SHOWN {
+        format!(
+            "{}, and {} more",
+            targets[..SHOWN].join(", "),
+            targets.len() - SHOWN
+        )
+    } else {
+        full.clone()
+    };
+    Some((short, full))
+}
+
+/// What a remediation job's exit code means, `(short, long)`, from the exit-code
+/// table of the toolkit's reference scripts (`remediation/README.md`, which pins
+/// the same codes). `None` for other kinds, whose scripts define their own codes,
+/// and for a code the reference scripts never return.
+///
+/// NinjaOne's v2 API returns no script output, so the code is all the Jobs tab
+/// has; a bare `4` beside "Failed: FAILURE" read as a failed install.
+pub(crate) fn remediation_exit_meaning(
+    kind: ActionKind,
+    code: i32,
+) -> Option<(&'static str, &'static str)> {
+    if !kind.is_remediation() {
+        return None;
+    }
+    Some(match code {
+        0 => (
+            "done",
+            "Every listed patch is installed or already was (on a dry run: would install or \
+             already is).",
+        ),
+        1 => (
+            "bad input",
+            "The parameters were missing, malformed or empty. Nothing was changed.",
+        ),
+        2 => (
+            "nothing matched",
+            "None of the listed patches is offered to this device or installed on it.",
+        ),
+        3 => (
+            "incomplete",
+            "At least one listed patch failed, is hidden on the device, or wasn't offered.",
+        ),
+        4 => (
+            "restart held back",
+            "Installed, but a restart is pending and rebootBehavior=Never held it back. The \
+             pending restart may predate this run.",
+        ),
+        5 => (
+            "environment error",
+            "Windows Update was unavailable or busy, the session wasn't elevated, or the \
+             install hook failed.",
+        ),
+        10 => (
+            "no install mechanism",
+            "The software script's install hook isn't implemented yet, so nothing was \
+             installed. See remediation/README.md.",
+        ),
+        _ => return None,
+    })
 }

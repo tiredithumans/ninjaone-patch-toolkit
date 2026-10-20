@@ -944,11 +944,6 @@ impl ActionKind {
         Self::Script,
     ];
 
-    /// Whether this action can restart the device as a side effect.
-    pub fn can_reboot(self) -> bool {
-        !matches!(self, Self::OsPatchScan | Self::SoftwarePatchScan)
-    }
-
     /// Whether this installs *only* the ticked patches, via the remediation script
     /// configured for its family. Mirrors the backend; see `actions::ActionKind`.
     pub fn is_remediation(self) -> bool {

@@ -1149,11 +1149,37 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                                     </button>
                                                 }
                                             });
+                                        // The reference scripts' exit codes, in
+                                        // words: NinjaOne returns no output, and a
+                                        // bare `4` read as a failed install.
+                                        let meaning = j
+                                            .exit_code
+                                            .and_then(|c| util::remediation_exit_meaning(j.kind, c));
+                                        let exit_help = meaning.map(|(_, long)| long);
+                                        let exit_text = match (j.exit_code, meaning) {
+                                            (Some(c), Some((short, _))) => format!("{c} · {short}"),
+                                            (Some(c), None) => c.to_string(),
+                                            (None, _) => String::new(),
+                                        };
                                         view! {
                                             <tr>
                                                 <td>{j.device_name.clone()}</td>
                                                 <td>{j.organization.clone()}</td>
-                                                <td>{j.detail.clone()}</td>
+                                                <td>
+                                                    {j.detail.clone()}
+                                                    // Which patches this device was
+                                                    // sent — the point of a selective
+                                                    // install, and on no other surface
+                                                    // once the dialog closed.
+                                                    {util::job_targets_summary(&j)
+                                                        .map(|(short, full)| {
+                                                            view! {
+                                                                <span class="job-targets" title=full>
+                                                                    {short}
+                                                                </span>
+                                                            }
+                                                        })}
+                                                </td>
                                                 <td>{job_mode_label(&j)}</td>
                                                 <td>
                                                     // NinjaOne v2 exposes no script
@@ -1167,12 +1193,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                                         {j.state.label()}
                                                     </span>
                                                 </td>
-                                                <td>
-                                                    {j
-                                                        .exit_code
-                                                        .map(|c| c.to_string())
-                                                        .unwrap_or_default()}
-                                                </td>
+                                                <td title=exit_help>{exit_text}</td>
                                                 <td>{j.dispatched_at.clone()}</td>
                                                 <td>{format_duration(j.duration_seconds)}</td>
                                                 <td>{retry}</td>
