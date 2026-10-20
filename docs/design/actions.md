@@ -391,13 +391,36 @@ the exit code plus the activity/series correlator.
 ## Resolving a dispatched action from `/activities`
 
 Three fields decide a job's fate and the spec gives them different jobs: `statusCode` is the
-enumerated lifecycle (`STARTED`/`IN_PROCESS`/`COMPLETED`/`CANCELLED`/`BLOCKED`), `status` is
+enumerated lifecycle (`STARTED`/`IN_PROCESS`/`COMPLETED`/`CANCELLED`/`BLOCKED` for scripts,
+kind-prefixed codes for the native actions — see below), `status` is
 free-text "Status description" with no enum, and `activityResult` is the outcome
 (`SUCCESS`/`FAILURE`/`UNSUPPORTED`/`UNCOMPLETED`/`AGENT_OFFLINE`). `Activity::lifecycle()`
 prefers `statusCode` and falls back to `status`; `Activity::outcome()` takes the verdict from
 `activityResult` first, so a `COMPLETED` activity carrying `FAILURE` is a failed job. The exit code
 comes from `data` (the spec's untyped bag), with `result` kept as an alias — reading only `result`
 meant `exit_code()` always returned `None` and every job reported "Completed, no exit code".
+
+### Native actions write their start and end as separate activities
+
+A native scan, apply or reboot never moves one activity from `STARTED` to `COMPLETED`. NinjaOne
+writes a new activity per step with a kind-prefixed code from the spec's `statusCode` enum:
+`PATCH_MANAGEMENT_APPLY_PATCH_STARTED`, a `PATCH_MANAGEMENT_INSTALLED` or `…_INSTALL_FAILED`
+per patch, then `PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED` (scans, software and `SYSTEM_REBOOTED`
+likewise). The matcher knew only the bare codes, so the third tier bound an apply to whichever
+`PATCH_MANAGEMENT` activity came first, which never turned terminal, and every apply read
+"Timed out" after 45 minutes. Now:
+
+- `model::NATIVE_END_CODES` are terminal; the completions succeed unless `activityResult`
+  says otherwise, and `PATCH_MANAGEMENT_FAILURE` fails the run. A per-patch `…_INSTALL_FAILED`
+  ends nothing.
+- `is_run_code` limits the third tier to bare lifecycle codes and the kind's own start/end
+  codes, so a per-patch row, an approval or a scan never binds an apply.
+- A job bound to a run's start moves to the run's end (`end_of_run`): the same series uid, or
+  the earliest unclaimed end of that kind after the start. The settled job reports the end's
+  activity id. A script bound to its own activity id with no series uid is unaffected.
+
+`actions::tests::a_native_apply_settles_on_its_completion_activity` pins it with the vendor's
+codes; every earlier fixture used a bare `COMPLETED`, which is why this went unseen.
 
 ### One read per device per tick
 

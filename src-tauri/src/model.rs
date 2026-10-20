@@ -616,7 +616,8 @@ impl RebootMode {
 /// The spec's `Activity` schema names three fields the terminal-state decision
 /// depends on, and they are not interchangeable:
 /// * `statusCode` — the enumerated lifecycle code (`STARTED`, `IN_PROCESS`,
-///   `COMPLETED`, `CANCELLED`, `BLOCKED`, …).
+///   `COMPLETED`, `CANCELLED`, `BLOCKED`, … for scripts; kind-prefixed codes such as
+///   `PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED` for the native actions).
 /// * `status` — "Status description", free text, with no enum at all.
 /// * `activityResult` — `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED` /
 ///   `AGENT_OFFLINE`.
@@ -658,6 +659,32 @@ pub struct Activity {
     pub data: Option<Value>,
 }
 
+/// The `statusCode`s that end a native scan, apply or reboot successfully.
+///
+/// NinjaOne does not move one activity from `STARTED` to `COMPLETED` for these: it
+/// writes a separate activity per step (`PATCH_MANAGEMENT_APPLY_PATCH_STARTED`, the
+/// per-patch `PATCH_MANAGEMENT_INSTALLED`, then `…_APPLY_PATCH_COMPLETED`), each
+/// with its own kind-prefixed code from the spec's `statusCode` enum.
+pub const NATIVE_COMPLETION_CODES: [&str; 5] = [
+    "PATCH_MANAGEMENT_SCAN_COMPLETED",
+    "PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED",
+    "SOFTWARE_PATCH_MANAGEMENT_SCAN_COMPLETED",
+    "SOFTWARE_PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED",
+    "SYSTEM_REBOOTED",
+];
+
+/// Every `statusCode` that ends a native action: the completions plus the OS
+/// patcher's run-level `PATCH_MANAGEMENT_FAILURE`. The per-patch
+/// `…_INSTALL_FAILED` is deliberately absent — one KB failing does not end the run.
+pub const NATIVE_END_CODES: [&str; 6] = [
+    NATIVE_COMPLETION_CODES[0],
+    NATIVE_COMPLETION_CODES[1],
+    NATIVE_COMPLETION_CODES[2],
+    NATIVE_COMPLETION_CODES[3],
+    NATIVE_COMPLETION_CODES[4],
+    "PATCH_MANAGEMENT_FAILURE",
+];
+
 /// How a terminal [`Activity`] turned out, decoupled from the `JobState` it maps to
 /// so `model` stays free of the action domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -680,6 +707,10 @@ impl Activity {
     /// `FAILED`/`TIMED_OUT` are kept even though the documented `statusCode` enum
     /// contains neither — dropping a spelling that a tenant might still emit would
     /// turn a finished job back into one that hangs to timeout.
+    ///
+    /// The native actions' end codes ([`NATIVE_END_CODES`]) count too: matching
+    /// only the bare lifecycle codes meant every patch apply, scan and reboot
+    /// resolved by timeout.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.lifecycle(),
@@ -692,7 +723,9 @@ impl Activity {
                     | "BLOCKED"
                     | "EVALUATION_FAILURE"
             )
-        )
+        ) || self
+            .lifecycle()
+            .is_some_and(|code| NATIVE_END_CODES.contains(&code))
     }
 
     /// How a terminal activity turned out, as a short code for the job report.
@@ -712,6 +745,7 @@ impl Activity {
         }
         match self.lifecycle() {
             Some("COMPLETED") => ActivityOutcome::Succeeded,
+            Some(code) if NATIVE_COMPLETION_CODES.contains(&code) => ActivityOutcome::Succeeded,
             Some("TIMED_OUT") => ActivityOutcome::TimedOut,
             Some(other) => ActivityOutcome::Failed(other.to_string()),
             None => ActivityOutcome::Failed("unknown terminal state".into()),

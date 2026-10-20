@@ -62,7 +62,9 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`,
   at most `MAX_FEED_READS_IN_FLIGHT` in flight): `statusCode` is lifecycle, `activityResult` is
   the verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is
-  applied client-side; `is_action_activity(kind, type)` accepts only the types that kind emits.
+  applied client-side; `is_action_activity(kind, type)` and `is_run_code(kind, code)` accept only
+  the types and codes that kind emits. Native runs write start and end as separate activities
+  with kind-prefixed codes (`model::NATIVE_END_CODES`); fixtures use the vendor's codes.
   → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 - **Opening audit records are written once per batch, before any task is spawned, and a
   dispatch task that panics still yields an `Unknown` job** (`dispatch::fill_unreported`, dated
