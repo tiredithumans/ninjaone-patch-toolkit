@@ -163,8 +163,17 @@ impl AppState {
         source: SelectionSource,
     ) -> Option<ActionRequest> {
         let opts = util::RunOptions {
-            use_kb_targeting: self.actions.use_kb_targeting.get_untracked(),
-            include_offline: self.actions.include_offline.get_untracked(),
+            // Only for a script that declares a kbAllowList: the checkbox is hidden
+            // for any other, and a hidden tick must not decide what is sent.
+            use_kb_targeting: self.actions.use_kb_targeting.get_untracked()
+                && self.picked_script_accepts_kb_allow_list(),
+            // Only while Settings allows offline targets, like the window override
+            // below: the checkbox is disabled otherwise, and its old tick stays.
+            include_offline: self.actions.include_offline.get_untracked()
+                && self
+                    .settings
+                    .f_actions
+                    .with_untracked(util::offline_targets_offered),
             // Only while the checkbox is on screen: a tick left behind after the
             // window stopped being enforced (or overridable) must not ride along.
             override_window: self.actions.override_window.get_untracked()
@@ -199,6 +208,16 @@ impl AppState {
         }
     }
 
+    /// Whether the script picked in the script picker declares a `kbAllowList`
+    /// (unknown or unpicked is no). Untracked, for `build_request`.
+    fn picked_script_accepts_kb_allow_list(self) -> bool {
+        let id = self.actions.script_id.get_untracked();
+        self.actions.scripts.with_untracked(|list| {
+            list.iter()
+                .any(|s| Some(s.id) == id && s.accepts_kb_allow_list)
+        })
+    }
+
     /// Asks the backend what `kind` would do against `source`'s selection and opens
     /// the confirmation modal.
     pub(in crate::app) fn open_plan(self, kind: ActionKind, source: SelectionSource) {
@@ -215,7 +234,7 @@ impl AppState {
             return;
         };
         if request.device_ids.is_empty() {
-            self.notify(Toast::err("Select at least one device first"));
+            self.notify(Toast::err(util::nothing_selected_reason(source)));
             return;
         }
         self.plan_request(request);
@@ -311,6 +330,7 @@ impl AppState {
         // "Preview on N devices" raised the amber banner and its Refresh link forced
         // a whole-fleet refetch for nothing.
         let mutating = request.kind.is_mutating() && !request.dry_run;
+        let dry_run = request.dry_run;
 
         self.actions.dispatching.set(true);
         spawn_local(async move {
@@ -332,15 +352,11 @@ impl AppState {
                         // The on-screen result predates the change we just made.
                         self.actions.results_stale.set(true);
                     }
-                    let msg = if batch.skipped > 0 {
-                        format!(
-                            "Dispatched to {} device(s); {} skipped",
-                            batch.dispatched, batch.skipped
-                        )
-                    } else {
-                        format!("Dispatched to {} device(s)", batch.dispatched)
-                    };
-                    self.notify(Toast::ok(msg));
+                    self.notify(Toast::ok(util::dispatch_toast(
+                        batch.dispatched,
+                        batch.skipped,
+                        dry_run,
+                    )));
                 }
                 // Kept in the dialog, which stays open: a toast behind the overlay
                 // vanished after a few seconds and left a Run button that could

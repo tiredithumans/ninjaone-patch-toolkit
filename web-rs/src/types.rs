@@ -1116,6 +1116,7 @@ impl JobReport {
 #[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct PlannedTarget {
+    pub device_id: i64,
     pub device_name: String,
     pub organization: String,
     pub offline: bool,

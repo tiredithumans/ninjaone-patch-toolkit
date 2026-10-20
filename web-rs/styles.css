@@ -1526,6 +1526,17 @@ tbody tr:hover {
   overflow-y: auto;
 }
 
+/* The same targets as the parameter block, in words — one device per line, capped
+   like it so a full batch keeps the Confirm button on screen. */
+.modal-target-lines {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
 .modal-targets,
 .modal-skipped {
   margin: 8px 0;

@@ -4,9 +4,9 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, ActionSettings, AuthStatus, DeviceSummary, JobReport, JobRequest, JobState,
-    Location, Organization, PatchFamilies, PatchGroup, PatchRow, RebootChoice, RebootMode, RowSort,
-    RowSortKey, RunRecord,
+    ActionKind, ActionRequest, ActionSettings, AuthStatus, DeviceSummary, JobReport, JobRequest,
+    JobState, Location, Organization, PatchFamilies, PatchGroup, PatchRow, PlannedTarget,
+    RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -1104,21 +1104,27 @@ fn an_optional_script_id_clears_on_blank_and_holds_on_garbage() {
 #[test]
 fn the_disabled_reason_names_the_most_fundamental_obstacle_first() {
     let blocked = Some("Sign in to run patch actions.".to_string());
+    let rows = SelectionSource::PatchRows;
     assert_eq!(
-        action_disabled_reason(blocked.clone(), 0, true).as_deref(),
+        action_disabled_reason(blocked.clone(), rows, 0, true).as_deref(),
         Some("Sign in to run patch actions."),
         "auth outranks both selection and dispatch state"
     );
     assert_eq!(
-        action_disabled_reason(None, 0, true).as_deref(),
-        Some("Select at least one device first"),
+        action_disabled_reason(None, rows, 0, true).as_deref(),
+        Some("Select at least one patch row first"),
         "an empty selection outranks an in-flight dispatch"
     );
+    // The Needs Reboot tab selects devices, so it asks for one.
     assert_eq!(
-        action_disabled_reason(None, 3, true).as_deref(),
-        Some("An action is already being dispatched")
+        action_disabled_reason(None, SelectionSource::Devices, 0, false).as_deref(),
+        Some("Select at least one device first")
     );
-    assert_eq!(action_disabled_reason(None, 3, false), None);
+    assert_eq!(
+        action_disabled_reason(None, rows, 3, true).as_deref(),
+        Some("Wait for the current plan or dispatch to finish")
+    );
+    assert_eq!(action_disabled_reason(None, rows, 3, false), None);
 }
 
 #[test]
@@ -1974,6 +1980,112 @@ fn remediation_summary_counts_distinct_patches_not_dispatches() {
         None,
         "a family with nothing ticked renders no chip"
     );
+}
+
+/// OS rows with no KB (macOS, Linux) are dropped from "Selected OS"; the bar says
+/// so rather than showing a target count smaller than what was ticked.
+#[test]
+fn ticked_os_rows_without_a_kb_are_called_out() {
+    let no_kb = SelectedPatch {
+        kb: None,
+        name: "macOS Sonoma 14.7".into(),
+        is_os: true,
+    };
+    let selected = BTreeMap::from([
+        (1, selection(vec![os("KB5040434"), no_kb.clone()])),
+        (2, selection(vec![no_kb, sw("7-Zip 24.08")])),
+    ]);
+    let note = untargetable_os_note(&selected).expect("two rows lack a KB");
+    assert!(
+        note.starts_with("2 ticked OS row(s) have no KB number"),
+        "{note}"
+    );
+
+    // Software rows never carry a KB and are targeted by title: not counted.
+    let fine = BTreeMap::from([(1, selection(vec![os("KB1"), sw("7-Zip 24.08")]))]);
+    assert_eq!(untargetable_os_note(&fine), None);
+}
+
+fn planned(id: i64, name: &str) -> PlannedTarget {
+    PlannedTarget {
+        device_id: id,
+        device_name: name.into(),
+        organization: "Org".into(),
+        offline: false,
+    }
+}
+
+/// The confirm dialog's targets in words: software travels base64-encoded, so
+/// without these lines the operator could not read what a device would install.
+#[test]
+fn target_lines_spell_out_each_devices_own_targets_in_plan_order() {
+    let eligible = vec![planned(2, "srv-b"), planned(1, "srv-a")];
+    let mut req = ActionRequest::new(ActionKind::SoftwarePatchRemediate, vec![1, 2]);
+    req.device_targets = BTreeMap::from([
+        (1, vec!["Google Chrome 141.0.7390.55".to_string()]),
+        (2, vec!["7-Zip 24.08".to_string(), "Zoom 6.2".to_string()]),
+    ]);
+    assert_eq!(
+        target_lines(&req, &eligible),
+        vec![
+            "srv-b → 7-Zip 24.08, Zoom 6.2".to_string(),
+            "srv-a → Google Chrome 141.0.7390.55".to_string(),
+        ]
+    );
+
+    // A KB-targeted script names the device it would send an empty list.
+    let mut script = ActionRequest::new(ActionKind::Script, vec![1, 2]);
+    script.device_targets = BTreeMap::from([(1, vec!["KB5040434".to_string()])]);
+    assert_eq!(
+        target_lines(&script, &eligible),
+        vec![
+            "srv-b → nothing — an empty list".to_string(),
+            "srv-a → KB5040434".to_string(),
+        ]
+    );
+    // ...but typed parameters are sent verbatim, so there is no list to describe.
+    script.parameters = Some("-Verbose".into());
+    assert!(target_lines(&script, &eligible).is_empty());
+
+    // A native endpoint sends no list at all.
+    let mut apply = ActionRequest::new(ActionKind::OsPatchApply, vec![1, 2]);
+    apply.device_targets = req.device_targets.clone();
+    assert!(target_lines(&apply, &eligible).is_empty());
+}
+
+/// Dry run or live is said up front, and a native action planned with Dry run
+/// ticked says it runs for real anyway.
+#[test]
+fn the_confirm_dialog_says_whether_it_is_a_dry_run() {
+    let (text, wide) = confirm_mode_line(ActionKind::OsPatchRemediate, true, true).unwrap();
+    assert!(text.starts_with("Dry run") && !wide, "{text}");
+    let (text, wide) = confirm_mode_line(ActionKind::SoftwarePatchRemediate, false, false).unwrap();
+    assert!(text.starts_with("Live") && wide, "{text}");
+    for kind in [ActionKind::OsPatchApply, ActionKind::Reboot] {
+        let (text, wide) = confirm_mode_line(kind, false, true).unwrap();
+        assert!(text.contains("doesn't apply") && wide, "{kind:?}: {text}");
+        assert_eq!(confirm_mode_line(kind, false, false), None, "{kind:?}");
+    }
+    // A scan changes nothing either way.
+    assert_eq!(
+        confirm_mode_line(ActionKind::OsPatchScan, false, true),
+        None
+    );
+}
+
+#[test]
+fn the_dispatch_toast_says_where_a_dry_runs_report_is() {
+    assert_eq!(dispatch_toast(3, 0, false), "Dispatched to 3 device(s)");
+    assert_eq!(
+        dispatch_toast(3, 1, false),
+        "Dispatched to 3 device(s); 1 skipped"
+    );
+    let dry = dispatch_toast(2, 1, true);
+    assert!(
+        dry.starts_with("Dry run sent to 2 device(s); 1 skipped"),
+        "{dry}"
+    );
+    assert!(dry.contains("NinjaOne activity"), "{dry}");
 }
 
 #[test]
