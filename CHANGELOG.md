@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-10-20
+
 ### Fixed
 
 - **"Restart afterwards" now works for the software remediation script.** A missing space in
