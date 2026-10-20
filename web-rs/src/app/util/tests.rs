@@ -1443,6 +1443,48 @@ fn job_mode_label_distinguishes_dispatch_kinds() {
     assert_eq!(job_mode_label(&job(ActionKind::Reboot, true)), "Dry run");
 }
 
+/// A script restarts only when told to, so its label follows the reboot choice
+/// it was sent rather than its kind.
+#[test]
+fn job_mode_label_follows_a_scripts_reboot_choice() {
+    let with_choice = |kind, reboot| JobReport {
+        request: Some(JobRequest {
+            reboot,
+            ..JobRequest::default()
+        }),
+        ..job(kind, false)
+    };
+    for kind in [
+        ActionKind::OsPatchRemediate,
+        ActionKind::SoftwarePatchRemediate,
+        ActionKind::Script,
+    ] {
+        assert_eq!(
+            job_mode_label(&with_choice(kind, RebootChoice::Never)),
+            "Live"
+        );
+        assert_eq!(
+            job_mode_label(&with_choice(kind, RebootChoice::Auto)),
+            "Live + reboot"
+        );
+        // No recorded request: the choice is unknown, so the label errs toward
+        // warning of a restart.
+        assert_eq!(job_mode_label(&job(kind, false)), "Live + reboot");
+    }
+    // "Apply all" and Reboot ignore the script choice: neither is sent one.
+    assert_eq!(
+        job_mode_label(&with_choice(
+            ActionKind::SoftwarePatchApply,
+            RebootChoice::Never
+        )),
+        "Live + reboot"
+    );
+    assert_eq!(
+        job_mode_label(&with_choice(ActionKind::Reboot, RebootChoice::Never)),
+        "Live + reboot"
+    );
+}
+
 #[test]
 fn format_duration_is_blank_while_running() {
     assert_eq!(format_duration(None), "");
@@ -2232,43 +2274,21 @@ fn a_blank_run_as_is_omitted_rather_than_sent_empty() {
 /// silently dropped the warning that distinguishes Apply-all from Apply-selected.
 #[test]
 fn the_mirrored_action_predicates_match_the_backend_table() {
-    // kind, is_mutating, can_reboot, is_remediation, runs_a_script, exceeds_selection
+    // kind, is_mutating, is_remediation, runs_a_script, exceeds_selection
     let table = [
-        (ActionKind::OsPatchScan, false, false, false, false, false),
-        (
-            ActionKind::SoftwarePatchScan,
-            false,
-            false,
-            false,
-            false,
-            false,
-        ),
+        (ActionKind::OsPatchScan, false, false, false, false),
+        (ActionKind::SoftwarePatchScan, false, false, false, false),
         // The two native applies are the only kinds that reach past the selection:
         // NinjaOne has no per-patch apply endpoint.
-        (ActionKind::OsPatchApply, true, true, false, false, true),
-        (
-            ActionKind::SoftwarePatchApply,
-            true,
-            true,
-            false,
-            false,
-            true,
-        ),
-        (ActionKind::OsPatchRemediate, true, true, true, true, false),
-        (
-            ActionKind::SoftwarePatchRemediate,
-            true,
-            true,
-            true,
-            true,
-            false,
-        ),
-        (ActionKind::Reboot, true, true, false, false, false),
-        (ActionKind::Script, true, true, false, true, false),
+        (ActionKind::OsPatchApply, true, false, false, true),
+        (ActionKind::SoftwarePatchApply, true, false, false, true),
+        (ActionKind::OsPatchRemediate, true, true, true, false),
+        (ActionKind::SoftwarePatchRemediate, true, true, true, false),
+        (ActionKind::Reboot, true, false, false, false),
+        (ActionKind::Script, true, false, true, false),
     ];
-    for (kind, mutating, reboot, remediation, script, wide) in table {
+    for (kind, mutating, remediation, script, wide) in table {
         assert_eq!(kind.is_mutating(), mutating, "{kind:?} is_mutating");
-        assert_eq!(kind.can_reboot(), reboot, "{kind:?} can_reboot");
         assert_eq!(
             kind.is_remediation(),
             remediation,

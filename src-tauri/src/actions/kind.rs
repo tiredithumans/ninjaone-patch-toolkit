@@ -83,8 +83,8 @@ impl ActionKind {
     /// post-action cache invalidation is one decision instead of two — the dispatch
     /// site invalidated the device inventory only for `Reboot` while the job poller
     /// invalidated it for *every* settled batch, so the two copies of the same rule
-    /// disagreed in both directions at once. Mirrors `can_reboot` in
-    /// `web-rs/src/types.rs`.
+    /// disagreed in both directions at once. Cache invalidation only: the Jobs
+    /// tab's reboot label reads each job's own reboot choice instead.
     pub fn can_reboot(self) -> bool {
         self.is_mutating()
     }

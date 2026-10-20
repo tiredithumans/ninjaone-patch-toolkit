@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::types::{FailureGroup, JobReport, PatchFamilies, RunRecord};
+use crate::types::{ActionKind, FailureGroup, JobReport, PatchFamilies, RebootChoice, RunRecord};
 
 use super::super::Tab;
 
@@ -240,12 +240,26 @@ pub(crate) fn is_fleet_tab(tab: Tab) -> bool {
     matches!(tab, Tab::Compliance | Tab::Reboot)
 }
 
-/// Short mode label for a dispatched job. A dry run applies — and reboots —
-/// nothing, so it wins over the reboot indication.
+/// Short mode label for a dispatched job: "+ reboot" only when the dispatch
+/// asked for or expects a restart, the same cases the backend plan warns about.
+///
+/// A dry run applies — and reboots — nothing, so it wins. A script reboots only
+/// when sent `RebootChoice::Auto`; an "Apply all" carries no reboot setting and
+/// NinjaOne's patch policy routinely restarts after it. A script row with no
+/// recorded request reads "+ reboot": overstating a restart is the safe miss.
 pub(crate) fn job_mode_label(job: &JobReport) -> &'static str {
+    let reboots = match job.kind {
+        ActionKind::Reboot => true,
+        k if k.exceeds_selection() => true,
+        k if k.runs_a_script() => job
+            .request
+            .as_ref()
+            .is_none_or(|r| r.reboot == RebootChoice::Auto),
+        _ => false,
+    };
     if job.dry_run {
         "Dry run"
-    } else if job.kind.can_reboot() {
+    } else if reboots {
         "Live + reboot"
     } else {
         "Live"

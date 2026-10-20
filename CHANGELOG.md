@@ -11,6 +11,13 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Jobs tab's Mode column no longer says "Live + reboot" for a script told not to
+  reboot.** "Apply selected patches" and other script runs now read "Live" when they were sent
+  with reboot set to *Never*. A Reboot, an "Apply all", and a script set to *Auto* still read
+  "Live + reboot".
+
 ## [0.17.0] - 2026-10-20
 
 ### Fixed
