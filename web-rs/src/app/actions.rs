@@ -1044,11 +1044,10 @@ pub(crate) fn JobsTable() -> impl IntoView {
             // next to the selection it targets. This tab is history; its Retry only
             // re-opens that same confirm flow. None of these buttons has a job store
             // to talk to in the browser demo, so they are not offered there.
+            // No Refresh: `action:progress` already pushes every job change here, so
+            // re-reading the store showed the same rows and looked broken.
             <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
             <div class="jobs-toolbar">
-                <button class="btn btn-sm" on:click=move |_| state.refresh_jobs()>
-                    "Refresh"
-                </button>
                 <button
                     class="btn btn-sm"
                     prop:disabled=move || state.actions.jobs.with(Vec::is_empty)

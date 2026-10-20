@@ -11,6 +11,11 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Removed
+
+- **The Jobs tab's Refresh button.** The list already updates live as jobs change, so the
+  button re-read the same rows and appeared to do nothing.
+
 ## [0.17.1] - 2026-10-20
 
 ### Fixed
