@@ -454,18 +454,32 @@ fn ActionSettingsFields() -> impl IntoView {
                         }
                     />
                 </label>
-                <label>
+                <label title="The default for scripts and installs of selected patches. A specific stored credential can be picked per dispatch in the action bar.">
                     "Run as"
-                    <input
-                        type="text"
-                        placeholder="system"
+                    <select
                         prop:disabled=move || !enabled()
-                        prop:value=move || a.with(|s| s.run_as.clone())
-                        on:input=move |ev| {
+                        on:change=move |ev| {
                             let v = event_target_value(&ev);
                             a.update(|s| s.run_as = v);
                         }
-                    />
+                    >
+                        {move || {
+                            a.with(|s| util::settings_run_as_choices(&s.run_as))
+                                .into_iter()
+                                .map(|c| {
+                                    let value = c.value.clone();
+                                    view! {
+                                        <option
+                                            value=c.value
+                                            prop:selected=move || a.with(|s| s.run_as.trim() == value)
+                                        >
+                                            {c.label}
+                                        </option>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </select>
                 </label>
             </div>
 

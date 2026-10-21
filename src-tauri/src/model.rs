@@ -789,23 +789,25 @@ pub struct AutomationScript {
     pub active: Option<bool>,
     #[serde(default)]
     pub language: Option<String>,
-    #[serde(default, deserialize_with = "null_as_empty")]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub operating_systems: Vec<String>,
-    #[serde(default, deserialize_with = "null_as_empty")]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub script_parameters: Vec<String>,
-    #[serde(default, deserialize_with = "null_as_empty")]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub script_variables: Vec<ScriptVariable>,
 }
 
-/// The spec marks no `AutomationScript` field required, and `#[serde(default)]`
-/// covers only an absent key. Without this, one script with a `null` list fails the
-/// whole library read, which blocks every dry run and the script picker.
-fn null_as_empty<'de, D, T>(de: D) -> Result<Vec<T>, D::Error>
+/// The spec marks no field of the scripting shapes (`AutomationScript`,
+/// `DeviceScriptingOptions`, `DeviceCredentialOptions`) required, and
+/// `#[serde(default)]` covers only an absent key. Without this, one `null` list or
+/// object fails the whole read: for the library that blocks every dry run and the
+/// script picker; for the scripting options, the Run-as choices.
+fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
+    T: Default + Deserialize<'de>,
 {
-    Ok(Option::<Vec<T>>::deserialize(de)?.unwrap_or_default())
+    Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
 }
 
 /// The script-variable / parameter name that lets a library script be told *which*
@@ -851,21 +853,35 @@ impl AutomationScript {
     }
 }
 
-/// Credential choices available for `runAs` on a given device.
+/// A stored credential a device's scripts may run as (the spec's
+/// `CredentialReference`). Its `type` (SNMP, BASIC, …) is not modelled: the Run-as
+/// choice is by name, and NinjaOne refuses a credential it cannot use.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CredentialReference {
+    pub id: i64,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Credential choices available for `runAs` on a given device: the roles
+/// (`system`, `loggedonuser`, the preferred-credential slots) and the individual
+/// stored credentials, which `runAs` takes by id.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DeviceCredentialOptions {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub roles: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub credentials: Vec<CredentialReference>,
 }
 
 /// Response of `GET /v2/device/{id}/scripting/options`.
 ///
-/// Only the credential roles are modelled. The `scripts` array duplicates
+/// Only the credential choices are modelled. The `scripts` array duplicates
 /// `/automation/scripts` (which the picker already reads, and which is the only
 /// source carrying `scriptVariables`), so deserializing it twice would buy nothing.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DeviceScriptingOptions {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub credentials: DeviceCredentialOptions,
 }
 

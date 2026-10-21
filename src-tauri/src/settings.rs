@@ -82,7 +82,11 @@ pub struct ActionSettings {
     /// numeric id copied out of the Admin → Library → Automation URL.
     pub os_patch_script_id: Option<i64>,
     pub software_patch_script_id: Option<i64>,
-    /// NinjaOne run-as identity: `system`, `loggedonuser`, or a credential role.
+    /// The default NinjaOne `runAs` for script dispatches: a role (`system`,
+    /// `loggedonuser`, `SR_LOCAL_ADMINISTRATOR`, `SR_DOMAIN_ADMINISTRATOR`, …) or a
+    /// stored credential's id as a string. Case-sensitive and sent verbatim; the
+    /// Settings menu and the action bar's per-dispatch menu choose it
+    /// (`docs/design/actions.md#run-as-is-a-menu-of-what-ninjaone-reports`).
     pub run_as: String,
     pub concurrency: usize,
     /// Blast-radius cap. A *blocker*, not a warning — raising it is a deliberate

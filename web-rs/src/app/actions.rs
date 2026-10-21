@@ -257,15 +257,8 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                     </span>
                     <label class="action-bar-runas">
                         "Run as"
-                        <input
-                            type="text"
-                            list="run-as-roles"
-                            placeholder="system"
-                            prop:value=move || state.actions.run_as.get()
-                            on:input=move |ev| state.actions.run_as.set(event_target_value(&ev))
-                        />
+                        <RunAsSelect/>
                     </label>
-                    <RunAsRoles/>
                     <label class="checkbox">
                         <input
                             type="checkbox"
@@ -825,17 +818,17 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
     }
 }
 
-/// Suggestions for the shared "Run as" field, as a bare `<datalist>`.
+/// The shared "Run as" menu: the Settings default, then the roles and stored
+/// credentials NinjaOne reports for the first selected device.
 ///
-/// Its own component because the input it feeds now lives in the action bar's shared
-/// options while the fetch is driven by the selection — and because credential roles
-/// are a *per-device* property, so this samples the first selected device and offers
-/// its roles as suggestions rather than a closed list: a role valid there may not
-/// exist on every other target.
+/// Its own component because it lives in the action bar's shared options while the
+/// fetch is driven by the selection. Credential roles are a *per-device* property,
+/// so a choice valid on the sampled device may not exist on every other target;
+/// NinjaOne refuses those dispatches per device, and the Jobs tab shows which.
 #[component]
-fn RunAsRoles() -> impl IntoView {
+fn RunAsSelect() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let roles = RwSignal::new(Vec::<String>::new());
+    let options = RwSignal::new(RunAsOptions::default());
     // Stamp of the newest lookup, so a slow reply for a device no longer sampled
     // cannot land after (and overwrite) the reply for the one that is.
     let request = StoredValue::new(0u64);
@@ -855,7 +848,7 @@ fn RunAsRoles() -> impl IntoView {
         let seq = util::next_query_seq(request.get_value());
         request.set_value(seq);
         let Some(device_id) = sampled.get() else {
-            roles.set(Vec::new());
+            options.set(RunAsOptions::default());
             return;
         };
         leptos::task::spawn_local(async move {
@@ -864,9 +857,9 @@ fn RunAsRoles() -> impl IntoView {
                 return;
             }
             match outcome {
-                Ok(opts) => roles.set(opts.roles),
+                Ok(opts) => options.set(opts),
                 // Every other call in this file routes failures through a Toast.
-                // Swallowing this one left an empty "Run as" datalist that looked
+                // Swallowing this one left an empty "Run as" list that looked
                 // exactly like a device with no configured credentials, so the
                 // operator had no way to tell a failed lookup from a real answer.
                 Err(e) => state.notify(Toast::err(e)),
@@ -874,16 +867,41 @@ fn RunAsRoles() -> impl IntoView {
         });
     });
 
+    let choices = Memo::new(move |_| {
+        let current = state.actions.run_as.get();
+        options.with(|o| util::action_run_as_choices(&o.roles, &o.credentials, &current))
+    });
+    let option = move |c: util::RunAsChoice| {
+        let value = c.value.clone();
+        view! {
+            <option
+                value=c.value
+                prop:selected=move || state.actions.run_as.with(|v| *v == value)
+            >
+                {c.label}
+            </option>
+        }
+    };
+
     view! {
-        <datalist id="run-as-roles">
+        <select on:change=move |ev| state.actions.run_as.set(event_target_value(&ev))>
+            // Blank sends no override; the backend resolves it to the saved default.
+            <option value="" prop:selected=move || state.actions.run_as.with(String::is_empty)>
+                {move || state.settings.f_actions.with(|a| util::run_as_default_label(&a.run_as))}
+            </option>
+            {move || choices.get().0.into_iter().map(option).collect_view()}
             {move || {
-                roles
-                    .get()
-                    .into_iter()
-                    .map(|role| view! { <option value=role></option> })
-                    .collect_view()
+                let creds = choices.get().1;
+                (!creds.is_empty())
+                    .then(|| {
+                        view! {
+                            <optgroup label="Credentials">
+                                {creds.into_iter().map(option).collect_view()}
+                            </optgroup>
+                        }
+                    })
             }}
-        </datalist>
+        </select>
     }
 }
 

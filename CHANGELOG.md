@@ -11,6 +11,15 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **"Run as" is now a menu, in the action bar and in Settings.** The action bar lists the Settings
+  default, the roles NinjaOne reports for the first selected device (System, Logged-on user,
+  Preferred Windows local or domain admin), and that device's stored credentials by name. Picking
+  a credential runs the script as that account. NinjaOne's Windows 3rd Party Patching preferred
+  credential can't be chosen as a role for scripts, but you can pick the same credential by name.
+  Settings offers the Windows roles as the default.
+
 ### Fixed
 
 - **Dry runs of library scripts no longer fail with "Couldn't confirm that the script declares

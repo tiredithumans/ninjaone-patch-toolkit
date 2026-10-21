@@ -1417,7 +1417,11 @@ tbody tr:hover {
 }
 
 .action-bar-runas {
-  flex: 0 1 180px;
+  flex: 0 1 260px;
+}
+
+.action-bar-runas select {
+  max-width: 100%;
 }
 
 /* Collapsed by default: the two "Install only the selected patches" buttons cover

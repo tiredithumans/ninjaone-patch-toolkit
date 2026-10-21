@@ -587,6 +587,12 @@
       }
     ],
     "list_run_as_options": {
+      "credentials": [
+        {
+          "id": 26,
+          "name": "Contoso patching admin"
+        }
+      ],
       "roles": [
         "system",
         "loggedonuser"
