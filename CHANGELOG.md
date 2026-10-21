@@ -20,6 +20,18 @@ version and start a fresh `[Unreleased]`.
   credential can't be chosen as a role for scripts, but you can pick the same credential by name.
   Settings offers the Windows roles as the default.
 
+### Changed
+
+- **The software remediation script (`remediation/Install-SelectedSoftwarePatches.ps1`) now
+  installs updates.** It maps each selected NinjaOne title to a WinGet package through a table in
+  the script, then upgrades it with Microsoft's `Microsoft.WinGet.Client` PowerShell module. It
+  no longer calls `winget.exe`, whose output as SYSTEM can't be read reliably (the cause of
+  "winget did not return a recognizable English package table"). Run as System, it uses
+  PowerShell 7 when the device has it. Run as a Windows credential, it works in Windows
+  PowerShell 5.1. If the module is missing, the first run installs it from the PowerShell
+  Gallery. Copy the new script into your NinjaOne library, then add the products you patch to its
+  table. A dry run lists any titles still missing. See `remediation/README.md`.
+
 ### Fixed
 
 - **Dry runs of library scripts no longer fail with "Couldn't confirm that the script declares

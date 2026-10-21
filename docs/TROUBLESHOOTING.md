@@ -136,13 +136,18 @@ With the reference scripts in [`remediation/`](../remediation/README.md#exit-cod
 code means something specific:
 
 - **1**: bad or empty input.
-- **2**: none of the listed KBs is offered to the device.
-- **3**: at least one KB failed, is hidden, or wasn't offered.
+- **2**: none of the listed KBs is offered to the device. For software: every listed title is
+  either missing from the script's `Get-ProductPackageMap` table or not installed. The
+  `NOT OFFERED` lines in the NinjaOne activity name the table key to add.
+- **3**: at least one KB or product failed, is hidden, or wasn't offered.
 - **4**: a restart is pending and `rebootBehavior=Never` held it back. For OS patches it may have
   been pending before this run.
-- **5**: the Windows Update Agent or elevation failed.
-- **10**: the software script has no install mechanism configured yet, so it installed nothing.
-  This is by design.
+- **5**: the Windows Update Agent or elevation failed. For software: `Microsoft.WinGet.Client`
+  couldn't be installed, loaded or run. Running as SYSTEM without PowerShell 7 on the device is
+  the usual cause: install PowerShell 7 there, or set **Run as** to a Windows credential (see
+  [which Run as to use](../remediation/README.md#which-run-as-to-use)).
+- **10**: a customized software script's install hook reported that it has no install
+  mechanism. The shipped script never exits `10`.
 
 Also confirm the IDs in **Settings → Patch actions** point at the library entries you imported
 from `remediation/`: the toolkit binds by numeric **ID**, so a similarly named library script
