@@ -11,7 +11,7 @@ Regenerate with `just licenses`. Do not edit by hand.
 
 ## Desktop app (src-tauri)
 
-- MIT License (531 crates)
+- MIT License (532 crates)
 - ISC License (20 crates)
 - Unicode License v3 (19 crates)
 - Apache License 2.0 (9 crates)
@@ -3857,7 +3857,7 @@ THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [sha2 0.11.0](https://github.com/RustCrypto/hashes)
+- [sha2 0.11.1](https://github.com/RustCrypto/hashes)
 
 ```
 Copyright (c) 2016-2026 The RustCrypto Project Developers
@@ -5703,7 +5703,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [swift-rs 1.0.8](https://github.com/Brendonovich/swift-rs)
+- [swift-rs 1.0.9](https://github.com/Brendonovich/swift-rs)
 
 ```
 Copyright (c) 2023 The swift-rs Developers
@@ -6424,12 +6424,12 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [tauri-build 2.7.2](https://github.com/tauri-apps/tauri)
+- [tauri-build 2.7.3](https://github.com/tauri-apps/tauri)
 - [tauri-codegen 2.7.1](https://github.com/tauri-apps/tauri)
 - [tauri-macros 2.7.1](https://github.com/tauri-apps/tauri)
 - [tauri-runtime-wry 2.12.1](https://github.com/tauri-apps/tauri)
 - [tauri-runtime 2.12.1](https://github.com/tauri-apps/tauri)
-- [tauri-utils 2.10.1](https://github.com/tauri-apps/tauri)
+- [tauri-utils 2.10.2](https://github.com/tauri-apps/tauri)
 - [tauri 2.12.2](https://github.com/tauri-apps/tauri)
 
 ```
@@ -7019,6 +7019,24 @@ SOFTWARE.
 ### MIT License
 
 Used by:
+- [static_vcruntime 3.0.0](https://github.com/ChrisDenton/static_vcruntime)
+
+```
+MIT License
+
+Copyright (c) 2021 Chris Denton.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the &quot;Software&quot;), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice (including the next paragraph) shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
 - [urlpattern 0.6.0](https://github.com/denoland/rust-urlpattern)
 
 ```
@@ -7362,9 +7380,9 @@ Used by:
 - [r-efi 6.0.0](https://github.com/r-efi/r-efi)
 - [rust_xlsxwriter 0.100.0](https://github.com/jmcnamara/rust_xlsxwriter)
 - [rustls-platform-verifier-android 0.2.0](https://github.com/rustls/rustls-platform-verifier)
-- [tauri-plugin-dialog 2.8.2](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-dialog 2.8.3](https://github.com/tauri-apps/plugins-workspace)
 - [tauri-plugin-fs 2.7.1](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin-updater 2.13.3](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-updater 2.14.0](https://github.com/tauri-apps/plugins-workspace)
 - [tauri-plugin 2.7.1](https://github.com/tauri-apps/tauri)
 - [webview2-com-macros 0.8.1](https://github.com/wravery/webview2-rs)
 - [webview2-com-sys 0.39.1](https://github.com/wravery/webview2-rs)
@@ -7442,7 +7460,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [tokio-util 0.7.19](https://github.com/tokio-rs/tokio)
-- [tokio 1.53.2](https://github.com/tokio-rs/tokio)
+- [tokio 1.53.3](https://github.com/tokio-rs/tokio)
 
 ```
 MIT License
