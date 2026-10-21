@@ -296,7 +296,7 @@ pub(super) async fn build_plan(
     let dry_run_support = if req.dry_run && req.kind.runs_a_script() {
         match state.api.automation_scripts().await {
             Ok(list) => dry_run_support(req, script.as_ref(), Ok(&list)),
-            Err(e) => dry_run_support(req, script.as_ref(), Err(&e.to_string())),
+            Err(e) => dry_run_support(req, script.as_ref(), Err(&format!("{e:#}"))),
         }
     } else {
         DryRunSupport::NotChecked

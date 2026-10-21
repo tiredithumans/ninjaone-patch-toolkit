@@ -422,4 +422,40 @@ mod tests {
         assert!(scripts[0].accepts_dry_run());
         assert!(!scripts[1].accepts_dry_run() && !scripts[2].accepts_dry_run());
     }
+
+    /// One script with a `null` list used to fail the whole library decode, which
+    /// blocked every dry run ("Couldn't confirm that the script declares a dryRun
+    /// variable") and the script picker with it.
+    #[tokio::test]
+    async fn automation_scripts_reads_null_lists_as_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/automation/scripts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "id": 1,
+                    "name": "Install-SoftwarePatches",
+                    "scriptVariables": [{ "name": "dryRun" }],
+                    "scriptParameters": null,
+                    "operatingSystems": null,
+                },
+                {
+                    "id": 2,
+                    "name": "Uncategorized",
+                    "scriptVariables": null,
+                    "scriptParameters": null,
+                    "operatingSystems": null,
+                },
+            ])))
+            .mount(&server)
+            .await;
+
+        let scripts = client(&server)
+            .automation_scripts()
+            .await
+            .unwrap_or_else(|e| panic!("{e:#}"));
+        assert!(scripts[0].accepts_dry_run());
+        assert!(!scripts[1].accepts_dry_run());
+        assert!(scripts[1].operating_systems.is_empty());
+    }
 }

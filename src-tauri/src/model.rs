@@ -789,12 +789,23 @@ pub struct AutomationScript {
     pub active: Option<bool>,
     #[serde(default)]
     pub language: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub operating_systems: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub script_parameters: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub script_variables: Vec<ScriptVariable>,
+}
+
+/// The spec marks no `AutomationScript` field required, and `#[serde(default)]`
+/// covers only an absent key. Without this, one script with a `null` list fails the
+/// whole library read, which blocks every dry run and the script picker.
+fn null_as_empty<'de, D, T>(de: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(de)?.unwrap_or_default())
 }
 
 /// The script-variable / parameter name that lets a library script be told *which*
