@@ -19,7 +19,9 @@ use crate::actions::{
     RebootChoice, SkippedTarget, apply_preview, fmt_ts,
 };
 use crate::changes::{self, RunSnapshot};
-use crate::commands::actions::{ActionBatch, ActionProgressEvent, RunAsOptions, ScriptSummary};
+use crate::commands::actions::{
+    ActionBatch, ActionProgressEvent, RunAsCredential, RunAsOptions, ScriptSummary,
+};
 use crate::commands::auth::AuthStatus;
 use crate::commands::diagnostics::AuditRecord;
 use crate::commands::lookups::list_node_classes;
@@ -645,6 +647,10 @@ fn ipc_fixture_is_current() {
             }],
             "list_run_as_options": RunAsOptions {
                 roles: vec!["system".into(), "loggedonuser".into()],
+                credentials: vec![RunAsCredential {
+                    id: 26,
+                    name: "Contoso patching admin".into(),
+                }],
             },
             "read_action_audit": [AuditRecord {
                 timestamp: fmt_ts(FIXTURE_NOW - Duration::minutes(10)),

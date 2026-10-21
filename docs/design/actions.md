@@ -228,6 +228,27 @@ So does "Include offline devices", which is disabled while Settings forbids offl
 be offered regardless and then ignored. An offline device's skip reason names whichever switch is
 off.
 
+### Run as is a menu of what NinjaOne reports
+
+The spec types `runAs` only as "Credential role/identifier". It takes a role string (`system`,
+`loggedonuser`, `SR_LOCAL_ADMINISTRATOR`, `SR_DOMAIN_ADMINISTRATOR`, `SR_MAC_SCRIPT`,
+`SR_LINUX_SCRIPT`) or a stored credential's id as a string, as the community
+[NinjaOne PowerShell module](https://docs.homotechsual.dev/modules/ninjaone/commandlets/invoke/script-or-action/)
+documents. The value is case-sensitive and sent verbatim, so the action bar offers a closed
+`<select>` instead of free text: "Settings default (…)" (blank, resolved by `resolve_run_as`), the
+first selected device's `scripting/options` roles, and its stored credentials by name
+(`RunAsOptions.credentials`). Labels come from `util::run_as_label` and match only the exact
+spelling. A value neither list has (a retry restoring what a job was sent with) stays as an
+option, because a menu without it would show the first entry while sending the old value. Settings
+has no device to ask, so it offers the four Windows roles plus the saved value if it is anything
+else.
+
+NinjaOne's **Windows 3rd Party Patching** preferred credential is a policy slot that NinjaOne's
+own patch engine uses, not a script run-as role. The scripting slots are the local-admin,
+domain-admin, Mac and Linux ones, so a script cannot ask for the 3rd-party slot by role. Picking
+the same stored credential by name under **Credentials** sends its id, which reaches the same
+account.
+
 The Jobs tab shows each row's targets (`util::job_targets_summary`, from its `JobRequest`), a Mode
 that says what the job was sent rather than what any install might do (`job_mode_label`: only a
 reboot, a native apply, or a script sent `rebootBehavior=Auto` mentions a restart), and, for a

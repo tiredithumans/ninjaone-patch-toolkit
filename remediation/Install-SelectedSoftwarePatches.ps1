@@ -1,8 +1,9 @@
 <#
 .SYNOPSIS
-    Reference remediation script for the NinjaOne Patch Toolkit's "Apply selected software
-    patches" action. Decodes and validates the toolkit's product allow list and hands each product
-    to an install hook YOU supply. Out of the box it installs nothing and says so.
+    Remediation script for the NinjaOne Patch Toolkit's "Apply selected software patches" action.
+    Decodes and validates the toolkit's product allow list, maps each NinjaOne product title to a
+    winget package id through an explicit table, and upgrades it with Microsoft's
+    Microsoft.WinGet.Client PowerShell module.
 
 .DESCRIPTION
     The toolkit dispatches this script through NinjaOne's POST /device/{id}/script/run with a
@@ -15,32 +16,41 @@
     "Google Chrome 141.0.7390.55|7-Zip". Titles carry spaces and NinjaOne splits the parameter
     string on spaces, which is why the list travels encoded.
 
-    WHY THIS SCRIPT DOES NOT INSTALL ANYTHING BY DEFAULT
+    HOW THE INSTALL IS PERFORMED
     NinjaOne's third-party patching is performed by the NinjaOne agent itself; there is no local,
-    supported command that says "install NinjaOne third-party patch <title>". The WinGet CLI is not
-    supported as SYSTEM (the context NinjaOne scripts run in), and mapping a NinjaOne title such as
-    "Google Chrome 141.0.7390.55" to a package id is a per-tenant decision. So this script does the
-    part that is the same everywhere - strict decoding, validation, per-product reporting, reboot
-    handling and exit codes - and delegates the install to Install-SelectedProduct below, which
-    returns NotImplemented until you replace it (for example with the Microsoft.WinGet.Client
-    module, which does support SYSTEM for machine-wide packages, or with Chocolatey). While it
-    returns NotImplemented, every run - including a dry run - exits 10 rather than 0, so the
-    toolkit's Jobs tab never shows a success for work that did not happen.
+    supported command that says "install NinjaOne third-party patch <title>". This script upgrades
+    through the Windows Package Manager instead, using the Microsoft.WinGet.Client module rather
+    than winget.exe: the CLI is not supported as SYSTEM, and there its column headers come back as
+    resource keys ("SearchId") that no parser can trust. The module returns objects, so nothing
+    here reads winget's text output.
 
-    Windows PowerShell 5.1 compatible. The script makes no network fetches of its own.
+    The module runs as SYSTEM only in PowerShell 7 started with -MTA. NinjaOne runs scripts in
+    Windows PowerShell 5.1, so as SYSTEM the script re-runs itself in PowerShell 7 when it is
+    installed. Under any other account (Run as a Windows credential) the module works in Windows
+    PowerShell 5.1 and the script stays there.
+
+    When the module is missing, the script installs it for all users from the PowerShell Gallery,
+    on a dry run too: that is the one change a dry run makes to a device, and the log says so.
+
+    A NinjaOne title ("ChromeEnterprise (X64)") is not a winget package id ("Google.Chrome"), so the
+    mapping is an explicit table - Get-ProductPackageMap - rather than a fuzzy search. A title the
+    table does not list is reported NotOffered, with installed packages that may match, and nothing
+    is guessed at or installed in its place. Extend the table before rolling this out.
+
+    Windows PowerShell 5.1 and PowerShell 7 compatible.
 
     Exit codes (see remediation/README.md):
         0  every listed product is installed (or already up to date); dry run: every one is actionable
         1  bad input - the parameter string is missing, malformed, not base64/UTF-8, or empty
-        2  nothing matched - the install hook reported every product as not offered on this device
+        2  nothing matched - every product is unmapped or not installed on this device
         3  incomplete - at least one product failed or was not offered while others were handled
         4  installed, but a reboot is required and rebootBehavior=Never suppressed it
-        5  environment error - not elevated, or the install hook threw
-        10 no install mechanism - Install-SelectedProduct has not been implemented
+        5  environment error - not elevated, or Microsoft.WinGet.Client could not be installed or run
+        10 no install mechanism - reserved for a hook that reports NotImplemented; this one never does
 
 .NOTES
     Dot-sourcing this file (". .\Install-SelectedSoftwarePatches.ps1") only defines the functions;
-    remediation/tests/ relies on that to test the decoder.
+    remediation/tests/ relies on that to test the decoder and the install hook.
 #>
 
 #region toolkit-parameter-parser
@@ -245,33 +255,285 @@ function Test-IsElevated {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-#region install-hook - REPLACE THIS FUNCTION
+function Test-IsSystem {
+    return [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
+}
+
+#region install-hook
+$script:WinGetModuleName = 'Microsoft.WinGet.Client'
+# Get-WinGetPackage with no filter lists every installed package; the unmapped-title diagnostic
+# reads it once per run, however many titles are unmapped.
+$script:InstalledPackageListing = $null
+
+function Get-ProductPackageMap {
+    <#
+        NinjaOne software-patch product title (normalized by ConvertTo-ProductKey) -> winget
+        package id. Tenant-specific and deliberately exhaustive rather than fuzzy: an unlisted
+        title is reported NotOffered, never guessed at. To add a row, run Get-WinGetPackage (or
+        `winget list`) on an endpoint and copy the Id column verbatim; an unmapped title's log
+        line names the key to add and the installed packages that may match.
+    #>
+    return @{
+        'chromeenterprisex64'        = 'Google.Chrome'
+        'chromeenterprisex86'        = 'Google.Chrome'
+        'googlechrome'               = 'Google.Chrome'
+        '7zip'                       = '7zip.7zip'
+        '7zipx64'                    = '7zip.7zip'
+        'mozillafirefox'             = 'Mozilla.Firefox'
+        'notepad++'                  = 'Notepad++.Notepad++'
+        'awscommandlineinterfacex64' = 'Amazon.AWSCLI'
+        'awscommandlineinterface'    = 'Amazon.AWSCLI'
+    }
+}
+
+function ConvertTo-ProductKey {
+    # NinjaOne titles vary in punctuation and sometimes carry a version, at the end or before an
+    # architecture ("Google Chrome 141.0.7390.55", "7-Zip 24.08 (x64)"); the map is keyed on
+    # what survives this.
+    param([Parameter(Mandatory = $true)][string]$Title)
+    $text = $Title.Trim() -replace '\s+v?\d+(?:\.\d+)+(?=\s|$)', ''
+    return ($text -replace '[\s\(\)\[\],._-]', '').ToLowerInvariant()
+}
+
+function Get-ProductTitleToken {
+    # CamelCase compounds are split so "ChromeEnterprise" can match an installed "Google Chrome".
+    # -creplace, not -replace: the default is case-insensitive, which makes [a-z][A-Z] match
+    # every adjacent letter pair and shred the title.
+    param([Parameter(Mandatory = $true)][string]$Title)
+    $text = $Title -replace '\s+v?\d+(?:\.\d+)+(?=\s|$)', ''
+    $text = $text -creplace '([a-z0-9])([A-Z])', '$1 $2'
+    $noise = @('x64', 'x86', 'arm64', 'the', 'and', 'for', 'inc', 'llc')
+    $tokens = New-Object System.Collections.Generic.List[string]
+    foreach ($word in ($text -split '[^A-Za-z0-9]+')) {
+        $token = $word.ToLowerInvariant()
+        if ($token.Length -lt 3 -or $noise -contains $token) { continue }
+        if (-not $tokens.Contains($token)) { $tokens.Add($token) }
+    }
+    return $tokens.ToArray()
+}
+
+function Resolve-ScriptHost {
+    <#
+        Where this run has to execute for Microsoft.WinGet.Client to work. Its cmdlets refuse to
+        run as SYSTEM in Windows PowerShell ("This cmdlet is not supported in Windows PowerShell",
+        microsoft/winget-cli#4820) but work there under any other account, and work as SYSTEM in
+        PowerShell 7 started with -MTA. Without PowerShell 7 (or without a script file to hand it)
+        the run stays put, and the first cmdlet call reports how to fix the device.
+    #>
+    param([AllowNull()][string]$Edition, [bool]$IsSystem, [AllowNull()][string]$PwshPath, [AllowNull()][string]$ScriptPath)
+    if ($Edition -eq 'Desktop' -and $IsSystem -and $PwshPath -and $ScriptPath) { return 'Relaunch' }
+    return 'InProcess'
+}
+
+function Find-Pwsh {
+    $command = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { return $command.Source }
+    # SYSTEM's PATH may predate the PowerShell 7 install; ProgramW6432 is the 64-bit Program
+    # Files even when the agent started a 32-bit Windows PowerShell.
+    foreach ($root in @($env:ProgramW6432, $env:ProgramFiles)) {
+        if (-not $root) { continue }
+        $candidate = Join-Path $root 'PowerShell\7\pwsh.exe'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
+function Get-WinGetHostHint {
+    # Appended to a failed module call, so the log says what to change rather than only what broke.
+    param([AllowNull()][string]$Edition, [bool]$IsSystem)
+    if ($Edition -eq 'Desktop' -and $IsSystem) {
+        return ' Microsoft.WinGet.Client does not run as SYSTEM in Windows PowerShell 5.1: install PowerShell 7 on this device (the script switches to it by itself), or set Run as to a Windows credential.'
+    }
+    return ' If App Installer is missing or out of date on this device, run Repair-WinGetPackageManager -AllUsers -Latest there once.'
+}
+
+function Install-WinGetModule {
+    # Windows PowerShell 5.1's PowerShellGet needs the NuGet provider, and its .NET defaults may
+    # not offer the TLS 1.2 the gallery requires.
+    if ($PSVersionTable.PSEdition -ne 'Core') {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $nuget = @(Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue | Where-Object { $_.Version -ge [version]'2.8.5.201' })
+        if ($nuget.Count -eq 0) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope AllUsers -Force -ErrorAction Stop | Out-Null
+        }
+    }
+    Install-Module -Name $script:WinGetModuleName -Repository PSGallery -Scope AllUsers -Force -ErrorAction Stop
+}
+
+function Initialize-WinGetModule {
+    <#
+        Loads Microsoft.WinGet.Client, installing it for all users first when it is missing.
+        Returns $null when the module is ready, or why it is not (an environment error).
+    #>
+    if (Get-Module -Name $script:WinGetModuleName) { return $null }
+    if (-not (Get-Module -ListAvailable -Name $script:WinGetModuleName)) {
+        if (-not (Test-IsElevated)) {
+            return "$($script:WinGetModuleName) is not installed, and installing it for all users needs an elevated session."
+        }
+        try {
+            Install-WinGetModule
+        } catch {
+            return "installing $($script:WinGetModuleName) from the PowerShell Gallery failed: $($_.Exception.Message)"
+        }
+        $installed = @(Get-Module -ListAvailable -Name $script:WinGetModuleName | Sort-Object Version -Descending)
+        if ($installed.Count -eq 0) {
+            return "$($script:WinGetModuleName) reported installed but PowerShell cannot find it."
+        }
+        Write-Host "SETUP            : installed $($script:WinGetModuleName) $($installed[0].Version) for all users from the PowerShell Gallery."
+    }
+    try {
+        Import-Module -Name $script:WinGetModuleName -ErrorAction Stop
+    } catch {
+        return "loading $($script:WinGetModuleName) failed: $($_.Exception.Message)"
+    }
+    return $null
+}
+
+# Thin wrappers over the module's cmdlets: the one place the hook touches WinGet, and what the
+# Pester suite mocks.
+function Get-InstalledWinGetPackage {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    return @(Get-WinGetPackage -Id $Id -MatchOption EqualsCaseInsensitive -ErrorAction Stop)
+}
+
+function Get-AllInstalledWinGetPackage {
+    return @(Get-WinGetPackage -ErrorAction Stop)
+}
+
+function Invoke-WinGetPackageUpdate {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    return Update-WinGetPackage -Id $Id -MatchOption EqualsCaseInsensitive -Mode Silent -IncludeUnknown -ErrorAction Stop
+}
+
+function Format-WinGetInstallFailure {
+    # PSInstallResult.ErrorMessage() dereferences ExtendedErrorCode, which is null for some
+    # statuses, so the message is assembled here instead.
+    param([Parameter(Mandatory = $true)][object]$Result)
+    $text = "status $($Result.Status), installer exit code $($Result.InstallerErrorCode)"
+    if ($null -ne $Result.ExtendedErrorCode) {
+        $text += (", extended error 0x{0:X8} ({1})" -f $Result.ExtendedErrorCode.HResult, $Result.ExtendedErrorCode.Message)
+    }
+    return $text
+}
+
+function Test-PendingReboot {
+    foreach ($key in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) {
+        if (Test-Path -LiteralPath $key) { return $true }
+    }
+    return $false
+}
+
+function Get-WinGetInstalledCandidate {
+    <#
+        Diagnostic only - never used to choose what to install. Lists installed packages whose
+        name shares a word with an unmapped NinjaOne title so the operator can paste the right Id
+        into Get-ProductPackageMap instead of guessing at it.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Title)
+    $tokens = @(Get-ProductTitleToken -Title $Title)
+    if ($tokens.Count -eq 0) { return @() }
+    if ($null -eq $script:InstalledPackageListing) {
+        try {
+            $script:InstalledPackageListing = @(Get-AllInstalledWinGetPackage)
+        } catch {
+            $script:InstalledPackageListing = @()
+        }
+    }
+    $matched = New-Object System.Collections.Generic.List[string]
+    foreach ($package in $script:InstalledPackageListing) {
+        $name = ([string]$package.Name).ToLowerInvariant()
+        foreach ($token in $tokens) {
+            if ($name.Contains($token)) {
+                $entry = "$($package.Name) [$($package.Id)]"
+                if (-not $matched.Contains($entry)) { $matched.Add($entry) }
+                break
+            }
+        }
+        if ($matched.Count -ge 5) { break }
+    }
+    return $matched.ToArray()
+}
+
 function Install-SelectedProduct {
     <#
-        Installs (or, with -DryRun, only evaluates) ONE product, named by its NinjaOne patch title
-        such as "Google Chrome 141.0.7390.55". Return a hashtable:
+        Upgrades (or, with -DryRun, only evaluates) ONE product, named by its NinjaOne patch title
+        such as "ChromeEnterprise (X64)". Returns:
 
             @{ State = '<state>'; RebootRequired = $false; Detail = '<one line for the log>' }
 
         State is one of:
-            Installed         - this call installed it
-            AlreadyInstalled  - the device already has this version or newer
-            WouldInstall      - dry run only: an install would be attempted
-            NotOffered        - no package matches this title on this device
-            Failed            - an install was attempted and failed
-            NotImplemented    - there is no install mechanism (the shipped default)
+            Installed         - this call upgraded it
+            AlreadyInstalled  - the device already has the newest version the source offers
+            WouldInstall      - dry run only: an upgrade would be attempted
+            NotOffered        - the title is unmapped, or the mapped package is not installed here
+            Failed            - an upgrade was attempted and failed, or applicability is unknown
+            NotImplemented    - unused by this implementation
 
-        Rules for a replacement:
-          * Map the title to a package id with an explicit, reviewed table - never a fuzzy search -
-            and return NotOffered for a title the table does not name.
-          * With -DryRun, change nothing on the device.
-          * Throwing is treated as an environment error (exit 5) for the whole run.
+        Throwing is treated as an environment error (exit 5) for the whole run, so only a failed
+        package lookup throws - the module itself is broken then, not this one product.
     #>
     param([Parameter(Mandatory = $true)][string]$Title, [bool]$DryRun)
+
+    $key = ConvertTo-ProductKey -Title $Title
+    $map = Get-ProductPackageMap
+    if (-not $map.ContainsKey($key)) {
+        $detail = "no winget package is mapped for key '$key' -- add it to Get-ProductPackageMap in this script"
+        $candidates = @(Get-WinGetInstalledCandidate -Title $Title)
+        if ($candidates.Count -gt 0) { $detail += "; installed packages that may match: $($candidates -join '; ')" }
+        return @{ State = 'NotOffered'; RebootRequired = $false; Detail = $detail }
+    }
+    $packageId = $map[$key]
+
+    try {
+        $found = @(Get-InstalledWinGetPackage -Id $packageId)
+    } catch {
+        throw ("looking up $packageId failed: $($_.Exception.Message)" + (Get-WinGetHostHint -Edition $PSVersionTable.PSEdition -IsSystem (Test-IsSystem)))
+    }
+    # The match option already asks for the exact id; filtering again keeps a looser module
+    # version from handing back a different package.
+    $installed = @($found | Where-Object { [string]$_.Id -ieq $packageId })
+    if ($installed.Count -eq 0) {
+        return @{ State = 'NotOffered'; RebootRequired = $false; Detail = "$packageId is not installed on this device" }
+    }
+    if ($installed.Count -gt 1) {
+        $versions = @($installed | ForEach-Object { [string]$_.InstalledVersion }) -join ', '
+        return @{ State = 'Failed'; RebootRequired = $false; Detail = "$packageId is installed $($installed.Count) times ($versions); upgrade it by hand" }
+    }
+    $package = $installed[0]
+    $from = [string]$package.InstalledVersion
+    # An unknown installed version reads as "no update available", which would report a
+    # product as patched without anyone knowing it is.
+    if ([string]::IsNullOrWhiteSpace($from) -or $from -ieq 'Unknown') {
+        return @{ State = 'Failed'; RebootRequired = $false; Detail = "WinGet cannot read the installed version of $packageId, so it cannot tell whether the patch applies" }
+    }
+    if (-not $package.IsUpdateAvailable) {
+        return @{ State = 'AlreadyInstalled'; RebootRequired = $false; Detail = "$packageId $from -- no newer version offered" }
+    }
+    $to = @($package.AvailableVersions | Where-Object { $_ })
+    $target = 'a newer version'
+    if ($to.Count -gt 0) { $target = [string]$to[0] }
+    if ($DryRun) {
+        return @{ State = 'WouldInstall'; RebootRequired = $false; Detail = "$packageId $from -> $target" }
+    }
+
+    $rebootBefore = Test-PendingReboot
+    try {
+        $result = Invoke-WinGetPackageUpdate -Id $packageId
+    } catch {
+        return @{ State = 'Failed'; RebootRequired = $false; Detail = "upgrading $packageId failed: $($_.Exception.Message)" }
+    }
+    if ($null -eq $result) {
+        return @{ State = 'Failed'; RebootRequired = $false; Detail = "Update-WinGetPackage returned no result for $packageId" }
+    }
+    if ([string]$result.Status -ne 'Ok') {
+        return @{ State = 'Failed'; RebootRequired = $false; Detail = "upgrading $packageId failed: $(Format-WinGetInstallFailure -Result $result)" }
+    }
     return @{
-        State          = 'NotImplemented'
-        RebootRequired = $false
-        Detail         = 'no install mechanism configured - replace Install-SelectedProduct in this script'
+        State          = 'Installed'
+        RebootRequired = ([bool]$result.RebootRequired -or ((Test-PendingReboot) -and -not $rebootBefore))
+        Detail         = "$packageId $from -> $target"
     }
 }
 #endregion install-hook
@@ -295,7 +557,13 @@ function Invoke-SoftwareRemediation {
     Write-Host "rebootBehavior: $($request.RebootBehavior)"
 
     if (-not $request.DryRun -and -not (Test-IsElevated)) {
-        Write-Host 'ERROR (environment): installing software needs an elevated session. Run as SYSTEM.'
+        Write-Host 'ERROR (environment): installing software needs an elevated session. Run as SYSTEM or an administrator credential.'
+        return 5
+    }
+
+    $notReady = Initialize-WinGetModule
+    if ($notReady) {
+        Write-Host "ERROR (environment): $notReady"
         return 5
     }
 
@@ -343,13 +611,28 @@ function Invoke-SoftwareRemediation {
 
     $exitCode = Get-ToolkitExitCode -States $states -RebootPending $rebootPending -RebootScheduled $rebootScheduled -DryRun $request.DryRun
     if ($exitCode -eq 10) {
-        Write-Host 'Nothing was installed: this reference script has no install mechanism. See remediation/README.md.'
+        Write-Host 'Nothing was installed: the install hook has no install mechanism. See remediation/README.md.'
     }
     Write-Host "Result: exit $exitCode"
     return $exitCode
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
+    $pwsh = $null
+    $isSystem = Test-IsSystem
+    if ($PSVersionTable.PSEdition -eq 'Desktop' -and $isSystem) { $pwsh = Find-Pwsh }
+    if ((Resolve-ScriptHost -Edition $PSVersionTable.PSEdition -IsSystem $isSystem -PwshPath $pwsh -ScriptPath $PSCommandPath) -eq 'Relaunch') {
+        Write-Host "Host: re-running in PowerShell 7 ($pwsh), because Microsoft.WinGet.Client does not run as SYSTEM in Windows PowerShell."
+        # The arguments are key=value tokens with no spaces or quotes, so they pass through
+        # verbatim; NinjaOne's script variables reach the child through the inherited environment.
+        & $pwsh -NoLogo -NoProfile -NonInteractive -MTA -ExecutionPolicy Bypass -File $PSCommandPath @args
+        $code = $LASTEXITCODE
+        if ($null -eq $code) {
+            Write-Host 'ERROR (environment): PowerShell 7 did not start.'
+            $code = 5
+        }
+        exit ([int]$code)
+    }
     # Select the last object so a stray pipeline write can never turn the exit code into an array.
     $code = Invoke-SoftwareRemediation -ScriptArguments $args | Select-Object -Last 1
     exit ([int]$code)

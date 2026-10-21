@@ -1225,6 +1225,16 @@ pub struct ScriptSummary {
 #[serde(rename_all = "camelCase")]
 pub struct RunAsOptions {
     pub roles: Vec<String>,
+    pub credentials: Vec<RunAsCredential>,
+}
+
+/// A stored credential `runAs` takes by id (sent as the id's decimal string).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(rename_all = "camelCase")]
+pub struct RunAsCredential {
+    pub id: i64,
+    pub name: String,
 }
 
 /// Mirror of the backend `commands::actions::ActionRequest`.

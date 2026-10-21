@@ -212,9 +212,11 @@ being sent an empty list.
 
 Reference scripts that implement this contract ship in [`remediation/`](./remediation/README.md):
 `Install-SelectedWindowsUpdates.ps1` installs only the listed KBs through the Windows Update
-Agent. `Install-SelectedSoftwarePatches.ps1` decodes and validates the product list, but it
-installs nothing until you supply an install mechanism, and until then it exits `10`. That
-README covers how to import them, the exact parameter format and the exit codes.
+Agent. `Install-SelectedSoftwarePatches.ps1` maps each listed title to a WinGet package through an
+explicit table you extend, and upgrades it with Microsoft's `Microsoft.WinGet.Client` module.
+Running it as SYSTEM needs PowerShell 7 on the device, and running it as a Windows credential
+doesn't. That README covers how to import them, which Run as to use, the exact parameter format
+and the exit codes.
 
 NinjaOne has **no script‑upload API**, so add the scripts by hand under **Administration →
 Library → Automation**, then paste each numeric ID (from the script's URL) into **Settings →

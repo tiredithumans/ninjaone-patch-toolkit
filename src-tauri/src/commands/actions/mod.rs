@@ -110,10 +110,22 @@ pub struct ScriptSummary {
     pub accepts_dry_run: bool,
 }
 
+/// What one device's scripts may run as. Both lists come from NinjaOne, so the
+/// Run-as choice can only name something that device reported.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAsOptions {
+    /// `runAs` role strings, sent verbatim.
     pub roles: Vec<String>,
+    /// Stored credentials, which `runAs` takes as the credential id in a string.
+    pub credentials: Vec<RunAsCredential>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAsCredential {
+    pub id: i64,
+    pub name: String,
 }
 
 /// The `action:progress` payload. Crate-visible for the same reason as
@@ -461,7 +473,14 @@ fn summarize(s: &AutomationScript) -> ScriptSummary {
     }
 }
 
-/// Credential roles this device will accept for `runAs`.
+/// Credential roles and stored credentials this device will accept for `runAs`.
+///
+/// The spec describes `runAs` only as "Credential role/identifier". That a stored
+/// credential is selected by its id as a string (`runAs: "26"`) is documented by
+/// the community NinjaOne PowerShell module
+/// (<https://docs.homotechsual.dev/modules/ninjaone/commandlets/invoke/script-or-action/>),
+/// alongside the roles `system`, `loggedonuser`, `SR_LOCAL_ADMINISTRATOR`,
+/// `SR_DOMAIN_ADMINISTRATOR`, `SR_MAC_SCRIPT` and `SR_LINUX_SCRIPT`.
 #[tauri::command]
 pub async fn list_run_as_options(
     state: State<'_, AppState>,
@@ -473,8 +492,20 @@ pub async fn list_run_as_options(
         .device_scripting_options(device_id)
         .await
         .map_err(UiError::from)?;
+    let creds = opts.credentials;
     Ok(RunAsOptions {
-        roles: opts.credentials.roles,
+        roles: creds.roles,
+        credentials: creds
+            .credentials
+            .into_iter()
+            .map(|c| RunAsCredential {
+                id: c.id,
+                name: c
+                    .name
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| format!("Credential #{}", c.id)),
+            })
+            .collect(),
     })
 }
 

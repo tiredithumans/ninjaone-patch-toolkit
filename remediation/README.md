@@ -9,11 +9,13 @@ implementations of that contract. Review them, import them and point the toolkit
 | Script | Action | What it does |
 |---|---|---|
 | [`Install-SelectedWindowsUpdates.ps1`](./Install-SelectedWindowsUpdates.ps1) | Apply selected OS patches | Uses the Windows Update Agent (`Microsoft.Update.Session`) to install **only** the listed KBs. |
-| [`Install-SelectedSoftwarePatches.ps1`](./Install-SelectedSoftwarePatches.ps1) | Apply selected software patches | Decodes and validates the product list and reports it. **It installs nothing until you implement its install hook**, and exits `10` until then. See [below](#the-software-script-needs-an-install-mechanism). |
+| [`Install-SelectedSoftwarePatches.ps1`](./Install-SelectedSoftwarePatches.ps1) | Apply selected software patches | Maps each listed NinjaOne title to a WinGet package through an explicit table and upgrades it with Microsoft's `Microsoft.WinGet.Client` PowerShell module. See [below](#how-the-software-script-installs). |
 
-Both scripts need Windows PowerShell 5.1 or later, contain only ASCII, and make no network
-requests of their own. The only downloads come from the Windows Update Agent, from the update
-service the device already uses (Microsoft Update or WSUS).
+Both scripts need Windows PowerShell 5.1 or later and contain only ASCII. The OS script makes no
+network requests of its own: its only downloads come from the Windows Update Agent, from the
+update service the device already uses (Microsoft Update or WSUS). The software script installs
+`Microsoft.WinGet.Client` from the PowerShell Gallery when a device lacks it, and WinGet downloads
+installers from its configured sources.
 
 ## Importing into NinjaOne
 
@@ -26,7 +28,7 @@ Library → Automation → Add → New script**:
 | Language | PowerShell |
 | Operating system | Windows |
 | Architecture | All (64-bit recommended; the Windows Update Agent is the same on both) |
-| Run as | System. The toolkit sends its own **Run as** (Settings → Patch actions, default `system`) with every dispatch. Installing updates needs an elevated context, and both scripts exit `5` when they aren't elevated. |
+| Run as | System. The toolkit sends its own **Run as** (Settings → Patch actions, default `system`) with every dispatch, so this is only the library default. Installing updates needs an elevated context, and both scripts exit `5` when they aren't elevated. For the software script, see [which Run as to use](#which-run-as-to-use). |
 | Script | paste the file's contents unchanged |
 
 Then add these **script variables**. Use exactly these names (case doesn't matter), type
@@ -100,46 +102,80 @@ for that run.
 | `2` | Nothing matched: none of the listed patches is offered to this device or installed on it. |
 | `3` | Incomplete: at least one listed patch failed to download or install, is hidden on the device, or wasn't offered while others were. |
 | `4` | A restart is pending and `rebootBehavior=Never` held it back. For the OS script the restart may have been pending before this run, so the code can appear even when nothing new was installed. NinjaOne will probably show the run as failed so that the pending restart is visible. |
-| `5` | Environment error: the Windows Update Agent is unavailable, the search failed, another install is in progress, the session isn't elevated, or the software install hook threw an error. |
-| `10` | Software script only: no install mechanism is configured, so nothing was installed. |
+| `5` | Environment error: the Windows Update Agent is unavailable, the search failed, another install is in progress, or the session isn't elevated. For the software script: `Microsoft.WinGet.Client` couldn't be installed, loaded or run (the log line says how to fix the device). |
+| `10` | Software script only: the install hook reported it has no install mechanism. The shipped hook never does; a replacement hook that returns `NotImplemented` would. |
 
 The OS script writes one line per KB, for example `WOULD INSTALL KB5040434 : '…'`,
 `INSTALLED KB5040434 : Succeeded (HRESULT 0x00000000, reboot required) '…'`,
 `INSTALLED KB5041580 : already installed`, `NOT FOUND KB5041585 : not offered …`,
 `SKIPPED KB… : … is hidden` and `FAILED KB… : …`. It ends with `Result: exit N`.
 
-## The software script needs an install mechanism
+## How the software script installs
 
 NinjaOne's third-party patching is carried out by the NinjaOne agent itself. There is no
-supported local command for "install NinjaOne third-party patch *title*", and there are two
-further obstacles:
+supported local command for "install NinjaOne third-party patch *title*", so the software script
+upgrades through the Windows Package Manager instead, with Microsoft's `Microsoft.WinGet.Client`
+module. It doesn't use `winget.exe`: the CLI
+[isn't supported as SYSTEM](https://learn.microsoft.com/windows/package-manager/winget/troubleshooting#system-context),
+and there its column headers come back as resource keys (`SearchName SearchId SearchVersion`)
+instead of English. The module returns objects, so the script never parses WinGet's text output.
 
-- The WinGet CLI [is not supported as SYSTEM](https://learn.microsoft.com/windows/package-manager/winget/troubleshooting#system-context).
-- Mapping a title such as `Google Chrome 141.0.7390.55` to a package id is a decision each tenant
-  has to make.
+For each title it:
 
-So `Install-SelectedSoftwarePatches.ps1` handles everything that's the same for every tenant:
-decoding, validation, per-product reporting, restarts and exit codes. It hands each title to
-`Install-SelectedProduct`, a clearly marked function whose shipped version returns
-`NotImplemented`. Until you replace it, every run, including a dry run, exits `10`, so the Jobs
-tab never shows a success for an install that didn't happen.
+1. Looks the title up in `Get-ProductPackageMap`, a table near the top of the install hook that
+   maps a normalized NinjaOne title (`ChromeEnterprise (X64)` → `chromeenterprisex64`) to a WinGet
+   package id (`Google.Chrome`). Versions, spaces and punctuation are dropped before the lookup,
+   so `Google Chrome 141.0.7390.55` and `7-Zip 24.08 (x64)` match their rows too. A title that
+   isn't in the table is reported `NOT OFFERED`. The log line names the key to add and the
+   installed packages that may match, so you can copy the right id into the table. Nothing is
+   ever guessed at.
+2. Asks the module for that package (`Get-WinGetPackage`, exact id). Not installed →
+   `NOT OFFERED`. No newer version → `ALREADY INSTALLED`. An unknown installed version, or the
+   same package installed twice, → `FAILED`, because the script can't tell whether the patch
+   applies.
+3. On a dry run, reports `WOULD INSTALL` with the version change. Otherwise it runs
+   `Update-WinGetPackage` silently and reports `INSTALLED` or `FAILED` with WinGet's status and the
+   installer's exit code. A restart the installer asks for is handled by `rebootBehavior`.
 
-To make the script install something, replace `Install-SelectedProduct` with a mapping you have
-reviewed, for example with the `Microsoft.WinGet.Client` module (supported as SYSTEM for
-machine-wide packages) or Chocolatey. The function's comment spells out the return contract.
-Map titles through an explicit table, never a fuzzy search, return `NotOffered` for any title the
-table doesn't name, and change nothing when `-DryRun` is set.
+**Before rolling it out, extend `Get-ProductPackageMap`** with the products you patch. Run a dry
+run first: every `NOT OFFERED` line tells you what to add.
+
+### Which Run as to use
+
+`Microsoft.WinGet.Client` works as SYSTEM only in PowerShell 7, and NinjaOne runs scripts in
+Windows PowerShell 5.1 (the cmdlets fail there with "This cmdlet is not supported in Windows
+PowerShell", [winget-cli#4820](https://github.com/microsoft/winget-cli/issues/4820)). Pick one:
+
+| Run as | Needs on each device | How it works |
+|---|---|---|
+| **System** (the default) | PowerShell 7 | The script re-runs itself in PowerShell 7 (`pwsh -MTA`). Deploy PowerShell 7 with NinjaOne's own software deployment first. Without it, every run exits `5` and says so. |
+| **A Windows credential** (Preferred Windows local admin, Preferred Windows domain admin, or a specific credential) | Nothing extra | Under a real account the module works in Windows PowerShell 5.1, so the script stays there. The account must be an administrator, and NinjaOne must start the run elevated, or a real install exits `5`. WinGet (App Installer) must be registered for that account. If a run fails saying App Installer is missing, run `Repair-WinGetPackageManager -AllUsers -Latest` on the device once. |
+
+The toolkit sends its **Run as** with every dispatch: **Settings → Patch actions** sets the
+default, and the action bar can override it for one dispatch. NinjaOne's **Windows 3rd Party
+Patching** preferred credential is a policy slot that only NinjaOne's own patch engine reads. It
+isn't a script run-as role, so it can't be chosen by role. Choosing the same credential by name
+works.
+
+The first run on a device without `Microsoft.WinGet.Client` installs it for all users from the
+PowerShell Gallery (plus the NuGet package provider in Windows PowerShell). This happens on a
+dry run too. It is the one change a dry run makes, and the log shows it as a `SETUP` line. The
+device needs to reach `www.powershellgallery.com` for that first run.
 
 ## Security
 
-- **These scripts run as SYSTEM on every device you dispatch to.** Read them before importing
+- **These scripts run as SYSTEM (or the credential you choose) on every device you dispatch to.** Read them before importing
   them, and review any change to them the way you would review a change to production. Pin the
   toolkit to the script **id**, not a name, so a script with the same name can't be picked by
   mistake.
 - The OS script only ever installs updates whose `KBArticleIDs` include a listed KB. It doesn't
   un-hide updates, change Windows Update settings, or install anything that isn't listed.
-- Neither script downloads or runs code from the network, writes credentials anywhere, or reads
-  any input other than the four keys above.
+- The software script only ever upgrades packages that `Get-ProductPackageMap` names, and only
+  ones already installed. It never installs a product the device doesn't have.
+- Neither script writes credentials anywhere or reads any input other than the four keys above.
+  The OS script downloads nothing itself. The software script downloads `Microsoft.WinGet.Client`
+  from the PowerShell Gallery when it's missing, and WinGet downloads the installers it runs from
+  its configured sources (by default Microsoft's `winget` community repository).
 
 ## Tests
 
@@ -163,4 +199,5 @@ Invoke-Pester -Path remediation/tests -Output Detailed
 CI's `pester` job runs them under both interpreters on Windows for every code change.
 
 The suites dot-source the scripts, which only defines their functions. They never call the
-Windows Update Agent, so they also run on Linux and macOS under `pwsh`.
+Windows Update Agent or WinGet (the software hook's module calls go through thin wrappers that
+the suite mocks), so they also run on Linux and macOS under `pwsh`.

@@ -458,4 +458,70 @@ mod tests {
         assert!(!scripts[1].accepts_dry_run());
         assert!(scripts[1].operating_systems.is_empty());
     }
+
+    /// The vendor's shape: roles plus stored credentials (`CredentialReference`),
+    /// with the `scripts` / `categories` the model ignores.
+    #[tokio::test]
+    async fn device_scripting_options_reads_roles_and_credentials() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/device/7/scripting/options"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "categories": [{ "id": 1, "name": "Patching" }],
+                "scripts": [{ "type": "SCRIPT", "id": 42, "name": "Install-Selected" }],
+                "credentials": {
+                    "roles": ["system", "loggedonuser", "SR_LOCAL_ADMINISTRATOR"],
+                    "credentials": [
+                        { "id": 26, "name": "Patching admin", "type": "BASIC" },
+                        { "id": 27, "name": null, "type": "BASIC" },
+                    ],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let opts = client(&server)
+            .device_scripting_options(7)
+            .await
+            .unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(
+            opts.credentials.roles,
+            ["system", "loggedonuser", "SR_LOCAL_ADMINISTRATOR"]
+        );
+        let creds: Vec<_> = opts
+            .credentials
+            .credentials
+            .iter()
+            .map(|c| (c.id, c.name.as_deref()))
+            .collect();
+        assert_eq!(creds, [(26, Some("Patching admin")), (27, None)]);
+    }
+
+    /// A `null` at either level reads as "nothing offered", not a decode error that
+    /// toasts on every selection.
+    #[tokio::test]
+    async fn device_scripting_options_reads_nulls_as_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/device/7/scripting/options"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "credentials": { "roles": null, "credentials": null },
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/device/8/scripting/options"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "credentials": null })))
+            .mount(&server)
+            .await;
+
+        for device in [7, 8] {
+            let opts = client(&server)
+                .device_scripting_options(device)
+                .await
+                .unwrap_or_else(|e| panic!("device {device}: {e:#}"));
+            assert!(opts.credentials.roles.is_empty());
+            assert!(opts.credentials.credentials.is_empty());
+        }
+    }
 }
