@@ -11,6 +11,15 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dry runs of library scripts no longer fail with "Couldn't confirm that the script declares
+  a dryRun variable (the script library: deserialize response body)".** If any script in the
+  library had an empty (`null`) parameter, variable or operating-system list, the whole
+  library failed to load. That blocked every dry run and stopped the script picker from loading. Those
+  lists now load as empty. If the library still can't be read, the message now gives the
+  underlying reason.
+
 ## [0.17.2] - 2026-10-20
 
 ### Fixed
