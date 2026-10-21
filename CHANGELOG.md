@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-21
+
 ### Added
 
 - **"Run as" is now a menu, in the action bar and in Settings.** The action bar lists the Settings
