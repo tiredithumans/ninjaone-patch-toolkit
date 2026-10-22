@@ -2276,6 +2276,11 @@ tbody tr:hover {
 }
 
 .group {
+  /* Never shrunk: the list is a height-capped flex column that scrolls inside the
+     tab, and a shrinkable group (its `overflow: hidden` lets it go below its
+     content) was squeezed to a sliver once the list outgrew the window, cutting
+     an expanded group's rows in half instead of scrolling. */
+  flex: none;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel-2);
