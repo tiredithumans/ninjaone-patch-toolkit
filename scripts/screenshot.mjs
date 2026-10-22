@@ -16,7 +16,7 @@
 //                                than the shipped window, and still cut off above the
 //                                first table row: the capture was widened to reach the
 //                                rows and never did. The fix was the layout, not the
-//                                viewport. The wide
+//                                viewport: the results now fill the window. The wide
 //                                desktop layout, tall enough to show the filters,
 //                                controls, and the first patch rows — narrow widths
 //                                give the stacked mobile layout); SCREENSHOT_DSF
