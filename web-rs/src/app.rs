@@ -23,7 +23,7 @@ mod update;
 pub(crate) mod util;
 
 use actions::{ActionBar, ConfirmActionModal, JobsTable, ReauthorizeLink, ScriptDialog};
-use charts::{ComplianceByOsBars, ComplianceCharts, TrendLine};
+use charts::{ComplianceCharts, TrendLine, bar_width_px, pct_legend};
 use controls::ViewNotices;
 use filters::{PatchFilterBar, ScopeBar};
 use header::{Header, SignInButton};

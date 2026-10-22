@@ -51,6 +51,11 @@ version and start a fresh `[Unreleased]`.
   trail.
 - **Sending an action no longer jumps to the Jobs tab.** The toast offers **View jobs**, the Jobs
   tab counts what is still running, and a second toast says when the batch has finished.
+- **Compliance reads as one page.** A row of links jumps to Organizations, Approvals, By OS,
+  Worst devices, Offline and Time to install. The Within SLA % column draws its bar in the cell,
+  replacing the separate bar charts that repeated the same numbers; the severity and age charts
+  sit side by side; the SLA policy is one line, with the definitions in "How these numbers are
+  calculated". An empty First seen → installed section offers **Include installed and run**.
 - Running a query or drilling down says so when it clears your selection. Counts read "1 device",
   "2 patch rows" instead of "device(s)".
 

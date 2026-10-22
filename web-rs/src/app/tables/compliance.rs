@@ -2,8 +2,53 @@
 //! per-organization and per-OS rollup tables (the organization one drills down to
 //! its rows).
 
+use leptos::web_sys::Element;
+
 use super::backlog::{DeviceBacklogSections, SlaPolicyNote, TimeToInstallSection};
 use super::*;
+
+/// The sections the jump strip reaches, as (element id, label), in page order.
+const SECTIONS: [(&str, &str); 6] = [
+    ("cmp-orgs", "Organizations"),
+    ("cmp-approvals", "Approvals"),
+    ("cmp-os", "By OS"),
+    ("cmp-worst", "Worst devices"),
+    ("cmp-offline", "Offline"),
+    ("cmp-tti", "Time to install"),
+];
+
+/// One line of links to the tab's sections. The tab is one long page — the
+/// operator reading it for a report wants all of it in one scroll — so this is
+/// how the one they came for is reached without hunting.
+///
+/// Buttons that scroll, not `href="#…"` links: the web demo keeps the shareable
+/// view code in the URL fragment, which an anchor would overwrite.
+#[component]
+fn SectionJumps() -> impl IntoView {
+    view! {
+        <nav class="section-jumps" aria-label="Compliance sections">
+            {SECTIONS
+                .into_iter()
+                .map(|(id, label)| {
+                    view! {
+                        <button
+                            type="button"
+                            class="link-btn"
+                            on:click=move |_| {
+                                if let Some(el) = document().get_element_by_id(id) {
+                                    let el: &Element = el.as_ref();
+                                    el.scroll_into_view();
+                                }
+                            }
+                        >
+                            {label}
+                        </button>
+                    }
+                })
+                .collect_view()}
+        </nav>
+    }
+}
 
 /// The four headline figures as tiles, each with its "n of N" and a one-line
 /// definition. Read off the displayed result, like everything else on the tab.
@@ -159,20 +204,24 @@ pub(super) fn ComplianceTab() -> impl IntoView {
             <ComplianceScopeNote/>
             <SlaPolicyNote/>
             <CalculationNotes/>
+            <SectionJumps/>
             <ComplianceCharts/>
-            <ComplianceRollupTable
-                columns=&util::COMPLIANCE_ORG_HEADERS
-                rows=org_rows
-                total=org_total
-                drill=RollupDrill::Organization
-            />
-            {move || uncounted().map(|note| view! { <p class="scope-note">{note}</p> })}
+            // The Within SLA % column carries its bar in the cell: a bar chart of
+            // the same percentages used to sit above each table.
+            <section class="compliance-section" id="cmp-orgs">
+                <h3 class="chart-title">"Within SLA by organization"</h3>
+                <ComplianceRollupTable
+                    columns=&util::COMPLIANCE_ORG_HEADERS
+                    rows=org_rows
+                    total=org_total
+                    drill=RollupDrill::Organization
+                />
+                {move || uncounted().map(|note| view! { <p class="scope-note">{note}</p> })}
+                {pct_legend()}
+            </section>
             <StuckApprovals/>
-            <section class="compliance-os">
+            <section class="compliance-os" id="cmp-os">
                 <h3 class="chart-title">"Compliance by OS"</h3>
-                <div class="chart-card">
-                    <ComplianceByOsBars/>
-                </div>
                 <ComplianceRollupTable columns=&util::COMPLIANCE_OS_HEADERS rows=os_rows/>
             </section>
             <DeviceBacklogSections/>
@@ -343,7 +392,15 @@ fn ComplianceCells(row: ComplianceRow) -> impl IntoView {
     view! {
         <td>{row.devices_total}</td>
         <td>{row.devices_within_sla}</td>
-        <td>{util::format_pct(row.within_sla_pct)}</td>
+        <td class="pct-cell">
+            <span class="pct-bar" aria-hidden="true">
+                <span
+                    class=format!("pct-bar__fill {}", util::pct_band_class(row.within_sla_pct))
+                    style=format!("width:{:.1}%", bar_width_px(row.within_sla_pct, 100.0, 100.0))
+                ></span>
+            </span>
+            {util::format_pct(row.within_sla_pct)}
+        </td>
         <td>{row.devices_fully_patched}</td>
         <td>{util::format_pct(row.fully_patched_pct)}</td>
         <td>{row.urgent_pending}</td>
@@ -371,7 +428,7 @@ fn StuckApprovals() -> impl IntoView {
             .with(|r| r.as_ref().map(|r| r.approvals.clone()).unwrap_or_default())
     };
     view! {
-        <section class="compliance-approvals">
+        <section class="compliance-approvals" id="cmp-approvals">
             <h3 class="chart-title">"Approvals"</h3>
             {move || {
                 let a = approvals();

@@ -5,8 +5,9 @@
 use super::*;
 
 /// The SLA policy behind this result's "past SLA" figures — read off the result,
-/// not Settings, since the policy may have changed since the query ran — and what
-/// its first-seen times are.
+/// not Settings, since the policy may have changed since the query ran. Only the
+/// windows: what "past SLA" and "first seen" mean is in "How these numbers are
+/// calculated" just below, which used to be printed here a second time.
 #[component]
 pub(super) fn SlaPolicyNote() -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -18,30 +19,11 @@ pub(super) fn SlaPolicyNote() -> impl IntoView {
                     .result
                     .with(|r| {
                         r.as_ref()
-                            .map(|r| {
-                                format!(
-                                    "SLA policy: {}. Urgent Past SLA counts Critical, Important and Security patches first seen longer ago than their severity's SLA; undated patches count as past SLA.",
-                                    util::sla_policy_summary(&r.sla_policy),
-                                )
-                            })
+                            .map(|r| format!("SLA policy: {}.", util::sla_policy_summary(&r.sla_policy)))
                             .unwrap_or_default()
                     })
             }}
         </p>
-        {move || {
-            state
-                .query
-                .result
-                .with(|r| r.as_ref().and_then(|r| util::first_seen_note(&r.first_seen)))
-                .map(|note| {
-                    view! {
-                        <p class="scope-note">
-                            <strong>"First seen: "</strong>
-                            {note}
-                        </p>
-                    }
-                })
-        }}
     }
 }
 
@@ -56,12 +38,12 @@ enum DeviceListKind {
 #[component]
 pub(super) fn DeviceBacklogSections() -> impl IntoView {
     view! {
-        <section class="compliance-os">
+        <section class="compliance-os" id="cmp-worst">
             <h3 class="chart-title">"Worst devices"</h3>
             <p class="scope-note">{util::WORST_DEVICES_NOTE}</p>
             <DeviceBacklogTable kind=DeviceListKind::Worst/>
         </section>
-        <section class="compliance-os">
+        <section class="compliance-os" id="cmp-offline">
             <h3 class="chart-title">"Offline devices with a pending backlog"</h3>
             <p class="scope-note">{util::OFFLINE_BACKLOG_NOTE}</p>
             <DeviceBacklogTable kind=DeviceListKind::Offline/>
@@ -181,7 +163,7 @@ pub(super) fn TimeToInstallSection() -> impl IntoView {
         })
     };
     view! {
-        <section class="compliance-os">
+        <section class="compliance-os" id="cmp-tti">
             <h3 class="chart-title">"First seen \u{2192} installed"</h3>
             // The one section on this tab built from the detail rows, so it is the
             // one the patch filters *do* reach — the banner above says otherwise
@@ -213,7 +195,25 @@ pub(super) fn TimeToInstallSection() -> impl IntoView {
             {move || {
                 let t = tti();
                 if let Some(reason) = util::time_to_install_empty_reason(&t) {
-                    return view! { <p class="empty">{reason}</p> }.into_any();
+                    // A query that never asked for installed rows has nothing to
+                    // measure: offer the one click that asks.
+                    let looked = state.query.applied_filters.with(|a| {
+                        a.as_ref().is_some_and(|a| a.statuses.iter().any(|s| s == "INSTALLED"))
+                    });
+                    return view! {
+                        <div class="empty">
+                            <p>{reason}</p>
+                            {(!looked).then(|| view! {
+                                <button
+                                    class="btn"
+                                    on:click=move |_| state.include_status_and_run("INSTALLED")
+                                >
+                                    "Include installed and run"
+                                </button>
+                            })}
+                        </div>
+                    }
+                        .into_any();
                 }
                 let rows: Vec<(&'static str, InstallLatency)> = t
                     .overall

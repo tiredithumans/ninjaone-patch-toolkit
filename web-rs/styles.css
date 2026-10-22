@@ -944,6 +944,9 @@ tbody tr:hover {
 /* --- Dashboard charts (inline SVG) --- */
 .charts {
   display: grid;
+  /* Severity and age side by side on a wide window, each its own height. */
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  align-items: start;
   gap: 16px;
   margin-bottom: 16px;
 }
@@ -994,17 +997,59 @@ tbody tr:hover {
   fill: var(--border);
 }
 
-/* Compliance bar fills, by health band. */
-.chart .bar-good {
+/* The Within SLA % cell's bar, by health band: the bar chart of the same
+   percentages that sat above each compliance table, drawn in the cell instead. */
+/* The age histogram's bars: one colour, the accent. Age is a distribution, not a
+   health band, so it does not borrow the Within SLA band colours. */
+.chart .age-bar {
   fill: var(--accent);
 }
 
-.chart .bar-warn {
-  fill: var(--warn);
+.pct-cell {
+  white-space: nowrap;
 }
 
-.chart .bar-bad {
-  fill: var(--danger);
+.pct-bar {
+  display: inline-block;
+  width: 64px;
+  height: 8px;
+  margin-right: 8px;
+  vertical-align: middle;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.pct-bar__fill {
+  display: block;
+  height: 100%;
+}
+
+.pct-bar__fill.bar-good {
+  background: var(--accent);
+}
+
+.pct-bar__fill.bar-warn {
+  background: var(--warn);
+}
+
+.pct-bar__fill.bar-bad {
+  background: var(--danger);
+}
+
+/* The Compliance tab's section links. */
+.section-jumps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 4px 2px 14px;
+  font-size: 12.5px;
+}
+
+.compliance-section,
+.compliance-os,
+.compliance-approvals {
+  scroll-margin-top: 8px;
 }
 
 /* The same bands as legend squares and as the Within SLA headline figure. */
