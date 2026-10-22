@@ -1,5 +1,14 @@
-use super::controls::PresetRow;
-use super::menu::dismiss_on_outside;
+//! The filters: the device scope bar under the top bar (every tab), and the patch
+//! filter bar at the top of the Patches and Failures tabs (the only tabs whose
+//! rows those filters reach).
+//!
+//! They used to be one ~490px panel above the tabs whose lower half vanished on
+//! Compliance and Needs Reboot, so the content under it jumped on every tab switch
+//! and the panel said in a sentence which of its own controls did nothing there.
+
+use leptos::task::spawn_local;
+
+use super::menu::{MenuButton, dismiss_on_outside};
 use super::*;
 
 /// The First-seen choices as (stored value, label). `custom` reveals the two date
@@ -13,385 +22,333 @@ const DETECTED_WINDOWS: [(&str, &str); 6] = [
     ("custom", "Custom range…"),
 ];
 
+/// Patch type choices as (value, label).
+const PATCH_TYPES: [(&str, &str); 3] = [("ALL", "All"), ("OS", "OS"), ("SOFTWARE", "Software")];
+
+/// The device scope: organizations, locations, roles, OS type and name, and the
+/// patch type — every filter that narrows every tab. One row of compact pickers.
 #[component]
-pub(crate) fn Filters() -> impl IntoView {
+pub(crate) fn ScopeBar() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // Shown for either install-history status — see `util::needs_install_window`.
-    let install_history_selected = move || {
+    let loading = Signal::derive(move || state.lookups.loading_lookups());
+    view! {
+        <section
+            class="scope-bar"
+            id=super::shortcuts::FILTERS_PANEL_ID
+            aria-label="Device scope"
+            // While the lookups load, the pickers are disabled (their options aren't
+            // there yet) and the bar reports busy to assistive tech.
+            aria-busy=move || loading.get().to_string()
+        >
+            <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
+                <PresetsMenu/>
+            </Show>
+            <Picker
+                label="Organizations"
+                all_label="All"
+                options=Signal::derive(move || state.lookups.orgs.get())
+                selected=state.filters.org_ids
+                // Changing the org scope changes which locations exist, so this one
+                // facet routes through the state method that reloads them (and drops
+                // any selected location that just went away).
+                on_toggle=Callback::new(move |id: i64| state.toggle_org(id))
+                // Clear goes through the same reload, or the location list kept
+                // offering (and the selection kept) only the cleared orgs' sites.
+                on_clear=Callback::new(move |()| state.clear_orgs())
+                disabled=loading
+                searchable=true
+            />
+            <Picker
+                label="Locations"
+                all_label="All"
+                options=Signal::derive(move || {
+                    // Names are qualified only where they'd otherwise collide — with
+                    // several organizations in scope, "HQ" appears once per org and is
+                    // unpickable without saying whose.
+                    util::disambiguate_locations(
+                        &state.lookups.locations.get(),
+                        &state.lookups.orgs.get(),
+                    )
+                })
+                selected=state.filters.loc_ids
+                on_toggle=Callback::new(move |id: i64| {
+                    state.filters.toggle_id(state.filters.loc_ids, id)
+                })
+                on_clear=Callback::new(move |()| state.filters.loc_ids.set(Vec::new()))
+                disabled=Signal::derive(move || {
+                    loading.get() || state.lookups.locations.with(Vec::is_empty)
+                })
+                searchable=true
+            />
+            <Picker
+                label="Roles"
+                all_label="All"
+                options=Signal::derive(move || state.lookups.roles.get())
+                selected=state.filters.role_ids
+                on_toggle=Callback::new(move |id: i64| {
+                    state.filters.toggle_id(state.filters.role_ids, id)
+                })
+                on_clear=Callback::new(move |()| state.filters.role_ids.set(Vec::new()))
+                disabled=loading
+                searchable=true
+            />
+            <Picker
+                label="OS type"
+                all_label="All"
+                options=Signal::derive(move || state.lookups.node_classes.get())
+                selected=state.filters.selected_classes
+                on_toggle=Callback::new(move |v: String| {
+                    state.filters.toggle_in(state.filters.selected_classes, v)
+                })
+                on_clear=Callback::new(move |()| state.filters.selected_classes.set(Vec::new()))
+                disabled=Signal::derive(move || state.lookups.node_classes.with(Vec::is_empty))
+            />
+            <input
+                class="scope-bar__os-name"
+                aria-label="OS name contains"
+                placeholder="OS name contains…"
+                prop:value=move || state.filters.os_name.get()
+                on:input=move |ev| state.filters.os_name.set(event_target_value(&ev))
+            />
+            // Type is a scope facet, not a row filter: only the families the query
+            // fetched are in the compliance, severity, age and reboot rollups, so an
+            // OS-only query cannot see a third-party backlog on any tab.
+            <div
+                class="seg-group"
+                role="group"
+                aria-label="Patch type"
+                title="Which patch families the query fetches. Narrows every tab, the fleet-health rollups included."
+            >
+                <span class="seg-group__label">"Type"</span>
+                {PATCH_TYPES
+                    .into_iter()
+                    .map(|(value, label)| {
+                        let active = move || state.filters.patch_type.with(|t| t == value);
+                        view! {
+                            <button
+                                type="button"
+                                class=move || if active() { "seg seg-on" } else { "seg" }
+                                aria-pressed=move || active().to_string()
+                                on:click=move |_| state.filters.patch_type.set(value.to_string())
+                            >
+                                {label}
+                            </button>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+            <Show when=move || loading.get()>
+                <span class="chips-label">"Loading…"</span>
+            </Show>
+            <FiltersChanged/>
+        </section>
+    }
+}
+
+/// "● Filters changed" while the controls describe a different query from the one
+/// on screen (`util::filters_changed`); a click runs it. Nothing applies a filter
+/// edit until a run — the old chip row showed the last run's filters with nothing
+/// to say they no longer matched the controls above it. Its tooltip names what the
+/// results on screen were filtered by.
+#[component]
+fn FiltersChanged() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let changed = Memo::new(move |_| {
+        state.filters.track();
+        let live = state.filters.query_args();
+        state
+            .query
+            .applied_args
+            .with(|applied| util::filters_changed(applied.as_ref(), &live))
+    });
+    let applied = move || {
+        state.query.applied_filters.with(|a| {
+            let chips = a.as_ref().map(filter_chips).unwrap_or_default();
+            if chips.is_empty() {
+                "The results on screen: no filters (whole fleet).".to_string()
+            } else {
+                let labels: Vec<String> = chips.into_iter().map(|c| c.label).collect();
+                format!("The results on screen: {}.", labels.join(" · "))
+            }
+        })
+    };
+    view! {
+        <Show when=move || changed.get()>
+            <button
+                type="button"
+                class="filters-changed"
+                title=applied
+                on:click=move |_| state.run_query()
+            >
+                "● Filters changed · Apply"
+            </button>
+        </Show>
+    }
+}
+
+/// The patch filters — Status, Severity, Search, First seen and, for an install
+/// status, the install-history window — at the top of the Patches and Failures
+/// tabs. Rendered outside those tabs' result guards, so they can be set before the
+/// first run and widened when nothing matched.
+///
+/// The bar remounts on every tab switch, so each select's choice rides on its
+/// options (`prop:selected`): a remount set a select's value before its options
+/// existed, and the control showed "Any time" over a window still filtering.
+#[component]
+pub(crate) fn PatchFilterBar() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let install_history = move || {
         state
             .filters
             .statuses
             .with(|s| util::needs_install_window(s))
     };
-    // Fleet-health tabs (Compliance / Needs Reboot) ignore the patch filters, so hide
-    // those controls there rather than imply they'd change the device-scope numbers.
-    let fleet = move || is_fleet_tab(state.ui.active_tab.get());
-
+    let severity_choices: Vec<util::Choice> = SEVERITY_OPTIONS
+        .iter()
+        .map(|&(value, label)| util::Choice { value, label })
+        .collect();
     view! {
-        <section class="panel" id=super::shortcuts::FILTERS_PANEL_ID>
-            <div class="row">
-                <h2>"Filters"</h2>
-                <Show when=move || state.lookups.loading_lookups()>
-                    <span class="chips-label">"Loading…"</span>
-                </Show>
-                // Presets persist through the backend's settings file, which the
-                // browser demo does not have: every save or delete could only fail.
-                <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
-                    <PresetRow/>
-                </Show>
-                <button
-                    class="btn btn-ghost filters-toggle"
-                    aria-expanded=move || (!state.ui.filters_collapsed.get()).to_string()
-                    on:click=move |_| {
-                        let next = !state.ui.filters_collapsed.get_untracked();
-                        state.ui.filters_collapsed.set(next);
-                        // An explicit toggle is a preference; remember it so the
-                        // auto-collapse below never overrides the operator again.
-                        api::set_ui_pref(api::PREF_FILTERS_COLLAPSED, next);
+        <div class="patch-filter-bar" role="group" aria-label="Patch filters">
+            <Picker
+                label="Status"
+                all_label="None"
+                options=Signal::derive(|| util::STATUS_CHOICES.to_vec())
+                selected=state.filters.statuses
+                on_toggle=Callback::new(move |v: String| {
+                    state.filters.toggle_in(state.filters.statuses, v)
+                })
+                // A query needs a status: the last one cannot be unticked, so "Select
+                // at least one status" is never an error raised from another tab.
+                keep_one=true
+                disabled=false
+            />
+            <Picker
+                label="Severity"
+                all_label="All"
+                options=Signal::derive(move || severity_choices.clone())
+                selected=state.filters.selected_severities
+                on_toggle=Callback::new(move |v: String| {
+                    state.filters.toggle_in(state.filters.selected_severities, v)
+                })
+                on_clear=Callback::new(move |()| state.filters.selected_severities.set(Vec::new()))
+                disabled=false
+            />
+            <input
+                id=super::shortcuts::SEARCH_INPUT_ID
+                class="patch-filter-bar__search"
+                type="search"
+                aria-label="Search (KB or name)"
+                placeholder="Search KB or name"
+                prop:value=move || state.filters.search.get()
+                on:input=move |ev| state.filters.search.set(event_target_value(&ev))
+            />
+            <label class="inline">
+                "First seen"
+                <select on:change=move |ev| state.filters.detected_window.set(event_target_value(&ev))>
+                    {DETECTED_WINDOWS
+                        .into_iter()
+                        .map(|(value, label)| {
+                            let selected = move || state.filters.detected_window.get() == value;
+                            view! {
+                                <option value=value prop:selected=selected>
+                                    {label}
+                                </option>
+                            }
+                        })
+                        .collect_view()}
+                </select>
+            </label>
+            <Show when=move || state.filters.detected_window.get() == "custom">
+                <label class="inline">
+                    "After"
+                    <input
+                        type="date"
+                        prop:value=move || state.filters.detected_after_date.get()
+                        on:change=move |ev| state.filters.detected_after_date.set(event_target_value(&ev))
+                    />
+                </label>
+                <label class="inline">
+                    "Before"
+                    <input
+                        type="date"
+                        prop:value=move || state.filters.detected_before_date.get()
+                        on:change=move |ev| state.filters.detected_before_date.set(event_target_value(&ev))
+                    />
+                </label>
+            </Show>
+            // Only while an install status is picked: the window bounds the whole
+            // install-history pull, so it is meaningless otherwise.
+            <Show when=install_history>
+                <label class="inline">
+                    "Install history"
+                    // "Custom range" replaces the relative lookback (backend-side too),
+                    // so a past patch cycle can be reviewed on its own dates.
+                    <select on:change=move |ev| {
+                        state.filters.install_custom.set(event_target_value(&ev) == "custom")
+                    }>
+                        <option value="" prop:selected=move || !state.filters.install_custom.get()>
+                            "Last N days"
+                        </option>
+                        <option value="custom" prop:selected=move || state.filters.install_custom.get()>
+                            "Custom range…"
+                        </option>
+                    </select>
+                </label>
+                <Show
+                    when=move || state.filters.install_custom.get()
+                    fallback=move || {
+                        view! {
+                            <label class="inline">
+                                <input
+                                    type="number"
+                                    aria-label="Install history window (days)"
+                                    class="narrow"
+                                    min="1"
+                                    max="3650"
+                                    prop:value=move || state.filters.install_days.get().to_string()
+                                    on:change=move |ev| {
+                                        let v = event_target_value(&ev)
+                                            .parse::<i64>()
+                                            .unwrap_or_else(|_| state.filters.install_days.get_untracked());
+                                        state.filters.install_days.set(v.clamp(1, 3650));
+                                    }
+                                />
+                                "days"
+                            </label>
+                        }
                     }
                 >
+                    <label class="inline">
+                        "From"
+                        <input
+                            type="date"
+                            prop:value=move || state.filters.install_after_date.get()
+                            on:change=move |ev| state.filters.install_after_date.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <label class="inline">
+                        "To"
+                        <input
+                            type="date"
+                            prop:value=move || state.filters.install_before_date.get()
+                            on:change=move |ev| state.filters.install_before_date.set(event_target_value(&ev))
+                        />
+                    </label>
                     {move || {
-                        if state.ui.filters_collapsed.get() { "Show ▸" } else { "Hide ▾" }
-                    }}
-                </button>
-            </div>
-            <Show when=move || !state.ui.filters_collapsed.get()>
-            <div class="subhead">
-                "Device scope"
-                <span class="subhead-note">"applies to every tab"</span>
-            </div>
-            // While the lookups load, the scope selects are disabled (their options
-            // aren't there yet) and the grid reports busy to assistive tech.
-            <div class="grid" aria-busy=move || state.lookups.loading_lookups().to_string()>
-                <ScopePicker
-                    label="Organizations"
-                    all_label="All organizations"
-                    options=Signal::derive(move || state.lookups.orgs.get())
-                    selected=state.filters.org_ids
-                    // Changing the org scope changes which locations exist, so this
-                    // one facet routes through the state method that reloads them
-                    // (and drops any selected location that just went away).
-                    on_toggle=Callback::new(move |id: i64| state.toggle_org(id))
-                    // Clear goes through the same reload, or the location list kept
-                    // offering (and the selection kept) only the cleared orgs' sites.
-                    on_clear=Callback::new(move |()| state.clear_orgs())
-                    disabled=Signal::derive(move || state.lookups.loading_lookups())
-                />
-                <ScopePicker
-                    label="Locations"
-                    all_label="All locations"
-                    options=Signal::derive(move || {
-                        // Names are qualified only where they'd otherwise collide —
-                        // with several organizations in scope, "HQ" appears once per
-                        // org and is unpickable without saying whose.
-                        util::disambiguate_locations(
-                            &state.lookups.locations.get(),
-                            &state.lookups.orgs.get(),
+                        util::install_range_problem(
+                            &state.filters.install_after_date.get(),
+                            &state.filters.install_before_date.get(),
                         )
-                    })
-                    selected=state.filters.loc_ids
-                    on_toggle=Callback::new(move |id: i64| {
-                        state.filters.toggle_id(state.filters.loc_ids, id)
-                    })
-                    on_clear=Callback::new(move |()| state.filters.loc_ids.set(Vec::new()))
-                    disabled=Signal::derive(move || {
-                        state.lookups.loading_lookups() || state.lookups.locations.get().is_empty()
-                    })
-                />
-                <ScopePicker
-                    label="Device Roles"
-                    all_label="All roles"
-                    options=Signal::derive(move || state.lookups.roles.get())
-                    selected=state.filters.role_ids
-                    on_toggle=Callback::new(move |id: i64| {
-                        state.filters.toggle_id(state.filters.role_ids, id)
-                    })
-                    on_clear=Callback::new(move |()| state.filters.role_ids.set(Vec::new()))
-                    disabled=Signal::derive(move || state.lookups.loading_lookups())
-                />
-            </div>
-            <div class="stacked-filters">
-                <div class="control-group">
-                    <span class="chips-label">"OS Type:"</span>
-                    {move || {
-                        state.lookups.node_classes
-                            .get()
-                            .into_iter()
-                            .map(|nc| {
-                                let value = nc.value.clone();
-                                let checked = move || state.filters.selected_classes.get().contains(&value);
-                                let toggle_value = nc.value.clone();
-                                view! {
-                                    <label class="chip">
-                                        <input
-                                            type="checkbox"
-                                            prop:checked=checked
-                                            on:change=move |_| {
-                                                state.filters.toggle_in(state.filters.selected_classes, toggle_value.clone())
-                                            }
-                                        />
-                                        {nc.label}
-                                    </label>
-                                }
-                            })
-                            .collect_view()
+                            .map(|msg| view! { <span class="field-hint" role="alert">{msg}</span> })
                     }}
-                </div>
-                <div class="control-group">
-                    <span class="chips-label" id="filter-os-name-label">"OS name contains:"</span>
-                    <input
-                        aria-labelledby="filter-os-name-label"
-                        placeholder="e.g. Server 2022"
-                        prop:value=move || state.filters.os_name.get()
-                        on:input=move |ev| state.filters.os_name.set(event_target_value(&ev))
-                    />
-                </div>
-            </div>
-            <div class="subhead">
-                "Patch filters"
-                <span class="subhead-note">
-                    {move || {
-                        if fleet() {
-                            "Type applies to every tab; the rest are hidden \u{2014} Patches & Failures tabs only"
-                        } else {
-                            "Type applies to every tab; the rest to Patches & Failures only"
-                        }
-                    }}
-                </span>
-            </div>
-            // Type sits outside the fleet-tab fold because it is not a row-only
-            // facet: only the families the query fetched are in the compliance,
-            // severity, age and reboot rollups, so an OS-only query cannot see a
-            // third-party backlog on any tab. Hiding it here under "Patch filters
-            // don't affect Compliance" said the opposite of what the banner on that
-            // tab says.
-            <div class="stacked-filters">
-                <div class="control-group">
-                    <span class="chips-label">"Type:"</span>
-                    {["ALL", "OS", "SOFTWARE"]
-                        .iter()
-                        .map(|t| {
-                            let t = t.to_string();
-                            let val = t.clone();
-                            let active = move || state.filters.patch_type.get() == val;
-                            let set = t.clone();
-                            let pressed = active.clone();
-                            view! {
-                                <button
-                                    type="button"
-                                    class=move || if active() { "seg seg-on" } else { "seg" }
-                                    aria-pressed=move || pressed().to_string()
-                                    on:click=move |_| state.filters.patch_type.set(set.clone())
-                                >
-                                    {t}
-                                </button>
-                            }
-                        })
-                        .collect_view()}
-                </div>
-            </div>
-            <Show
-                when=move || !fleet()
-                fallback=|| {
-                    view! {
-                        <p class="filters-hidden-note">
-                            "Status, Severity, Search and the date windows don't affect Compliance or Needs Reboot. Switch to the Patches or Failures tab to use them."
-                        </p>
-                    }
-                }
-            >
-            <div class="stacked-filters">
-                <div class="control-group">
-                    <span class="chips-label">"Status:"</span>
-                    {STATUS_OPTIONS
-                        .iter()
-                        .map(|s| {
-                            let s = s.to_string();
-                            let value = s.clone();
-                            let checked = move || state.filters.statuses.get().contains(&value);
-                            let toggle = s.clone();
-                            view! {
-                                <label class="chip">
-                                    <input
-                                        type="checkbox"
-                                        prop:checked=checked
-                                        on:change=move |_| {
-                                            state.filters.toggle_in(state.filters.statuses, toggle.clone())
-                                        }
-                                    />
-                                    {s}
-                                </label>
-                            }
-                        })
-                        .collect_view()}
-                </div>
-                <div class="control-group">
-                    <span class="chips-label">"Severity:"</span>
-                    {SEVERITY_OPTIONS
-                        .iter()
-                        .map(|&(value, label)| {
-                            let v_checked = value.to_string();
-                            let checked = move || {
-                                state.filters.selected_severities.get().contains(&v_checked)
-                            };
-                            let v_toggle = value.to_string();
-                            view! {
-                                <label class="chip">
-                                    <input
-                                        type="checkbox"
-                                        prop:checked=checked
-                                        on:change=move |_| {
-                                            state.filters.toggle_in(state.filters.selected_severities, v_toggle.clone())
-                                        }
-                                    />
-                                    {label}
-                                </label>
-                            }
-                        })
-                        .collect_view()}
-                </div>
-                <div class="control-group">
-                    <span class="chips-label" id="filter-search-label">"Search (KB or name):"</span>
-                    <input
-                        id=super::shortcuts::SEARCH_INPUT_ID
-                        type="search"
-                        aria-labelledby="filter-search-label"
-                        placeholder="e.g. KB5040434"
-                        prop:value=move || state.filters.search.get()
-                        on:input=move |ev| state.filters.search.set(event_target_value(&ev))
-                    />
-                </div>
-                <div class="control-group">
-                    <span class="chips-label" id="filter-first-seen-label">"First seen:"</span>
-                    // Selection rides on each option, not `prop:value` on the select:
-                    // this sits inside a `<Show>`, and a remount set the value before
-                    // the options existed, so the control showed "Any time" over a
-                    // stored window that was still filtering the query.
-                    <select
-                        aria-labelledby="filter-first-seen-label"
-                        on:change=move |ev| state.filters.detected_window.set(event_target_value(&ev))
-                    >
-                        {DETECTED_WINDOWS
-                            .into_iter()
-                            .map(|(value, label)| {
-                                let selected = move || state.filters.detected_window.get() == value;
-                                view! {
-                                    <option value=value prop:selected=selected>
-                                        {label}
-                                    </option>
-                                }
-                            })
-                            .collect_view()}
-                    </select>
-                    <Show when=move || state.filters.detected_window.get() == "custom">
-                        <label class="inline">
-                            "After"
-                            <input
-                                type="date"
-                                prop:value=move || state.filters.detected_after_date.get()
-                                on:change=move |ev| {
-                                    state.filters.detected_after_date.set(event_target_value(&ev))
-                                }
-                            />
-                        </label>
-                        <label class="inline">
-                            "Before"
-                            <input
-                                type="date"
-                                prop:value=move || state.filters.detected_before_date.get()
-                                on:change=move |ev| {
-                                    state.filters.detected_before_date.set(event_target_value(&ev))
-                                }
-                            />
-                        </label>
-                    </Show>
-                </div>
-                // Install-window field: only relevant when INSTALLED is selected.
-                // Lives inside `stacked-filters` as a control-group so its label
-                // shares the same aligned column (and row gap) as the rows above.
-                <Show when=install_history_selected>
-                    <div class="control-group">
-                        <span class="chips-label" id="filter-install-days-label">
-                            "Install history:"
-                        </span>
-                        // "Custom range" replaces the relative lookback (backend-side
-                        // too), so a past patch cycle can be reviewed on its own dates.
-                        // Selection rides on each option for the same `<Show>` remount
-                        // reason as the First-seen select above.
-                        <select
-                            aria-labelledby="filter-install-days-label"
-                            on:change=move |ev| {
-                                state.filters.install_custom.set(event_target_value(&ev) == "custom")
-                            }
-                        >
-                            <option value="" prop:selected=move || !state.filters.install_custom.get()>
-                                "Last N days"
-                            </option>
-                            <option value="custom" prop:selected=move || state.filters.install_custom.get()>
-                                "Custom range…"
-                            </option>
-                        </select>
-                        <Show
-                            when=move || state.filters.install_custom.get()
-                            fallback=move || {
-                                view! {
-                                    <input
-                                        type="number"
-                                        aria-label="Install history window (days)"
-                                        class="narrow"
-                                        min="1"
-                                        max="3650"
-                                        prop:value=move || state.filters.install_days.get().to_string()
-                                        on:change=move |ev| {
-                                            let v = event_target_value(&ev)
-                                                .parse::<i64>()
-                                                .unwrap_or_else(|_| state.filters.install_days.get_untracked());
-                                            state.filters.install_days.set(v.clamp(1, 3650));
-                                        }
-                                    />
-                                    <span class="chips-label">"days"</span>
-                                }
-                            }
-                        >
-                            <label class="inline">
-                                "From"
-                                <input
-                                    type="date"
-                                    prop:value=move || state.filters.install_after_date.get()
-                                    on:change=move |ev| {
-                                        state.filters.install_after_date.set(event_target_value(&ev))
-                                    }
-                                />
-                            </label>
-                            <label class="inline">
-                                "To"
-                                <input
-                                    type="date"
-                                    prop:value=move || state.filters.install_before_date.get()
-                                    on:change=move |ev| {
-                                        state.filters.install_before_date.set(event_target_value(&ev))
-                                    }
-                                />
-                            </label>
-                            {move || {
-                                util::install_range_problem(
-                                    &state.filters.install_after_date.get(),
-                                    &state.filters.install_before_date.get(),
-                                )
-                                    .map(|msg| view! { <span class="field-hint" role="alert">{msg}</span> })
-                            }}
-                        </Show>
-                    </div>
                 </Show>
-            </div>
             </Show>
-            </Show>
-        </section>
+        </div>
     }
 }
 
-/// One multi-select scope facet: a summary line that opens a scrollable, searchable
-/// checkbox list.
+/// One multi-select facet: a compact button naming the facet and its value, which
+/// opens a checkbox list (searchable for the long lookups).
 ///
 /// A `<select multiple>` was the obvious alternative and is the wrong tool here — it
 /// needs ctrl-click to add to a selection and silently discards the whole selection
@@ -400,20 +357,28 @@ pub(crate) fn Filters() -> impl IntoView {
 /// mis-clicked that way, and the search box is what keeps the pattern usable for a
 /// tenant with hundreds of organizations.
 ///
-/// Generic over the three lookup types via [`util::Named`], since they differ only in
-/// which struct holds the id and name.
+/// Generic over every facet via [`util::Named`]: the id-keyed lookups and the
+/// string-keyed value/label choices.
 #[component]
-fn ScopePicker<T>(
+fn Picker<T>(
     label: &'static str,
     /// Shown when nothing is selected — the facet's "everything" state.
     all_label: &'static str,
     options: Signal<Vec<T>>,
-    selected: RwSignal<Vec<i64>>,
-    on_toggle: Callback<i64>,
-    /// Empties the selection. A callback rather than a direct write so a facet
-    /// with side effects (the org scope reloads the locations) keeps them.
-    on_clear: Callback<()>,
-    disabled: Signal<bool>,
+    selected: RwSignal<Vec<T::Key>>,
+    on_toggle: Callback<T::Key>,
+    /// Empties the selection; `None` offers no Clear. A callback rather than a
+    /// direct write so a facet with side effects (the org scope reloads the
+    /// locations) keeps them.
+    #[prop(optional)]
+    on_clear: Option<Callback<()>>,
+    #[prop(into)] disabled: Signal<bool>,
+    /// A search box over the options, for the tenant-sized lookups.
+    #[prop(optional)]
+    searchable: bool,
+    /// The last ticked option cannot be unticked.
+    #[prop(optional)]
+    keep_one: bool,
 ) -> impl IntoView
 where
     T: util::Named + Clone + Send + Sync + 'static,
@@ -423,75 +388,88 @@ where
     let root: NodeRef<leptos::html::Div> = NodeRef::new();
     dismiss_on_outside(open, root);
 
-    // The collapsed summary names the selection while it is short enough to read.
-    let summary = move || {
+    let names = move || {
         let sel = selected.get();
-        let names = options.with(|opts| util::names_for(&sel, opts.iter().cloned()));
-        util::selection_label(&names, all_label)
+        options.with(|opts| util::names_for(&sel, opts.iter().cloned()))
     };
-    let count = move || selected.get().len();
-    // The button's accessible name is the facet label *and* its current value, so a
-    // screen reader says "Organizations, All organizations" rather than only the
-    // value with no idea which picker it belongs to.
-    let slug = label.to_ascii_lowercase().replace(' ', "-");
-    let label_id = format!("scope-{slug}-label");
-    let button_id = format!("scope-{slug}-button");
+    // The button names the selection while it is short enough to read; the tooltip
+    // always names all of it.
+    let summary = move || util::selection_label(&names(), all_label);
+    let full = move || {
+        let n = names();
+        if n.is_empty() {
+            format!("{label}: {all_label}")
+        } else {
+            format!("{label}: {}", n.join(", "))
+        }
+    };
+    let count = move || selected.with(Vec::len);
 
     view! {
-        <div class="scope-picker" node_ref=root>
-            <span class="scope-picker__label" id=label_id.clone()>{label}</span>
+        <div class="picker" node_ref=root>
             <button
                 type="button"
-                id=button_id.clone()
-                aria-labelledby=format!("{label_id} {button_id}")
-                class="scope-picker__summary"
-                prop:disabled=move || disabled.get()
+                class=move || {
+                    if count() > 0 { "picker__button picker__button--set" } else { "picker__button" }
+                }
+                title=full
+                aria-haspopup="true"
                 aria-expanded=move || open.get().to_string()
+                prop:disabled=move || disabled.get()
                 on:click=move |_| open.update(|o| *o = !*o)
             >
-                <span class="scope-picker__value">{summary}</span>
-                <span class="scope-picker__caret">{move || if open.get() { "▾" } else { "▸" }}</span>
+                <span class="picker__label">{label}</span>
+                <span class="picker__value">{summary}</span>
+                <span class="picker__caret" aria-hidden="true">"▾"</span>
             </button>
             <Show when=move || open.get()>
-                <div class="scope-picker__panel">
-                    <div class="scope-picker__tools">
-                        <input
-                            class="scope-picker__search"
-                            placeholder="Filter…"
-                            aria-label=format!("Filter {label}")
-                            prop:value=move || search.get()
-                            on:input=move |ev| search.set(event_target_value(&ev))
-                        />
-                        <button
-                            type="button"
-                            class="btn btn-ghost"
-                            prop:disabled=move || count() == 0
-                            on:click=move |_| on_clear.run(())
-                        >
-                            "Clear"
-                        </button>
-                    </div>
-                    <div class="scope-picker__list" role="group" aria-label=label>
+                <div class="picker__panel">
+                    <Show when=move || searchable || on_clear.is_some()>
+                        <div class="picker__tools">
+                            <Show when=move || searchable>
+                                <input
+                                    class="picker__search"
+                                    placeholder="Filter…"
+                                    aria-label=format!("Filter {label}")
+                                    prop:value=move || search.get()
+                                    on:input=move |ev| search.set(event_target_value(&ev))
+                                />
+                            </Show>
+                            {on_clear.map(|clear| view! {
+                                <button
+                                    type="button"
+                                    class="btn btn-ghost"
+                                    prop:disabled=move || count() == 0
+                                    on:click=move |_| clear.run(())
+                                >
+                                    "Clear"
+                                </button>
+                            })}
+                        </div>
+                    </Show>
+                    <div class="picker__list" role="group" aria-label=label>
                         {move || {
                             let needle = search.get();
                             let matching = options.with(|o| util::matching_options(o, &needle));
                             if matching.is_empty() {
-                                return view! {
-                                    <p class="scope-picker__empty">"No matches"</p>
-                                }
-                                    .into_any();
+                                return view! { <p class="picker__empty">"No matches"</p> }.into_any();
                             }
                             matching
                                 .into_iter()
                                 .map(|o| {
-                                    let id = o.id();
-                                    let checked = move || selected.get().contains(&id);
+                                    let key = o.key();
+                                    let (k_checked, k_lock, k_toggle) = (key.clone(), key.clone(), key);
+                                    let checked = move || selected.with(|s| s.contains(&k_checked));
+                                    let locked = move || {
+                                        keep_one && selected.with(|s| s.len() == 1 && s.contains(&k_lock))
+                                    };
                                     view! {
-                                        <label class="chip">
+                                        <label class="picker__option">
                                             <input
                                                 type="checkbox"
                                                 prop:checked=checked
-                                                on:change=move |_| on_toggle.run(id)
+                                                prop:disabled=locked
+                                                on:change=move |_| on_toggle.run(k_toggle.clone())
                                             />
                                             {o.name().to_string()}
                                         </label>
@@ -504,5 +482,140 @@ where
                 </div>
             </Show>
         </div>
+    }
+}
+
+/// Saved filter presets, in a menu at the head of the scope bar. Applying one sets
+/// the controls (and says "Filters changed" until it is run). Presets persist
+/// through the backend's settings file, so the browser demo has none.
+#[component]
+fn PresetsMenu() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let saving = RwSignal::new(false);
+
+    let save_preset = move |_| {
+        if saving.get_untracked() {
+            return;
+        }
+        let name = state.settings.preset_name.get_untracked();
+        if name.trim().is_empty() {
+            state.notify(Toast::err("Name the preset first"));
+            return;
+        }
+        let preset = Preset {
+            name: name.trim().to_string(),
+            filter: state.current_filter(),
+            patch_type: Some(state.filters.patch_type.get_untracked()),
+            statuses: Some(state.filters.statuses.get_untracked()),
+            install_days: Some(state.filters.install_days.get_untracked()),
+        };
+        saving.set(true);
+        spawn_local(async move {
+            match api::save_preset(preset).await {
+                Ok(p) => {
+                    state.settings.presets.set(p);
+                    state.settings.preset_name.set(String::new());
+                    state.notify(Toast::ok("Preset saved"));
+                }
+                Err(e) => state.notify(Toast::err(e)),
+            }
+            saving.set(false);
+        });
+    };
+
+    view! {
+        <MenuButton
+            label=Signal::derive(move || {
+                let n = state.settings.presets.with(Vec::len);
+                if n == 0 { "Presets ▾".to_string() } else { format!("Presets ({n}) ▾") }
+            })
+            class="btn-ghost"
+            title=String::from("Apply or save a set of filters")
+        >
+            <div class="presets">
+            {move || {
+                state.settings.presets
+                    .get()
+                    .into_iter()
+                    .map(|p| {
+                        let name = p.name.clone();
+                        let label_name = p.name.clone();
+                        let p2 = p.clone();
+                        let del_name = p.name.clone();
+                        // Two-click confirm: first click arms, second deletes;
+                        // mouseleave/blur disarm. Component-local so the signal is
+                        // disposed with this chip when the preset list re-renders.
+                        let armed = RwSignal::new(false);
+                        view! {
+                            <span class="preset">
+                                <button
+                                    type="button"
+                                    class="menu__item"
+                                    on:click=move |_| state.apply_preset(p2.clone())
+                                >
+                                    {name}
+                                </button>
+                                // Kept open across the arming click.
+                                <button
+                                    type="button"
+                                    data-keep-open=""
+                                    class=move || if armed.get() { "x x-armed" } else { "x" }
+                                    aria-label=move || {
+                                        if armed.get() {
+                                            format!("Confirm delete preset {label_name}")
+                                        } else {
+                                            format!("Delete preset {label_name}")
+                                        }
+                                    }
+                                    on:click=move |_| {
+                                        if !armed.get_untracked() {
+                                            armed.set(true);
+                                            return;
+                                        }
+                                        let n = del_name.clone();
+                                        spawn_local(async move {
+                                            match api::delete_preset(n).await {
+                                                Ok(p) => state.settings.presets.set(p),
+                                                // It used to fail silently, leaving a
+                                                // chip that looked deleted-then-not.
+                                                Err(e) => state.notify(Toast::err(format!(
+                                                    "Couldn't delete the preset: {e}"
+                                                ))),
+                                            }
+                                        });
+                                    }
+                                    on:mouseleave=move |_| armed.set(false)
+                                    on:blur=move |_| armed.set(false)
+                                >
+                                    {move || if armed.get() { "Delete?" } else { "×" }}
+                                </button>
+                            </span>
+                        }
+                    })
+                    .collect_view()
+            }}
+            <Show when=move || state.settings.presets.with(Vec::is_empty)>
+                <p class="menu__note">"No presets yet."</p>
+            </Show>
+            </div>
+            <div class="presets-save">
+                <input
+                    class="preset-name"
+                    aria-label="Preset name"
+                    placeholder="Name these filters"
+                    prop:value=move || state.settings.preset_name.get()
+                    on:input=move |ev| state.settings.preset_name.set(event_target_value(&ev))
+                />
+                <button
+                    type="button"
+                    class="btn"
+                    data-keep-open=""
+                    prop:disabled=move || saving.get()
+                    on:click=save_preset
+                >
+                    "Save"
+                </button>
+            </div>
+        </MenuButton>
     }
 }

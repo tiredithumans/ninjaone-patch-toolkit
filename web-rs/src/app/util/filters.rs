@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{FilterParams, Location, Organization, Role};
+use crate::types::{FilterParams, Location, NodeClass, Organization, PatchQueryArgs, Role};
 
 use super::super::AppliedFilters;
 
@@ -341,18 +341,21 @@ pub(crate) fn region_select_value(url: &str, custom_chosen: bool) -> &'static st
 /// instance field.
 pub(crate) const REGION_CUSTOM: &str = "custom";
 
-/// Anything the scope multi-selects can list: an id and a display name.
+/// Anything a multi-select picker can list: a key and a display name.
 ///
 /// The three lookups (`Organization`/`Location`/`Role`) are separate types with the
-/// same two fields, so one trait keeps the picker, the chip row and the snapshot
-/// generic over all three instead of triplicating each of them.
+/// same two fields, and the OS-type, status and severity facets are value/label
+/// pairs keyed by string, so one trait keeps the picker, the chip row and the
+/// snapshot generic over all of them instead of repeating each.
 pub(crate) trait Named {
-    fn id(&self) -> i64;
+    type Key: Clone + PartialEq + std::fmt::Display + Send + Sync + 'static;
+    fn key(&self) -> Self::Key;
     fn name(&self) -> &str;
 }
 
 impl Named for Organization {
-    fn id(&self) -> i64 {
+    type Key = i64;
+    fn key(&self) -> i64 {
         self.id
     }
     fn name(&self) -> &str {
@@ -361,7 +364,8 @@ impl Named for Organization {
 }
 
 impl Named for Location {
-    fn id(&self) -> i64 {
+    type Key = i64;
+    fn key(&self) -> i64 {
         self.id
     }
     fn name(&self) -> &str {
@@ -370,12 +374,106 @@ impl Named for Location {
 }
 
 impl Named for Role {
-    fn id(&self) -> i64 {
+    type Key = i64;
+    fn key(&self) -> i64 {
         self.id
     }
     fn name(&self) -> &str {
         &self.name
     }
+}
+
+impl Named for NodeClass {
+    type Key = String;
+    fn key(&self) -> String {
+        self.value.clone()
+    }
+    fn name(&self) -> &str {
+        &self.label
+    }
+}
+
+/// One fixed choice of a string-valued facet (status, severity): the raw value the
+/// backend takes and the label the picker shows.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Choice {
+    pub value: &'static str,
+    pub label: &'static str,
+}
+
+impl Named for Choice {
+    type Key = String;
+    fn key(&self) -> String {
+        self.value.to_string()
+    }
+    fn name(&self) -> &str {
+        self.label
+    }
+}
+
+/// The patch statuses as picker choices. The values stay the backend's uppercase
+/// spellings; the labels read like the severities beside them instead of shouting.
+pub(crate) const STATUS_CHOICES: [Choice; 5] = [
+    Choice {
+        value: "PENDING",
+        label: "Pending",
+    },
+    Choice {
+        value: "APPROVED",
+        label: "Approved",
+    },
+    Choice {
+        value: "REJECTED",
+        label: "Rejected",
+    },
+    Choice {
+        value: "INSTALLED",
+        label: "Installed",
+    },
+    Choice {
+        value: "FAILED",
+        label: "Failed",
+    },
+];
+
+/// Whether the controls on screen would run a different query from the one whose
+/// result is displayed — the "Filters changed" indicator. `None` (nothing run yet)
+/// is never "changed": there is no result for the controls to disagree with.
+///
+/// Compared on what the query does, not how the controls were clicked: the
+/// multi-selects keep tick order, so un-ticking and re-ticking a status is the
+/// same query, and the install window is only a difference while an install
+/// status is selected (it bounds nothing otherwise, and every Settings save
+/// rewrites it).
+pub(crate) fn filters_changed(applied: Option<&PatchQueryArgs>, live: &PatchQueryArgs) -> bool {
+    applied.is_some_and(|a| canonical_query(a) != canonical_query(live))
+}
+
+fn canonical_query(args: &PatchQueryArgs) -> PatchQueryArgs {
+    let mut c = args.clone();
+    c.statuses.sort();
+    c.filter.severities.sort();
+    c.filter.node_classes.sort();
+    c.filter.organization_ids.sort_unstable();
+    c.filter.location_ids.sort_unstable();
+    c.filter.role_ids.sort_unstable();
+    if !needs_install_window(&c.statuses) {
+        c.install_after_days = None;
+        c.filter.installed_after = None;
+        c.filter.installed_before = None;
+    } else if c.filter.installed_after.is_some() {
+        // An absolute range replaces the lookback backend-side.
+        c.install_after_days = None;
+    }
+    c
+}
+
+/// A status's label (`"PENDING"` → `"Pending"`); an unknown value reads as itself.
+pub(crate) fn status_label(value: &str) -> &str {
+    STATUS_CHOICES
+        .iter()
+        .find(|c| c.value == value)
+        .map_or(value, |c| c.label)
 }
 
 /// Resolves selected ids to display names, in the lookup's own order.
@@ -389,14 +487,14 @@ impl Named for Role {
 /// row read "No filters — whole fleet" beside zero rows. The backend's provenance
 /// block prints the same case as `id 4711` for the same reason.
 pub(crate) fn names_for<T: Named>(
-    selected: &[i64],
+    selected: &[T::Key],
     options: impl Iterator<Item = T>,
 ) -> Vec<String> {
-    let mut seen: Vec<i64> = Vec::new();
+    let mut seen: Vec<T::Key> = Vec::new();
     let mut names: Vec<String> = options
-        .filter(|o| selected.contains(&o.id()))
+        .filter(|o| selected.contains(&o.key()))
         .map(|o| {
-            seen.push(o.id());
+            seen.push(o.key());
             o.name().to_string()
         })
         .collect();
@@ -506,8 +604,9 @@ pub(crate) fn filter_chips(f: &AppliedFilters) -> Vec<FilterChip> {
         });
     }
     if !f.statuses.is_empty() {
+        let statuses: Vec<&str> = f.statuses.iter().map(|s| status_label(s)).collect();
         out.push(FilterChip {
-            label: format!("Status: {}", f.statuses.join(", ")),
+            label: format!("Status: {}", statuses.join(", ")),
             patch: true,
         });
     }

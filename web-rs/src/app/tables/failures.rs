@@ -21,12 +21,13 @@ pub(super) fn FailuresTable() -> impl IntoView {
     };
 
     view! {
+        <PatchFilterBar/>
         <Show
             when=has_failures
             fallback=|| {
                 view! {
                     <p class="empty">
-                        "No patch failures. Select the FAILED status and Run query to analyze failures."
+                        "No patch failures. Tick Failed under Status above and run the query to analyze failures."
                     </p>
                 }
             }
@@ -35,7 +36,7 @@ pub(super) fn FailuresTable() -> impl IntoView {
                 kind="filtered"
                 tier="Filtered results"
                 reflects="failed installs matching your device scope and all patch filters."
-                filters="Restricted to Status = FAILED — select FAILED and Run query to populate this tab."
+                filters="Restricted to the Failed status — tick Failed under Status and run the query to populate this tab."
             />
             <div class="table-wrap table-wrap--fill">
                 <table>

@@ -189,6 +189,27 @@ pub(super) fn TimeToInstallSection() -> impl IntoView {
             <p class="scope-note">
                 "Unlike the sections above, this follows every patch filter (Status, Severity, Search, First-seen, Installed-within): it measures the installed rows this query returned."
             </p>
+            // The patch filters are set on the Patches tab, so this tab names the
+            // ones these figures were measured under.
+            <p class="scope-note">
+                {move || {
+                    state.query.applied_filters.with(|a| {
+                        let chips: Vec<String> = a
+                            .as_ref()
+                            .map(filter_chips)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|c| c.patch)
+                            .map(|c| c.label)
+                            .collect();
+                        if chips.is_empty() {
+                            "Patch filters on these results: none.".to_string()
+                        } else {
+                            format!("Patch filters on these results: {}.", chips.join(" · "))
+                        }
+                    })
+                }}
+            </p>
             {move || {
                 let t = tti();
                 if let Some(reason) = util::time_to_install_empty_reason(&t) {

@@ -219,7 +219,8 @@ frontend-only and never crosses IPC anyway. Without it two workbooks off one fle
 a single org and CRITICAL-only, one unfiltered — are indistinguishable once saved, while every
 number in them describes a different population.
 
-- `QueryResult`-only, deliberately **not** on `QuerySummary`: the frontend has its own chip row,
+- `QueryResult`-only, deliberately **not** on `QuerySummary`: the frontend keeps its own snapshot
+  of the applied filters (`AppliedFilters`),
   so a second copy over IPC would be a wire field with no reader. This is the documented exception
   to the compact-aggregates lockstep rule in
   [query-cache.md](./query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows).
@@ -609,8 +610,8 @@ lookback rather than intersect it — a 30-day default silently truncating "revi
 failure this avoids — and they travel on `FilterParams`, so presets save them. They are validated
 by `FilterParams::install_range` (a start is required; start ≤ end; not in the future; span ≤
 `MAX_WINDOW_DAYS`), **refused rather than repaired**, and only when an install status is selected:
-the Filters panel hides the control otherwise, and a stale range must not fail a Pending query with
-its cause off screen. `query_patches` checks before claiming the `QueryToken`, so a malformed range
+the patch filter bar hides the control otherwise, and a stale range must not fail a Pending query
+with its cause off screen. `query_patches` checks before claiming the `QueryToken`, so a malformed range
 cannot supersede a good query in flight; `QueryPlan::build` re-checks. Both bounds are pushed down
 (`installedAfter`/`installedBefore`, as unspecified in the spec as each other) and both are
 re-applied client-side, inclusive, with undated records kept as for the lookback.

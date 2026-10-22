@@ -387,40 +387,12 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
   opacity: 1;
 }
 
-/* Device / Patch filters: one filter per row, each row's title inline with its
-   controls. The min-width on the titles lines the controls up into a single
-   column; the shared width on inputs/selects keeps that column straight. */
-.stacked-filters {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.stacked-filters > .control-group > .chips-label {
-  min-width: 148px;
-}
-
-.stacked-filters > .control-group > input,
-.stacked-filters > .control-group > select {
-  width: 260px;
-  max-width: 100%;
-}
-
-/* The install-window field is a small number input — keep it compact rather than
-   stretching to the shared 260px column width above. */
-.stacked-filters > .control-group > input.narrow {
-  width: 80px;
-}
-
 select:disabled {
   opacity: 0.5;
 }
 
 .chips,
-.row,
-.controls,
-.control-group {
+.row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -432,20 +404,7 @@ select:disabled {
   margin-top: 12px;
 }
 
-/* The Filters header is the only `.row` with an h2; its default bottom margin
-   leaves dead space below the title and offsets it from the Show/Hide toggle.
-   The row supplies its own gap, so drop the heading margin here. */
-.row h2 {
-  margin: 0;
-}
 
-.controls {
-  gap: 14px;
-}
-
-.row .presets {
-  margin-top: 0;
-}
 
 .chips-label {
   font-size: 12px;
@@ -467,11 +426,6 @@ select:disabled {
 
 .chip input {
   margin: 0;
-}
-
-.chip-preset {
-  gap: 2px;
-  padding: 2px 4px 2px 10px;
 }
 
 .btn {
@@ -502,13 +456,6 @@ select:disabled {
 
 .btn-ghost {
   background: transparent;
-}
-
-/* Collapse toggle in the Filters header — pushed to the right, compact. */
-.filters-toggle {
-  margin-left: auto;
-  padding: 4px 10px;
-  font-size: 12px;
 }
 
 .link {
@@ -577,10 +524,6 @@ select:disabled {
   color: var(--on-accent);
   border-color: var(--accent);
   font-weight: 600;
-}
-
-.preset-name {
-  width: 150px;
 }
 
 .tabs {
@@ -848,22 +791,6 @@ tbody tr:hover {
   }
 }
 
-/* --- Filter sub-section headings (Device / Patch) --- */
-.subhead {
-  margin: 14px 0 6px;
-  color: var(--muted);
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
-}
-
-.subhead:first-of-type {
-  border-top: 0;
-  padding-top: 0;
-}
-
 /* --- Patches table pagination --- */
 .pager {
   display: flex;
@@ -987,89 +914,6 @@ tbody tr:hover {
   margin-top: 16px;
   font-size: 11px;
   color: var(--muted);
-}
-
-/* --- Scope clarity: per-tab scope banner + filter-section note --- */
-.scope-banner {
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-left-width: 3px;
-  border-radius: 8px;
-  background: var(--panel-2);
-}
-
-.scope-banner-filtered {
-  border-left-color: var(--accent);
-}
-
-.scope-banner-fleet {
-  border-left-color: var(--warn);
-}
-
-.scope-banner-tier {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-
-.scope-banner-text {
-  margin: 4px 0 0;
-  font-size: 13px;
-  color: var(--text);
-}
-
-.scope-banner-filters {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-/* Applied-filter chips: read-only snapshot of the filters behind the current result. */
-.applied-filters {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-
-.applied-chip {
-  font-size: 11.5px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  color: var(--text);
-}
-
-/* Patch-tier chip on a Fleet-health tab — the filter is set but ignored here. */
-.applied-chip-dim {
-  opacity: 0.4;
-  text-decoration: line-through;
-  cursor: help;
-}
-
-.applied-chip-none {
-  color: var(--muted);
-  font-style: italic;
-}
-
-.subhead-note {
-  margin-left: 8px;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 400;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-/* Shown in place of the patch-filter controls while a Fleet-health tab is active. */
-.filters-hidden-note {
-  margin: 6px 0 0;
-  color: var(--muted);
-  font-size: 12px;
 }
 
 /* Failures: the full affected-device list can be long — keep the cell readable. */
@@ -1317,26 +1161,264 @@ tbody tr:hover {
     padding: 12px 13px;
   }
 
-  /* Each stacked filter row puts its label on its own line and lets the
-     controls span the full width, instead of fighting the fixed 148px label
-     column + 260px control width that crowd a phone screen. */
-  .stacked-filters > .control-group > .chips-label {
-    flex-basis: 100%;
-    min-width: 0;
-    margin-right: 0;
-  }
-
-  .stacked-filters > .control-group > input,
-  .stacked-filters > .control-group > select {
-    width: 100%;
-  }
-
   /* The results summary takes its own full line under the wrapped tab groups
      instead of squeezing beside them (margin-left:auto only suits one row). */
   .result-summary {
     flex-basis: 100%;
     margin-left: 0;
   }
+}
+
+/* --- Filters (filters.rs): the scope bar and the patch filter bar --------- */
+
+/* One row of compact pickers under the top bar. Never `overflow-x: auto`: a
+   scroll container would clip the pickers' drop-down panels. */
+.scope-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.scope-bar__os-name {
+  width: 170px;
+  padding: 6px 10px;
+}
+
+/* At the top of the Patches and Failures tabs, the only ones its filters reach. */
+.patch-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.patch-filter-bar__search {
+  width: 200px;
+  padding: 6px 10px;
+}
+
+.patch-filter-bar select,
+.patch-filter-bar input[type="date"] {
+  padding: 5px 8px;
+}
+
+.seg-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.seg-group__label {
+  font-size: 12px;
+  color: var(--muted);
+  margin-right: 2px;
+}
+
+.seg-group .seg {
+  padding: 5px 10px;
+}
+
+/* The controls no longer match the results on screen; a click runs them. */
+.filters-changed {
+  margin-left: auto;
+  padding: 5px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--warn);
+  border-radius: 999px;
+  color: var(--warn);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.filters-changed:hover {
+  background: var(--accent-soft);
+}
+
+/* A multi-select facet: one compact button naming the facet and its value. */
+.picker {
+  position: relative;
+}
+
+.picker__button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 6px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.picker__button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+/* A narrowed facet stands out from the "All" ones beside it. */
+.picker__button--set {
+  border-color: var(--accent-2);
+}
+
+.picker__button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.picker__label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.picker__value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker__caret {
+  color: var(--muted);
+  flex: none;
+  font-size: 11px;
+}
+
+/* Above the sticky action bar (5) and table headers. */
+.picker__panel {
+  position: absolute;
+  z-index: 30;
+  top: 100%;
+  left: 0;
+  width: max-content;
+  min-width: 220px;
+  max-width: 360px;
+  margin-top: 4px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+
+.picker__tools {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.picker__search {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Bounded so a tenant with hundreds of organizations scrolls the list rather than
+   the page. */
+.picker__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.picker__option {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.picker__option:hover {
+  background: var(--panel-2);
+}
+
+.picker__option input {
+  margin: 0;
+}
+
+.picker__empty {
+  margin: 4px 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* The presets menu: a list of saved filters over a Save row. */
+.presets {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.preset {
+  display: flex;
+  align-items: center;
+}
+
+.preset .menu__item {
+  flex: 1;
+}
+
+.presets-save {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.preset-name {
+  flex: 1;
+  min-width: 0;
+}
+
+/* --- Scope caption: which tier a tab is and what it reflects ---------------- */
+
+.scope-caption {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: help;
+}
+
+.scope-caption__tier {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.scope-caption-filtered .scope-caption__tier {
+  color: var(--accent-2);
+}
+
+.scope-caption-fleet .scope-caption__tier {
+  color: var(--warn);
+}
+
+/* Read by assistive tech, not drawn. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* --- Menus (app/menu.rs) ------------------------------------------------- */
@@ -2194,95 +2276,6 @@ tbody tr:hover {
 
 .group-members td {
   padding: 6px 10px;
-}
-
-/* --- Scope multi-select (Organizations / Locations / Device Roles) ------------
-   Sits in the same `.grid` the three single-selects used, so the panel keeps its
-   layout; the popover is positioned relative to the picker rather than the grid so
-   an open list overlays the row below instead of reflowing the whole panel. */
-.scope-picker {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  position: relative;
-}
-
-.scope-picker__label {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.scope-picker__summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  width: 100%;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 7px 10px;
-  color: var(--text);
-  font: inherit;
-  cursor: pointer;
-  text-align: left;
-}
-
-.scope-picker__summary:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.scope-picker__value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.scope-picker__caret {
-  color: var(--muted);
-  flex: none;
-}
-
-.scope-picker__panel {
-  position: absolute;
-  z-index: 20;
-  top: 100%;
-  left: 0;
-  right: 0;
-  margin-top: 4px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px;
-  box-shadow: 0 8px 24px var(--shadow);
-}
-
-.scope-picker__tools {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.scope-picker__search {
-  flex: 1;
-  min-width: 0;
-}
-
-/* Bounded so a tenant with hundreds of organizations scrolls the list rather than
-   the page. */
-.scope-picker__list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 240px;
-  overflow-y: auto;
-}
-
-.scope-picker__empty {
-  margin: 4px 2px;
-  font-size: 12px;
-  color: var(--muted);
 }
 
 /* The sentence stating which devices and which patch families the compliance

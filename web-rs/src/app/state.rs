@@ -240,6 +240,37 @@ impl FilterState {
         });
     }
 
+    /// The query the controls describe now. Untracked, like `current_filter`.
+    pub(super) fn query_args(self) -> PatchQueryArgs {
+        PatchQueryArgs {
+            filter: self.current_filter(),
+            patch_type: self.patch_type.get_untracked(),
+            statuses: self.statuses.get_untracked(),
+            install_after_days: Some(self.install_days.get_untracked()),
+        }
+    }
+
+    /// Subscribes the caller to every control [`query_args`](Self::query_args)
+    /// reads, which are untracked there because the Run path must not be.
+    pub(super) fn track(self) {
+        self.org_ids.track();
+        self.loc_ids.track();
+        self.role_ids.track();
+        self.selected_classes.track();
+        self.selected_severities.track();
+        self.os_name.track();
+        self.search.track();
+        self.detected_window.track();
+        self.detected_after_date.track();
+        self.detected_before_date.track();
+        self.patch_type.track();
+        self.statuses.track();
+        self.install_days.track();
+        self.install_custom.track();
+        self.install_after_date.track();
+        self.install_before_date.track();
+    }
+
     /// Reads the panel's signals and hands them to the pure [`filter_params`]
     /// mapping. Everything below the signal reads is testable there; this method
     /// stays a lift so it has nothing left to get wrong.
@@ -271,6 +302,9 @@ pub(crate) struct QueryState {
     /// the read-only applied-filter chip row (kept in sync with the displayed result,
     /// not the live controls).
     pub(super) applied_filters: RwSignal<Option<AppliedFilters>>,
+    /// The query that produced `result`, as sent. "Filters changed" compares the
+    /// controls with it (`util::filters_changed`), and auto-refresh re-runs it.
+    pub(super) applied_args: RwSignal<Option<PatchQueryArgs>>,
     /// Zero-based page index for the paginated Patches table.
     pub(super) patches_page: RwSignal<usize>,
     /// The detail rows for the currently displayed page, fetched from the backend
@@ -370,6 +404,7 @@ impl QueryState {
         Self {
             result: RwSignal::new(None),
             applied_filters: RwSignal::new(None),
+            applied_args: RwSignal::new(None),
             patches_page: RwSignal::new(0),
             page_rows: RwSignal::new(Vec::new()),
             query_error: RwSignal::new(None),
@@ -529,9 +564,6 @@ pub(crate) struct UiState {
     pub(super) toast: RwSignal<Option<Toast>>,
     pub(super) toast_gen: RwSignal<u64>,
     pub(super) show_settings: RwSignal<bool>,
-    /// Collapses the Filters panel body to give the results more room. Expanded
-    /// (false) by default.
-    pub(super) filters_collapsed: RwSignal<bool>,
     pub(super) active_tab: RwSignal<Tab>,
     /// The keyboard-shortcuts help dialog.
     pub(super) shortcuts_open: RwSignal<bool>,
@@ -562,14 +594,6 @@ impl UiState {
             toast: RwSignal::new(None),
             toast_gen: RwSignal::new(0),
             show_settings: RwSignal::new(false),
-            // Starts from the operator's remembered choice. `None` (never chosen)
-            // opens expanded so the controls are discoverable on a first launch;
-            // `run_query` collapses it once the first result lands, because at that
-            // moment the table is what they came for and the panel is ~487px of the
-            // window standing in front of it.
-            filters_collapsed: RwSignal::new(
-                api::ui_pref(api::PREF_FILTERS_COLLAPSED).unwrap_or(false),
-            ),
             active_tab: RwSignal::new(Tab::Patches),
             shortcuts_open: RwSignal::new(false),
             theme: RwSignal::new(util::Theme::from_pref(

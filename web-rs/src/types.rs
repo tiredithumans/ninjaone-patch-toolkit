@@ -815,7 +815,7 @@ pub enum RowSortKey {
     InstalledDate,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchQueryArgs {
     pub filter: FilterParams,

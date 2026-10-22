@@ -22,7 +22,18 @@ version and start a fresh `[Unreleased]`.
 - **Settings opens as a dialog** with Close and Escape, instead of a panel pushing the page down.
   "Settings → Patch actions" notes and the "Patch actions are disabled" note link straight to it.
 - **First launch says what to do:** connect in Settings, then sign in.
-- Organization, location and role pickers close on a click outside them or on Escape.
+- **The filters take one row.** Organizations, locations, roles, OS type, OS name and patch type
+  sit in a compact bar under the top bar; Status, Severity, Search, First seen and install history
+  sit at the top of the Patches and Failures tabs, the only tabs they affect, instead of vanishing
+  from a tall panel on Compliance and Needs Reboot. Presets are in a **Presets** menu. Statuses
+  read in title case, and the last one can't be unticked.
+- **"Filters changed" says when the controls no longer match the results**, and applies them on a
+  click. Auto-refresh now re-runs the query on screen rather than picking up an edit you haven't
+  applied yet. The row of applied-filter chips is gone; the indicator's tooltip names the filters
+  behind the results.
+- Each tab's three-line scope banner is now a one-line caption (details on hover).
+- <kbd>/</kbd> switches to the Patches tab when needed and focuses Search.
+- Pickers and menus close on a click outside them or on Escape.
 
 ### Fixed
 

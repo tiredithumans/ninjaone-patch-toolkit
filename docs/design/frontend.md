@@ -225,7 +225,7 @@ staying unreachable. What lives in
 
 **The shell.** The results fill the window: one top bar (`header.rs`: Run query, the data's age —
 "Data as of …", with the result's generation time and the last run's duration in the Refresh
-tooltip — Refresh, auto-refresh, the Export / account / ⋯ menus), then the filters, then the
+tooltip — Refresh, auto-refresh, the Export / account / ⋯ menus), then the scope bar, then the
 results panel, whose tab panel takes the remaining height (`main.shell`, flex) and whose main
 table scrolls inside it under a sticky header (`.table-wrap--fill`). It used to be four stacked
 panels that pushed the first row below the fold of the default 1360×1000 window. Below 641px the
@@ -243,7 +243,7 @@ says what to do (`util::onboarding`): it waits for the saved settings to load, b
 starts on defaults and deciding earlier flashed "Connect to NinjaOne" on every launch.
 
 Per-machine view conveniences — none of them configuration, so none go through
-`settings.json` (see `api::ui_pref`) — and the rules each one keeps.
+`settings.json` (see `api::ui_pref_str`) — and the rules each one keeps.
 
 **Auto-refresh countdown.** A one-second ticker (`AppState::tick_auto_refresh`) advances a
 wall-clock countdown (`util::advance_refresh`; ticks are throttled in the background, so counting
@@ -260,7 +260,25 @@ dialog/README table (`every_documented_key_is_bound`). It stands down while typi
 (`util::is_text_entry` — a focused checkbox is *not* typing, since focus stays on it after ticking
 a row), under any modal, on auto-repeat and with Ctrl/Alt/Meta (Shift is allowed: `?` is
 Shift+/). **No key reaches a mutating action, an export or sign-out**; `r` runs the (read-only)
-query, and `[`/`]` page the Patches table through the same `go_to_patches_page` as the pager.
+query, `/` focuses Search (switching to Patches from a tab without the patch filter bar), and
+`[`/`]` page the Patches table through the same `go_to_patches_page` as the pager.
+
+**Filters.** Two bars, placed where they act. The **scope bar** under the top bar holds the device
+scope and the patch Type — every tab honours them — as compact pickers (`filters::Picker`, generic
+over `util::Named`, so the id-keyed lookups and the value/label choices share one control). The
+**patch filter bar** (`PatchFilterBar`: Status, Severity, Search, First seen, Install history)
+renders only at the top of the Patches and Failures tabs, outside their result guards so it works
+before the first run and after an empty one. It used to be one panel above every tab whose lower
+half vanished on Compliance and Needs Reboot. The last status cannot be unticked, so "Select at
+least one status" is never raised from a tab that does not show the control; Compliance's First
+seen → installed section, the one fleet-tab figure the patch filters reach, names the ones it was
+measured under. Nothing applies a filter edit until a run, and **"● Filters changed"** says so:
+it compares the controls with the query on screen (`QueryState::applied_args`,
+`util::filters_changed` — on what the query does, so tick order and an install window with no
+install status picked are not changes) and runs on click. **Auto-refresh re-runs that applied
+query**, not the controls: an edit not yet applied would otherwise land on the next tick, re-scoping
+the results — and the selection kept across a refresh — behind the operator's back. A manual Run
+or ↻ Refresh applies the controls.
 
 **Column chooser.** Stored as the set of *hidden* column ids (`util::column_id`, a slug of the
 header label), so a column another build adds is visible by default and an id this build does not

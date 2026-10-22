@@ -77,6 +77,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
     let go_to = Callback::new(move |target: usize| state.go_to_patches_page(target));
 
     view! {
+        <PatchFilterBar/>
         <Show
             when=move || state.query.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
