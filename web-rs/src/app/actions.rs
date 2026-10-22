@@ -6,14 +6,18 @@
 //! while `commands::actions` is what actually refuses it. A confirmation dialog
 //! that exists only in WASM is not a guardrail.
 
+use super::menu::Popover;
 use super::*;
 
 /// Reboot modes offered in the confirm dialog, as (value, label).
 const REBOOT_MODES: [(&str, &str); 2] = [("NORMAL", "Normal"), ("FORCED", "Forced")];
 
-/// Sticky bar above the Patches table — and above the Needs Reboot table, where it
-/// dispatches against a device-level selection. Always renders its running total,
-/// because a selection spanning several pages is otherwise invisible.
+/// The bar above the Patches table — and above the Needs Reboot table, where it
+/// dispatches against a device-level selection. One row whatever is selected: the
+/// running total, the action groups, the run options behind an Options button that
+/// says what they will do, and the script picker behind its own button. It used to
+/// grow by ~300px of option rows on the first tick, pushing the ticked row out of
+/// view and, once scrolled, covering ~40% of the window.
 ///
 /// One component on both tabs rather than a second surface: the same buttons, the
 /// same run-option signals, the same plan → confirm path. `source` only decides
@@ -35,9 +39,9 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
     let disabled_reason = move || action_disabled_reason(blocked(), source, counts().0, busy());
 
     // The per-device targets of the two remediation kinds, computed once per
-    // selection change and shared by their buttons and the target chips rather
-    // than walked again for every button prop and every chip. Only meaningful for
-    // a remediation kind; the callers check that first.
+    // selection change and shared by their buttons and the target count rather
+    // than walked again for every button prop. Only meaningful for a remediation
+    // kind; the callers check that first.
     let os_targets = Memo::new(move |_| state.remediation_targets(ActionKind::OsPatchRemediate));
     let sw_targets =
         Memo::new(move |_| state.remediation_targets(ActionKind::SoftwarePatchRemediate));
@@ -48,6 +52,22 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
             sw_targets
         }
     };
+    // Why `kind`'s button is disabled, stacked in `util::action_button_reason`'s
+    // pinned order; one Memo per button, so its title and its disabled prop share
+    // a single evaluation per change.
+    let reason_for = move |kind: ActionKind| {
+        Memo::new(move |_| {
+            util::action_button_reason(
+                disabled_reason(),
+                source,
+                kind,
+                || state.remediation_script_configured(kind),
+                || targets_of(kind).with(|t| t.len()),
+                || state.dry_run_reason(kind),
+            )
+        })
+    };
+    let full_label = move |kind: ActionKind| format!("{}. {}", kind.label(), kind.blast_radius());
 
     view! {
         <div class="action-bar">
@@ -71,188 +91,220 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                         }
                             .into_any();
                     };
-                    {
-                        view! {
-                            <>
-                                <strong>{text}</strong>
-                                <button
-                                    class="link-btn"
-                                    on:click=move |_| state.clear_selection_for(source)
-                                >
-                                    "Clear"
-                                </button>
-                            </>
-                        }
-                            .into_any()
+                    view! {
+                        <>
+                            <strong>{text}</strong>
+                            <button
+                                class="link-btn"
+                                on:click=move |_| state.clear_selection_for(source)
+                            >
+                                "Clear"
+                            </button>
+                        </>
                     }
+                        .into_any()
                 }}
             </div>
-            <div class="action-bar-buttons">
-                {ACTION_GROUPS
-                    .iter()
-                    .map(|(heading, kinds)| {
-                        view! {
-                            <div class="action-group">
-                                <span class="action-group-label">{*heading}</span>
-                                {kinds
-                                    .iter()
-                                    .map(|(kind, label)| {
-                                        let kind = *kind;
-                                        // The stacked reasons live in
-                                        // `util::action_button_reason` (their order is
-                                        // pinned by its test); one Memo per button, so
-                                        // the title and the disabled prop share a
-                                        // single evaluation per change.
-                                        let why = Memo::new(move |_| {
-                                            util::action_button_reason(
-                                                disabled_reason(),
-                                                source,
-                                                kind,
-                                                || state.remediation_script_configured(kind),
-                                                || targets_of(kind).with(|t| t.len()),
-                                                || state.dry_run_reason(kind),
-                                            )
-                                        });
-                                        view! {
-                                            <button
-                                                // The two untargeted applies reach
-                                                // past the selection, so they read
-                                                // differently from every other
-                                                // button rather than relying on the
-                                                // heading above them.
-                                                class=if kind.exceeds_selection() {
-                                                    "btn btn-sm btn-wide-radius"
-                                                } else {
-                                                    "btn btn-sm"
-                                                }
-                                                // The accessible name is the full
-                                                // sentence, so a screen reader says
-                                                // what the button reaches instead of
-                                                // just "OS", and the tooltip agrees.
-                                                aria-label=move || {
-                                                    format!("{}. {}", kind.label(), kind.blast_radius())
-                                                }
-                                                title=move || {
-                                                    why.get().unwrap_or_else(|| {
-                                                        format!(
-                                                            "{}. {}",
-                                                            kind.label(),
-                                                            kind.blast_radius(),
-                                                        )
-                                                    })
-                                                }
-                                                prop:disabled=move || why.with(Option::is_some)
-                                                on:click=move |_| state.open_plan(kind, source)
-                                            >
-                                                {*label}
-                                            </button>
-                                        }
-                                    })
-                                    .collect_view()}
-                            </div>
-                        }
-                    })
-                    .collect_view()}
-            </div>
-
-            // Which patches "Install only the selected patches" would actually send,
-            // per device. The distinction between the two Install rows is only
-            // trustworthy if the operator can see the target list it derives from.
-            // A device-level selection has no targets to show.
-            <Show when=move || rows_source && any()>
-                <div class="action-bar-targets">
-                    {move || {
+            {ACTION_GROUPS
+                .iter()
+                .map(|(heading, kinds)| {
+                    let heading = *heading;
+                    // "Apply selected" is only trustworthy if the operator can see
+                    // what it would send: the distinct patches per family, with the
+                    // per-device detail on hover and a marker for ticked OS rows it
+                    // cannot send. A device-level selection has no targets.
+                    let selected_group = rows_source
+                        && kinds.iter().any(|(k, _)| *k == ActionKind::OsPatchRemediate);
+                    let target_count = move || {
+                        (selected_group && any())
+                            .then(|| {
+                                os_targets.with(|os| sw_targets.with(|sw| util::remediation_short(os, sw)))
+                            })
+                            .flatten()
+                    };
+                    let target_detail = move || {
                         [ActionKind::OsPatchRemediate, ActionKind::SoftwarePatchRemediate]
                             .into_iter()
-                            .filter_map(|kind| {
-                                let summary =
-                                    targets_of(kind).with(|t| util::remediation_summary(kind, t))?;
-                                Some(view! { <span class="action-target-chip">{summary}</span> })
-                            })
-                            .collect_view()
-                    }}
-                    {move || {
-                        state
-                            .actions
-                            .selected
-                            .with(util::untargetable_os_note)
-                            .map(|note| view! { <span class="action-options-note">{note}</span> })
-                    }}
-                </div>
+                            .filter_map(|k| targets_of(k).with(|t| util::remediation_summary(k, t)))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    };
+                    let untargetable = move || {
+                        selected_group
+                            .then(|| state.actions.selected.with(util::untargetable_os_note))
+                            .flatten()
+                    };
+                    view! {
+                        <div class="action-group" role="group" aria-label=heading>
+                            <span class="action-group-label" title=target_detail>
+                                {heading}
+                                {move || target_count().map(|c| format!(" ({c})"))}
+                            </span>
+                            {move || {
+                                untargetable()
+                                    .map(|note| {
+                                        view! {
+                                            <span class="action-group-warn" title=note.clone() aria-label=note>
+                                                "⚠"
+                                            </span>
+                                        }
+                                    })
+                            }}
+                            {kinds
+                                .iter()
+                                .map(|(kind, label)| {
+                                    let (kind, label) = (*kind, *label);
+                                    let why = reason_for(kind);
+                                    let title = move || why.get().unwrap_or_else(|| full_label(kind));
+                                    if kind == ActionKind::Reboot {
+                                        return view! {
+                                            <RebootPopover source=source why=why label=label/>
+                                        }
+                                            .into_any();
+                                    }
+                                    view! {
+                                        <button
+                                            // The two untargeted applies reach past the
+                                            // selection, so they read differently from
+                                            // every other button rather than relying on
+                                            // the heading beside them.
+                                            class=if kind.exceeds_selection() {
+                                                "btn btn-sm btn-wide-radius"
+                                            } else {
+                                                "btn btn-sm"
+                                            }
+                                            // The accessible name is the full sentence,
+                                            // so a screen reader says what the button
+                                            // reaches instead of just "OS", and the
+                                            // tooltip agrees.
+                                            aria-label=move || full_label(kind)
+                                            title=title
+                                            prop:disabled=move || why.with(Option::is_some)
+                                            on:click=move |_| state.open_plan(kind, source)
+                                        >
+                                            {label}
+                                        </button>
+                                    }
+                                        .into_any()
+                                })
+                                .collect_view()}
+                        </div>
+                    }
+                })
+                .collect_view()}
+            <RunOptions source=source/>
+            // The escape hatch for any other library script, in its own dialog. It
+            // stays on this bar so dispatch happens where the selection it targets
+            // is visible.
+            <Show when=move || rows_source>
+                <button
+                    type="button"
+                    class="btn btn-sm btn-ghost"
+                    prop:disabled=move || blocked().is_some()
+                    on:click=move |_| state.actions.script_dialog.set(true)
+                >
+                    "Run a script…"
+                </button>
             </Show>
+            <Show when=move || blocked().is_some()>
+                <p class="action-bar-blocked" role="note">
+                    {move || blocked().unwrap_or_default()}
+                    <ReauthorizeLink/>
+                    <EnableActionsLink/>
+                </p>
+            </Show>
+        </div>
+    }
+}
 
-            // Everything below applies to whichever action is dispatched next, so it
-            // is rendered once. These used to be split across the action bar and the
-            // Jobs tab's script picker, bound to the same signals — so ticking "Dry
-            // run" one tab away silently changed what an Apply button would do.
-            <Show when=any>
-                <div class="action-bar-options">
-                    <span class="action-options-label">"Applies to every action"</span>
-                    // Disabled rather than hidden while Settings forbids offline
-                    // targets: the backend would skip them whatever this says, and
-                    // the note says where the switch is.
-                    <label class="checkbox">
+/// The run options, rendered once, behind a button whose label says what they will
+/// do to the next dispatch ("Options: Dry run", warn-coloured at "Live"). They used
+/// to be three always-open rows that appeared under the bar on the first tick.
+///
+/// Each row is labelled with the actions it reaches: the native endpoints take no
+/// parameters, have no preview mode and run as NinjaOne's agent, so an unlabelled
+/// "Dry run" beside them reads as protection it isn't giving. The panel stays
+/// mounted while closed (`menu::Popover`): `RunAsSelect` fetches the sampled
+/// device's roles as it mounts, and remounting on every open refetched them.
+#[component]
+fn RunOptions(source: SelectionSource) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let rows_source = source == SelectionSource::PatchRows;
+    let open = RwSignal::new(false);
+    let label = Memo::new(move |_| {
+        util::options_label(
+            rows_source,
+            state.actions.dry_run.get(),
+            state.actions.override_window.get()
+                && state.settings.f_actions.with(util::window_override_offered),
+            state.actions.include_offline.get()
+                && state.settings.f_actions.with(util::offline_targets_offered),
+        )
+    });
+    view! {
+        <Popover
+            label=Signal::derive(move || label.get().0)
+            class=Signal::derive(move || {
+                if label.get().1 { "btn-sm options-live".to_string() } else { "btn-sm".to_string() }
+            })
+            title=Signal::derive(|| "Options for the next dispatch".to_string())
+            disabled=Signal::derive(move || state.blocked_reason().is_some())
+            open=open
+        >
+            <div class="action-bar-options">
+                <span class="action-options-label">"Applies to every action"</span>
+                // Disabled rather than hidden while Settings forbids offline targets:
+                // the backend would skip them whatever this says, and the note says
+                // where the switch is.
+                <label class="checkbox">
+                    <input
+                        type="checkbox"
+                        prop:disabled=move || !state.settings.f_actions.with(util::offline_targets_offered)
+                        prop:checked=move || {
+                            state.actions.include_offline.get()
+                                && state.settings.f_actions.with(util::offline_targets_offered)
+                        }
+                        on:change=move |ev| state.actions.include_offline.set(event_target_checked(&ev))
+                    />
+                    "Include offline devices"
+                    <Show when=move || !state.settings.f_actions.with(util::offline_targets_offered)>
+                        <span class="action-options-note">
+                            "(switched off in "
+                            <SettingsLink label="Settings → Patch actions"/>
+                            ")"
+                        </span>
+                    </Show>
+                </label>
+                // Rendered only while the window is enforced and Settings permits
+                // overriding it; the backend decides whether the window is actually
+                // closed, and audits the dispatch only when it was. Cleared after
+                // every dispatch and when the session ends, so it never outlives the
+                // one it was ticked for.
+                <Show when=move || state.settings.f_actions.with(util::window_override_offered)>
+                    <label
+                        class="checkbox"
+                        title="Only needed outside the window. The backend checks the window at plan and again at confirm, and records an override on the audit trail."
+                    >
                         <input
                             type="checkbox"
-                            prop:disabled=move || {
-                                !state.settings.f_actions.with(util::offline_targets_offered)
-                            }
-                            prop:checked=move || {
-                                state.actions.include_offline.get()
-                                    && state.settings.f_actions.with(util::offline_targets_offered)
-                            }
-                            on:change=move |ev| {
-                                state.actions.include_offline.set(event_target_checked(&ev))
-                            }
+                            prop:checked=move || state.actions.override_window.get()
+                            on:change=move |ev| state.actions.override_window.set(event_target_checked(&ev))
                         />
-                        "Include offline devices"
-                        <Show when=move || {
-                            !state.settings.f_actions.with(util::offline_targets_offered)
-                        }>
-                            <span class="action-options-note">
-                                "(switched off in "
-                                <SettingsLink label="Settings → Patch actions"/>
-                                ")"
-                            </span>
-                        </Show>
+                        "Override the maintenance window for this dispatch"
+                        <span class="action-options-note">
+                            {move || {
+                                format!(
+                                    "(window: {}, this computer's local time)",
+                                    state.settings.f_actions.with(util::window_summary),
+                                )
+                            }}
+                        </span>
                     </label>
-                    // Rendered only while the window is enforced and Settings permits
-                    // overriding it; the backend decides whether the window is actually
-                    // closed, and audits the dispatch only when it was. Cleared after
-                    // every dispatch and when the session ends, so it never outlives
-                    // the one it was ticked for.
-                    <Show when=move || state.settings.f_actions.with(util::window_override_offered)>
-                        <label
-                            class="checkbox"
-                            title="Only needed outside the window. The backend checks the window at plan and again at confirm, and records an override on the audit trail."
-                        >
-                            <input
-                                type="checkbox"
-                                prop:checked=move || state.actions.override_window.get()
-                                on:change=move |ev| {
-                                    state.actions.override_window.set(event_target_checked(&ev))
-                                }
-                            />
-                            "Override the maintenance window for this dispatch"
-                            <span class="action-options-note">
-                                {move || {
-                                    format!(
-                                        "(window: {}, this computer's local time)",
-                                        state.settings.f_actions.with(util::window_summary),
-                                    )
-                                }}
-                            </span>
-                        </label>
-                    </Show>
-                </div>
-
-                // The native endpoints take no parameters, have no preview mode (a dry
-                // run of one is a `plan()` blocker) and run as NinjaOne's agent, so
-                // these three reach only the script-driven actions. Saying which is
-                // what stops "Dry run" from reading as protection it isn't giving.
-                // Not rendered for a device-level selection: none of the kinds it can
-                // reach reads them.
-                <Show when=move || rows_source>
+                </Show>
+            </div>
+            // Not rendered for a device-level selection: none of the kinds it can
+            // reach reads them.
+            <Show when=move || rows_source>
                 <div class="action-bar-options">
                     <span class="action-options-label">
                         "Applies to installs of selected patches, and to scripts"
@@ -264,9 +316,7 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                     <label class="checkbox">
                         <input
                             type="checkbox"
-                            prop:checked=move || {
-                                state.actions.script_reboot.get() == RebootChoice::Auto
-                            }
+                            prop:checked=move || state.actions.script_reboot.get() == RebootChoice::Auto
                             on:change=move |ev| {
                                 state
                                     .actions
@@ -303,65 +353,142 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                             .map(|note| view! { <span class="action-options-note">{note}</span> })
                     }}
                 </div>
-                </Show>
-
-                // Reboot needs its mode and reason chosen before planning: the reason
-                // is recorded in NinjaOne's own activity feed, and the backend refuses
-                // a reboot without one.
-                <div class="action-bar-options">
-                    <span class="action-options-label">"Applies to Reboot"</span>
-                    <label>
-                        "Mode"
-                        // `prop:selected` per option rather than `prop:value`: this sits in
-                        // a `<Show>`, and on a remount the value was set before the
-                        // options existed — the control read "Normal" while a stored
-                        // "Forced" was what the next plan would send.
-                        <select on:change=move |ev| {
-                            state.actions.reboot_mode.set(event_target_value(&ev))
-                        }>
-                            {REBOOT_MODES
-                                .into_iter()
-                                .map(|(value, label)| {
-                                    let selected = move || state.actions.reboot_mode.get() == value;
-                                    view! {
-                                        <option value=value prop:selected=selected>
-                                            {label}
-                                        </option>
-                                    }
-                                })
-                                .collect_view()}
-                        </select>
-                    </label>
-                    <label class="action-bar-reason">
-                        "Reason"
-                        <input
-                            type="text"
-                            placeholder="e.g. July patch cycle"
-                            prop:value=move || state.actions.reason.get()
-                            on:input=move |ev| state.actions.reason.set(event_target_value(&ev))
-                        />
-                    </label>
-                </div>
-
-                // Collapsed: the two "Install only the selected patches" buttons cover
-                // the common case, and this is the escape hatch for any other library
-                // script. It lives here rather than in the Jobs tab so that dispatch
-                // happens where the selection it targets is visible.
-                <Show when=move || rows_source>
-                    <details class="action-bar-script">
-                        <summary>"Run a library script…"</summary>
-                        <ScriptPicker/>
-                    </details>
-                </Show>
             </Show>
-            <Show when=move || blocked().is_some()>
-                <p class="action-bar-blocked" role="note">
-                    {move || blocked().unwrap_or_default()}
-                    <ReauthorizeLink/>
-                    <EnableActionsLink/>
-                </p>
-            </Show>
-        </div>
+        </Popover>
+    }
+}
+
+/// Reboot's mode and reason, asked for before it is planned: the reason is recorded
+/// in NinjaOne's own activity feed and the backend refuses a reboot without one, so
+/// the Review button waits for it (`util::reboot_reason_missing`, the backend's
+/// trim rule) instead of the dialog opening only to say so. Rendered only here.
+#[component]
+fn RebootPopover(
+    source: SelectionSource,
+    why: Memo<Option<String>>,
+    label: &'static str,
+) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let open = RwSignal::new(false);
+    let missing = move || {
+        state
+            .actions
+            .reason
+            .with(|r| util::reboot_reason_missing(r))
+    };
+    view! {
+        <Popover
+            label=Signal::derive(move || label.to_string())
+            class=Signal::derive(|| "btn-sm".to_string())
+            title=Signal::derive(move || {
+                why.get().unwrap_or_else(|| {
+                    format!("{}. {}", ActionKind::Reboot.label(), ActionKind::Reboot.blast_radius())
+                })
+            })
+            disabled=Signal::derive(move || why.with(Option::is_some))
+            open=open
+        >
+            <div class="reboot-options">
+                <label>
+                    "Mode"
+                    // `prop:selected` per option rather than `prop:value`: on a
+                    // remount the value was set before the options existed — the
+                    // control read "Normal" while a stored "Forced" was what the next
+                    // plan would send.
+                    <select on:change=move |ev| state.actions.reboot_mode.set(event_target_value(&ev))>
+                        {REBOOT_MODES
+                            .into_iter()
+                            .map(|(value, label)| {
+                                let selected = move || state.actions.reboot_mode.get() == value;
+                                view! {
+                                    <option value=value prop:selected=selected>
+                                        {label}
+                                    </option>
+                                }
+                            })
+                            .collect_view()}
+                    </select>
+                </label>
+                <label class="action-bar-reason">
+                    "Reason (recorded in NinjaOne's activity feed)"
+                    <input
+                        type="text"
+                        placeholder="e.g. July patch cycle"
+                        prop:value=move || state.actions.reason.get()
+                        on:input=move |ev| state.actions.reason.set(event_target_value(&ev))
+                    />
+                </label>
+                <button
+                    type="button"
+                    class="btn btn-primary btn-sm"
+                    title=move || if missing() { "Give a reason first".to_string() } else { String::new() }
+                    prop:disabled=move || missing() || why.with(Option::is_some)
+                    on:click=move |_| {
+                        open.set(false);
+                        state.open_plan(ActionKind::Reboot, source);
+                    }
+                >
+                    "Review reboot…"
+                </button>
+            </div>
+        </Popover>
+    }
+}
+
+/// The library-script picker, in a dialog opened from the action bar's "Run a
+/// script…". It runs with the action bar's options, which the dialog names rather
+/// than repeating: run options render once.
+#[component]
+pub(crate) fn ScriptDialog() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    view! {
+        <Show when=move || state.actions.script_dialog.get()>
+            {move || {
+                let (dialog, on_tab) = modal::focus_trap();
+                let close = move || state.actions.script_dialog.set(false);
+                let esc = window_event_listener(leptos::ev::keydown, move |ev| {
+                    if ev.key() == "Escape" && state.actions.pending.with_untracked(Option::is_none) {
+                        close();
+                    }
+                });
+                on_cleanup(move || esc.remove());
+                view! {
+                    <div class="modal-overlay">
+                        <div
+                            class="modal script-dialog"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="script-dialog-title"
+                            tabindex="-1"
+                            node_ref=dialog
+                            on:keydown=move |ev| on_tab(&ev)
+                        >
+                            <div class="modal-head">
+                                <h2 id="script-dialog-title">"Run a library script"</h2>
+                                <button class="x" aria-label="Close" on:click=move |_| close()>
+                                    "×"
+                                </button>
+                            </div>
+                            <p class="modal-sub">
+                                {move || {
+                                    let (options, _) = util::options_label(
+                                        true,
+                                        state.actions.dry_run.get(),
+                                        false,
+                                        false,
+                                    );
+                                    format!(
+                                        "On the devices of the ticked rows, with the action bar's options ({}). You confirm before anything is sent.",
+                                        options.trim_end_matches(" ▾"),
+                                    )
+                                }}
+                            </p>
+                            <ScriptPicker/>
+                        </div>
+                    </div>
+                }
+            }}
+        </Show>
     }
 }
 
@@ -419,9 +546,11 @@ pub(crate) fn ReauthorizeLink() -> impl IntoView {
 /// rows looked like they narrowed an apply that in fact ignored them.
 ///
 /// Every dispatch button comes from here, Reboot included, so each one gets the
-/// same tooltip, accessible name and disabled-reason stacking. Reboot's mode and
-/// reason are *not* per-button: they are the shared run options rendered once
-/// below, like Run as and Dry run.
+/// same tooltip, accessible name and disabled-reason stacking. Reboot's button
+/// opens its mode and reason (`RebootPopover`, the only place they render) rather
+/// than planning at once. The headings read like the kind labels the confirm
+/// dialog and the audit trail use ("Apply all OS patches", "Apply selected OS
+/// patches"); they used to say "Install", so one action had two names.
 const ACTION_GROUPS: [(&str, &[(ActionKind, &str)]); 4] = [
     (
         "Scan",
@@ -430,19 +559,19 @@ const ACTION_GROUPS: [(&str, &[(ActionKind, &str)]); 4] = [
             (ActionKind::SoftwarePatchScan, "Software"),
         ],
     ),
-    // The two Install rows differ by blast radius, and that difference used to live
+    // The two Apply groups differ by blast radius, and that difference used to live
     // only in these headings — at 11px, muted, above two pairs of buttons all
     // reading "OS" and "Software". The button text now carries it too: "All OS"
     // cannot be misread as the targeted one at a glance the way a bare "OS" could.
     (
-        "Install all approved patches",
+        "Apply all approved",
         &[
             (ActionKind::OsPatchApply, "All OS"),
             (ActionKind::SoftwarePatchApply, "All Software"),
         ],
     ),
     (
-        "Install only the selected patches",
+        "Apply selected",
         &[
             (ActionKind::OsPatchRemediate, "Selected OS"),
             (ActionKind::SoftwarePatchRemediate, "Selected Software"),
@@ -569,7 +698,12 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                 view! {
                                     <p class="modal-sub">
                                         {format!(
-                                            "Organization(s): {}",
+                                            "{}: {}",
+                                            if plan.organizations.len() == 1 {
+                                                "Organization"
+                                            } else {
+                                                "Organizations"
+                                            },
                                             plan.organizations.join(", "),
                                         )}
                                     </p>
@@ -706,7 +840,7 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                 view! {
                                     <details class="modal-targets">
                                         <summary>
-                                            {format!("{device_count} device(s) targeted")}
+                                            {format!("{} targeted", util::count_of(device_count, "device", "devices"))}
                                         </summary>
                                         <ul>{items}</ul>
                                     </details>
@@ -727,7 +861,7 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                 view! {
                                     <details class="modal-skipped">
                                         <summary>
-                                            {format!("{} device(s) skipped", plan.skipped.len())}
+                                            {format!("{} skipped", util::count_of(plan.skipped.len(), "device", "devices"))}
                                         </summary>
                                         <ul>{items}</ul>
                                     </details>
@@ -805,9 +939,9 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                                 None => "Dispatching…".to_string(),
                                             }
                                         } else if dry_run {
-                                            format!("Preview on {device_count} device(s)")
+                                            format!("Preview on {}", util::count_of(device_count, "device", "devices"))
                                         } else {
-                                            format!("Run on {device_count} device(s)")
+                                            format!("Run on {}", util::count_of(device_count, "device", "devices"))
                                         }
                                     }}
                                 </button>
@@ -1036,7 +1170,10 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
                         || state.actions.dispatching.get()
                         || state.dry_run_reason(ActionKind::Script).is_some()
                 }
-                on:click=move |_| state.open_plan(ActionKind::Script, SelectionSource::PatchRows)
+                on:click=move |_| {
+                    state.actions.script_dialog.set(false);
+                    state.open_plan(ActionKind::Script, SelectionSource::PatchRows);
+                }
             >
                 "Run script…"
             </button>

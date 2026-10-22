@@ -241,8 +241,20 @@ impl AppState {
                         self.prune_device_selection_after_refresh();
                     } else {
                         // A new scope: a selection made against the previous result
-                        // no longer describes what is on screen.
+                        // no longer describes what is on screen. Said out loud: it
+                        // used to vanish without a word, and a run or a drill-down
+                        // is easy to start with rows still ticked.
+                        let had = self.actions.selected.with_untracked(|s| !s.is_empty())
+                            || self
+                                .actions
+                                .device_selected
+                                .with_untracked(|s| !s.is_empty());
                         self.clear_selection();
+                        if had {
+                            self.notify(Toast::ok(
+                                "Selection cleared: it was made on the previous results.",
+                            ));
+                        }
                     }
                     self.actions.results_stale.set(false);
                     self.reload_device_detail();
@@ -460,6 +472,8 @@ impl AppState {
         self.run.query_seq.update(|s| *s = util::next_query_seq(*s));
         self.run.progress.set(Progress::default());
         self.actions.jobs.set(Vec::new());
+        self.actions.watched.set(Vec::new());
+        self.actions.script_dialog.set(false);
         self.actions.pending.set(None);
         self.actions.confirm_input.set(String::new());
         self.actions.dispatch_error.set(None);

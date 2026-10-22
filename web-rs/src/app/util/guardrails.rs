@@ -7,7 +7,7 @@
 
 use crate::types::{ActionKind, ActionSettings, ApplyPreview, ApplyPreviewDevice};
 
-use super::group_thousands;
+use super::{count_of, group_thousands};
 
 /// Day names indexed like `ActionSettings::window_days` (`0` = Sunday), matching
 /// the backend's `window_label`.
@@ -124,10 +124,11 @@ pub(crate) fn confirm_mode_line(
 /// The toast after a dispatch. A dry run says where its report is: NinjaOne's v2 API
 /// returns no script output, so it is not anywhere in this app.
 pub(crate) fn dispatch_toast(dispatched: usize, skipped: usize, dry_run: bool) -> String {
+    let devices = count_of(dispatched, "device", "devices");
     let mut msg = if dry_run {
-        format!("Dry run sent to {dispatched} device(s)")
+        format!("Dry run sent to {devices}")
     } else {
-        format!("Dispatched to {dispatched} device(s)")
+        format!("Dispatched to {devices}")
     };
     if skipped > 0 {
         msg.push_str(&format!("; {skipped} skipped"));
@@ -197,10 +198,15 @@ pub(crate) fn apply_preview_summary(p: &ApplyPreview) -> String {
         );
     }
     let mut out = format!(
-        "NinjaOne will install {} approved {} patch(es) across {} device(s)",
+        "NinjaOne will install {} approved {} {} across {}",
         group_thousands(p.approved_total),
         p.family,
-        p.devices.len()
+        if p.approved_total == 1 {
+            "patch"
+        } else {
+            "patches"
+        },
+        count_of(p.devices.len(), "device", "devices"),
     );
     if p.pending_manual_total > 0 {
         out.push_str(&format!(
@@ -241,4 +247,40 @@ pub(crate) fn audit_mode_label(dry_run: bool, window_override: bool) -> &'static
         (false, true) => "Live (window override)",
         (false, false) => "Live",
     }
+}
+
+/// Whether a reboot reason is missing. Mirrors the backend's blocker, which treats
+/// a reason of only whitespace as none — it lands in NinjaOne's activity feed.
+pub(crate) fn reboot_reason_missing(reason: &str) -> bool {
+    reason.trim().is_empty()
+}
+
+/// The action bar's Options button: what the choices behind it will do to the next
+/// dispatch, so the one that decides whether a script runs for real is visible
+/// without opening it. `(text, warn)`; `warn` while a script would run live.
+///
+/// From the device-level bar none of the script options apply, so only the
+/// window override and offline targets are named there.
+pub(crate) fn options_label(
+    patch_rows: bool,
+    dry_run: bool,
+    override_window: bool,
+    include_offline: bool,
+) -> (String, bool) {
+    let mut parts: Vec<&str> = Vec::new();
+    if patch_rows {
+        parts.push(if dry_run { "Dry run" } else { "Live" });
+    }
+    if override_window {
+        parts.push("window override");
+    }
+    if include_offline {
+        parts.push("offline included");
+    }
+    let text = if parts.is_empty() {
+        "Options ▾".to_string()
+    } else {
+        format!("Options: {} ▾", parts.join(" · "))
+    };
+    (text, patch_rows && !dry_run)
 }

@@ -12,9 +12,23 @@ pub(crate) fn Toaster() -> impl IntoView {
                 } else {
                     "toast toast-ok"
                 };
+                let action = t.action.map(|a| match a {
+                    ToastAction::ViewJobs => view! {
+                        <button
+                            class="link-btn"
+                            on:click=move |_| {
+                                state.ui.active_tab.set(Tab::Jobs);
+                                state.ui.toast.set(None);
+                            }
+                        >
+                            "View jobs"
+                        </button>
+                    },
+                });
                 view! {
                     <div class=cls>
                         <span>{t.msg}</span>
+                        {action}
                         <button
                             class="x"
                             aria-label="Dismiss notification"

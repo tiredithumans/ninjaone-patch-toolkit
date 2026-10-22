@@ -1,6 +1,6 @@
 # Reference remediation scripts
 
-The toolkit's **Install only the selected patches** actions (*Apply selected OS patches* /
+The toolkit's **Apply selected** actions (*Apply selected OS patches* /
 *Apply selected software patches*) don't install anything themselves. NinjaOne has no per-patch
 apply endpoint, so the toolkit runs a script from your NinjaOne automation library on each device
 and passes it the patches ticked on that device. The two scripts here are reference

@@ -115,3 +115,73 @@ pub(crate) fn MenuButton(
         </div>
     }
 }
+
+/// A button that opens a panel of controls below it, the panel **always mounted**
+/// and only shown or hidden. For panels holding state a remount would lose or
+/// refetch — the action bar's run options (its Run-as menu fetches the sampled
+/// device's roles when it mounts) and the reboot mode and reason. Never closes on
+/// a press inside it; outside it and Escape close it as for a menu.
+#[component]
+pub(crate) fn Popover(
+    #[prop(into)] label: Signal<String>,
+    /// Classes on the trigger, after `btn`.
+    #[prop(into)]
+    class: Signal<String>,
+    #[prop(optional, into)] title: Option<Signal<String>>,
+    #[prop(into)] disabled: Signal<bool>,
+    /// The caller's handle on the open state, to close it after an action.
+    open: RwSignal<bool>,
+    children: Children,
+) -> impl IntoView {
+    let root: NodeRef<Div> = NodeRef::new();
+    dismiss_on_outside(open, root);
+    // Which way the panel opens, decided as it opens: toward the side of the
+    // window with room. The action bar wraps, so the same button sits at the left
+    // edge of one window and the right edge of another, and a panel opening the
+    // wrong way was clipped by the scrolling tab it lives in.
+    let to_left = RwSignal::new(false);
+    let place = move || {
+        let Some(el) = root.get_untracked() else {
+            return;
+        };
+        let rect = el.get_bounding_client_rect();
+        let width = window()
+            .inner_width()
+            .ok()
+            .and_then(|w| w.as_f64())
+            .unwrap_or_default();
+        to_left.set(rect.left() + rect.width() / 2.0 > width / 2.0);
+    };
+    view! {
+        <div class="menu" node_ref=root>
+            <button
+                type="button"
+                class=move || format!("btn {}", class.get())
+                aria-haspopup="true"
+                aria-expanded=move || open.get().to_string()
+                title=move || title.map(|t| t.get())
+                prop:disabled=move || disabled.get()
+                on:click=move |_| {
+                    if !open.get_untracked() {
+                        place();
+                    }
+                    open.update(|o| *o = !*o)
+                }
+            >
+                {move || label.get()}
+            </button>
+            <div
+                class=move || {
+                    if to_left.get() {
+                        "menu__panel popover__panel menu__panel--right"
+                    } else {
+                        "menu__panel popover__panel"
+                    }
+                }
+                prop:hidden=move || !open.get()
+            >
+                {children()}
+            </div>
+        </div>
+    }
+}

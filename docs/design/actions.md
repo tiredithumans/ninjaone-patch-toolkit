@@ -212,16 +212,41 @@ Everything dispatches from the `ActionBar`, next to the selection it targets —
 (patch rows) and the Needs Reboot tab (devices, `source=SelectionSource::Devices`). It is one
 component on both, reading the same run-option signals, not a second surface; from the device
 source it simply omits the script-only options row and the script picker, which nothing it can
-reach reads. The `ScriptPicker` is folded into it behind a `<details>`, and the Jobs tab is history
-plus a Retry that re-opens the same plan → confirm dialog (below). `Run
+reach reads. The `ScriptPicker` opens in a dialog from the bar's "Run a script…" (`ScriptDialog`,
+which names the bar's options rather than repeating them), and the Jobs tab is history plus a
+Retry that re-opens the same plan → confirm dialog (below).
+
+**The bar is one row whatever is selected.** It used to grow by ~300px of option rows on the
+first tick, pushing the ticked row out of view and, once scrolled, covering ~40% of the window.
+The run options now sit behind an **Options** button (`RunOptions`, a `menu::Popover` whose panel
+stays mounted while closed: `RunAsSelect` fetches the sampled device's roles as it mounts, and a
+remount per opening refetched them) whose label says what they will do to the next dispatch
+(`util::options_label`: "Dry run", or "Live" in the warn colour, plus any window override or
+offline targets). Reboot's mode and reason are asked for in the Reboot button's own popover
+(`RebootPopover`, the only place they render), whose Review waits for a reason
+(`util::reboot_reason_missing`, the backend's trim rule) instead of the dialog opening only to
+say so. "Apply selected" shows its distinct patches per family beside its heading
+(`util::remediation_short`, the per-device detail on hover) and a ⚠ for ticked OS rows it cannot
+send: those buttons are only trustworthy while the target list is visible. The headings read
+"Apply all approved" / "Apply selected", like the kind labels the dialog and the audit trail use;
+they used to say "Install", so one action had two names.
+
+**A dispatch does not leave the tab.** It used to switch to Jobs, so sending Software after OS
+from the same selection was a round trip. The toast offers **View jobs** (`ToastAction`, an enum:
+a callback made inside the async dispatch would have no reactive owner), the Jobs tab counts what
+is in flight, and the batch is announced when every job has settled (`util::take_finished_batches`,
+keyed by job ids since progress events carry no batch id; an `Unknown` job is still polled, so it
+holds the announcement; an error toast on screen is not replaced by one).
+
+`Run
 as`, `Restart the device after installing` and `Dry run` are rendered **once** and reach every
 `runs_a_script()` kind — they mean the same thing for a remediation install and a hand-picked
 script, and duplicating the controls across two tabs while they wrote the same signals meant
 ticking "Dry run" in the Jobs tab silently changed what an Apply button did. (The labels now read
 `Restart afterwards if a restart is pending` — the OS script also acts on a restart pending from
 before the run — and `Dry run (installs nothing; …)`, which says the report is in NinjaOne's
-activity, since v2 returns no script output.) Each options row carries a label naming the actions
-it reaches: the native endpoints take no parameters, have no
+activity, since v2 returns no script output.) Each options row in the panel carries a label naming
+the actions it reaches: the native endpoints take no parameters, have no
 preview mode and run as NinjaOne's agent, so an unlabelled "Dry run" beside them reads as
 protection they cannot give. The maintenance-window override sits in the "Applies to every
 action" row for the same reason: it is one choice about the next dispatch, not a per-button one.

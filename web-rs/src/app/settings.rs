@@ -596,7 +596,7 @@ fn ActionSettingsFields() -> impl IntoView {
                 </label>
             </div>
             <p class="settings-hint">
-                "These enable \"Install only the selected patches\" in the action bar. NinjaOne's own apply endpoints install everything approved on a device and cannot be told which patches to install, so targeting specific ones needs a library script that accepts a target list — "
+                "These enable \"Apply selected\" in the action bar. NinjaOne's own apply endpoints install everything approved on a device and cannot be told which patches to install, so targeting specific ones needs a library script that accepts a target list — "
                 <code>"kbAllowList"</code>
                 " (comma-separated KB numbers) for OS patches, "
                 <code>"productAllowListB64"</code>

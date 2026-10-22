@@ -374,9 +374,9 @@ pub(crate) fn remediation_summary(
     // is the batch-wide reading this whole path exists to replace.
     let distinct: BTreeSet<&String> = targets.values().flatten().collect();
     Some(format!(
-        "{family}: {} patch(es) on {} device(s)",
-        distinct.len(),
-        targets.len()
+        "{family}: {} on {}",
+        count_of(distinct.len(), "patch", "patches"),
+        count_of(targets.len(), "device", "devices"),
     ))
 }
 
@@ -390,9 +390,9 @@ pub(crate) fn kb_targeting_summary(targets: &BTreeMap<i64, Vec<String>>) -> Stri
     }
     let distinct: BTreeSet<&String> = targets.values().flatten().collect();
     format!(
-        "Each device is sent only its own KBs — {} distinct KB(s) across {} device(s).",
-        distinct.len(),
-        targets.len()
+        "Each device is sent only its own KBs — {} across {}.",
+        count_of(distinct.len(), "distinct KB", "distinct KBs"),
+        count_of(targets.len(), "device", "devices"),
     )
 }
 
@@ -407,10 +407,14 @@ pub(crate) fn untargetable_os_note(selected: &BTreeMap<i64, DeviceSelection>) ->
         .filter(|p| p.is_os && p.kb.as_deref().is_none_or(|k| k.trim().is_empty()))
         .count();
     (n > 0).then(|| {
-        format!(
-            "{} ticked OS row(s) have no KB number, so \"Selected OS\" can't send them.",
-            group_thousands(n)
-        )
+        if n == 1 {
+            "1 ticked OS row has no KB number, so \"Selected OS\" can't send it.".to_string()
+        } else {
+            format!(
+                "{} ticked OS rows have no KB number, so \"Selected OS\" can't send them.",
+                group_thousands(n)
+            )
+        }
     })
 }
 
@@ -592,9 +596,9 @@ pub(crate) fn selection_summary(devices: usize, rows: usize, offline: usize) -> 
         return None;
     }
     let mut text = format!(
-        "{} device(s) selected · {} patch row(s)",
-        group_thousands(devices),
-        group_thousands(rows),
+        "{} selected · {}",
+        count_of(devices, "device", "devices"),
+        count_of(rows, "patch row", "patch rows"),
     );
     if offline > 0 {
         text.push_str(&format!(" · {offline} offline"));
@@ -651,8 +655,8 @@ pub(crate) fn group_selection_note(label: &str, rows: usize, capped: bool) -> St
         )
     } else {
         format!(
-            "Selected {} patch row(s) in {label}.",
-            group_thousands(rows)
+            "Selected {} in {label}.",
+            count_of(rows, "patch row", "patch rows")
         )
     }
 }
@@ -778,7 +782,7 @@ pub(crate) fn device_selection_summary(devices: usize, offline: usize) -> Option
     if devices == 0 {
         return None;
     }
-    let mut text = format!("{} device(s) selected", group_thousands(devices));
+    let mut text = format!("{} selected", count_of(devices, "device", "devices"));
     if offline > 0 {
         text.push_str(&format!(" · {offline} offline"));
     }
@@ -798,4 +802,20 @@ pub(crate) fn build_device_action_request(
     opts: &RunOptions,
 ) -> Option<ActionRequest> {
     device_selection_allows(kind).then(|| build_action_request(kind, selected, opts))
+}
+
+/// The compact count beside "Apply selected": distinct patches per family, e.g.
+/// `"OS 2 · Software 1"`. `None` when neither family has anything ticked.
+pub(crate) fn remediation_short(
+    os: &BTreeMap<i64, Vec<String>>,
+    software: &BTreeMap<i64, Vec<String>>,
+) -> Option<String> {
+    let distinct =
+        |t: &BTreeMap<i64, Vec<String>>| t.values().flatten().collect::<BTreeSet<_>>().len();
+    let parts: Vec<String> = [("OS", distinct(os)), ("Software", distinct(software))]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(family, n)| format!("{family} {n}"))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }

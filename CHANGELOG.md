@@ -41,6 +41,17 @@ version and start a fresh `[Unreleased]`.
   for them. Group headers say "1 patch" and "1 device".
 - <kbd>/</kbd> switches to the Patches tab when needed and focuses Search.
 - Pickers and menus close on a click outside them or on Escape.
+- **The action bar stays one row when you tick rows.** Run as, restart, Dry run, offline targets
+  and the window override moved behind an **Options** button whose label says what the next
+  dispatch will do (*Dry run*, or *Live* in amber). Reboot asks for its mode and reason in its own
+  pop-up, and won't open the confirmation until a reason is given. The script picker opens from
+  **Run a script…**. "Apply selected" shows how many patches it would send. The groups are now
+  called *Apply all approved* and *Apply selected*, matching the confirmation dialog and the audit
+  trail.
+- **Sending an action no longer jumps to the Jobs tab.** The toast offers **View jobs**, the Jobs
+  tab counts what is still running, and a second toast says when the batch has finished.
+- Running a query or drilling down says so when it clears your selection. Counts read "1 device",
+  "2 patch rows" instead of "device(s)".
 
 ### Fixed
 

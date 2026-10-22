@@ -1462,6 +1462,11 @@ tbody tr:hover {
   right: 0;
 }
 
+/* A popover's panel stays mounted while closed; `hidden` must beat its flex. */
+.menu__panel[hidden] {
+  display: none;
+}
+
 .menu__item {
   display: flex;
   align-items: center;
@@ -1645,8 +1650,8 @@ tbody tr:hover {
 
 /* --- Device actions ------------------------------------------------------- */
 
-/* Sticky so the running selection total and the action buttons stay reachable
-   while scrolling a 100-row page. */
+/* One row whatever is selected. Sticky so the running selection total and the
+   action buttons stay reachable while a grouped view scrolls the tab. */
 .action-bar {
   position: sticky;
   top: 0;
@@ -1654,9 +1659,9 @@ tbody tr:hover {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  margin-bottom: 10px;
+  gap: 6px 8px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1667,7 +1672,7 @@ tbody tr:hover {
   align-items: center;
   gap: 8px;
   flex: 1 1 auto;
-  min-width: 220px;
+  min-width: 200px;
   font-size: 13px;
 }
 
@@ -1675,47 +1680,79 @@ tbody tr:hover {
   color: var(--muted);
 }
 
-.action-bar-buttons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-/* Each group is one mechanism, labelled. "Install all approved" and "Install only
-   the selected" are different endpoints with different blast radii, and the label
-   above the pair is what distinguishes them — the buttons themselves ("All OS",
+/* Each group is one mechanism, labelled. "Apply all approved" and "Apply
+   selected" are different endpoints with different blast radii, and the label
+   before the pair is what distinguishes them — the buttons themselves ("All OS",
    "Selected OS", …) are too terse to carry that alone. */
 .action-group {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 4px;
-  padding: 4px 8px;
+  padding: 3px 4px 3px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
 }
 
-/* Own line, so the buttons below it read as a pair belonging to it. */
 .action-group-label {
-  flex: 1 1 100%;
+  margin-right: 2px;
   font-size: 11px;
   color: var(--muted);
   white-space: nowrap;
 }
 
-.action-bar-targets {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  flex: 1 1 100%;
+/* Ticked OS rows "Selected OS" cannot send; the note is the tooltip. */
+.action-group-warn {
+  color: var(--warn);
   font-size: 12px;
+  cursor: help;
 }
 
-.action-target-chip {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--panel);
-  border: 1px solid var(--border);
+/* The Options button while a script would run for real. */
+.options-live {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+/* The run options and the reboot's mode and reason, behind their buttons. */
+.popover__panel {
+  min-width: 320px;
+  max-width: min(560px, 90vw);
+  max-height: 60vh;
+  overflow-y: auto;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.reboot-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
   color: var(--muted);
+}
+
+.reboot-options label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.reboot-options .btn-primary {
+  align-self: flex-start;
+}
+
+/* `.action-bar-reason`'s flex basis is a width in the bar's row; in this column
+   it would be a 240px-tall gap. */
+.reboot-options .action-bar-reason {
+  flex: none;
+}
+
+.popover__panel .action-bar-options {
+  min-width: 400px;
+}
+
+.script-dialog .script-picker {
+  margin: 0;
 }
 
 /* One row per scope. Each carries a label saying which actions it reaches, because
@@ -1759,19 +1796,6 @@ tbody tr:hover {
 
 .action-bar-runas select {
   max-width: 100%;
-}
-
-/* Collapsed by default: the two "Install only the selected patches" buttons cover
-   the common case, and this is the escape hatch for any other library script. */
-.action-bar-script {
-  flex: 1 1 100%;
-  font-size: 12px;
-}
-
-.action-bar-script > summary {
-  cursor: pointer;
-  color: var(--muted);
-  padding: 2px 0;
 }
 
 .action-bar-blocked {
