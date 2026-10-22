@@ -87,7 +87,15 @@ impl AppState {
     }
 
     pub(in crate::app) fn run_query_inner(self, silent: bool, force: bool) {
-        let statuses = self.filters.statuses.get_untracked();
+        // An automatic refresh re-runs the query on screen, not whatever the controls
+        // say now: a filter edited but not yet applied would otherwise land on the
+        // next tick, re-scoping the results (and the selection kept across the
+        // refresh) behind the operator's back. Every other run applies the controls.
+        let reapply = silent
+            .then(|| self.query.applied_args.get_untracked())
+            .flatten();
+        let args = reapply.clone().unwrap_or_else(|| self.filters.query_args());
+        let statuses = args.statuses.clone();
         // The guard chain lives in `util::run_decision` so its ordering is testable;
         // this method only carries out the decision.
         match util::run_decision(
@@ -121,15 +129,12 @@ impl AppState {
             }
             util::RunDecision::Run => {}
         }
-        let args = PatchQueryArgs {
-            filter: self.current_filter(),
-            patch_type: self.filters.patch_type.get_untracked(),
-            statuses,
-            install_after_days: Some(self.filters.install_days.get_untracked()),
-        };
         // Snapshot the filters driving this run; applied only if the query succeeds, so
-        // a failed run leaves the chips matching the still-displayed prior result.
-        let snapshot = self.snapshot_filters();
+        // a failed run leaves the snapshot matching the still-displayed prior result.
+        // A re-run of the applied query keeps the snapshot it already has.
+        let applied = reapply
+            .is_none()
+            .then(|| (args.clone(), self.snapshot_filters()));
         // Stamp this run so progress events from a superseded run are ignored, and
         // clear the previous run's counts.
         let seq = util::next_query_seq(self.run.query_seq.get_untracked());
@@ -177,7 +182,6 @@ impl AppState {
                         current_page: self.query.patches_page.get_untracked(),
                         current_sort: self.query.patches_sort.get_untracked(),
                         sort_on_next_run: self.query.sort_on_next_run.get_untracked(),
-                        filters_pref_set: api::ui_pref(api::PREF_FILTERS_COLLAPSED).is_some(),
                     });
                     self.query.patches_page.set(plan.page);
                     if !silent {
@@ -224,17 +228,11 @@ impl AppState {
                         }
                         util::ViewFetch::Rows(page) => self.fetch_page(page),
                     }
-                    // Reclaim the fold. The filter panel is ~487px tall and always
-                    // opened expanded, so on the app's own default window not one
-                    // patch row was visible on first paint — the operator scrolled
-                    // past the controls to reach the thing they ran the query for.
-                    // Only when they have expressed no preference: an explicit
-                    // toggle is remembered and always wins.
-                    if plan.collapse_filters {
-                        self.ui.filters_collapsed.set(true);
-                    }
                     self.query.result.set(Some(r));
-                    self.query.applied_filters.set(Some(snapshot));
+                    if let Some((args, snapshot)) = applied {
+                        self.query.applied_args.set(Some(args));
+                        self.query.applied_filters.set(Some(snapshot));
+                    }
                     self.query.query_error.set(None);
                     if plan.keep_selection {
                         // Same scope, fresher data: keep what the operator ticked,
@@ -424,6 +422,7 @@ impl AppState {
             self.fetch_page(0);
         }
         self.clear_selection();
+        self.query.applied_args.set(Some(self.filters.query_args()));
         self.query
             .applied_filters
             .set(Some(self.snapshot_filters()));
@@ -539,6 +538,7 @@ impl AppState {
         // Invalidates a page/header request still in flight for the dropped result.
         self.query.next_view_seq();
         self.query.applied_filters.set(None);
+        self.query.applied_args.set(None);
         self.query.query_error.set(None);
         self.clear_selection();
         self.actions.results_stale.set(false);

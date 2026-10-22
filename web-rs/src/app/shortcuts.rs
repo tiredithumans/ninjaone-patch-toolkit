@@ -6,9 +6,9 @@ use wasm_bindgen::JsCast;
 
 use super::*;
 
-/// Where `/` lands: the Search filter, or — on a Fleet-health tab, where the
-/// patch filters are folded away — the first control in the Filters panel.
+/// Where `/` lands: the Search filter in the patch filter bar.
 pub(crate) const SEARCH_INPUT_ID: &str = "filter-search";
+/// The device scope bar.
 pub(crate) const FILTERS_PANEL_ID: &str = "filters-panel";
 
 #[component]
@@ -142,25 +142,21 @@ fn editing(ev: &KeyboardEvent) -> bool {
     util::is_text_entry(&el.tag_name(), input_type.as_deref(), editable)
 }
 
-/// Opens the Filters panel and focuses the Search field (or the panel's first
-/// control when Search is folded away). Deferred a frame: the panel may only
-/// just have been told to expand.
+/// Focuses the Search filter. It lives in the patch filter bar, which only the
+/// Patches and Failures tabs render, so from any other tab `/` switches to Patches
+/// first. Deferred a frame: the tab may only just have been told to mount.
 fn focus_search(state: AppState) {
-    state.ui.filters_collapsed.set(false);
+    if !matches!(
+        state.ui.active_tab.get_untracked(),
+        Tab::Patches | Tab::Failures
+    ) {
+        state.ui.active_tab.set(Tab::Patches);
+    }
     request_animation_frame(move || {
-        let doc = document();
-        let target = doc
+        if let Some(el) = document()
             .get_element_by_id(SEARCH_INPUT_ID)
-            .or_else(|| {
-                doc.get_element_by_id(FILTERS_PANEL_ID).and_then(|panel| {
-                    panel
-                        .query_selector("input, select, button:not(.filters-toggle)")
-                        .ok()
-                        .flatten()
-                })
-            })
-            .and_then(|e| e.dyn_into::<HtmlElement>().ok());
-        if let Some(el) = target {
+            .and_then(|e| e.dyn_into::<HtmlElement>().ok())
+        {
             let _ = el.focus();
         }
     });

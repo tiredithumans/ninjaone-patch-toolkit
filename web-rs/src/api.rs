@@ -57,33 +57,18 @@ pub fn document_hidden() -> bool {
         .unwrap_or(false)
 }
 
-/// Reads a remembered UI preference, `None` when the operator has never set one.
+/// Reads a remembered UI preference (the theme, the hidden columns), `None` when the
+/// operator has never set one.
 ///
 /// `localStorage`, not `settings.json`: this is a per-machine view convenience, not
-/// configuration. Routing one boolean through the settings schema would mean a
+/// configuration. Routing one view choice through the settings schema would mean a
 /// backend field, a `SaveSettingsArgs` field, a `SettingsView` field, a mirror in
-/// `types.rs` and an IPC round trip on every toggle. Lives here beside
+/// `types.rs` and an IPC round trip on every change. Lives here beside
 /// [`document_hidden`] because it touches `js_sys`, and `util` is JS-free by rule.
 ///
 /// Every access is fallible and every failure reads as "no preference": a webview
 /// with site data blocked throws on the accessor itself, and the correct response is
 /// the default view, never a panic.
-pub fn ui_pref(key: &str) -> Option<bool> {
-    match ui_pref_str(key)?.as_str() {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
-    }
-}
-
-/// Records a UI preference. Best-effort — a failure costs the operator a remembered
-/// panel state and nothing else.
-pub fn set_ui_pref(key: &str, value: bool) {
-    set_ui_pref_str(key, if value { "true" } else { "false" });
-}
-
-/// [`ui_pref`] for a string value (the theme, the hidden-column list). Same
-/// failure rule: anything that throws is "never set".
 pub fn ui_pref_str(key: &str) -> Option<String> {
     let storage =
         js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("localStorage")).ok()?;
@@ -92,7 +77,8 @@ pub fn ui_pref_str(key: &str) -> Option<String> {
     f.call1(&storage, &JsValue::from_str(key)).ok()?.as_string()
 }
 
-/// [`set_ui_pref`] for a string value.
+/// Records a UI preference. Best-effort — a failure costs the operator a remembered
+/// view choice and nothing else.
 pub fn set_ui_pref_str(key: &str, value: &str) {
     let Ok(storage) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("localStorage"))
     else {
@@ -106,8 +92,6 @@ pub fn set_ui_pref_str(key: &str, value: &str) {
     }
 }
 
-/// Storage key for the Filters panel's collapsed state.
-pub const PREF_FILTERS_COLLAPSED: &str = "npt.filtersCollapsed";
 /// Storage key for the colour theme (`system` / `light` / `dark`).
 pub const PREF_THEME: &str = "npt.theme";
 /// Storage key for the Patches table's hidden columns (a JSON list of column ids).

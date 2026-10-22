@@ -4,9 +4,9 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, ActionRequest, ActionSettings, AuthStatus, DeviceSummary, JobReport, JobRequest,
-    JobState, Location, Organization, PatchFamilies, PatchGroup, PatchRow, PlannedTarget,
-    RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
+    ActionKind, ActionRequest, ActionSettings, AuthStatus, DeviceSummary, FilterParams, JobReport,
+    JobRequest, JobState, Location, Organization, PatchFamilies, PatchGroup, PatchQueryArgs,
+    PatchRow, PlannedTarget, RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -399,7 +399,6 @@ fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
         current_page: 3,
         current_sort: Some(sort),
         sort_on_next_run: None,
-        filters_pref_set: false,
     };
     let manual = run_plan(base);
     assert_eq!(manual.page, 0);
@@ -407,7 +406,7 @@ fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
         manual.sort, None,
         "canonical order unless a view link queued one"
     );
-    assert!(manual.collapse_filters && !manual.keep_selection && !manual.reopen_groups);
+    assert!(!manual.keep_selection && !manual.reopen_groups);
     assert_eq!(manual.fetch, ViewFetch::SeedFirstPage);
 
     let linked = run_plan(RunContext {
@@ -420,15 +419,6 @@ fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
         ViewFetch::Rows(0),
         "a sorted page 0 is fetched, not seeded"
     );
-    assert!(
-        !run_plan(RunContext {
-            filters_pref_set: true,
-            ..base
-        })
-        .collapse_filters,
-        "an explicit toggle wins"
-    );
-
     let silent = run_plan(RunContext {
         silent: true,
         ..base
@@ -439,7 +429,7 @@ fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
         Some(sort),
         "the operator's sort survives a refresh"
     );
-    assert!(!silent.collapse_filters && silent.keep_selection);
+    assert!(silent.keep_selection);
     assert_eq!(silent.fetch, ViewFetch::Rows(3));
 
     // The result shrank under the refresh: the page is clamped to the last one.
@@ -467,7 +457,6 @@ fn a_grouped_run_fetches_headers_and_a_silent_one_reopens_groups() {
             desc: false,
         }),
         sort_on_next_run: None,
-        filters_pref_set: true,
     };
     let manual = run_plan(base);
     assert_eq!(manual.fetch, ViewFetch::Groups(0));
@@ -1397,19 +1386,6 @@ fn a_long_history_keeps_its_newest_runs() {
     );
 }
 
-#[test]
-fn is_fleet_tab_flags_compliance_and_reboot() {
-    assert!(is_fleet_tab(Tab::Compliance));
-    assert!(is_fleet_tab(Tab::Reboot));
-    assert!(!is_fleet_tab(Tab::Patches));
-    assert!(!is_fleet_tab(Tab::Failures));
-    // Jobs is neither tier — it doesn't reflect the query at all.
-    assert!(!is_fleet_tab(Tab::Jobs));
-    // Trend reads the run-history file, which spans many queries — the current
-    // query's filters describe none of it.
-    assert!(!is_fleet_tab(Tab::Trend));
-}
-
 fn job(kind: ActionKind, dry_run: bool) -> JobReport {
     JobReport {
         id: 1,
@@ -1814,7 +1790,7 @@ fn filter_chips_emits_only_non_default_facets() {
             "OS Type: Windows Server",
             "OS name: 2022",
             "Type: OS",
-            "Status: INSTALLED",
+            "Status: Installed",
             "Severity: Critical",
             "Search: KB5040434",
             "First seen: last 7 days",
@@ -3991,5 +3967,63 @@ fn onboarding_names_the_missing_step_once_settings_have_loaded() {
     assert_eq!(
         onboarding(false, true, true, false),
         Some(Onboarding::SignIn)
+    );
+}
+
+fn query(statuses: &[&str]) -> PatchQueryArgs {
+    PatchQueryArgs {
+        filter: FilterParams::default(),
+        patch_type: "ALL".into(),
+        statuses: statuses.iter().map(|s| s.to_string()).collect(),
+        install_after_days: Some(30),
+    }
+}
+
+/// "Filters changed" compares what the queries do: nothing run yet is never a
+/// change, tick order is not one, and the install window counts only while an
+/// install status is picked.
+#[test]
+fn filters_changed_compares_the_query_not_the_clicks() {
+    let applied = query(&["PENDING", "FAILED"]);
+    assert!(!filters_changed(None, &applied), "nothing on screen yet");
+    assert!(!filters_changed(Some(&applied), &applied));
+    assert!(
+        !filters_changed(Some(&applied), &query(&["FAILED", "PENDING"])),
+        "re-ticking reorders the statuses"
+    );
+    assert!(filters_changed(Some(&applied), &query(&["PENDING"])));
+
+    let mut severity = applied.clone();
+    severity.filter.severities = vec!["CRITICAL".into()];
+    assert!(filters_changed(Some(&applied), &severity));
+
+    // The window bounds the install-history pull only.
+    let pending = query(&["PENDING"]);
+    let mut wider = pending.clone();
+    wider.install_after_days = Some(90);
+    assert!(
+        !filters_changed(Some(&pending), &wider),
+        "no install status"
+    );
+    let mut failed_wider = applied.clone();
+    failed_wider.install_after_days = Some(90);
+    assert!(filters_changed(Some(&applied), &failed_wider));
+    // An absolute range replaces the lookback.
+    let mut ranged = applied.clone();
+    ranged.filter.installed_after = Some(1_700_000_000);
+    let mut ranged_wider = ranged.clone();
+    ranged_wider.install_after_days = Some(90);
+    assert!(!filters_changed(Some(&ranged), &ranged_wider));
+}
+
+#[test]
+fn statuses_read_in_title_case_and_keep_their_values() {
+    assert_eq!(status_label("PENDING"), "Pending");
+    assert_eq!(status_label("FAILED"), "Failed");
+    assert_eq!(status_label("SOMETHING"), "SOMETHING");
+    assert!(
+        STATUS_CHOICES
+            .iter()
+            .all(|c| c.value == c.value.to_uppercase())
     );
 }

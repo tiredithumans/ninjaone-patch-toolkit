@@ -137,9 +137,6 @@ pub(crate) struct RunContext {
     pub current_page: usize,
     pub current_sort: Option<RowSort>,
     pub sort_on_next_run: Option<RowSort>,
-    /// The operator has toggled the filter panel at least once (the choice is
-    /// remembered and always wins over the first-run collapse).
-    pub filters_pref_set: bool,
 }
 
 /// What a run that succeeded does to the view.
@@ -157,8 +154,6 @@ pub(crate) struct RunPlan {
     /// leaves `patches_sort` as it is rather than rewriting it with its own value.
     pub sort: Option<RowSort>,
     pub fetch: ViewFetch,
-    /// Reclaim the fold on a manual run when the operator has not said otherwise.
-    pub collapse_filters: bool,
     /// Prune the selection against the fresh rows instead of dropping it.
     pub keep_selection: bool,
     /// Reopen the groups that were open and are still listed.
@@ -186,7 +181,6 @@ pub(crate) fn run_plan(ctx: RunContext) -> RunPlan {
         page,
         sort,
         fetch,
-        collapse_filters: !ctx.silent && !ctx.filters_pref_set,
         keep_selection: ctx.silent,
         reopen_groups: ctx.silent && ctx.grouped,
     }

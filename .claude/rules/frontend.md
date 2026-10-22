@@ -14,6 +14,9 @@ paths:
   → `docs/design/frontend.md#non-trivial-logic-does-not-belong-in-a-component-body`
 - **A dialog calls `modal::focus_trap()` in the closure that creates it**, per instance.
   → `docs/design/frontend.md#frontend-reactivity-is-closure-based-leptos-csr`
+- **Patch facets (Status, Severity, Search, First seen, Install history) render only in
+  `PatchFilterBar`, on Patches and Failures; auto-refresh re-runs `applied_args`, never the live
+  controls.** → `docs/design/frontend.md#operator-ux`
 - **A menu or popover is never `aria-modal`** (`menu::MenuButton`, `dismiss_on_outside`): that
   attribute holds auto-refresh and silences the shortcuts. → `docs/design/frontend.md#operator-ux`
 - **A `query.members` entry is replaced with a fresh `Arc`, never mutated in place** — open

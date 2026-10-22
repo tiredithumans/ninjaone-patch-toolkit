@@ -154,7 +154,9 @@ export async function capture(url) {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     // The demo starts empty ("Run a query to list patches") until Run query, just
     // like the real app — click it, then wait for the result summary to render.
-    await page.getByRole("button", { name: "Run query" }).click();
+    // `exact`: the accessible name is matched as a substring otherwise, and any
+    // other button mentioning the query would make the locator ambiguous.
+    await page.getByRole("button", { name: "Run query", exact: true }).click();
     await page.getByText(/patch rows/).first().waitFor({ timeout: 15000 });
     // Clicking can scroll the button into view; reset to the top so the capture
     // starts at the header, not wherever the click left the scroll position.

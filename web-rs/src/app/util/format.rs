@@ -234,14 +234,6 @@ pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts) -> String {
     }
 }
 
-/// Fleet-health tabs (Compliance, Needs Reboot) reflect the device scope only and
-/// ignore the patch filters; Filtered-results tabs (Patches, Failures) honor them.
-/// Jobs and Trend are neither — they show dispatch history and run history, not the
-/// output of the current query.
-pub(crate) fn is_fleet_tab(tab: Tab) -> bool {
-    matches!(tab, Tab::Compliance | Tab::Reboot)
-}
-
 /// Short mode label for a dispatched job. A dry run applies — and reboots —
 /// nothing, so it wins over the reboot indication.
 ///

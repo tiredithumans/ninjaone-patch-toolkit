@@ -168,7 +168,6 @@ pub(crate) fn Results() -> impl IntoView {
                     </button>
                 </div>
             </Show>
-            <AppliedFilterChips/>
             <div
                 id=TAB_PANEL_ID
                 role="tabpanel"
@@ -237,56 +236,6 @@ fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
     }
 }
 
-/// Read-only chips describing the filters that produced the current result (snapshot
-/// taken at Run time). Patch-tier chips grey out + strike through on Fleet-health tabs,
-/// where those filters are ignored — making the silent scope change explicit.
-#[component]
-fn AppliedFilterChips() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    view! {
-        // Hidden on Jobs: dispatch history isn't produced by the query, so chips
-        // describing that query would claim a scope the tab doesn't have.
-        <Show when=move || {
-            state.query.applied_filters.with(|a| a.is_some())
-                && !matches!(state.ui.active_tab.get(), Tab::Jobs | Tab::Trend)
-        }>
-            <div
-                class="applied-filters"
-                role="group"
-                aria-label="Filters applied to the current results"
-            >
-                {move || {
-                    let chips = state.query.applied_filters
-                        .with(|a| a.as_ref().map(filter_chips).unwrap_or_default());
-                    let fleet = is_fleet_tab(state.ui.active_tab.get());
-                    if chips.is_empty() {
-                        return view! {
-                            <span class="applied-chip applied-chip-none">
-                                "No filters — whole fleet"
-                            </span>
-                        }
-                            .into_any();
-                    }
-                    chips
-                        .into_iter()
-                        .map(|c| {
-                            let dim = c.patch && fleet;
-                            let cls = if dim {
-                                "applied-chip applied-chip-dim"
-                            } else {
-                                "applied-chip"
-                            };
-                            let title = if dim { "Ignored on this tab" } else { "" };
-                            view! { <span class=cls title=title>{c.label}</span> }
-                        })
-                        .collect_view()
-                        .into_any()
-                }}
-            </div>
-        </Show>
-    }
-}
-
 /// Prev / "Rows 1–100 of N" / Next above a paged table, rendered only when there
 /// is more than one page. The arithmetic is `util`'s; the caller owns the page
 /// index (already clamped) and decides what moving to a page fetches.
@@ -320,9 +269,14 @@ fn Pager(
     }
 }
 
-/// The contract banner shown at the top of every results tab: which tier it belongs
-/// to, what it reflects, and exactly which filters apply or are ignored. `kind` picks
-/// the accent ("filtered" = patch-filtered tier, "fleet" = device-scope-only tier).
+/// The contract line at the top of a results tab: which tier it belongs to, what it
+/// reflects, and — on hover, and to a screen reader — exactly which filters apply
+/// or are ignored. `kind` picks the accent ("filtered" = patch-filtered tier,
+/// "fleet" = device-scope-only tier).
+///
+/// One muted line: it used to be a three-line boxed banner on every tab, above the
+/// rows it described. Where the patch filters apply is now also what the layout
+/// says — their bar renders only on the tabs they reach.
 #[component]
 fn ScopeBanner(
     kind: &'static str,
@@ -331,14 +285,13 @@ fn ScopeBanner(
     filters: &'static str,
 ) -> impl IntoView {
     view! {
-        <div class=format!("scope-banner scope-banner-{kind}")>
-            <span class="scope-banner-tier">{tier}</span>
-            <p class="scope-banner-text">
-                <strong>"Showing "</strong>
-                {reflects}
-            </p>
-            <p class="scope-banner-filters">{filters}</p>
-        </div>
+        <p class=format!("scope-caption scope-caption-{kind}") title=filters>
+            <span class="scope-caption__tier">{tier}</span>
+            " · Showing "
+            {reflects}
+            <span class="scope-caption__info" aria-hidden="true">" ⓘ"</span>
+            <span class="sr-only">{format!(" {filters}")}</span>
+        </p>
     }
 }
 

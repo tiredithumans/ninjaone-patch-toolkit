@@ -25,7 +25,7 @@ pub(crate) mod util;
 use actions::{ActionBar, ConfirmActionModal, JobsTable, ReauthorizeLink};
 use charts::{ComplianceByOsBars, ComplianceCharts, TrendLine};
 use controls::ViewNotices;
-use filters::Filters;
+use filters::{PatchFilterBar, ScopeBar};
 use header::{Header, SignInButton};
 use settings::{EnableActionsLink, SettingsDialog, SettingsLink};
 use shortcuts::KeyboardShortcuts;
@@ -36,9 +36,9 @@ use update::UpdateSplash;
 use util::{
     FilterInputs, MdBlock, MdSpan, SelectionSource, SummaryCounts, action_blocked_reason,
     action_disabled_reason, aged_badge, aria_sort, filter_chips, filter_params, format_duration,
-    group_thousands, is_fleet_tab, job_mode_label, next_sort, non_empty, parse_changelog,
-    parse_clamped, parse_optional_id, patch_key, selection_summary, sev_class, sort_glyph,
-    sort_patch_rows, status_class, summary_line, tab_class,
+    group_thousands, job_mode_label, next_sort, non_empty, parse_changelog, parse_clamped,
+    parse_optional_id, patch_key, selection_summary, sev_class, sort_glyph, sort_patch_rows,
+    status_class, summary_line, tab_class,
 };
 
 const PATCHES_PAGE_SIZE: usize = 100;
@@ -240,7 +240,7 @@ pub fn App() -> impl IntoView {
                 </p>
             </Show>
             <ViewNotices/>
-            <Filters/>
+            <ScopeBar/>
             <Results/>
             <Toaster/>
             // Before the update splash, which "Check for updates" opens over it.
