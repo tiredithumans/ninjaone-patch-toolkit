@@ -80,7 +80,7 @@ Note also that `REPORTING_PAGE_SIZE = 5000` rests on the envelope branch tolerat
 cap, **not** on a documented ceiling: the four patch endpoints declare `pageSize` with no maximum
 (the `maximum: 10000` in the spec is on `/queries/logged-on-users`, which this app never calls).
 
-## An empty page short of the cursor's announced `count` is re-read, then an error
+## An empty page short of the cursor's announced `count` restarts the scan, then an error
 
 NinjaOne's cursor object carries `count` beside `name` and `offset`. The spec says nothing about
 what it measures; the field logs did: a 6,721-row OS feed and a 559,210-row software feed both
@@ -90,12 +90,22 @@ last page under a terminal cursor (`exit="cursor exhausted"`), not an empty page
 Then one day the OS feed opened with `count=6721`, served 5000 rows, and answered the next request
 — 79 ms later — with zero rows. The envelope branch took any empty page as the end, so the fetch
 returned 5000 rows as the whole feed and every rollup ran on 74% of the OS patches; the next
-query, two minutes later, got all 6,721. `get_paginated_reporting` now keeps the first cursor's
-`count` (`cursor_count`) and, on an empty page while `all.len() < count`, re-sends the same cursor
-name after a short fixed pause (`EMPTY_PAGE_REREADS` × `EMPTY_PAGE_REREAD_DELAY` — the position is
-server-side state, so this just asks for the page again). A page that stays empty is reported like
-the other stalls. An empty page at or past the count, or from an endpoint that announces none, ends
-the scan exactly as before (`an_empty_page_at_or_without_an_announced_count_ends_the_scan`).
+query, two minutes later, got all 6,721.
+
+The first fix re-sent the same cursor name after a short pause, on the theory that the position is
+server-side state and the page could simply be asked for again. The field logs disproved it: once
+a cursor serves that empty page it is broken. On the OS feed the re-read was refused with
+`400 Invalid cursor.`, failing the query; on the software feed it carried on, ended 6,959 rows
+short of its `count`, and was stored as complete with only a warning. Every occurrence so far has
+been the second page, within a few hundred milliseconds of the open.
+
+`get_paginated_reporting` therefore keeps the first cursor's `count` (`cursor_count`) and, on an
+empty page while `all.len() < count`, **starts the scan over** after a short fixed pause
+(`EMPTY_PAGE_RESTARTS` × `EMPTY_PAGE_RESTART_DELAY`): no `cursor` parameter, the rows already paged
+dropped (nothing says which of them the new cursor would serve again), and the count re-read from
+the new cursor. A scan that keeps breaking is reported like the other stalls. An empty page at or
+past the count, or from an endpoint that announces none, ends the scan exactly as before
+(`an_empty_page_at_or_without_an_announced_count_ends_the_scan`).
 
 A **terminal cursor** short of the count is only a warning
 (`an_exhausted_cursor_short_of_the_count_is_a_warning_not_an_error`): the count is taken when the

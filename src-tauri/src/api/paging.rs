@@ -41,19 +41,24 @@ pub(super) const REPORTING_PAGE_SIZE: u32 = 5000;
 /// so reaching it means the endpoint is misbehaving, not that the fleet is large.
 const MAX_PAGES: u32 = 10_000;
 
-/// How many times an empty page is re-read while the cursor's `count` says rows
-/// remain, and how long to wait before each re-read.
+/// How many times a scan starts over after an empty page arrives while the cursor's
+/// `count` says rows remain, and how long to wait before each restart.
 ///
 /// NinjaOne's normal end of a scan is a *non-empty* last page under a terminal
 /// cursor. In the field the OS feed opened with `count=6721`, served 5000 rows, and
 /// then answered the very next request — 79 ms later — with zero rows; the loop
-/// took that as the end and every rollup ran on 74% of the fleet's OS patches. The
-/// position is server-side state keyed by the cursor name, so re-sending the same
-/// name simply asks for the page again; a short pause covers the lag the symptom
-/// suggests, and the delay is fixed rather than exponential because these pauses sit
-/// inside a scan that otherwise runs at a few hundred milliseconds per page.
-pub(super) const EMPTY_PAGE_REREADS: u8 = 2;
-const EMPTY_PAGE_REREAD_DELAY: std::time::Duration = std::time::Duration::from_millis(750);
+/// took that as the end and every rollup ran on 74% of the fleet's OS patches.
+///
+/// Asking that cursor again does not recover the scan. It used to be re-read, and
+/// the field logs show the cursor is broken once it serves the empty page: the OS
+/// feed's re-read was refused with `400 Invalid cursor.`, failing the query, and a
+/// third-party feed's re-read carried on but ended 6,959 rows short of its count. So
+/// the scan restarts from page 1 under a fresh cursor, dropping the rows already
+/// paged — nothing says which of them the new cursor would serve again. The delay
+/// is fixed rather than exponential: the empty page has so far only ever been the
+/// second one, so a restart costs one page plus this pause.
+pub(super) const EMPTY_PAGE_RESTARTS: u8 = 2;
+const EMPTY_PAGE_RESTART_DELAY: std::time::Duration = std::time::Duration::from_millis(750);
 
 /// Sink for incremental pagination progress: invoked with the cumulative row
 /// count after each page is accumulated. Callers that don't stream progress to
@@ -130,9 +135,9 @@ impl NinjaApiClient {
         let started = std::time::Instant::now();
         // The scan's size as the server announced it on the first cursor, when the
         // endpoint announces one. It is what lets an empty page be told apart from
-        // the end of the feed — see [`EMPTY_PAGE_REREADS`].
+        // the end of the feed — see [`EMPTY_PAGE_RESTARTS`].
         let mut announced_total: Option<usize> = None;
-        let mut empty_rereads: u8 = 0;
+        let mut restarts: u8 = 0;
 
         loop {
             let mut query: Vec<(&str, String)> = base_query.to_vec();
@@ -225,29 +230,37 @@ impl NinjaApiClient {
                     // `{"cursor": {}}` ends the fetch rather than tripping the
                     // malformed-shape error below.
                     //
-                    // Unless the server itself said more rows exist. Then the page is
-                    // re-read a couple of times, and one that stays empty is reported
-                    // like any other stall: the rows in hand are a partial fleet.
+                    // Unless the server itself said more rows exist. Then the cursor is
+                    // broken and the scan starts over under a fresh one, a couple of
+                    // times; one that keeps breaking is reported like any other stall,
+                    // since the rows in hand are a partial fleet.
                     if page_len == 0 {
                         if let Some(total) = announced_total
                             && all.len() < total
                         {
-                            if empty_rereads < EMPTY_PAGE_REREADS {
-                                empty_rereads += 1;
+                            if restarts < EMPTY_PAGE_RESTARTS {
+                                restarts += 1;
                                 warn!(
                                     path,
                                     rows = all.len(),
                                     total,
-                                    reread = empty_rereads,
-                                    "empty page before the announced count; re-reading the cursor"
+                                    restart = restarts,
+                                    "empty page before the announced count; restarting the scan"
                                 );
-                                tokio::time::sleep(EMPTY_PAGE_REREAD_DELAY).await;
+                                all.clear();
+                                cursor = None;
+                                seen_cursors.clear();
+                                announced_total = None;
+                                if let Some(report) = on_progress {
+                                    report(0);
+                                }
+                                tokio::time::sleep(EMPTY_PAGE_RESTART_DELAY).await;
                                 continue;
                             }
                             bail!(
                                 "{path} returned an empty page at {} of the {total} rows its cursor \
-                                 announced, {EMPTY_PAGE_REREADS} re-reads included; stopping rather \
-                                 than reporting a partial fleet as complete",
+                                 announced, after starting the scan over {EMPTY_PAGE_RESTARTS} times; \
+                                 stopping rather than reporting a partial fleet as complete",
                                 all.len()
                             );
                         }

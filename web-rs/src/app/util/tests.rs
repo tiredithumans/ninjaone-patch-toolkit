@@ -1295,6 +1295,33 @@ fn summary_line_is_tab_aware() {
         summary_line(Tab::Reboot, &c),
         "12 of 540 devices need reboot"
     );
+
+    // One of anything reads as one: "1 organizations" was on screen.
+    let one = SummaryCounts {
+        rows_total: 1,
+        devices_total: 1,
+        failures: 1,
+        failing_devices: 1,
+        orgs: 1,
+        devices_counted: 1,
+        reboot: 1,
+    };
+    assert_eq!(
+        summary_line(Tab::Patches, &one),
+        "1 patch row across 1 device"
+    );
+    assert_eq!(
+        summary_line(Tab::Failures, &one),
+        "1 failing patch on 1 device"
+    );
+    assert_eq!(
+        summary_line(Tab::Compliance, &one),
+        "1 organization \u{00b7} 1 of 1 device counted"
+    );
+    assert_eq!(
+        summary_line(Tab::Reboot, &one),
+        "1 of 1 device needs reboot"
+    );
 }
 
 #[test]

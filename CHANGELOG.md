@@ -11,6 +11,12 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Queries no longer fail with "Invalid cursor." or come back short when NinjaOne returns an empty
+  page partway through a patch list; the list is fetched again from the start.
+- Counts of one read as one ("1 organization", "1 device").
+
 ## [0.19.0] - 2026-10-22
 
 A redesigned layout: results fill the window, with filters, actions and settings in compact bars
