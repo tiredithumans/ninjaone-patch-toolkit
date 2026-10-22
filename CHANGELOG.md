@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-10-22
+
 ### Fixed
 
 - Queries no longer fail with "Invalid cursor." or come back short when NinjaOne returns an empty
