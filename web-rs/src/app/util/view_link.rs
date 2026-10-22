@@ -122,6 +122,24 @@ fn tab_from_id(id: &str) -> Option<Tab> {
     TAB_ORDER.iter().copied().find(|t| tab_id(*t) == id)
 }
 
+/// The remembered results tab: the one stored by [`tab_id`], else Patches.
+pub(crate) fn tab_from_pref(stored: Option<&str>) -> Tab {
+    stored.and_then(tab_from_id).unwrap_or(Tab::Patches)
+}
+
+/// The Patches view mode as remembered: `"flat"` or the grouping's backend name.
+pub(crate) fn group_by_pref(group_by: Option<GroupBy>) -> String {
+    group_by
+        .as_ref()
+        .and_then(variant_name)
+        .unwrap_or_else(|| "flat".to_string())
+}
+
+/// The remembered Patches view mode; anything unreadable is flat.
+pub(crate) fn group_by_from_pref(stored: Option<&str>) -> Option<GroupBy> {
+    stored.and_then(from_variant_name::<GroupBy>)
+}
+
 /// A serde unit-variant name (`"DEVICE"`, `"severity"`), as the backend spells it.
 fn variant_name<T: Serialize>(v: &T) -> Option<String> {
     match serde_json::to_value(v).ok()? {

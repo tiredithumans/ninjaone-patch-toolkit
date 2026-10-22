@@ -32,6 +32,13 @@ version and start a fresh `[Unreleased]`.
   applied yet. The row of applied-filter chips is gone; the indicator's tooltip names the filters
   behind the results.
 - Each tab's three-line scope banner is now a one-line caption (details on hover).
+- **More rows fit on screen.** Long patch names wrap to two lines at most (full name on hover),
+  Location and Role start hidden (bring them back from **Columns**; your choice is remembered),
+  the pager shares the view row, and "Changes since …" is one line whose counts open their lists.
+- **Tabs show what's waiting:** the patch row count, failures, devices needing a reboot, and jobs
+  still running. The app reopens on the tab and Patches view you last used.
+- The empty Failures tab offers **Include failed installs and run** when the query didn't ask
+  for them. Group headers say "1 patch" and "1 device".
 - <kbd>/</kbd> switches to the Patches tab when needed and focuses Search.
 - Pickers and menus close on a click outside them or on Escape.
 

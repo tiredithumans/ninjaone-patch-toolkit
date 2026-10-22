@@ -24,11 +24,28 @@ pub(super) fn FailuresTable() -> impl IntoView {
         <PatchFilterBar/>
         <Show
             when=has_failures
-            fallback=|| {
-                view! {
-                    <p class="empty">
-                        "No patch failures. Tick Failed under Status above and run the query to analyze failures."
-                    </p>
+            fallback=move || {
+                // A query that never asked for failed installs cannot have found
+                // any: say so, and offer the one click that asks.
+                let looked = state.query.applied_filters.with(|a| {
+                    a.as_ref().is_some_and(|a| a.statuses.iter().any(|s| s == "FAILED"))
+                });
+                if looked {
+                    view! { <p class="empty">"No failed installs in this scope and window."</p> }
+                        .into_any()
+                } else {
+                    view! {
+                        <div class="empty">
+                            <p>"These results don't include failed installs."</p>
+                            <button
+                                class="btn btn-primary"
+                                on:click=move |_| state.include_status_and_run("FAILED")
+                            >
+                                "Include failed installs and run"
+                            </button>
+                        </div>
+                    }
+                        .into_any()
                 }
             }
         >
@@ -95,7 +112,7 @@ pub(super) fn FailuresTable() -> impl IntoView {
                                                     }}
                                                 </button>
                                             </td>
-                                            <td class="patch-name">{f.name}</td>
+                                            <td class="patch-name"><span class="clamp-2" title=f.name.clone()>{f.name.clone()}</span></td>
                                             <td>{f.affected_devices}</td>
                                             <td>{f.latest_failure.unwrap_or_default()}</td>
                                             <td class="device-list">{f.device_names.join(", ")}</td>

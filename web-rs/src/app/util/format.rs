@@ -80,9 +80,36 @@ pub(crate) fn chart_label(title: &str, items: &[(String, String)]) -> String {
 /// catches.
 pub(crate) fn group_count_label(by_device: bool, rows: usize, devices: usize) -> String {
     if by_device {
-        format!("{} patches", group_thousands(rows))
+        count_of(rows, "patch", "patches")
     } else {
-        format!("{} devices", group_thousands(devices))
+        count_of(devices, "device", "devices")
+    }
+}
+
+/// `"1 patch"`, `"1,200 patches"`: a count with its noun agreeing. "1 patches" and
+/// "device(s)" read as unfinished.
+pub(crate) fn count_of(n: usize, one: &str, many: &str) -> String {
+    format!("{} {}", group_thousands(n), if n == 1 { one } else { many })
+}
+
+/// The count a results tab carries beside its name, or `None` for no badge.
+///
+/// Patches always counts its rows once there is a result; Failures and Needs
+/// Reboot only when there is something there (a pending-only query never looked
+/// for failures, so a "0" would claim more than it knows); Jobs counts what is
+/// still in flight. Compliance and Trend are reports, not lists to work through.
+pub(crate) fn tab_badge(
+    tab: Tab,
+    counts: Option<&SummaryCounts>,
+    jobs_in_flight: usize,
+) -> Option<String> {
+    let nonzero = |n: usize| (n > 0).then(|| group_thousands(n));
+    match tab {
+        Tab::Patches => counts.map(|c| group_thousands(c.rows_total)),
+        Tab::Failures => counts.and_then(|c| nonzero(c.failures)),
+        Tab::Reboot => counts.and_then(|c| nonzero(c.reboot)),
+        Tab::Jobs => nonzero(jobs_in_flight),
+        Tab::Compliance | Tab::Trend => None,
     }
 }
 

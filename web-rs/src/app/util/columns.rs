@@ -30,12 +30,24 @@ pub(crate) fn column_id(label: &str) -> String {
     id
 }
 
-/// Reads the stored hidden set. Anything unreadable — no value, not JSON, not a
-/// list of strings — is "nothing hidden": the worst a bad value can do is show
-/// every column.
+/// Hidden on a machine whose operator never opened the chooser: Location and Role.
+/// With all twelve columns the table overflowed the default 1360px window and
+/// clipped Installed; the device's location and role are a click away in its
+/// drill-down, and one tick in Columns brings either back.
+pub(crate) const DEFAULT_HIDDEN_COLUMNS: [&str; 2] = ["location", "role"];
+
+/// Reads the stored hidden set. Nothing stored is [`DEFAULT_HIDDEN_COLUMNS`];
+/// anything unreadable — not JSON, not a list of strings — is "nothing hidden":
+/// the worst a bad value can do is show every column.
 pub(crate) fn parse_hidden_columns(stored: Option<&str>) -> BTreeSet<String> {
-    stored
-        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+    let Some(stored) = stored else {
+        return DEFAULT_HIDDEN_COLUMNS
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+    };
+    serde_json::from_str::<Vec<String>>(stored)
+        .ok()
         .map(|ids| ids.into_iter().filter(|id| !id.is_empty()).collect())
         .unwrap_or_default()
 }
@@ -100,8 +112,14 @@ mod tests {
     }
 
     #[test]
+    fn nothing_stored_hides_the_defaults() {
+        assert_eq!(parse_hidden_columns(None), set(&["location", "role"]));
+        // Choosing to show everything is a stored empty list, and it sticks.
+        assert!(parse_hidden_columns(Some("[]")).is_empty());
+    }
+
+    #[test]
     fn a_bad_stored_value_hides_nothing() {
-        assert!(parse_hidden_columns(None).is_empty());
         assert!(parse_hidden_columns(Some("")).is_empty());
         assert!(parse_hidden_columns(Some("not json")).is_empty());
         assert!(parse_hidden_columns(Some("{\"kb\":false}")).is_empty());
