@@ -42,12 +42,13 @@ lists individual patches per server, and exports to Excel.
     and a definition behind every figure.
   - Saved filter presets and optional auto‑refresh with a visible countdown and Pause (it
     also waits while a dialog or Settings is open, or the window is hidden).
-- **Operator comforts** — keyboard shortcuts (below); a **Columns** menu to hide Patches‑table
-  columns (remembered per machine; the Excel export still writes every column); **Copy view
-  link** / **Open view…** to hand a colleague the same filters, tab, grouping and sort (never
-  the selection or any credential — a link from another instance warns before applying; the web
-  demo keeps it in the URL); Light / Dark / System theme; reduced motion honoured; the window
-  reopens where you left it.
+- **Operator comforts** — the results fill the window under one top bar (Run query, the data's
+  age, Refresh, auto‑refresh, an **Export** menu, Settings and the ⋯ menu); keyboard shortcuts
+  (below); a **Columns** menu to hide Patches‑table columns (remembered per machine; the Excel
+  export still writes every column); **Copy view link** / **Open view…** in the ⋯ menu to hand a
+  colleague the same filters, tab, grouping and sort (never the selection or any credential — a
+  link from another instance warns before applying; the web demo keeps it in the URL); Light /
+  Dark / System theme, also in ⋯; reduced motion honoured; the window reopens where you left it.
 - **Patch actions** *(opt‑in — see [Patch actions](#patch-actions))* — select patch rows and
   scan, apply, reboot, or run any script from the tenant's automation library, then watch
   each dispatch to a terminal state in the **Jobs** tab.

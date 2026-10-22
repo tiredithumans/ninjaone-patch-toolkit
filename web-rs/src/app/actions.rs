@@ -210,7 +210,9 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                             !state.settings.f_actions.with(util::offline_targets_offered)
                         }>
                             <span class="action-options-note">
-                                "(switched off in Settings → Patch actions)"
+                                "(switched off in "
+                                <SettingsLink label="Settings → Patch actions"/>
+                                ")"
                             </span>
                         </Show>
                     </label>
@@ -356,6 +358,7 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                 <p class="action-bar-blocked" role="note">
                     {move || blocked().unwrap_or_default()}
                     <ReauthorizeLink/>
+                    <EnableActionsLink/>
                 </p>
             </Show>
         </div>
@@ -1055,6 +1058,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
                 <p class="empty" role="note">
                     {move || state.blocked_reason().unwrap_or_default()}
                     <ReauthorizeLink/>
+                    <EnableActionsLink/>
                 </p>
             </Show>
 

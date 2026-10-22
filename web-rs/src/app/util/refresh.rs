@@ -14,8 +14,8 @@ pub(crate) enum RefreshHold {
     /// chose, so it is the one the label must name.
     Paused,
     /// A dialog is open — the action confirmation, the update splash, the
-    /// shortcuts help — or the Settings panel. A refresh landing underneath a
-    /// confirmation would re-scope the rows the operator is reading about.
+    /// shortcuts help, Settings. A refresh landing underneath a confirmation would
+    /// re-scope the rows the operator is reading about.
     Dialog,
     /// The window is hidden or minimized: nobody is reading the result.
     Hidden,

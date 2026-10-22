@@ -24,6 +24,50 @@ use patches::PatchesTable;
 use reboot::RebootTable;
 use trend::TrendTab;
 
+/// Says what to do first, before there is anything to show: connect in Settings,
+/// or sign in. Decided by `util::onboarding`, which waits for the saved settings.
+#[component]
+fn OnboardingCard() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let step = move || {
+        util::onboarding(
+            state.session.web_mode.get(),
+            state.settings.loaded.get(),
+            state.settings.has_client_id.get(),
+            state.is_authed(),
+        )
+    };
+    move || {
+        step().map(|step| match step {
+            util::Onboarding::Connect => view! {
+                <div class="onboarding" role="note">
+                    <h2>"Connect to NinjaOne"</h2>
+                    <p>
+                        "Open Settings, pick your region and enter the Client ID of your NinjaOne "
+                        "API app, then sign in. The README's “NinjaOne setup” section lists what "
+                        "the app needs on the NinjaOne side."
+                    </p>
+                    <button class="btn btn-primary" on:click=move |_| state.ui.show_settings.set(true)>
+                        "Open Settings"
+                    </button>
+                </div>
+            }
+            .into_any(),
+            util::Onboarding::SignIn => view! {
+                <div class="onboarding" role="note">
+                    <h2>"Sign in to load your fleet"</h2>
+                    <p>
+                        "The connection is set up. Sign in to list patches — a browser window "
+                        "opens if NinjaOne needs you to log in."
+                    </p>
+                    <SignInButton/>
+                </div>
+            }
+            .into_any(),
+        })
+    }
+}
+
 #[component]
 pub(crate) fn Results() -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -43,13 +87,14 @@ pub(crate) fn Results() -> impl IntoView {
                     devices_counted: r.compliance_total.devices_total,
                     reboot: r.reboot_devices.len(),
                 };
-                summary_line(tab, &c, &r.generated_at)
+                summary_line(tab, &c)
             })
         })
     };
 
     view! {
         <section class="panel results">
+            <OnboardingCard/>
             <div class="tabs">
                 // Only tabs are owned by the tablist: the group captions are visual
                 // grouping (hidden from the accessibility tree, the tabs carry their

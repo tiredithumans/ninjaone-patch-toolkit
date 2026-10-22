@@ -11,6 +11,19 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The results fill the window.** Run query, the data's age, Refresh and auto-refresh moved into
+  one top bar with the app's name, and the results panel takes the rest of the window: its table
+  scrolls inside it under a sticky header instead of pushing the page down. Exports are in an
+  **Export** menu; the theme, keyboard shortcuts and view links in a **⋯** menu; Sign out in the
+  account menu. The summary beside the tabs now gives counts only — the data's age is in the top
+  bar, with the result's generation time on Refresh's tooltip.
+- **Settings opens as a dialog** with Close and Escape, instead of a panel pushing the page down.
+  "Settings → Patch actions" notes and the "Patch actions are disabled" note link straight to it.
+- **First launch says what to do:** connect in Settings, then sign in.
+- Organization, location and role pickers close on a click outside them or on Escape.
+
 ### Fixed
 
 - **The device details dialog is wide again.** A missing brace in the stylesheet swallowed its

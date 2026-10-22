@@ -1,8 +1,27 @@
 use super::*;
 
+/// Settings, as a dialog over the app. It used to be an inline panel above the
+/// filters with no way to close it but the header button that opened it, pushing
+/// the whole page down while it was open.
+///
+/// Close keeps what was typed — as hiding the panel always did — and only Save
+/// writes it. Rendered at the App level beside the other dialogs, so it stacks
+/// under the update splash that "Check for updates" can open over it.
 #[component]
-pub(crate) fn SettingsPanel() -> impl IntoView {
+pub(crate) fn SettingsDialog() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // Created per opening (this component mounts inside a `Show`), so focus goes
+    // back to the Settings button on close.
+    let (dialog, on_tab) = modal::focus_trap();
+    let close = move || state.ui.show_settings.set(false);
+    // Escape closes it — unless the update splash is open over it, which handles
+    // its own Escape; both listeners see the same key press.
+    let esc = window_event_listener(leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" && state.updates.update.get_untracked().is_none() {
+            close();
+        }
+    });
+    on_cleanup(move || esc.remove());
     // Two-click confirm for "Clear stored secret": the first click arms the
     // button, the second fires; leaving or blurring it disarms.
     let clear_armed = RwSignal::new(false);
@@ -64,8 +83,23 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
     };
 
     view! {
-        <section class="panel settings">
-            <h2>"Connection"</h2>
+        <div class="modal-overlay">
+        <div
+            class="modal modal-wide settings"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-title"
+            tabindex="-1"
+            node_ref=dialog
+            on:keydown=move |ev| on_tab(&ev)
+        >
+            <div class="modal-head">
+                <h2 id="settings-title">"Settings"</h2>
+                <button class="x" aria-label="Close settings" on:click=move |_| close()>
+                    "×"
+                </button>
+            </div>
+            <h3 class="settings-section">"Connection"</h3>
             <div class="grid">
                 <label>
                     "Region / Instance"
@@ -183,7 +217,7 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
             </div>
             <SlaSettingsFields/>
             <ActionSettingsFields/>
-            <div class="row">
+            <div class="settings-footer">
                 <button class="btn btn-primary" prop:disabled=move || saving.get() on:click=save>
                     {move || if saving.get() { "Saving…" } else { "Save settings" }}
                 </button>
@@ -239,11 +273,49 @@ pub(crate) fn SettingsPanel() -> impl IntoView {
                 >
                     "Open diagnostics folder"
                 </button>
+                <span class="app-version">
+                    {concat!("NinjaOne Patch Toolkit v", env!("CARGO_PKG_VERSION"))}
+                </span>
+                <button class="btn" on:click=move |_| close()>
+                    "Close"
+                </button>
             </div>
-            <p class="app-version">
-                {concat!("NinjaOne Patch Toolkit v", env!("CARGO_PKG_VERSION"))}
-            </p>
-        </section>
+        </div>
+        </div>
+    }
+}
+
+/// A link that opens Settings, for a sentence that sends the operator there.
+#[component]
+pub(crate) fn SettingsLink(label: &'static str) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    view! {
+        <button
+            type="button"
+            class="link-btn"
+            on:click=move |_| state.ui.show_settings.set(true)
+        >
+            {label}
+        </button>
+    }
+}
+
+/// "Open Settings" beside the "Patch actions are disabled" note — the one blocked
+/// reason whose fix is a Settings switch. Renders nothing otherwise.
+#[component]
+pub(crate) fn EnableActionsLink() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let actions_off = move || {
+        !state.session.web_mode.get()
+            && state.session.auth.with(|a| {
+                a.as_ref()
+                    .is_some_and(|a| a.authenticated && !a.actions_enabled)
+            })
+    };
+    view! {
+        <Show when=actions_off>
+            <SettingsLink label="Open Settings"/>
+        </Show>
     }
 }
 

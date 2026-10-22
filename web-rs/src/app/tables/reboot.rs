@@ -57,7 +57,7 @@ pub(super) fn RebootTable() -> impl IntoView {
             <Show when=move || state.action_surface_visible()>
                 <ActionBar source=SelectionSource::Devices/>
             </Show>
-            <div class="table-wrap">
+            <div class="table-wrap table-wrap--fill">
                 <table>
                     <thead>
                         <tr>

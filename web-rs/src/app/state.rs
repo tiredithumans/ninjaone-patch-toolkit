@@ -476,6 +476,12 @@ pub(crate) struct SettingsState {
     pub(super) f_actions: RwSignal<ActionSettings>,
     pub(super) presets: RwSignal<Vec<Preset>>,
     pub(super) preset_name: RwSignal<String>,
+    /// The saved settings have arrived from the backend. Until then the form holds
+    /// defaults, so nothing may be concluded from it (see `util::onboarding`).
+    pub(super) loaded: RwSignal<bool>,
+    /// Whether the *saved* settings carry a client id — not the form field, which
+    /// moves as the operator types.
+    pub(super) has_client_id: RwSignal<bool>,
 }
 
 impl SettingsState {
@@ -494,6 +500,8 @@ impl SettingsState {
             f_actions: RwSignal::new(ActionSettings::default()),
             presets: RwSignal::new(Vec::new()),
             preset_name: RwSignal::new(String::new()),
+            loaded: RwSignal::new(false),
+            has_client_id: RwSignal::new(false),
         }
     }
 }
@@ -535,6 +543,8 @@ pub(crate) struct UiState {
     /// The last view code the operator copied, kept on screen in a read-only field
     /// so it can be selected by hand when the clipboard refuses.
     pub(super) view_code: RwSignal<Option<String>>,
+    /// The "Open view…" paste field is showing.
+    pub(super) opening_view: RwSignal<bool>,
     /// A view link held back because it was shared from another instance.
     pub(super) pending_view: RwSignal<Option<PendingView>>,
 }
@@ -569,6 +579,7 @@ impl UiState {
                 api::ui_pref_str(api::PREF_PATCH_COLUMNS).as_deref(),
             )),
             view_code: RwSignal::new(None),
+            opening_view: RwSignal::new(false),
             pending_view: RwSignal::new(None),
         }
     }

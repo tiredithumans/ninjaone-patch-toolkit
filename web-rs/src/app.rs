@@ -10,6 +10,7 @@ mod charts;
 mod controls;
 mod filters;
 mod header;
+mod menu;
 mod modal;
 mod settings;
 mod shortcuts;
@@ -23,10 +24,10 @@ pub(crate) mod util;
 
 use actions::{ActionBar, ConfirmActionModal, JobsTable, ReauthorizeLink};
 use charts::{ComplianceByOsBars, ComplianceCharts, TrendLine};
-use controls::RunControls;
+use controls::ViewNotices;
 use filters::Filters;
-use header::Header;
-use settings::SettingsPanel;
+use header::{Header, SignInButton};
+use settings::{EnableActionsLink, SettingsDialog, SettingsLink};
 use shortcuts::KeyboardShortcuts;
 use state::*;
 use tables::{DeviceDetailModal, Results};
@@ -231,20 +232,21 @@ pub fn App() -> impl IntoView {
             </main>
         </Show>
         <Show when=move || !state.session.backend_missing.get()>
-        <main>
+        <main class="shell">
             <Header/>
             <Show when=move || state.session.demo.get()>
                 <p class="demo-banner" role="note">
                     "Demo mode — press Run query to list sample patches (not a live fleet)."
                 </p>
             </Show>
-            <Show when=move || state.ui.show_settings.get()>
-                <SettingsPanel/>
-            </Show>
+            <ViewNotices/>
             <Filters/>
-            <RunControls/>
             <Results/>
             <Toaster/>
+            // Before the update splash, which "Check for updates" opens over it.
+            <Show when=move || state.ui.show_settings.get()>
+                <SettingsDialog/>
+            </Show>
             <UpdateSplash/>
             <ConfirmActionModal/>
             <KeyboardShortcuts/>
