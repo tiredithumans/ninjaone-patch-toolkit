@@ -166,8 +166,8 @@ body {
 main {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px;
+  gap: 10px;
+  padding: 12px 14px;
   min-height: 100vh;
 }
 
@@ -534,15 +534,15 @@ select:disabled {
   align-items: center;
   gap: 6px;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 12px;
-  padding-bottom: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
 }
 
 .tab {
   background: none;
   border: none;
   color: var(--muted);
-  padding: 6px 12px;
+  padding: 5px 10px;
   cursor: pointer;
   border-radius: 8px;
 }
@@ -556,6 +556,12 @@ select:disabled {
   margin-left: auto;
   color: var(--muted);
   font-size: 12px;
+  cursor: help;
+}
+
+/* The results panel's own padding, tighter than a settings-style panel's. */
+.panel.results {
+  padding: 10px 14px;
 }
 
 /* Tab bar grouped by scope tier (Filtered results | Fleet health). */
@@ -1395,29 +1401,6 @@ tbody tr:hover {
 .preset-name {
   flex: 1;
   min-width: 0;
-}
-
-/* --- Scope caption: which tier a tab is and what it reflects ---------------- */
-
-.scope-caption {
-  margin: 0 0 8px;
-  font-size: 12px;
-  color: var(--muted);
-  cursor: help;
-}
-
-.scope-caption__tier {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.scope-caption-filtered .scope-caption__tier {
-  color: var(--accent-2);
-}
-
-.scope-caption-fleet .scope-caption__tier {
-  color: var(--warn);
 }
 
 /* Read by assistive tech, not drawn. */

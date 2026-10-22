@@ -49,12 +49,6 @@ pub(super) fn FailuresTable() -> impl IntoView {
                 }
             }
         >
-            <ScopeBanner
-                kind="filtered"
-                tier="Filtered results"
-                reflects="failed installs matching your device scope and all patch filters."
-                filters="Restricted to the Failed status — tick Failed under Status and run the query to populate this tab."
-            />
             <div class="table-wrap table-wrap--fill">
                 <table>
                     <thead>

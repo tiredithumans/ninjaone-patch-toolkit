@@ -4189,3 +4189,22 @@ fn the_apply_selected_count_names_distinct_patches_per_family() {
     );
     assert_eq!(remediation_short(&BTreeMap::new(), &BTreeMap::new()), None);
 }
+
+/// Every tab that shows the query's output says which filters reach it; the fleet
+/// tabs name the patch filters they ignore, and Compliance its one exception.
+#[test]
+fn each_query_tab_states_its_scope() {
+    for tab in [Tab::Patches, Tab::Failures, Tab::Compliance, Tab::Reboot] {
+        assert!(tab_scope(tab).is_some(), "{tab:?}");
+    }
+    assert_eq!(tab_scope(Tab::Jobs), None);
+    assert_eq!(tab_scope(Tab::Trend), None);
+    for tab in [Tab::Compliance, Tab::Reboot] {
+        assert!(tab_scope(tab).unwrap().contains("ignored here"), "{tab:?}");
+    }
+    assert!(
+        tab_scope(Tab::Compliance)
+            .unwrap()
+            .contains("First seen → installed")
+    );
+}

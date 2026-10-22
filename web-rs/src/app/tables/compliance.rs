@@ -155,18 +155,6 @@ pub(super) fn ComplianceTab() -> impl IntoView {
             when=has_result
             fallback=|| view! { <p class="empty">"Run a query to see compliance."</p> }
         >
-            <ScopeBanner
-                kind="fleet"
-                tier="Fleet health"
-                reflects="the pending backlog for the selected device scope."
-                // `Type` is listed because it genuinely narrows these numbers: only
-                // the patch families the query fetched are in the rollups, and an
-                // OS-only query cannot see a third-party backlog. Claiming it was
-                // ignored here let "100% compliant" mean "no pending OS patches"
-                // with nothing on screen saying so. The chip row agrees: `Type` is a
-                // device-tier chip (`filter_chips`), so it is never struck through.
-                filters="Device scope (Org / Location / Role / OS Type / OS name) and patch Type. Status, Severity, Search, First-seen and Installed-within are ignored here."
-            />
             <ComplianceKpis/>
             <ComplianceScopeNote/>
             <SlaPolicyNote/>

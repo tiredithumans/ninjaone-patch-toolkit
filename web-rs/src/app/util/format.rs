@@ -261,6 +261,38 @@ pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts) -> String {
     }
 }
 
+/// What a results tab shows and which filters reach it: the tab summary's tooltip.
+/// It used to be a banner at the top of each tab, then a caption line; the tab
+/// groups ("Filtered results", "Fleet health") and the patch filter bar — present
+/// only where its filters act — now say most of it, and this says the rest.
+///
+/// `Type` is listed for the fleet tabs because it genuinely narrows them: only the
+/// patch families the query fetched are in the rollups, so an OS-only query cannot
+/// see a third-party backlog.
+pub(crate) fn tab_scope(tab: Tab) -> Option<&'static str> {
+    match tab {
+        Tab::Patches => Some(
+            "Every patch matching your device scope and all patch filters: device scope + Type, \
+             Status, Severity, Search, First-seen and Installed-within are all applied.",
+        ),
+        Tab::Failures => Some(
+            "Failed installs matching your device scope and all patch filters. Restricted to the \
+             Failed status — tick Failed under Status and run the query to populate this tab.",
+        ),
+        Tab::Compliance => Some(
+            "The pending backlog for the selected device scope: device scope (Org / Location / \
+             Role / OS Type / OS name) and patch Type. Status, Severity, Search, First-seen and \
+             Installed-within are ignored here, except in First seen → installed.",
+        ),
+        Tab::Reboot => Some(
+            "Devices in the selected device scope flagged for reboot: device scope and patch Type \
+             (the pending count covers only the patch families this query fetched). Status, \
+             Severity, Search, First-seen and Installed-within are ignored here.",
+        ),
+        Tab::Jobs | Tab::Trend => None,
+    }
+}
+
 /// Short mode label for a dispatched job. A dry run applies — and reboots —
 /// nothing, so it wins over the reboot indication.
 ///

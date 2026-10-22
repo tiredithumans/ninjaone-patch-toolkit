@@ -31,7 +31,8 @@ version and start a fresh `[Unreleased]`.
   click. Auto-refresh now re-runs the query on screen rather than picking up an edit you haven't
   applied yet. The row of applied-filter chips is gone; the indicator's tooltip names the filters
   behind the results.
-- Each tab's three-line scope banner is now a one-line caption (details on hover).
+- Each tab's three-line scope banner is gone: what the tab shows and which filters reach it is on
+  the ⓘ beside the tab summary, and the app's spacing is tighter.
 - **More rows fit on screen.** Long patch names wrap to two lines at most (full name on hover),
   Location and Role start hidden (bring them back from **Columns**; your choice is remembered),
   the pager shares the view row, and "Changes since …" is one line whose counts open their lists.
