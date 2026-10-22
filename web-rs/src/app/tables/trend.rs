@@ -77,6 +77,7 @@ pub(super) fn TrendTab() -> impl IntoView {
                     {older}
                     // Every run here shares the newest one's method, so a method-1
                     // figure is present on each; `filter_map` only drops an empty scope.
+                    <div class="trend-grid">
                     <TrendLine
                         title="Within SLA"
                         percent=true
@@ -107,6 +108,7 @@ pub(super) fn TrendTab() -> impl IntoView {
                         higher_is_better=false
                         values={runs.iter().map(|r| r.needs_reboot as f64).collect::<Vec<_>>()}
                     />
+                    </div>
                     <OrgDeltaTable newest=newest previous=previous/>
                 }
                     .into_any()

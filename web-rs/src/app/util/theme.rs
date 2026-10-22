@@ -112,6 +112,34 @@ mod tests {
         assert!(!before[media..].contains('}'), "block escaped its @media");
     }
 
+    /// An unclosed rule swallows every rule after it: browsers read the rest as
+    /// nested selectors under it, which match nothing. A missing `}` after `kbd`
+    /// once left the device drill-down at the narrow dialog width this way.
+    #[test]
+    fn styles_css_braces_balance() {
+        let mut depth = 0usize;
+        let mut rest = CSS;
+        while let Some(i) = rest.find(['{', '}', '/']) {
+            let (c, tail) = (rest.as_bytes()[i], &rest[i + 1..]);
+            rest = match c {
+                b'/' if tail.starts_with('*') => {
+                    let end = tail.find("*/").expect("unterminated comment");
+                    &tail[end + 2..]
+                }
+                b'{' => {
+                    depth += 1;
+                    tail
+                }
+                b'}' => {
+                    depth = depth.checked_sub(1).expect("a `}` closes nothing");
+                    tail
+                }
+                _ => tail,
+            };
+        }
+        assert_eq!(depth, 0, "{depth} rule(s) left open");
+    }
+
     #[test]
     fn reduced_motion_is_honoured() {
         assert!(CSS.contains("@media (prefers-reduced-motion: reduce)"));

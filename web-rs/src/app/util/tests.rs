@@ -3244,6 +3244,37 @@ fn only_a_definite_failure_with_a_recorded_request_is_retryable() {
     );
 }
 
+/// A settled job without a Retry says why in the cell; one still in flight, one
+/// that completed and one that can be retried say nothing there.
+#[test]
+fn the_retry_cell_explains_only_a_settled_job_it_will_not_retry() {
+    let with = |state: JobState| JobReport {
+        state,
+        ..failed_job(1, 1, 7, &["KB1"])
+    };
+    assert_eq!(retry_cell_note(&failed_job(1, 1, 7, &["KB1"])), None);
+    for state in [JobState::Queued, JobState::Running, JobState::Completed] {
+        assert_eq!(retry_cell_note(&with(state.clone())), None, "{state:?}");
+    }
+    let (short, full) = retry_cell_note(&with(JobState::TimedOut)).unwrap();
+    assert_eq!(short, "Not retried");
+    assert!(full.contains("never replayed"));
+    let (short, _) = retry_cell_note(&with(JobState::Unknown("502".into()))).unwrap();
+    assert_eq!(short, "Not retried");
+    let (short, _) = retry_cell_note(&with(JobState::Skipped("offline".into()))).unwrap();
+    assert_eq!(short, "Not sent");
+    let unrecorded = JobReport {
+        request: None,
+        ..failed_job(1, 1, 7, &["KB1"])
+    };
+    assert!(
+        retry_cell_note(&unrecorded)
+            .unwrap()
+            .1
+            .contains("did not record")
+    );
+}
+
 /// A retry is the original dispatch, rebuilt for the failed devices: each gets back
 /// only its own targets, the recorded run-as / reboot / offline / dry-run choices,
 /// no confirm token (so it must be planned and confirmed afresh) and never the

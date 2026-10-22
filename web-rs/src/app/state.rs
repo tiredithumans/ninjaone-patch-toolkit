@@ -677,6 +677,10 @@ pub(crate) struct ActionState {
 pub(crate) struct PendingAction {
     pub request: ActionRequest,
     pub plan: ActionPlan,
+    /// Whether the bar this was planned from shows the Dry run checkbox (the patch
+    /// rows' bar does; Needs Reboot's and a Jobs retry do not), so the dialog only
+    /// answers a tick the operator could actually see.
+    pub dry_run_shown: bool,
 }
 
 impl ActionState {

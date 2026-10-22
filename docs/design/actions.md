@@ -58,7 +58,9 @@ eligible device's targets as titles or KBs (`util::target_lines`, read from the 
 `device_targets` the backend composes from). It also states first whether the dispatch is a dry
 run or live (`util::confirm_mode_line`) — the heading reads the same either way, and Dry run,
 on by default, reaches only the script-driven kinds, so a native apply or reboot planned with it
-ticked says it runs for real.
+ticked says it runs for real. That line answers a tick the operator could see: a plan from the
+Needs Reboot bar or a Jobs retry, neither of which shows the checkbox, skips it
+(`PendingAction::dry_run_shown`).
 
 ### The parameter encoding is chosen by kind
 
