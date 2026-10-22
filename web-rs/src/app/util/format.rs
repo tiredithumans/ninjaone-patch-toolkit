@@ -228,30 +228,31 @@ pub(crate) struct SummaryCounts {
 pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts) -> String {
     match tab {
         Tab::Patches => format!(
-            "{} patch rows across {} devices",
-            group_thousands(c.rows_total),
-            group_thousands(c.devices_total),
+            "{} across {}",
+            count_of(c.rows_total, "patch row", "patch rows"),
+            count_of(c.devices_total, "device", "devices"),
         ),
         // Against the devices that actually failed, not the fleet. "12 failing
         // patches across 4,000 devices" put the fleet size where the reader expects
         // the blast radius, making a contained problem look fleet-wide.
         Tab::Failures => format!(
-            "{} failing patches on {} devices",
-            group_thousands(c.failures),
-            group_thousands(c.failing_devices),
+            "{} on {}",
+            count_of(c.failures, "failing patch", "failing patches"),
+            count_of(c.failing_devices, "device", "devices"),
         ),
         // Counted against in scope, so the line reconciles with the table under it
         // rather than putting a second, larger device count beside it.
         Tab::Compliance => format!(
-            "{} organizations \u{00b7} {} of {} devices counted",
-            group_thousands(c.orgs),
+            "{} \u{00b7} {} of {} counted",
+            count_of(c.orgs, "organization", "organizations"),
             group_thousands(c.devices_counted),
-            group_thousands(c.devices_total),
+            count_of(c.devices_total, "device", "devices"),
         ),
         Tab::Reboot => format!(
-            "{} of {} devices need reboot",
+            "{} of {} {} reboot",
             group_thousands(c.reboot),
-            group_thousands(c.devices_total),
+            count_of(c.devices_total, "device", "devices"),
+            if c.reboot == 1 { "needs" } else { "need" },
         ),
         // Jobs describes dispatched actions, not the query result, so the query's
         // counts would be actively misleading here. Trend is the same: it reads the
