@@ -37,12 +37,6 @@ pub(super) fn RebootTable() -> impl IntoView {
             when=has_devices
             fallback=|| view! { <p class="empty">"No devices flagged for reboot."</p> }
         >
-            <ScopeBanner
-                kind="fleet"
-                tier="Fleet health"
-                reflects="devices in the selected device scope flagged for reboot."
-                filters="Device scope and patch Type (the pending count covers only the patch families this query fetched). Status, Severity, Search, First-seen and Installed-within are ignored here."
-            />
             <Pager
                 page=Signal::derive(current)
                 page_count=Signal::derive(page_count)

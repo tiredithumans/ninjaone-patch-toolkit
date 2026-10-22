@@ -278,7 +278,9 @@ over `util::Named`, so the id-keyed lookups and the value/label choices share on
 **patch filter bar** (`PatchFilterBar`: Status, Severity, Search, First seen, Install history)
 renders only at the top of the Patches and Failures tabs, outside their result guards so it works
 before the first run and after an empty one. It used to be one panel above every tab whose lower
-half vanished on Compliance and Needs Reboot. The last status cannot be unticked, so "Select at
+half vanished on Compliance and Needs Reboot. What each tab reflects and which filters reach it is
+the tab summary's tooltip (`util::tab_scope`, also read to screen readers); it was a three-line
+banner at the top of every tab. The last status cannot be unticked, so "Select at
 least one status" is never raised from a tab that does not show the control; Compliance's First
 seen → installed section, the one fleet-tab figure the patch filters reach, names the ones it was
 measured under. Nothing applies a filter edit until a run, and **"● Filters changed"** says so:

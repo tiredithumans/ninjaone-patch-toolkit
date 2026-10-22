@@ -22,7 +22,7 @@ mod update;
 // its own copy — the browser demo does its own date-window filtering.
 pub(crate) mod util;
 
-use actions::{ActionBar, ConfirmActionModal, JobsTable, ReauthorizeLink};
+use actions::{ActionBar, ConfirmActionModal, JobsTable, ReauthorizeLink, ScriptDialog};
 use charts::{ComplianceByOsBars, ComplianceCharts, TrendLine};
 use controls::ViewNotices;
 use filters::{PatchFilterBar, ScopeBar};
@@ -152,6 +152,7 @@ pub fn App() -> impl IntoView {
             .actions
             .jobs
             .update(|jobs| util::merge_jobs(jobs, ev.jobs));
+        state.announce_settled_batches();
     });
 
     // Load what a session needs whenever the auth status *becomes* the state that
@@ -258,6 +259,8 @@ pub fn App() -> impl IntoView {
                 <SettingsDialog/>
             </Show>
             <UpdateSplash/>
+            // Before the confirm dialog, which its "Run script…" opens over it.
+            <ScriptDialog/>
             <ConfirmActionModal/>
             <KeyboardShortcuts/>
             <DeviceDetailModal/>

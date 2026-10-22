@@ -1122,18 +1122,18 @@ fn the_selection_summary_counts_and_mentions_offline_only_when_present() {
     assert_eq!(selection_summary(0, 0, 0), None);
     assert_eq!(
         selection_summary(2, 5, 0).as_deref(),
-        Some("2 device(s) selected · 5 patch row(s)"),
+        Some("2 devices selected · 5 patch rows"),
         "a zero offline count must not clutter every selection"
     );
     assert_eq!(
         selection_summary(2, 5, 1).as_deref(),
-        Some("2 device(s) selected · 5 patch row(s) · 1 offline")
+        Some("2 devices selected · 5 patch rows · 1 offline")
     );
     // An action against an offline device is queued rather than run, so the
     // counts stay legible at fleet scale.
     assert_eq!(
         selection_summary(1200, 34500, 7).as_deref(),
-        Some("1,200 device(s) selected · 34,500 patch row(s) · 7 offline")
+        Some("1,200 devices selected · 34,500 patch rows · 7 offline")
     );
 }
 
@@ -2010,7 +2010,7 @@ fn remediation_summary_counts_distinct_patches_not_dispatches() {
     ]);
     assert_eq!(
         remediation_summary(ActionKind::OsPatchRemediate, &targets).as_deref(),
-        Some("OS: 2 patch(es) on 3 device(s)")
+        Some("OS: 2 patches on 3 devices")
     );
     assert_eq!(
         remediation_summary(ActionKind::SoftwarePatchRemediate, &BTreeMap::new()),
@@ -2034,7 +2034,7 @@ fn ticked_os_rows_without_a_kb_are_called_out() {
     ]);
     let note = untargetable_os_note(&selected).expect("two rows lack a KB");
     assert!(
-        note.starts_with("2 ticked OS row(s) have no KB number"),
+        note.starts_with("2 ticked OS rows have no KB number"),
         "{note}"
     );
 
@@ -2112,14 +2112,14 @@ fn the_confirm_dialog_says_whether_it_is_a_dry_run() {
 
 #[test]
 fn the_dispatch_toast_says_where_a_dry_runs_report_is() {
-    assert_eq!(dispatch_toast(3, 0, false), "Dispatched to 3 device(s)");
+    assert_eq!(dispatch_toast(3, 0, false), "Dispatched to 3 devices");
     assert_eq!(
         dispatch_toast(3, 1, false),
-        "Dispatched to 3 device(s); 1 skipped"
+        "Dispatched to 3 devices; 1 skipped"
     );
     let dry = dispatch_toast(2, 1, true);
     assert!(
-        dry.starts_with("Dry run sent to 2 device(s); 1 skipped"),
+        dry.starts_with("Dry run sent to 2 devices; 1 skipped"),
         "{dry}"
     );
     assert!(dry.contains("NinjaOne activity"), "{dry}");
@@ -2133,7 +2133,7 @@ fn kb_targeting_summary_says_per_device() {
     ]);
     let s = kb_targeting_summary(&targets);
     assert!(s.contains("only its own KBs"), "{s}");
-    assert!(s.contains("2 distinct KB(s) across 2 device(s)"), "{s}");
+    assert!(s.contains("2 distinct KBs across 2 devices"), "{s}");
 
     assert!(kb_targeting_summary(&BTreeMap::new()).contains("empty allow list"));
 }
@@ -2599,7 +2599,7 @@ fn prune_keeps_only_ticked_rows_the_fresh_result_still_lists() {
 fn group_selection_note_says_how_many_and_whether_capped() {
     assert_eq!(
         group_selection_note("KB1", 3, false),
-        "Selected 3 patch row(s) in KB1."
+        "Selected 3 patch rows in KB1."
     );
     let capped = group_selection_note("Chrome", 500, true);
     assert!(
@@ -2952,7 +2952,7 @@ fn the_apply_preview_states_what_will_and_will_not_install() {
     };
     let summary = apply_preview_summary(&p);
     assert!(
-        summary.contains("install 3 approved OS patch(es) across 2 device(s)"),
+        summary.contains("install 3 approved OS patches across 2 devices"),
         "{summary}"
     );
     assert!(
@@ -3148,11 +3148,11 @@ fn the_device_selection_summary_counts_devices_and_offline_only() {
     assert_eq!(device_selection_summary(0, 0), None);
     assert_eq!(
         device_selection_summary(1_200, 0).as_deref(),
-        Some("1,200 device(s) selected")
+        Some("1,200 devices selected")
     );
     assert_eq!(
         device_selection_summary(3, 1).as_deref(),
-        Some("3 device(s) selected · 1 offline")
+        Some("3 devices selected · 1 offline")
     );
 }
 
@@ -4082,4 +4082,129 @@ fn the_tab_and_view_mode_are_remembered_and_read_back() {
     }
     assert_eq!(group_by_from_pref(None), None);
     assert_eq!(group_by_from_pref(Some("nonsense")), None);
+}
+
+fn job_in(id: u64, state: JobState) -> JobReport {
+    JobReport {
+        id,
+        state,
+        ..failed_job(1, 1, 7, &["KB1"])
+    }
+}
+
+/// A batch is announced once every job has settled — never while one is still
+/// polled as Unknown — with a tally of how they ended, and only once.
+#[test]
+fn a_watched_batch_is_announced_once_all_its_jobs_settle() {
+    let batch = WatchedBatch {
+        job_ids: vec![1, 2, 3],
+        label: "Apply selected OS patches".into(),
+        dry_run: false,
+    };
+    let mut watched = vec![batch.clone()];
+    let mut jobs = vec![
+        job_in(1, JobState::Completed),
+        job_in(2, JobState::Running),
+        job_in(3, JobState::Unknown("502".into())),
+    ];
+    assert!(take_finished_batches(&mut watched, &jobs).is_empty());
+    assert_eq!(watched.len(), 1);
+
+    jobs[1].state = JobState::Failed("exit 1".into());
+    assert!(
+        take_finished_batches(&mut watched, &jobs).is_empty(),
+        "Unknown is still being polled"
+    );
+    jobs[2].state = JobState::Completed;
+    assert_eq!(
+        take_finished_batches(&mut watched, &jobs),
+        vec!["Apply selected OS patches finished: 2 completed, 1 failed.".to_string()]
+    );
+    assert!(watched.is_empty());
+    assert!(
+        take_finished_batches(&mut watched, &jobs).is_empty(),
+        "only once"
+    );
+
+    let mut dry = vec![WatchedBatch {
+        dry_run: true,
+        ..batch.clone()
+    }];
+    let done = take_finished_batches(&mut dry, &jobs);
+    assert!(done[0].starts_with("Dry run of Apply selected OS patches finished"));
+
+    // Every job cleared from the list: dropped without a word.
+    let mut gone = vec![batch];
+    assert!(take_finished_batches(&mut gone, &[]).is_empty());
+    assert!(gone.is_empty());
+}
+
+#[test]
+fn a_reboot_reason_of_only_whitespace_is_missing() {
+    assert!(reboot_reason_missing(""));
+    assert!(reboot_reason_missing("  \t"));
+    assert!(!reboot_reason_missing("July patch cycle"));
+}
+
+/// The Options button names the choice that decides whether a script runs for
+/// real, and warns while it would.
+#[test]
+fn the_options_label_names_what_the_next_dispatch_will_do() {
+    assert_eq!(
+        options_label(true, true, false, false),
+        ("Options: Dry run ▾".to_string(), false)
+    );
+    assert_eq!(
+        options_label(true, false, false, false),
+        ("Options: Live ▾".to_string(), true)
+    );
+    assert_eq!(
+        options_label(true, true, true, true).0,
+        "Options: Dry run · window override · offline included ▾"
+    );
+    assert_eq!(
+        options_label(false, true, false, false),
+        ("Options ▾".to_string(), false)
+    );
+    assert_eq!(
+        options_label(false, false, true, false).0,
+        "Options: window override ▾"
+    );
+}
+
+#[test]
+fn the_apply_selected_count_names_distinct_patches_per_family() {
+    let os = BTreeMap::from([
+        (1, vec!["KB1".to_string(), "KB2".to_string()]),
+        (2, vec!["KB1".to_string()]),
+    ]);
+    let sw = BTreeMap::from([(2, vec!["7-Zip".to_string()])]);
+    assert_eq!(
+        remediation_short(&os, &sw).as_deref(),
+        Some("OS 2 · Software 1")
+    );
+    assert_eq!(
+        remediation_short(&os, &BTreeMap::new()).as_deref(),
+        Some("OS 2")
+    );
+    assert_eq!(remediation_short(&BTreeMap::new(), &BTreeMap::new()), None);
+}
+
+/// Every tab that shows the query's output says which filters reach it; the fleet
+/// tabs name the patch filters they ignore, and Compliance its one exception.
+#[test]
+fn each_query_tab_states_its_scope() {
+    for tab in [Tab::Patches, Tab::Failures, Tab::Compliance, Tab::Reboot] {
+        assert!(tab_scope(tab).is_some(), "{tab:?}");
+    }
+    assert_eq!(tab_scope(Tab::Jobs), None);
+    assert_eq!(tab_scope(Tab::Trend), None);
+    for tab in [Tab::Compliance, Tab::Reboot] {
+        assert!(tab_scope(tab).unwrap().contains("ignored here"), "{tab:?}");
+    }
+    assert!(
+        tab_scope(Tab::Compliance)
+            .unwrap()
+            .contains("First seen → installed")
+    );
 }

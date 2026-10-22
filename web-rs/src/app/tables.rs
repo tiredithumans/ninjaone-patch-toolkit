@@ -121,7 +121,20 @@ pub(crate) fn Results() -> impl IntoView {
                         <TabButton this=Tab::Jobs label="Jobs"/>
                     </div>
                 </div>
-                <span class="result-summary">{summary}</span>
+                // What the tab reflects and which filters reach it, on hover and
+                // to a screen reader (`util::tab_scope`).
+                <span class="result-summary" title=move || util::tab_scope(tab.get()).unwrap_or_default()>
+                    {summary}
+                    {move || {
+                        util::tab_scope(tab.get())
+                            .map(|scope| {
+                                view! {
+                                    <span class="result-summary__info" aria-hidden="true">" ⓘ"</span>
+                                    <span class="sr-only">{format!(" {scope}")}</span>
+                                }
+                            })
+                    }}
+                </span>
             </div>
             // A dispatched action changed the fleet after these results were
             // computed, so the backlog on screen is already out of date.
@@ -279,32 +292,6 @@ fn Pager(
                 </button>
             </div>
         </Show>
-    }
-}
-
-/// The contract line at the top of a results tab: which tier it belongs to, what it
-/// reflects, and — on hover, and to a screen reader — exactly which filters apply
-/// or are ignored. `kind` picks the accent ("filtered" = patch-filtered tier,
-/// "fleet" = device-scope-only tier).
-///
-/// One muted line: it used to be a three-line boxed banner on every tab, above the
-/// rows it described. Where the patch filters apply is now also what the layout
-/// says — their bar renders only on the tabs they reach.
-#[component]
-fn ScopeBanner(
-    kind: &'static str,
-    tier: &'static str,
-    reflects: &'static str,
-    filters: &'static str,
-) -> impl IntoView {
-    view! {
-        <p class=format!("scope-caption scope-caption-{kind}") title=filters>
-            <span class="scope-caption__tier">{tier}</span>
-            " · Showing "
-            {reflects}
-            <span class="scope-caption__info" aria-hidden="true">" ⓘ"</span>
-            <span class="sr-only">{format!(" {filters}")}</span>
-        </p>
     }
 }
 

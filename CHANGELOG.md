@@ -31,7 +31,8 @@ version and start a fresh `[Unreleased]`.
   click. Auto-refresh now re-runs the query on screen rather than picking up an edit you haven't
   applied yet. The row of applied-filter chips is gone; the indicator's tooltip names the filters
   behind the results.
-- Each tab's three-line scope banner is now a one-line caption (details on hover).
+- Each tab's three-line scope banner is gone: what the tab shows and which filters reach it is on
+  the ⓘ beside the tab summary, and the app's spacing is tighter.
 - **More rows fit on screen.** Long patch names wrap to two lines at most (full name on hover),
   Location and Role start hidden (bring them back from **Columns**; your choice is remembered),
   the pager shares the view row, and "Changes since …" is one line whose counts open their lists.
@@ -41,6 +42,17 @@ version and start a fresh `[Unreleased]`.
   for them. Group headers say "1 patch" and "1 device".
 - <kbd>/</kbd> switches to the Patches tab when needed and focuses Search.
 - Pickers and menus close on a click outside them or on Escape.
+- **The action bar stays one row when you tick rows.** Run as, restart, Dry run, offline targets
+  and the window override moved behind an **Options** button whose label says what the next
+  dispatch will do (*Dry run*, or *Live* in amber). Reboot asks for its mode and reason in its own
+  pop-up, and won't open the confirmation until a reason is given. The script picker opens from
+  **Run a script…**. "Apply selected" shows how many patches it would send. The groups are now
+  called *Apply all approved* and *Apply selected*, matching the confirmation dialog and the audit
+  trail.
+- **Sending an action no longer jumps to the Jobs tab.** The toast offers **View jobs**, the Jobs
+  tab counts what is still running, and a second toast says when the batch has finished.
+- Running a query or drilling down says so when it clears your selection. Counts read "1 device",
+  "2 patch rows" instead of "device(s)".
 
 ### Fixed
 

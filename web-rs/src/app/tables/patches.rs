@@ -82,12 +82,6 @@ pub(super) fn PatchesTable() -> impl IntoView {
             when=move || state.query.result.with(|r| r.is_some())
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
-            <ScopeBanner
-                kind="filtered"
-                tier="Filtered results"
-                reflects="every patch matching your device scope and all patch filters."
-                filters="Device scope + Type, Status, Severity, Search, First-seen and Installed-within are all applied."
-            />
             <ChangesPanel/>
             <Show
                 when=move || { rows_total() > 0 }

@@ -60,6 +60,15 @@ pub(crate) struct AppliedFilters {
 pub struct Toast {
     pub msg: String,
     pub error: bool,
+    /// A button beside the message.
+    pub action: Option<ToastAction>,
+}
+
+/// What a toast's button does. An enum, not a callback: a toast is raised from
+/// async tasks, where a callback created on the spot would have no reactive owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToastAction {
+    ViewJobs,
 }
 
 impl Toast {
@@ -67,12 +76,20 @@ impl Toast {
         Self {
             msg: m.into(),
             error: false,
+            action: None,
         }
     }
     pub(super) fn err(m: impl Into<String>) -> Self {
         Self {
             msg: m.into(),
             error: true,
+            action: None,
+        }
+    }
+    pub(super) fn with_action(self, action: ToastAction) -> Self {
+        Self {
+            action: Some(action),
+            ..self
         }
     }
 }
@@ -709,6 +726,11 @@ pub(crate) struct ActionState {
     /// movement instead of a frozen "Dispatching…".
     pub(super) dispatch_progress: RwSignal<Option<(usize, usize)>>,
     pub(super) jobs: RwSignal<Vec<JobReport>>,
+    /// Dispatches to announce when their jobs have all settled
+    /// (`util::take_finished_batches`).
+    pub(super) watched: RwSignal<Vec<util::WatchedBatch>>,
+    /// The "Run a library script" dialog is open.
+    pub(super) script_dialog: RwSignal<bool>,
     /// A mutating action landed since the displayed result was computed.
     pub(super) results_stale: RwSignal<bool>,
 }
@@ -747,6 +769,8 @@ impl ActionState {
             dispatch_error: RwSignal::new(None),
             dispatch_progress: RwSignal::new(None),
             jobs: RwSignal::new(Vec::new()),
+            watched: RwSignal::new(Vec::new()),
+            script_dialog: RwSignal::new(false),
             results_stale: RwSignal::new(false),
         }
     }

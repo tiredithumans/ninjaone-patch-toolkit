@@ -169,26 +169,28 @@ the read‑only scope.
 **What you can do.** Tick patch rows in the **Patches** tab, then use the action bar. Ticking
 a row selects both that row's **patch** and its **device** — which of the two an action acts on
 is the single most important thing to know here, so read
-[Install all vs install only the selected](#install-all-vs-install-only-the-selected) before
-using either.
+[Apply all vs apply selected](#apply-all-vs-apply-selected) before using either.
 
-The action bar groups the buttons by **mechanism**, because that is what decides the blast radius —
-and each button names its own reach (*All OS* installs everything approved; *Selected OS* installs
-only what you ticked), states it in full in its tooltip, and repeats it as the first line of the
-confirmation dialog:
+The action bar is one row: the selection, the buttons grouped by **mechanism** (that is what
+decides the blast radius), an **Options** button whose label says what the next dispatch will do
+(*Options: Dry run*, or *Live* in amber), and **Run a script…**. Each button names its own reach
+(*All OS* installs everything approved; *Selected OS* installs only what you ticked), states it in
+full in its tooltip, and repeats it as the first line of the confirmation dialog. After you
+confirm, you stay where you are — the toast offers **View jobs**, the Jobs tab counts what is
+still running, and a second toast says when the batch has finished:
 
 | Action bar group | Action | Endpoint | Notes |
 |---|---|---|---|
 | **Scan** | OS / Software | `POST /device/{id}/patch/{os,software}/scan` | Read‑only on the device; no confirmation needed. |
-| **Install all approved patches** | OS / Software | `POST /device/{id}/patch/{os,software}/apply` | Installs **every approved patch** on the device, not just the ones you ticked. |
-| **Install only the selected patches** | OS / Software | `POST /device/{id}/script/run` (remediation script) | Installs only the patches ticked **on that device**. Needs a configured script ID. |
-| *(not grouped)* | Reboot | `POST /device/{id}/reboot/{mode}` | Requires a reason, recorded in NinjaOne's activity feed. `FORCED` needs a typed confirmation. |
+| **Apply all approved** | OS / Software | `POST /device/{id}/patch/{os,software}/apply` | Installs **every approved patch** on the device, not just the ones you ticked. |
+| **Apply selected** | OS / Software | `POST /device/{id}/script/run` (remediation script) | Installs only the patches ticked **on that device**. Needs a configured script ID. |
+| **Restart** | Reboot… | `POST /device/{id}/reboot/{mode}` | Asks for the mode and a reason (recorded in NinjaOne's activity feed) first. `FORCED` needs a typed confirmation. |
 | *(not grouped)* | Run script | `POST /device/{id}/script/run` | Any script in the tenant's automation library. |
 
 Confirmation dialogs, the Jobs tab and the audit log name these more precisely — *Apply all OS
 patches* vs *Apply selected OS patches*, and so on for software.
 
-### Install all vs install only the selected
+### Apply all vs apply selected
 
 NinjaOne's API has **no per‑patch apply endpoint**. `/patch/{os,software}/apply` installs
 everything approved on the device and cannot be told which patches to install — so ticking one
@@ -199,11 +201,11 @@ list. Because those are different mechanisms with different blast radii, they ar
 actions under separate headings in the action bar, and the toolkit warns when you pick the
 untargeted one while holding a partial selection:
 
-- **Install all approved patches** — native endpoint, whole approved backlog, no preview, runs
+- **Apply all approved** — native endpoint, whole approved backlog, no preview, runs
   as NinjaOne's agent (the shared *Run as* / *Dry run* options do not reach it). The confirm
   dialog shows, per device, how many approved patches it will install and how many are still
   pending approval (from the patch data already loaded; "unknown" if none is).
-- **Install only the selected patches** — remediation script, only the ticked patches, and each
+- **Apply selected** — remediation script, only the ticked patches, and each
   device receives only *its own* ticked patches rather than the union of the selection.
 
 A device with nothing ticked of that patch family is dropped from a targeted apply rather than

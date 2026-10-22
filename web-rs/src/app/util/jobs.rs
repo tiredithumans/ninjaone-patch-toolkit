@@ -312,3 +312,63 @@ pub(crate) fn remediation_exit_meaning(
         _ => return None,
     })
 }
+
+/// A dispatch the operator is told about once every one of its jobs has settled.
+/// Keyed by job ids, not the backend's batch id: the poller's progress events do
+/// not carry one.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct WatchedBatch {
+    pub job_ids: Vec<u64>,
+    /// What was dispatched, as the confirm dialog named it.
+    pub label: String,
+    pub dry_run: bool,
+}
+
+/// Removes from `watched` every batch whose jobs have all settled, returning what
+/// to announce for each.
+///
+/// "Settled" is [`JobState::is_terminal`]: an `Unknown` job is still being polled,
+/// so a batch with one is not finished yet. A job no longer in the list (cleared
+/// meanwhile) counts as settled and is left out of the tally; a batch none of whose
+/// jobs is still listed is dropped without a word.
+pub(crate) fn take_finished_batches(
+    watched: &mut Vec<WatchedBatch>,
+    jobs: &[JobReport],
+) -> Vec<String> {
+    let mut finished = Vec::new();
+    watched.retain(|batch| {
+        let listed: Vec<&JobReport> = batch
+            .job_ids
+            .iter()
+            .filter_map(|id| jobs.iter().find(|j| j.id == *id))
+            .collect();
+        if listed.iter().any(|j| !j.state.is_terminal()) {
+            return true;
+        }
+        if !listed.is_empty() {
+            finished.push(batch_finished_message(batch, &listed));
+        }
+        false
+    });
+    finished
+}
+
+fn batch_finished_message(batch: &WatchedBatch, jobs: &[&JobReport]) -> String {
+    let count = |pred: fn(&JobState) -> bool| jobs.iter().filter(|j| pred(&j.state)).count();
+    let tally = [
+        (count(|s| matches!(s, JobState::Completed)), "completed"),
+        (count(|s| matches!(s, JobState::Failed(_))), "failed"),
+        (count(|s| matches!(s, JobState::TimedOut)), "timed out"),
+        (count(|s| matches!(s, JobState::Skipped(_))), "not sent"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect::<Vec<_>>()
+    .join(", ");
+    format!(
+        "{}{} finished: {tally}.",
+        if batch.dry_run { "Dry run of " } else { "" },
+        batch.label,
+    )
+}

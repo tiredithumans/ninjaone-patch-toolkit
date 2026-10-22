@@ -335,6 +335,7 @@ impl AppState {
         // a whole-fleet refetch for nothing.
         let mutating = request.kind.is_mutating() && !request.dry_run;
         let dry_run = request.dry_run;
+        let label = request.kind.label().to_string();
 
         self.actions.dispatching.set(true);
         spawn_local(async move {
@@ -351,16 +352,31 @@ impl AppState {
                     self.actions
                         .jobs
                         .update(|jobs| util::merge_jobs(jobs, batch.jobs.clone()));
-                    self.ui.active_tab.set(Tab::Jobs);
                     if mutating && batch.dispatched > 0 {
                         // The on-screen result predates the change we just made.
                         self.actions.results_stale.set(true);
                     }
-                    self.notify(Toast::ok(util::dispatch_toast(
-                        batch.dispatched,
-                        batch.skipped,
-                        dry_run,
-                    )));
+                    // Stays on this tab: the operator often has a second dispatch
+                    // to send from the same selection (Software after OS). It used
+                    // to switch to Jobs, so every follow-up was a round trip. The
+                    // toast offers Jobs, the tab counts what is in flight, and the
+                    // batch is announced when it settles.
+                    self.notify(
+                        Toast::ok(util::dispatch_toast(
+                            batch.dispatched,
+                            batch.skipped,
+                            dry_run,
+                        ))
+                        .with_action(ToastAction::ViewJobs),
+                    );
+                    self.actions.watched.update(|w| {
+                        w.push(util::WatchedBatch {
+                            job_ids: batch.jobs.iter().map(|j| j.id).collect(),
+                            label,
+                            dry_run,
+                        })
+                    });
+                    self.announce_settled_batches();
                 }
                 // Kept in the dialog, which stays open: a toast behind the overlay
                 // vanished after a few seconds and left a Run button that could
@@ -384,6 +400,25 @@ impl AppState {
         });
     }
 
+    /// Announces each watched dispatch whose jobs have all settled. Called after
+    /// every merge of job rows. The toast slot holds one message, so an error on
+    /// screen is not replaced by an announcement — the Jobs tab still has the rows.
+    pub(in crate::app) fn announce_settled_batches(self) {
+        let mut done = Vec::new();
+        self.actions.jobs.with_untracked(|jobs| {
+            self.actions
+                .watched
+                .update(|w| done = util::take_finished_batches(w, jobs));
+        });
+        let error_showing = self
+            .ui
+            .toast
+            .with_untracked(|t| t.as_ref().is_some_and(|t| t.error));
+        if let Some(msg) = done.pop().filter(|_| !error_showing) {
+            self.notify(Toast::ok(msg).with_action(ToastAction::ViewJobs));
+        }
+    }
+
     pub(in crate::app) fn refresh_jobs(self) {
         if self.session.web_mode.get_untracked() || self.session.demo.get_untracked() {
             return;
@@ -391,6 +426,7 @@ impl AppState {
         spawn_local(async move {
             if let Ok(jobs) = api::list_jobs().await {
                 self.actions.jobs.set(jobs);
+                self.announce_settled_batches();
             }
         });
     }
