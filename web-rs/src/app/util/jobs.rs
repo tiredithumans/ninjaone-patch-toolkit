@@ -116,8 +116,29 @@ pub(crate) fn retry_blocked_reason(job: &JobReport) -> Option<String> {
              never replayed. Check the device in NinjaOne first."
                 .into(),
         ),
+        JobState::TimedOut => Some(
+            "NinjaOne never reported how this ended — the action may still have run on the \
+             device, so it is never replayed. Check the device in NinjaOne first."
+                .into(),
+        ),
+        JobState::Skipped(_) => Some(
+            "Nothing was sent to this device. Select it again to plan a fresh dispatch.".into(),
+        ),
         _ => Some("Only a failed job can be retried.".into()),
     }
+}
+
+/// What the Retry cell says when there is no Retry button: `(short, full)` for a
+/// settled job that will not be retried, `None` while a job is still in flight, once
+/// it completed, or when it can be retried. An empty cell beside a red "Timed out"
+/// read as a missing button.
+pub(crate) fn retry_cell_note(job: &JobReport) -> Option<(&'static str, String)> {
+    let short = match job.state {
+        JobState::Failed(_) | JobState::Unknown(_) | JobState::TimedOut => "Not retried",
+        JobState::Skipped(_) => "Not sent",
+        JobState::Queued | JobState::Running | JobState::Completed => return None,
+    };
+    retry_blocked_reason(job).map(|full| (short, full))
 }
 
 /// Rebuilds the dispatch that produced `jobs`, for their devices only.

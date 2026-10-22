@@ -237,7 +237,7 @@ impl AppState {
             self.notify(Toast::err(util::nothing_selected_reason(source)));
             return;
         }
-        self.plan_request(request);
+        self.plan_request(request, source == SelectionSource::PatchRows);
     }
 
     /// Re-opens the plan → confirm flow for failed jobs, rebuilt from what each job
@@ -259,22 +259,23 @@ impl AppState {
             util::retry_request(&picked)
         });
         match rebuilt {
-            Ok(request) => self.plan_request(request),
+            Ok(request) => self.plan_request(request, false),
             Err(e) => self.notify(Toast::err(e)),
         }
     }
 
     /// Plans `request` and holds it in the confirmation modal.
-    fn plan_request(self, request: ActionRequest) {
+    fn plan_request(self, request: ActionRequest, dry_run_shown: bool) {
         self.actions.confirm_input.set(String::new());
         self.actions.dispatch_error.set(None);
         self.actions.dispatching.set(true);
         spawn_local(async move {
             match api::plan_action(request.clone()).await {
-                Ok(plan) => self
-                    .actions
-                    .pending
-                    .set(Some(PendingAction { request, plan })),
+                Ok(plan) => self.actions.pending.set(Some(PendingAction {
+                    request,
+                    plan,
+                    dry_run_shown,
+                })),
                 Err(e) => self.notify(Toast::err(e)),
             }
             self.actions.dispatching.set(false);
@@ -299,15 +300,18 @@ impl AppState {
         };
         let mut request = pending.request;
         request.confirm_token = None;
+        let dry_run_shown = pending.dry_run_shown;
         self.actions.dispatching.set(true);
         spawn_local(async move {
             match api::plan_action(request.clone()).await {
                 Ok(plan) => {
                     self.actions.dispatch_error.set(None);
                     self.actions.confirm_input.set(String::new());
-                    self.actions
-                        .pending
-                        .set(Some(PendingAction { request, plan }));
+                    self.actions.pending.set(Some(PendingAction {
+                        request,
+                        plan,
+                        dry_run_shown,
+                    }));
                 }
                 Err(e) => self
                     .actions

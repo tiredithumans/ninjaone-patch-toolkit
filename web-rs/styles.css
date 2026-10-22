@@ -946,10 +946,6 @@ tbody tr:hover {
   margin-bottom: 0;
 }
 
-.modal-actions {
-  margin-top: 0;
-}
-
 .app-version {
   margin-top: 16px;
   font-size: 11px;
@@ -1346,8 +1342,8 @@ tbody tr:hover {
 
 /* Each group is one mechanism, labelled. "Install all approved" and "Install only
    the selected" are different endpoints with different blast radii, and the label
-   above the pair is what distinguishes them — the buttons themselves only say
-   which patch family. */
+   above the pair is what distinguishes them — the buttons themselves ("All OS",
+   "Selected OS", …) are too terse to carry that alone. */
 .action-group {
   display: flex;
   flex-wrap: wrap;
@@ -1530,8 +1526,14 @@ tbody tr:hover {
   overflow-y: auto;
 }
 
-/* The same targets as the parameter block, in words — one device per line, capped
-   like it so a full batch keeps the Confirm button on screen. */
+/* Why a settled job has no Retry; the full reason is the tooltip. */
+.retry-note {
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: underline dotted;
+  cursor: help;
+}
+
 /* The patches a Jobs row was sent, under its action. */
 .job-targets {
   display: block;
@@ -1540,6 +1542,8 @@ tbody tr:hover {
   overflow-wrap: anywhere;
 }
 
+/* The same targets as the parameter block, in words — one device per line, capped
+   like it so a full batch keeps the Confirm button on screen. */
 .modal-target-lines {
   margin: 0 0 8px;
   padding-left: 18px;
@@ -2078,11 +2082,18 @@ tbody tr:hover {
 
 /* --- Trend tab: fleet health over the run history ------------------------- */
 
+/* Side by side on a wide window: the cards are read together, as a row. */
+.trend-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
 .trend-card {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px 14px;
-  margin-bottom: 10px;
   background: var(--panel-2);
   color: var(--accent);
 }
@@ -2304,6 +2315,8 @@ kbd {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   text-align: center;
+}
+
 /* --- Device drill-down (tables/device.rs) --- */
 /* Wider than the confirm/update dialogs: it carries a patch table. */
 .modal-wide {

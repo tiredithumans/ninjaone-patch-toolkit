@@ -11,6 +11,20 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The device details dialog is wide again.** A missing brace in the stylesheet swallowed its
+  layout rules, so it opened at the narrow confirm-dialog width with its facts in one column.
+- **A reboot from Needs Reboot no longer says "Dry run doesn't apply".** That tab has no Dry run
+  checkbox, so the confirm dialog no longer answers one.
+- **The Jobs tab says why a job has no Retry.** A timed-out, unknown or skipped job showed an
+  empty cell; it now reads "Not retried" or "Not sent", with the reason on hover.
+- **The maintenance-window message no longer offers a retry the override.** A retry is planned
+  without it, so the message now says to wait for the window, or to override a new dispatch.
+- **The Trend cards sit side by side** on a wide window instead of stacking, and the confirm
+  dialog's title is styled like the other dialogs'.
+- **Web demo:** the link in the address bar now follows a custom install-history range.
+
 ## [0.18.0] - 2026-10-21
 
 ### Added

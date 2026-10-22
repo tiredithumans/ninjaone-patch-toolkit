@@ -481,7 +481,7 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
             let mode_line = util::confirm_mode_line(
                 kind,
                 dry_run,
-                state.actions.dry_run.get_untracked(),
+                pending.dry_run_shown && state.actions.dry_run.get_untracked(),
             );
             let target_lines = util::target_lines(&pending.request, &plan.eligible);
             let expected = device_count.to_string();
@@ -525,7 +525,7 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                         node_ref=dialog
                         on:keydown=move |ev| on_tab(&ev)
                     >
-                        <h3 id="confirm-action-title">{plan.summary.clone()}</h3>
+                        <h2 id="confirm-action-title">{plan.summary.clone()}</h2>
 
                         // First line, before any device list or warning: what this
                         // action reaches. The dialog previously opened with the
@@ -1145,6 +1145,16 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                     children=move |j| {
                                         // Only a definite failure gets a Retry;
                                         // an Unknown one may already have acted.
+                                        // A settled job without one says why.
+                                        let retry_note = util::retry_cell_note(&j).map(
+                                            |(short, full)| {
+                                                view! {
+                                                    <span class="retry-note" title=full>
+                                                        {short}
+                                                    </span>
+                                                }
+                                            },
+                                        );
                                         let retry = util::retry_blocked_reason(&j)
                                             .is_none()
                                             .then(|| {
@@ -1213,7 +1223,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
                                                 <td title=exit_help>{exit_text}</td>
                                                 <td>{j.dispatched_at.clone()}</td>
                                                 <td>{format_duration(j.duration_seconds)}</td>
-                                                <td>{retry}</td>
+                                                <td>{retry}{retry_note}</td>
                                             </tr>
                                         }
                                     }
