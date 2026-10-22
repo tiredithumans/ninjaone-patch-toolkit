@@ -308,6 +308,8 @@ fn the_window_blocker_names_the_real_steps_and_the_window() {
         !b.contains("Settings"),
         "the Settings step is already done: {b}"
     );
+    // A retry is re-planned without the override, so it is not promised one.
+    assert!(b.contains("A retry never carries an override"), "{b}");
 
     // Used: the plan says so, which is what the audit trail records.
     let p = plan(PlanInput {

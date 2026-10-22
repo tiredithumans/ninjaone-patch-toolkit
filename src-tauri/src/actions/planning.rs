@@ -454,10 +454,14 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
                      dispatch overrides it. The override is recorded in the audit trail."
                 ));
             } else if s.allow_window_override {
+                // A retry never carries the override (it was approved for the original
+                // moment), so the way round the window is named for a new dispatch only;
+                // this used to send a retry to a checkbox that could not reach it.
                 blockers.push(format!(
-                    "Outside the maintenance window ({window}). Wait for the window to open, or \
-                     tick \"Override the maintenance window for this dispatch\" in the action bar \
-                     and plan again."
+                    "Outside the maintenance window ({window}). Wait for the window to open. A \
+                     retry never carries an override; for a new dispatch, tick \"Override the \
+                     maintenance window for this dispatch\" in the action bar's options and plan \
+                     again."
                 ));
             } else {
                 // This used to say "enable the override in Settings", which named only
@@ -466,9 +470,9 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
                 blockers.push(format!(
                     "Outside the maintenance window ({window}). Wait for the window to open. \
                      Overriding it is switched off — to allow it, tick \"Allow overriding the \
-                     maintenance window\" in Settings → Patch actions and save, then tick \
-                     \"Override the maintenance window for this dispatch\" in the action bar and \
-                     plan again."
+                     maintenance window\" in Settings → Patch actions and save, then, for a new \
+                     dispatch, tick \"Override the maintenance window for this dispatch\" in the \
+                     action bar's options and plan again. A retry never carries an override."
                 ));
             }
         }
