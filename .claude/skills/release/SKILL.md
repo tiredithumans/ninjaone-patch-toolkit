@@ -42,6 +42,9 @@ refuses the tag.
   `## [Unreleased]` above it.
 - The section must be non-empty and its heading must equal the tag minus the `v`; the guard
   job fails the run otherwise.
+- Before rolling, trim it to what a user notices: one line per entry, related entries merged,
+  and for a large release a one-sentence headline above the groups. It is what the in-app update
+  window shows.
 
 ## 3. Verify
 
