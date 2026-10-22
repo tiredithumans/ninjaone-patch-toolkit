@@ -10311,7 +10311,7 @@ the following restrictions:
 
 ## Web frontend (web-rs)
 
-- MIT License (160 crates)
+- MIT License (156 crates)
 - Unicode License v3 (19 crates)
 - zlib License (5 crates)
 - Boost Software License 1.0 (1 crate)
@@ -11453,6 +11453,41 @@ SOFTWARE.
 ### MIT License
 
 Used by:
+- [quote-use-macros 0.9.0](https://github.com/ModProg/quote-use)
+- [quote-use 0.9.0](https://github.com/ModProg/quote-use)
+
+```
+Copyright (c) Roland Fredenhagen
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
 - [libc 0.2.189](https://github.com/rust-lang/libc)
 
 ```
@@ -11605,37 +11640,6 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [proc-macro-error-attr2 2.0.0](https://github.com/GnomedDev/proc-macro-error-2)
-- [proc-macro-error2 2.0.1](https://github.com/GnomedDev/proc-macro-error-2)
-
-```
-MIT License
-
-Copyright (c) 2019-2020 CreepySkeleton
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the &quot;Software&quot;), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-```
-
-### MIT License
-
-Used by:
 - [convert_case 0.6.0](https://github.com/rutrum/convert-case)
 
 ```
@@ -11756,8 +11760,8 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [attribute-derive-macro 0.10.5](https://github.com/ModProg/attribute-derive)
-- [manyhow-macros 0.11.4](https://github.com/ModProg/manyhow)
+- [attribute-derive-macro 0.11.0](https://github.com/ModProg/attribute-derive)
+- [manyhow-macros 0.14.1](https://github.com/ModProg/manyhow)
 
 ```
 MIT License
@@ -11788,7 +11792,7 @@ SOFTWARE.
 
 Used by:
 - [interpolator 0.5.0](https://github.com/ModProg/interpolator)
-- [manyhow 0.11.4](https://github.com/ModProg/manyhow)
+- [manyhow 0.14.1](https://github.com/ModProg/manyhow)
 - [proc-macro-utils 0.10.0](https://github.com/ModProg/proc-macro-utils)
 
 ```
@@ -11849,7 +11853,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [attribute-derive 0.10.5](https://github.com/ModProg/attribute-derive)
+- [attribute-derive 0.11.0](https://github.com/ModProg/attribute-derive)
 
 ```
 MIT License
@@ -11917,27 +11921,24 @@ Used by:
 - [gloo-net 0.6.0](https://github.com/rustwasm/gloo)
 - [gloo-timers 0.4.0](https://github.com/rustwasm/gloo/tree/master/crates/timers)
 - [gloo-utils 0.2.0](https://github.com/rustwasm/gloo/tree/master/crates/utils)
-- [hydration_context 0.3.1](https://github.com/leptos-rs/leptos)
-- [leptos 0.8.21](https://github.com/leptos-rs/leptos)
+- [hydration_context 0.3.2](https://github.com/leptos-rs/leptos)
+- [leptos 0.8.22](https://github.com/leptos-rs/leptos)
 - [leptos_config 0.8.10](https://github.com/leptos-rs/leptos)
 - [leptos_dom 0.8.8](https://github.com/leptos-rs/leptos)
-- [leptos_hot_reload 0.8.6](https://github.com/leptos-rs/leptos)
-- [leptos_macro 0.8.18](https://github.com/leptos-rs/leptos)
+- [leptos_hot_reload 0.8.7](https://github.com/leptos-rs/leptos)
+- [leptos_macro 0.8.19](https://github.com/leptos-rs/leptos)
 - [leptos_server 0.8.8](https://github.com/leptos-rs/leptos)
 - [next_tuple 0.1.0](https://github.com/leptos-rs/leptos)
 - [oco_ref 0.2.1](https://github.com/leptos-rs/leptos)
 - [or_poisoned 0.1.0](https://github.com/leptos-rs/leptos)
-- [quote-use-macros 0.8.4](https://github.com/ModProg/quote-use)
-- [quote-use 0.8.4](https://github.com/ModProg/quote-use)
 - [r-efi 6.0.0](https://github.com/r-efi/r-efi)
 - [reactive_graph 0.2.15](https://github.com/leptos-rs/leptos)
 - [reactive_stores 0.4.4](https://github.com/leptos-rs/leptos)
 - [reactive_stores_macro 0.4.4](https://github.com/leptos-rs/leptos)
-- [rstml 0.12.1](https://github.com/rs-tml/rstml)
+- [rstml 0.13.1](https://github.com/rs-tml/rstml)
 - [server_fn 0.8.13](https://github.com/leptos-rs/leptos)
-- [server_fn_macro 0.8.11](https://github.com/leptos-rs/leptos)
-- [server_fn_macro_default 0.8.5](https://github.com/leptos-rs/leptos)
-- [syn_derive 0.2.0](https://github.com/Kyuuhachi/syn_derive)
+- [server_fn_macro 0.8.12](https://github.com/leptos-rs/leptos)
+- [server_fn_macro_default 0.8.6](https://github.com/leptos-rs/leptos)
 - [tachys 0.2.19](https://github.com/leptos-rs/leptos)
 - [throw_error 0.3.1](https://github.com/leptos-rs/leptos)
 - [wasm_split_helpers 0.2.3](https://github.com/WorldSEnder/wasm-split-prototype)
@@ -12076,7 +12077,7 @@ Used by:
 - [pin-project-internal 1.1.13](https://github.com/taiki-e/pin-project)
 - [pin-project-lite 0.2.17](https://github.com/taiki-e/pin-project-lite)
 - [pin-project 1.1.13](https://github.com/taiki-e/pin-project)
-- [prettyplease 0.2.37](https://github.com/dtolnay/prettyplease)
+- [prettyplease 0.3.0](https://github.com/dtolnay/prettyplease)
 - [proc-macro2 1.0.107](https://github.com/dtolnay/proc-macro2)
 - [quote 1.0.47](https://github.com/dtolnay/quote)
 - [rustversion 1.0.23](https://github.com/dtolnay/rustversion)
@@ -12085,7 +12086,7 @@ Used by:
 - [serde 1.0.229](https://github.com/serde-rs/serde)
 - [serde_core 1.0.229](https://github.com/serde-rs/serde)
 - [serde_derive 1.0.229](https://github.com/serde-rs/serde)
-- [serde_json 1.0.151](https://github.com/serde-rs/json)
+- [serde_json 1.0.154](https://github.com/serde-rs/json)
 - [syn 2.0.119](https://github.com/dtolnay/syn)
 - [syn 3.0.6](https://github.com/dtolnay/syn)
 - [thiserror-impl 1.0.69](https://github.com/dtolnay/thiserror)
@@ -12308,39 +12309,11 @@ THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [proc-macro2-diagnostics 0.10.1](https://github.com/SergioBenitez/proc-macro2-diagnostics)
+- [proc-macro2-diagnostics 0.11.0](https://github.com/SergioBenitez/proc-macro2-diagnostics)
 
 ```
 The MIT License (MIT)
 Copyright (c) 2016-2020 Sergio Benitez
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the &quot;Software&quot;), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software is furnished to do so,
-subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-```
-
-### MIT License
-
-Used by:
-- [yansi 1.0.1](https://github.com/SergioBenitez/yansi)
-
-```
-The MIT License (MIT)
-Copyright (c) 2017 Sergio Benitez
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the &quot;Software&quot;), to deal in
