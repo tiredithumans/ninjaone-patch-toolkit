@@ -88,6 +88,9 @@ runtime in **Settings** (persisted via the `directories` crate; secrets go to th
   - Scopes: `desktop`, `web`, `api`, `auth`, `actions`, `export`, `filter`, `settings`,
     `release`, `ci`, `docs`.
 - User-facing changes go under `## [Unreleased]` in `CHANGELOG.md`; the release skill rolls it.
+  **One line per entry**: what the user sees or can now do — no mechanism, history or internal
+  names (those belong in the PR). The section is also the GitHub release body and the in-app
+  update notes.
 
 ## Verification playbook
 

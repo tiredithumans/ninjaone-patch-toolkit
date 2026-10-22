@@ -11,67 +11,34 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+A redesigned layout: results fill the window, with filters, actions and settings in compact bars
+and menus.
+
+### Added
+
+- First-launch guidance for connecting to NinjaOne and signing in.
+- One-click "Include failed installs" and "Include installed" when those views are empty.
+
 ### Changed
 
-- **The results fill the window.** Run query, the data's age, Refresh and auto-refresh moved into
-  one top bar with the app's name, and the results panel takes the rest of the window: its table
-  scrolls inside it under a sticky header instead of pushing the page down. Exports are in an
-  **Export** menu; the theme, keyboard shortcuts and view links in a **⋯** menu; Sign out in the
-  account menu. The summary beside the tabs now gives counts only — the data's age is in the top
-  bar, with the result's generation time on Refresh's tooltip.
-- **Settings opens as a dialog** with Close and Escape, instead of a panel pushing the page down.
-  "Settings → Patch actions" notes and the "Patch actions are disabled" note link straight to it.
-- **First launch says what to do:** connect in Settings, then sign in.
-- **The filters take one row.** Organizations, locations, roles, OS type, OS name and patch type
-  sit in a compact bar under the top bar; Status, Severity, Search, First seen and install history
-  sit at the top of the Patches and Failures tabs, the only tabs they affect, instead of vanishing
-  from a tall panel on Compliance and Needs Reboot. Presets are in a **Presets** menu. Statuses
-  read in title case, and the last one can't be unticked.
-- **"Filters changed" says when the controls no longer match the results**, and applies them on a
-  click. Auto-refresh now re-runs the query on screen rather than picking up an edit you haven't
-  applied yet. The row of applied-filter chips is gone; the indicator's tooltip names the filters
-  behind the results.
-- Each tab's three-line scope banner is gone: what the tab shows and which filters reach it is on
-  the ⓘ beside the tab summary, and the app's spacing is tighter.
-- **More rows fit on screen.** Long patch names wrap to two lines at most (full name on hover),
-  Location and Role start hidden (bring them back from **Columns**; your choice is remembered),
-  the pager shares the view row, and "Changes since …" is one line whose counts open their lists.
-- **Tabs show what's waiting:** the patch row count, failures, devices needing a reboot, and jobs
-  still running. The app reopens on the tab and Patches view you last used.
-- The empty Failures tab offers **Include failed installs and run** when the query didn't ask
-  for them. Group headers say "1 patch" and "1 device".
-- <kbd>/</kbd> switches to the Patches tab when needed and focuses Search.
-- Pickers and menus close on a click outside them or on Escape.
-- **The action bar stays one row when you tick rows.** Run as, restart, Dry run, offline targets
-  and the window override moved behind an **Options** button whose label says what the next
-  dispatch will do (*Dry run*, or *Live* in amber). Reboot asks for its mode and reason in its own
-  pop-up, and won't open the confirmation until a reason is given. The script picker opens from
-  **Run a script…**. "Apply selected" shows how many patches it would send. The groups are now
-  called *Apply all approved* and *Apply selected*, matching the confirmation dialog and the audit
-  trail.
-- **Sending an action no longer jumps to the Jobs tab.** The toast offers **View jobs**, the Jobs
-  tab counts what is still running, and a second toast says when the batch has finished.
-- **Compliance reads as one page.** A row of links jumps to Organizations, Approvals, By OS,
-  Worst devices, Offline and Time to install. The Within SLA % column draws its bar in the cell,
-  replacing the separate bar charts that repeated the same numbers; the severity and age charts
-  sit side by side; the SLA policy is one line, with the definitions in "How these numbers are
-  calculated". An empty First seen → installed section offers **Include installed and run**.
-- Running a query or drilling down says so when it clears your selection. Counts read "1 device",
-  "2 patch rows" instead of "device(s)".
+- Results fill the window; Run query, Refresh and auto-refresh sit in one top bar.
+- Filters fit in one row, and Status, Severity and Search appear only on the tabs they affect.
+- A "Filters changed" badge shows when the results no longer match your filters; auto-refresh
+  keeps the results you're viewing.
+- Exports, theme and view links moved into menus; Settings opens as a dialog.
+- More rows fit on screen; Location and Role are hidden by default (restore them from Columns).
+- Tabs show counts, and the app reopens on the last tab you used.
+- The action bar stays one row; run options are under Options, which shows whether the next
+  action is a dry run.
+- Sending an action keeps you on the current tab and tells you when it finishes.
+- Compliance is one page, with section links and inline percentage bars.
 
 ### Fixed
 
-- **The device details dialog is wide again.** A missing brace in the stylesheet swallowed its
-  layout rules, so it opened at the narrow confirm-dialog width with its facts in one column.
-- **A reboot from Needs Reboot no longer says "Dry run doesn't apply".** That tab has no Dry run
-  checkbox, so the confirm dialog no longer answers one.
-- **The Jobs tab says why a job has no Retry.** A timed-out, unknown or skipped job showed an
-  empty cell; it now reads "Not retried" or "Not sent", with the reason on hover.
-- **The maintenance-window message no longer offers a retry the override.** A retry is planned
-  without it, so the message now says to wait for the window, or to override a new dispatch.
-- **The Trend cards sit side by side** on a wide window instead of stacking, and the confirm
-  dialog's title is styled like the other dialogs'.
-- **Web demo:** the link in the address bar now follows a custom install-history range.
+- The device details dialog opens at full width again.
+- The Jobs tab explains why a job can't be retried.
+- Reboots from Needs Reboot no longer mention Dry run.
+- The maintenance-window message no longer suggests overriding a retry.
 
 ## [0.18.0] - 2026-10-21
 

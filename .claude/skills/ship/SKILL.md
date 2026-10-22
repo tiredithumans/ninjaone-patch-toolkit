@@ -19,7 +19,9 @@ a gate fails.
   `.claude/hooks/` or `.claude/settings.json` changed → `.claude/hooks/test.sh`. Changes limited
   to docs, skills or `.github/` skip verify — say so in the PR test plan. The local gates are
   the fast loop; the required CI checks on `main` are the gate the merge waits for (step 4).
-- User-facing change without a `CHANGELOG.md` `[Unreleased]` line → add one before committing.
+- User-facing change without a `CHANGELOG.md` `[Unreleased]` line → add one before committing:
+  one line, what the user sees or can now do, under Added / Changed / Fixed — no mechanism or
+  history (that goes in the PR body).
 
 ## 1. Branch
 
