@@ -194,8 +194,12 @@ pub(crate) struct SummaryCounts {
 /// Builds the results-summary line for the active tab. The old shared line read
 /// "{rows} patch rows …" across every tab, which is the Patches detail-row count —
 /// misleading on Compliance/Reboot, whose scope is devices, not patch rows.
-pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts, generated_at: &str) -> String {
-    let head = match tab {
+///
+/// Counts only: the data's age is in the top bar ("Data as of …", with the
+/// generation time in its Refresh tooltip). Ending this line with "generated …"
+/// put a second timestamp a hand's width from the first.
+pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts) -> String {
+    match tab {
         Tab::Patches => format!(
             "{} patch rows across {} devices",
             group_thousands(c.rows_total),
@@ -223,13 +227,11 @@ pub(crate) fn summary_line(tab: Tab, c: &SummaryCounts, generated_at: &str) -> S
             group_thousands(c.devices_total),
         ),
         // Jobs describes dispatched actions, not the query result, so the query's
-        // counts and generation time would be actively misleading here. Trend is the
-        // same: it reads the run-history file, which spans many queries and has no
-        // single generation time.
-        Tab::Jobs => return "Dispatched actions".to_string(),
-        Tab::Trend => return "Fleet health over time".to_string(),
-    };
-    format!("{head} \u{00b7} generated {generated_at}")
+        // counts would be actively misleading here. Trend is the same: it reads the
+        // run-history file, which spans many queries.
+        Tab::Jobs => "Dispatched actions".to_string(),
+        Tab::Trend => "Fleet health over time".to_string(),
+    }
 }
 
 /// Fleet-health tabs (Compliance, Needs Reboot) reflect the device scope only and

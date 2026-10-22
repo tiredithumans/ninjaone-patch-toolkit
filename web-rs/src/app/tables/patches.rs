@@ -117,7 +117,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
                     <GroupedPatches/>
                 </Show>
                 <Show when=move || state.query.group_by.get().is_none()>
-                <div class="table-wrap">
+                <div class="table-wrap table-wrap--fill">
                 // Hides the chosen columns by position; see `util::columns`.
                 <style>
                     {move || {

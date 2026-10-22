@@ -1,3 +1,5 @@
+use super::controls::PresetRow;
+use super::menu::dismiss_on_outside;
 use super::*;
 
 /// The First-seen choices as (stored value, label). `custom` reveals the two date
@@ -31,6 +33,11 @@ pub(crate) fn Filters() -> impl IntoView {
                 <h2>"Filters"</h2>
                 <Show when=move || state.lookups.loading_lookups()>
                     <span class="chips-label">"Loading…"</span>
+                </Show>
+                // Presets persist through the backend's settings file, which the
+                // browser demo does not have: every save or delete could only fail.
+                <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
+                    <PresetRow/>
                 </Show>
                 <button
                     class="btn btn-ghost filters-toggle"
@@ -413,6 +420,8 @@ where
 {
     let open = RwSignal::new(false);
     let search = RwSignal::new(String::new());
+    let root: NodeRef<leptos::html::Div> = NodeRef::new();
+    dismiss_on_outside(open, root);
 
     // The collapsed summary names the selection while it is short enough to read.
     let summary = move || {
@@ -429,7 +438,7 @@ where
     let button_id = format!("scope-{slug}-button");
 
     view! {
-        <div class="scope-picker">
+        <div class="scope-picker" node_ref=root>
             <span class="scope-picker__label" id=label_id.clone()>{label}</span>
             <button
                 type="button"

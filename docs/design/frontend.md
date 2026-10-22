@@ -223,14 +223,33 @@ staying unreachable. What lives in
 
 ## Operator UX
 
+**The shell.** The results fill the window: one top bar (`header.rs`: Run query, the data's age —
+"Data as of …", with the result's generation time and the last run's duration in the Refresh
+tooltip — Refresh, auto-refresh, the Export / account / ⋯ menus), then the filters, then the
+results panel, whose tab panel takes the remaining height (`main.shell`, flex) and whose main
+table scrolls inside it under a sticky header (`.table-wrap--fill`). It used to be four stacked
+panels that pushed the first row below the fold of the default 1360×1000 window. Below 641px the
+page keeps the plain document flow. Rarely used controls live in menus (`menu::MenuButton`):
+a disclosure, never `aria-modal` — that attribute is what holds auto-refresh and silences the
+shortcuts (`modal::any_modal_open`), and an open Export menu is reason for neither. A menu and a
+scope picker close on a press outside them or on Escape (`menu::dismiss_on_outside`, a window
+listener: macOS's WebKit view does not focus a clicked button, so focus loss cannot be the
+signal). What must stay visible does not go in a menu: the copied view code and a pending
+cross-instance view render as notices under the bar (`controls::ViewNotices`). **Settings is a
+dialog** (focus trap, Escape — unless the update splash is open over it — and Close, which keeps
+what was typed until Save, as hiding the old inline panel did), rendered at App level before the
+update splash so "Check for updates" stacks above it. Before the first sign-in the results panel
+says what to do (`util::onboarding`): it waits for the saved settings to load, because the form
+starts on defaults and deciding earlier flashed "Connect to NinjaOne" on every launch.
+
 Per-machine view conveniences — none of them configuration, so none go through
 `settings.json` (see `api::ui_pref`) — and the rules each one keeps.
 
 **Auto-refresh countdown.** A one-second ticker (`AppState::tick_auto_refresh`) advances a
 wall-clock countdown (`util::advance_refresh`; ticks are throttled in the background, so counting
 them drifts). `util::refresh_hold` decides, in this order, why it waits: the operator's **Pause**,
-an open dialog (any `aria-modal` element, plus the Settings panel), a hidden window, a run in
-flight. A run restarts the full cadence, so a manual Run also pushes the next automatic one out.
+an open dialog (any `aria-modal` element, Settings included through its own signal so the label
+reacts at once), a hidden window, a run in flight. A run restarts the full cadence, so a manual Run also pushes the next automatic one out.
 **A selection is deliberately not a hold**: a refresh already prunes the selection to rows still
 listed, and after a dispatch the selection is still there exactly while the operator watches the
 patches land — pausing on it would switch the cadence off when it is most wanted. Picking a

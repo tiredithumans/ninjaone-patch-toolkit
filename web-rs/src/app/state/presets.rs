@@ -6,6 +6,12 @@ use super::*;
 impl AppState {
     pub(in crate::app) fn apply_settings_view(self, v: SettingsView) {
         self.settings.f_instance.set(v.instance_base_url);
+        self.settings.has_client_id.set(
+            v.client_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty()),
+        );
+        self.settings.loaded.set(true);
         self.settings
             .f_client_id
             .set(v.client_id.unwrap_or_default());

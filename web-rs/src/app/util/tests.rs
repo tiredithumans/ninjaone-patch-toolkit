@@ -1286,27 +1286,24 @@ fn summary_line_is_tab_aware() {
         reboot: 12,
     };
     assert_eq!(
-        summary_line(Tab::Patches, &c, "2026-06-28"),
-        "12,300 patch rows across 540 devices \u{00b7} generated 2026-06-28"
+        summary_line(Tab::Patches, &c),
+        "12,300 patch rows across 540 devices"
     );
     assert_eq!(
-        summary_line(Tab::Failures, &c, "2026-06-28"),
+        summary_line(Tab::Failures, &c),
         // Against the devices that actually failed, not the fleet.
-        "7 failing patches on 5 devices \u{00b7} generated 2026-06-28"
+        "7 failing patches on 5 devices"
     );
     assert_eq!(
-        summary_line(Tab::Compliance, &c, "2026-06-28"),
-        "3 organizations \u{00b7} 512 of 540 devices counted \u{00b7} generated 2026-06-28"
+        summary_line(Tab::Compliance, &c),
+        "3 organizations \u{00b7} 512 of 540 devices counted"
     );
-    // Jobs shows dispatch history, not query output, so the query's counts and
-    // generation time would be actively misleading there.
+    // Jobs shows dispatch history, not query output, so the query's counts would
+    // be actively misleading there.
+    assert_eq!(summary_line(Tab::Jobs, &c), "Dispatched actions");
     assert_eq!(
-        summary_line(Tab::Jobs, &c, "2026-06-28"),
-        "Dispatched actions"
-    );
-    assert_eq!(
-        summary_line(Tab::Reboot, &c, "2026-06-28"),
-        "12 of 540 devices need reboot \u{00b7} generated 2026-06-28"
+        summary_line(Tab::Reboot, &c),
+        "12 of 540 devices need reboot"
     );
 }
 
@@ -3973,4 +3970,26 @@ fn the_within_sla_bands_match_their_colours() {
             assert!(css.contains(&selector), "styles.css lacks {selector}");
         }
     }
+}
+
+/// The card waits for the saved settings (the form starts empty), stays out of the
+/// web demo and of a signed-in session, and otherwise names the missing step.
+#[test]
+fn onboarding_names_the_missing_step_once_settings_have_loaded() {
+    assert_eq!(
+        onboarding(false, false, false, false),
+        None,
+        "settings not loaded yet"
+    );
+    assert_eq!(onboarding(true, true, false, false), None, "web demo");
+    assert_eq!(onboarding(false, true, true, true), None, "signed in");
+    assert_eq!(onboarding(false, true, false, true), None, "signed in");
+    assert_eq!(
+        onboarding(false, true, false, false),
+        Some(Onboarding::Connect)
+    );
+    assert_eq!(
+        onboarding(false, true, true, false),
+        Some(Onboarding::SignIn)
+    );
 }

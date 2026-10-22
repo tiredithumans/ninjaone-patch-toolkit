@@ -14,6 +14,8 @@ paths:
   → `docs/design/frontend.md#non-trivial-logic-does-not-belong-in-a-component-body`
 - **A dialog calls `modal::focus_trap()` in the closure that creates it**, per instance.
   → `docs/design/frontend.md#frontend-reactivity-is-closure-based-leptos-csr`
+- **A menu or popover is never `aria-modal`** (`menu::MenuButton`, `dismiss_on_outside`): that
+  attribute holds auto-refresh and silences the shortcuts. → `docs/design/frontend.md#operator-ux`
 - **A `query.members` entry is replaced with a fresh `Arc`, never mutated in place** — open
   groups detect change by `Arc::ptr_eq` (`util::member_entry_changed`).
   → `docs/design/frontend.md#frontend-reactivity-is-closure-based-leptos-csr`

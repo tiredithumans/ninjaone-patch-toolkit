@@ -185,36 +185,91 @@ h2 {
 }
 
 .topbar {
+  position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  gap: 10px 16px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 12px 16px;
+  padding: 8px 14px;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+}
+
+.brand h1 {
+  font-size: 16px;
+  white-space: nowrap;
 }
 
 .logo {
   color: var(--accent);
-  font-size: 26px;
+  font-size: 22px;
 }
 
 .subtitle {
-  margin: 2px 0 0;
+  margin: 1px 0 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+.subtitle:empty {
+  display: none;
+}
+
+/* Run query, the data's age, Refresh and the auto-refresh cadence: the controls
+   used on every visit, in the bar rather than a panel of their own. */
+.run-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.run-status {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.run-status:empty {
+  display: none;
+}
+
+/* A one-glyph button (↻), square so it does not read as a text label. */
+.btn-icon {
+  padding: 5px 10px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* The running query's progress along the bar's bottom edge. */
+.topbar-progress {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 0;
+  height: 3px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--panel-2);
 }
 
 .actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.account {
+  color: var(--accent-2);
 }
 
 .pill {
@@ -388,7 +443,7 @@ select:disabled {
   gap: 14px;
 }
 
-.controls .presets {
+.row .presets {
   margin-top: 0;
 }
 
@@ -722,6 +777,12 @@ tbody tr:hover {
   color: var(--danger-fg);
 }
 
+/* The two live regions hold only fixed-position toasts. Fixed themselves, they
+   leave the page's flex column, whose gap they used to widen while empty. */
+.toaster {
+  position: fixed;
+}
+
 .toast {
   position: fixed;
   bottom: 18px;
@@ -766,22 +827,6 @@ tbody tr:hover {
 }
 
 /* --- Running-query progress --- */
-.query-progress {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.progress {
-  flex: 1;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  overflow: hidden;
-}
-
 .progress-bar {
   height: 100%;
   border-radius: 999px;
@@ -801,19 +846,6 @@ tbody tr:hover {
   100% {
     margin-left: 100%;
   }
-}
-
-.progress-label {
-  color: var(--muted);
-  font-size: 0.85rem;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.query-hint {
-  margin: 10px 0 0;
-  color: var(--muted);
-  font-size: 0.85rem;
 }
 
 /* --- Filter sub-section headings (Device / Patch) --- */
@@ -879,6 +911,11 @@ tbody tr:hover {
 .modal h2 {
   margin: 0 0 4px;
   font-size: 18px;
+  /* A dialog's title is a sentence or a name ("SEA-DC01", "Reboot on 3
+     devices"), not a section label: not the small-caps style h2 has elsewhere. */
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
 }
 
 .modal-sub {
@@ -1299,6 +1336,216 @@ tbody tr:hover {
   .result-summary {
     flex-basis: 100%;
     margin-left: 0;
+  }
+}
+
+/* --- Menus (app/menu.rs) ------------------------------------------------- */
+
+.menu {
+  position: relative;
+}
+
+/* Above the sticky action bar (5) and table headers, which it drops over. */
+.menu__panel {
+  position: absolute;
+  z-index: 30;
+  top: 100%;
+  left: 0;
+  min-width: 200px;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+
+.menu__panel--right {
+  left: auto;
+  right: 0;
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.menu__item:hover:not(:disabled) {
+  background: var(--panel-2);
+}
+
+.menu__item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.menu__note {
+  margin: 2px 10px 4px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.menu__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 10px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+
+.menu__heading {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.menu__segs {
+  display: flex;
+  gap: 4px;
+}
+
+/* --- Notices under the top bar (a copied view link, a pending view) --------- */
+
+.notice-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+/* --- Dialog chrome shared by Settings and the drill-down -------------------- */
+
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.modal.settings {
+  max-height: 88vh;
+  padding-bottom: 0;
+}
+
+.settings-section {
+  margin: 8px 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Save stays in reach however far down the form the operator scrolled. */
+.settings-footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 16px -22px 0;
+  padding: 12px 22px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+
+.settings-footer .app-version {
+  margin: 0 0 0 auto;
+}
+
+/* --- First run: what to do before there is anything to show ----------------- */
+
+.onboarding {
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.onboarding h2 {
+  margin: 0 0 6px;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 15px;
+}
+
+.onboarding p {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+/* --- App shell: the results fill the window ------------------------------- */
+
+/* The bars keep their height; the results panel takes the rest of the window and
+   its table scrolls inside it, under a sticky header. The page itself scrolls
+   only when the window is too short for the bars plus a usable results floor.
+   Phones keep the plain document flow. */
+@media (min-width: 641px) {
+  main.shell {
+    height: 100vh;
+  }
+
+  .results {
+    flex: 1 1 auto;
+    min-height: 320px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .results > * {
+    flex: none;
+  }
+
+  /* Never `overflow: hidden` here: it would clip the popovers inside the tab. */
+  .results > #results-tabpanel {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #results-tabpanel > * {
+    flex: none;
+  }
+
+  /* Natural height up to the space left, then it scrolls inside; the floor keeps
+     a few rows visible when the banners above it are tall. */
+  #results-tabpanel > .table-wrap--fill,
+  #results-tabpanel > .groups {
+    flex: 0 1 auto;
+    min-height: 160px;
+    max-height: none;
+  }
+
+  #results-tabpanel > .groups {
+    overflow: auto;
   }
 }
 
@@ -2214,10 +2461,6 @@ tbody tr:hover {
   white-space: nowrap;
 }
 
-.view-link {
-  margin-top: 8px;
-}
-
 .view-code {
   flex: 1 1 260px;
   min-width: 0;
@@ -2227,7 +2470,7 @@ tbody tr:hover {
 }
 
 .view-link-warning {
-  margin-top: 8px;
+  margin: 0;
 }
 
 .patches-toolbar {

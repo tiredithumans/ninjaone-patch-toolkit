@@ -1,5 +1,5 @@
-//! Focus management for the modal dialogs (the action confirmation, the update
-//! splash and the keyboard-shortcuts help).
+//! Focus management for the modal dialogs (the action confirmation, Settings, the
+//! update splash, the device drill-down and the keyboard-shortcuts help).
 //!
 //! `role="dialog" aria-modal="true"` is a *claim*: it tells assistive tech the rest
 //! of the page is inert, but it moves nothing. Without this, keyboard focus stayed

@@ -71,7 +71,10 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
 │   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
 │   ├── tables/                  # one file per results tab (+ changes panel, backlog, device drill-down dialog)
-│   ├── header.rs · controls.rs · filters.rs · settings.rs · charts.rs · toaster.rs · update.rs
+│   ├── header.rs                # top bar: brand, run controls, Export / account / ⋯ menus
+│   ├── controls.rs              # run controls, export menu, presets, view-link notices
+│   ├── menu.rs                  # MenuButton + dismiss_on_outside: menus and pickers (never aria-modal)
+│   ├── filters.rs · settings.rs (Settings dialog) · charts.rs · toaster.rs · update.rs
 │   ├── shortcuts.rs             # key handler + help dialog (map: util::shortcut_for)
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests

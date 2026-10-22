@@ -1,145 +1,161 @@
 use leptos::task::spawn_local;
 
+use super::menu::MenuButton;
 use super::*;
 
+/// The run cluster in the top bar: Run query, what the data on screen is and how
+/// old, Refresh, and the auto-refresh cadence. "Last run took Ns" and the result's
+/// generation time moved into the data line's tooltip: two timestamps side by side
+/// (data fetched, result generated) read as one said twice.
 #[component]
 pub(crate) fn RunControls() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // One save dialog at a time, shared by both exports: each opens a native Save
-    // dialog, and a double-click used to stack two of them over the same workbook.
-    let exporting = RwSignal::new(false);
-
     view! {
-        <section class="panel">
-            <div class="controls">
-                // Enabled during an auto-refresh on purpose: a click then queues
-                // behind it (see `util::run_decision`) and says so.
-                <button
-                    class="btn btn-primary"
-                    prop:disabled=move || state.run.busy.get()
-                    on:click=move |_| state.run_query()
-                >
-                    {move || {
-                        if state.run.busy.get() {
-                            "Running…"
-                        } else if state.run.queued.get().is_some() {
-                            "Queued…"
-                        } else {
-                            "Run query"
-                        }
-                    }}
-                </button>
-                <ExportButton kind=Export::Workbook exporting=exporting/>
-                <ExportButton kind=Export::Csv exporting=exporting/>
-                <ExportButton kind=Export::Report exporting=exporting/>
-                <Show when=move || state.run.refreshing.get()>
-                    <span class="chips-label">"↻ refreshing…"</span>
-                </Show>
-                <label class="inline">
-                    "Auto-refresh"
-                    <select on:change=move |ev| {
-                        state.set_refresh_cadence(event_target_value(&ev).parse().unwrap_or(0))
-                    }>
-                        // No sub-minute cadence: a tick re-pages the whole-fleet
-                        // patch feeds, which on a large tenant takes longer than
-                        // 30s to finish — the option only ever produced a
-                        // back-to-back download loop. The backend enforces its own
-                        // floor regardless (`FORCE_MIN_INTERVAL`).
-                        {[("0", "Off"), ("60", "1m"), ("300", "5m"), ("900", "15m")]
-                            .into_iter()
-                            .map(|(val, label)| {
-                                let sel = move || state.run.refresh_secs.get().to_string() == val;
-                                view! {
-                                    <option value=val selected=sel>
-                                        {label}
-                                    </option>
-                                }
-                            })
-                            .collect_view()}
-                    </select>
-                </label>
-                <AutoRefreshStatus/>
-                <button
-                    class="btn"
-                    prop:disabled=move || {
-                        state.run.busy.get() || state.run.refreshing.get() || state.session.web_mode.get()
-                            || state.session.demo.get() || state.query.result.get().is_none()
+        <div class="run-controls">
+            // Enabled during an auto-refresh on purpose: a click then queues behind
+            // it (see `util::run_decision`) and says so.
+            <button
+                class="btn btn-primary"
+                prop:disabled=move || state.run.busy.get()
+                on:click=move |_| state.run_query()
+            >
+                {move || {
+                    if state.run.busy.get() {
+                        "Running…"
+                    } else if state.run.queued.get().is_some() {
+                        "Queued…"
+                    } else {
+                        "Run query"
                     }
-                    title="Refetch live patch data from NinjaOne for the current filter"
-                    on:click=move |_| state.refresh_now()
-                >
-                    "↻ Refresh"
-                </button>
-                <Show when=move || state.query.result.get().is_some()>
-                    <span class="chips-label">
-                        {move || {
-                            state.query.result
+                }}
+            </button>
+            <span class="run-status" role="status">
+                {move || {
+                    if state.run.busy.get() {
+                        return progress_label(state);
+                    }
+                    if state.run.refreshing.get() {
+                        return "↻ refreshing…".to_string();
+                    }
+                    state
+                        .query
+                        .result
+                        .with(|r| r.as_ref().map(|r| format!("Data as of {}", r.data_fetched_at)))
+                        .unwrap_or_default()
+                }}
+            </span>
+            <button
+                class="btn btn-ghost btn-icon"
+                aria-label="Refresh from NinjaOne"
+                prop:disabled=move || {
+                    state.run.busy.get() || state.run.refreshing.get() || state.session.web_mode.get()
+                        || state.session.demo.get() || state.query.result.get().is_none()
+                }
+                title=move || {
+                    let base = "Refetch live patch data from NinjaOne for the current filter";
+                    state.query.result.with(|r| match r {
+                        Some(r) => format!(
+                            "{base}. These results were generated {}{}.",
+                            r.generated_at,
+                            state
+                                .run
+                                .last_duration_ms
                                 .get()
-                                .map(|r| format!("patch data as of {}", r.data_fetched_at))
-                                .unwrap_or_default()
-                        }}
-                    </span>
-                </Show>
-                // Presets persist through the backend's settings file, which the
-                // browser demo does not have: every save or delete could only fail.
-                <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
-                    <PresetRow/>
-                </Show>
+                                .map(|ms| format!("; the last run took {:.0}s", ms / 1000.0))
+                                .unwrap_or_default(),
+                        ),
+                        None => base.to_string(),
+                    })
+                }
+                on:click=move |_| state.refresh_now()
+            >
+                "↻"
+            </button>
+            <label class="inline">
+                "Auto-refresh"
+                <select on:change=move |ev| {
+                    state.set_refresh_cadence(event_target_value(&ev).parse().unwrap_or(0))
+                }>
+                    // No sub-minute cadence: a tick re-pages the whole-fleet patch
+                    // feeds, which on a large tenant takes longer than 30s to finish
+                    // — the option only ever produced a back-to-back download loop.
+                    // The backend enforces its own floor regardless
+                    // (`FORCE_MIN_INTERVAL`).
+                    {[("0", "Off"), ("60", "1m"), ("300", "5m"), ("900", "15m")]
+                        .into_iter()
+                        .map(|(val, label)| {
+                            let sel = move || state.run.refresh_secs.get().to_string() == val;
+                            view! {
+                                <option value=val selected=sel>
+                                    {label}
+                                </option>
+                            }
+                        })
+                        .collect_view()}
+                </select>
+            </label>
+            <AutoRefreshStatus/>
+        </div>
+    }
+}
+
+/// "Running… 12s · loaded 4,210 records", or the rollup stage.
+fn progress_label(state: AppState) -> String {
+    let p = state.run.progress.get();
+    let secs = state.run.elapsed_secs();
+    if p.joining {
+        format!("Running… {secs:.0}s · computing rollups…")
+    } else {
+        let n = p.records();
+        if n > 0 {
+            format!(
+                "Running… {secs:.0}s · loaded {} records",
+                group_thousands(n)
+            )
+        } else {
+            format!("Running… {secs:.0}s")
+        }
+    }
+}
+
+/// A thin progress line along the top bar's bottom edge while a query runs —
+/// estimated from the last run's duration when there is one, indeterminate
+/// otherwise.
+#[component]
+pub(crate) fn QueryProgressLine() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    view! {
+        <Show when=move || state.run.busy.get()>
+            <div class="topbar-progress" aria-hidden="true">
+                {move || match state.run.progress_estimate() {
+                    Some(p) => {
+                        view! {
+                            <div class="progress-bar" style=format!("width:{:.1}%", p * 100.0)></div>
+                        }
+                            .into_any()
+                    }
+                    None => {
+                        view! { <div class="progress-bar progress-indeterminate"></div> }
+                            .into_any()
+                    }
+                }}
             </div>
-            <ViewLinkRow/>
-            <Show when=move || state.run.busy.get()>
-                <div class="query-progress">
-                    <div class="progress">
-                        {move || match state.run.progress_estimate() {
-                            Some(p) => {
-                                view! {
-                                    <div
-                                        class="progress-bar"
-                                        style=format!("width:{:.1}%", p * 100.0)
-                                    ></div>
-                                }
-                                    .into_any()
-                            }
-                            None => {
-                                view! { <div class="progress-bar progress-indeterminate"></div> }
-                                    .into_any()
-                            }
-                        }}
-                    </div>
-                    <span class="progress-label">
-                        {move || {
-                            let p = state.run.progress.get();
-                            let secs = state.run.elapsed_secs();
-                            if p.joining {
-                                format!("Running… {secs:.0}s · computing rollups…")
-                            } else {
-                                let n = p.records();
-                                if n > 0 {
-                                    format!(
-                                        "Running… {secs:.0}s · loaded {} records",
-                                        group_thousands(n),
-                                    )
-                                } else {
-                                    format!("Running… {secs:.0}s")
-                                }
-                            }
-                        }}
-                    </span>
-                </div>
-            </Show>
-            <Show when=move || {
-                !state.run.busy.get() && state.run.last_duration_ms.get().is_some()
-            }>
-                <p class="query-hint">
-                    {move || {
-                        format!(
-                            "Last run took {:.0}s",
-                            state.run.last_duration_ms.get().unwrap_or(0.0) / 1000.0,
-                        )
-                    }}
-                </p>
-            </Show>
-        </section>
+        </Show>
+    }
+}
+
+/// The three exports of the cached result, in one menu. One save dialog at a time,
+/// shared by every export: each opens a native Save dialog, and a double-click used
+/// to stack two of them over the same workbook.
+#[component]
+pub(crate) fn ExportMenu() -> impl IntoView {
+    let exporting = RwSignal::new(false);
+    view! {
+        <MenuButton label=String::from("Export ▾") title=String::from("Export the results on screen")>
+            <ExportButton kind=Export::Workbook exporting=exporting/>
+            <ExportButton kind=Export::Csv exporting=exporting/>
+            <ExportButton kind=Export::Report exporting=exporting/>
+        </MenuButton>
     }
 }
 
@@ -156,9 +172,9 @@ enum Export {
 impl Export {
     fn label(self) -> &'static str {
         match self {
-            Self::Workbook => "Export to Excel",
-            Self::Csv => "Export CSV",
-            Self::Report => "Export report",
+            Self::Workbook => "Excel workbook",
+            Self::Csv => "CSV of the patch rows",
+            Self::Report => "HTML report",
         }
     }
 
@@ -200,15 +216,16 @@ impl Export {
     }
 }
 
-/// One export button. `exporting` is owned by the caller and shared by every
-/// export, so a click on either is refused while any Save dialog is open.
+/// One export, as a menu item. `exporting` is owned by the caller and shared by
+/// every export, so a click on either is refused while any Save dialog is open.
 #[component]
 fn ExportButton(kind: Export, exporting: RwSignal<bool>) -> impl IntoView {
     let state = expect_context::<AppState>();
     let web_only = move || state.session.web_mode.get() || state.session.demo.get();
     view! {
         <button
-            class="btn"
+            type="button"
+            class="menu__item"
             prop:disabled=move || {
                 exporting.get() || state.query.result.with(|r| r.is_none()) || web_only()
             }
@@ -234,7 +251,7 @@ fn ExportButton(kind: Export, exporting: RwSignal<bool>) -> impl IntoView {
 }
 
 #[component]
-fn PresetRow() -> impl IntoView {
+pub(crate) fn PresetRow() -> impl IntoView {
     let state = expect_context::<AppState>();
     let saving = RwSignal::new(false);
 
@@ -373,15 +390,26 @@ fn AutoRefreshStatus() -> impl IntoView {
     }
 }
 
-/// Share the current view: filters, results tab, grouping and sort — never the
-/// selection or anything about the sign-in. The web demo shares its URL (whose
-/// fragment always carries the view); the desktop, which has no URL, shares a
-/// code, and applies one pasted into "Open view…".
+/// The view-link notices under the top bar, each shown only while it has
+/// something to say: the code just copied (kept on screen in case the clipboard
+/// refused it), the "Open view…" paste field, and a link from another instance
+/// waiting for "Apply anyway". Sharing itself lives in the ⋯ menu; these cannot,
+/// because a closed menu would hide a code the operator still has to copy and a
+/// pending view that holds auto-refresh (`refresh_hold`).
 #[component]
-fn ViewLinkRow() -> impl IntoView {
+pub(crate) fn ViewNotices() -> impl IntoView {
     let state = expect_context::<AppState>();
-    let opening = RwSignal::new(false);
+    let opening = state.ui.opening_view;
     let pasted = RwSignal::new(String::new());
+    let paste_field: NodeRef<leptos::html::Input> = NodeRef::new();
+    // Focus the paste field as it opens, so "Open view…" then Cmd/Ctrl+V works.
+    Effect::new(move |_| {
+        if opening.get()
+            && let Some(input) = paste_field.get()
+        {
+            let _ = input.focus();
+        }
+    });
     let apply = move || {
         let text = pasted.get_untracked();
         state.open_view_link(&text);
@@ -391,22 +419,9 @@ fn ViewLinkRow() -> impl IntoView {
         }
     };
     view! {
-        <div class="row view-link">
-            <button
-                class="btn btn-ghost"
-                title="Copy a link to these filters, tab, grouping and sort (no selection, no credentials)"
-                on:click=move |_| state.copy_view_link()
-            >
-                "Copy view link"
-            </button>
-            <button
-                class="btn btn-ghost"
-                aria-expanded=move || opening.get().to_string()
-                on:click=move |_| opening.update(|o| *o = !*o)
-            >
-                "Open view…"
-            </button>
-            <Show when=move || state.ui.view_code.with(Option::is_some)>
+        <Show when=move || state.ui.view_code.with(Option::is_some)>
+            <div class="notice-row">
+                <span class="chips-label">"View link"</span>
                 <input
                     class="view-code"
                     readonly
@@ -414,25 +429,40 @@ fn ViewLinkRow() -> impl IntoView {
                     prop:value=move || state.ui.view_code.get().unwrap_or_default()
                     on:focus=move |ev| select_all(&ev)
                 />
-            </Show>
-            <Show when=move || opening.get()>
+                <button
+                    class="x"
+                    aria-label="Dismiss the view link"
+                    on:click=move |_| state.ui.view_code.set(None)
+                >
+                    "×"
+                </button>
+            </div>
+        </Show>
+        <Show when=move || opening.get()>
+            <div class="notice-row">
                 <input
                     class="view-code"
                     aria-label="Paste a view link or code"
                     placeholder="Paste a view link or code"
+                    node_ref=paste_field
                     prop:value=move || pasted.get()
                     on:input=move |ev| pasted.set(event_target_value(&ev))
                     on:keydown=move |ev| {
                         if ev.key() == "Enter" {
                             apply();
+                        } else if ev.key() == "Escape" {
+                            opening.set(false);
                         }
                     }
                 />
                 <button class="btn" on:click=move |_| apply()>
                     "Apply view"
                 </button>
-            </Show>
-        </div>
+                <button class="btn btn-ghost" on:click=move |_| opening.set(false)>
+                    "Cancel"
+                </button>
+            </div>
+        </Show>
         {move || {
             state
                 .ui
