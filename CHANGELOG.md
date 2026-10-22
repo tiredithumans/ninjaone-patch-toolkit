@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-22
+
 A redesigned layout: results fill the window, with filters, actions and settings in compact bars
 and menus.
 
