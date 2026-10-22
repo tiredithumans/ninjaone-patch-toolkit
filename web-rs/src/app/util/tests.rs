@@ -4,9 +4,10 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, ActionRequest, ActionSettings, AuthStatus, DeviceSummary, FilterParams, JobReport,
-    JobRequest, JobState, Location, Organization, PatchFamilies, PatchGroup, PatchQueryArgs,
-    PatchRow, PlannedTarget, RebootChoice, RebootMode, RowSort, RowSortKey, RunRecord,
+    ActionKind, ActionRequest, ActionSettings, AuthStatus, DeviceSummary, FilterParams, GroupBy,
+    JobReport, JobRequest, JobState, Location, Organization, PatchFamilies, PatchGroup,
+    PatchQueryArgs, PatchRow, PlannedTarget, RebootChoice, RebootMode, RowSort, RowSortKey,
+    RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -4026,4 +4027,59 @@ fn statuses_read_in_title_case_and_keep_their_values() {
             .iter()
             .all(|c| c.value == c.value.to_uppercase())
     );
+}
+
+#[test]
+fn a_count_agrees_with_its_noun() {
+    assert_eq!(count_of(1, "patch", "patches"), "1 patch");
+    assert_eq!(count_of(0, "patch", "patches"), "0 patches");
+    assert_eq!(count_of(1_200, "device", "devices"), "1,200 devices");
+    assert_eq!(group_count_label(true, 1, 1), "1 patch");
+    assert_eq!(group_count_label(false, 5, 1), "1 device");
+}
+
+/// Patches counts its rows; Failures and Needs Reboot only what is there (a
+/// pending-only query never looked for failures); Jobs what is in flight; the
+/// reports none.
+#[test]
+fn tab_badges_count_what_is_waiting_on_the_tab() {
+    let c = SummaryCounts {
+        rows_total: 1_250,
+        devices_total: 40,
+        failures: 0,
+        failing_devices: 0,
+        orgs: 3,
+        devices_counted: 38,
+        reboot: 5,
+    };
+    assert_eq!(
+        tab_badge(Tab::Patches, Some(&c), 0).as_deref(),
+        Some("1,250")
+    );
+    assert_eq!(tab_badge(Tab::Failures, Some(&c), 0), None);
+    assert_eq!(tab_badge(Tab::Reboot, Some(&c), 0).as_deref(), Some("5"));
+    assert_eq!(tab_badge(Tab::Compliance, Some(&c), 0), None);
+    assert_eq!(tab_badge(Tab::Trend, Some(&c), 0), None);
+    assert_eq!(tab_badge(Tab::Jobs, None, 0), None);
+    assert_eq!(tab_badge(Tab::Jobs, None, 2).as_deref(), Some("2"));
+    assert_eq!(tab_badge(Tab::Patches, None, 2), None, "no result yet");
+}
+
+#[test]
+fn the_tab_and_view_mode_are_remembered_and_read_back() {
+    for tab in TAB_ORDER {
+        assert_eq!(tab_from_pref(Some(tab_id(tab))), tab);
+    }
+    assert_eq!(tab_from_pref(None), Tab::Patches);
+    assert_eq!(tab_from_pref(Some("nonsense")), Tab::Patches);
+    for mode in [
+        None,
+        Some(GroupBy::Device),
+        Some(GroupBy::Patch),
+        Some(GroupBy::Product),
+    ] {
+        assert_eq!(group_by_from_pref(Some(&group_by_pref(mode))), mode);
+    }
+    assert_eq!(group_by_from_pref(None), None);
+    assert_eq!(group_by_from_pref(Some("nonsense")), None);
 }

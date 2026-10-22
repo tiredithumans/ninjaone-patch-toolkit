@@ -263,6 +263,15 @@ Shift+/). **No key reaches a mutating action, an export or sign-out**; `r` runs 
 query, `/` focuses Search (switching to Patches from a tab without the patch filter bar), and
 `[`/`]` page the Patches table through the same `go_to_patches_page` as the pager.
 
+**Remembered view, tab badges.** The results tab and the Patches view mode are remembered per
+machine (`npt.tab`, `npt.view.patches` via `util::tab_from_pref` / `group_by_from_pref`; anything
+unreadable is Patches / flat). Each tab carries a count of what is waiting there
+(`util::tab_badge`): Patches its rows, Failures and Needs Reboot only when non-zero — a
+pending-only query never looked for failures, so "0" would claim more than it knows — and Jobs
+what is still in flight. The empty Failures tab offers "Include failed installs and run" when the
+query never asked for them. "Changes since …" is one strip: the three counts open their lists
+below it, and its caveats stay printed under it.
+
 **Filters.** Two bars, placed where they act. The **scope bar** under the top bar holds the device
 scope and the patch Type — every tab honours them — as compact pickers (`filters::Picker`, generic
 over `util::Named`, so the id-keyed lookups and the value/label choices share one control). The
@@ -282,7 +291,12 @@ or ↻ Refresh applies the controls.
 
 **Column chooser.** Stored as the set of *hidden* column ids (`util::column_id`, a slug of the
 header label), so a column another build adds is visible by default and an id this build does not
-know is kept and ignored. Hiding is positional CSS generated per table
+know is kept and ignored. A machine that never stored a choice hides Location and Role
+(`util::DEFAULT_HIDDEN_COLUMNS`): all twelve overflowed the default window and clipped Installed,
+and both are in the device drill-down. A stored empty list (everything shown) sticks; an
+unreadable value still shows every column. Long patch names clamp to two lines (`.clamp-2` on an
+inner span — `-webkit-box` on the cell would lose its table-cell layout) with the full name on
+hover. Hiding is positional CSS generated per table
 (`util::hidden_columns_css`), not a filtered cell list, so adding a column touches only
 `PATCH_COLUMNS` and the row markup. Device and Patch are required. Exports ignore it.
 

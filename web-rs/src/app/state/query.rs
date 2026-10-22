@@ -387,6 +387,17 @@ impl AppState {
         self.run_query();
     }
 
+    /// Adds `status` to the status filter and runs: the empty Failures tab's one
+    /// click, instead of a trip to the Status picker and back.
+    pub(in crate::app) fn include_status_and_run(self, status: &str) {
+        self.filters.statuses.update(|s| {
+            if !s.iter().any(|x| x == status) {
+                s.push(status.to_string());
+            }
+        });
+        self.run_query();
+    }
+
     /// Demo-mode counterpart to `run_query`: filters the in-memory sample with the
     /// current facets (no backend, no auth) and recomputes the row count.
     pub(in crate::app) fn run_demo_query(self, silent: bool) {

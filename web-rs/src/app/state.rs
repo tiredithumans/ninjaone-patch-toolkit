@@ -409,7 +409,9 @@ impl QueryState {
             page_rows: RwSignal::new(Vec::new()),
             query_error: RwSignal::new(None),
             patches_sort: RwSignal::new(None),
-            group_by: RwSignal::new(None),
+            group_by: RwSignal::new(util::group_by_from_pref(
+                api::ui_pref_str(api::PREF_PATCH_VIEW).as_deref(),
+            )),
             groups: RwSignal::new(Vec::new()),
             groups_total: RwSignal::new(0),
             expanded: RwSignal::new(BTreeSet::new()),
@@ -594,7 +596,11 @@ impl UiState {
             toast: RwSignal::new(None),
             toast_gen: RwSignal::new(0),
             show_settings: RwSignal::new(false),
-            active_tab: RwSignal::new(Tab::Patches),
+            // Remembered per machine: an operator who lives on Compliance should
+            // not land on Patches every launch.
+            active_tab: RwSignal::new(util::tab_from_pref(
+                api::ui_pref_str(api::PREF_TAB).as_deref(),
+            )),
             shortcuts_open: RwSignal::new(false),
             theme: RwSignal::new(util::Theme::from_pref(
                 api::ui_pref_str(api::PREF_THEME).as_deref(),

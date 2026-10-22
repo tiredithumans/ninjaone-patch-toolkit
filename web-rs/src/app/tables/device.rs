@@ -158,7 +158,7 @@ fn DrillBody(detail: DeviceDetail, sort: RwSignal<Option<RowSort>>) -> impl Into
                                         view! {
                                             <tr>
                                                 <td>{r.kb.unwrap_or_default()}</td>
-                                                <td class="patch-name">{r.name}</td>
+                                                <td class="patch-name"><span class="clamp-2" title=r.name.clone()>{r.name.clone()}</span></td>
                                                 <td>{r.patch_type}</td>
                                                 <td><span class=sev>{r.severity}</span></td>
                                                 <td><span class=stat>{r.status}</span></td>

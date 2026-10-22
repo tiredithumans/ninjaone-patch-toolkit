@@ -76,20 +76,10 @@ pub(crate) fn Results() -> impl IntoView {
     let summary = move || {
         // Read the active tab so the line re-renders (and re-describes) on switch.
         let tab = tab.get();
-        state.query.result.with(|r| {
-            r.as_ref().map(|r| {
-                let c = SummaryCounts {
-                    rows_total: r.rows_total,
-                    devices_total: r.devices_total,
-                    failures: r.failures.len(),
-                    failing_devices: util::failing_device_count(&r.failures),
-                    orgs: r.compliance.len(),
-                    devices_counted: r.compliance_total.devices_total,
-                    reboot: r.reboot_devices.len(),
-                };
-                summary_line(tab, &c)
-            })
-        })
+        state
+            .query
+            .result
+            .with(|r| r.as_ref().map(|r| summary_line(tab, &summary_counts(r))))
     };
 
     view! {
@@ -216,10 +206,32 @@ fn tab_dom_id(tab: Tab) -> &'static str {
 /// One results tab button with proper tab semantics. `aria-selected` is set as a
 /// string — Leptos drops boolean-ish ARIA attributes when they're false. Only the
 /// selected tab is in the Tab order (roving tabindex); the arrow keys reach the rest.
+/// The counts the tab bar reports on, from the result on screen.
+fn summary_counts(r: &QueryResult) -> SummaryCounts {
+    SummaryCounts {
+        rows_total: r.rows_total,
+        devices_total: r.devices_total,
+        failures: r.failures.len(),
+        failing_devices: util::failing_device_count(&r.failures),
+        orgs: r.compliance.len(),
+        devices_counted: r.compliance_total.devices_total,
+        reboot: r.reboot_devices.len(),
+    }
+}
+
 #[component]
 fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
     let state = expect_context::<AppState>();
     let tab = state.ui.active_tab;
+    // What is waiting on the tab, so the bar says where the work is without a
+    // visit: rows, failures, devices to reboot, jobs still running.
+    let badge = move || {
+        let in_flight = state.actions.jobs.with(|j| util::jobs_in_flight(j));
+        state
+            .query
+            .result
+            .with(|r| util::tab_badge(this, r.as_ref().map(summary_counts).as_ref(), in_flight))
+    };
     view! {
         <button
             id=tab_dom_id(this)
@@ -232,6 +244,7 @@ fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
             on:click=move |_| tab.set(this)
         >
             {label}
+            {move || badge().map(|n| view! { <span class="tab-badge">{n}</span> })}
         </button>
     }
 }

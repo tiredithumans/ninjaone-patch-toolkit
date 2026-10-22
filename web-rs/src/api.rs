@@ -96,6 +96,10 @@ pub fn set_ui_pref_str(key: &str, value: &str) {
 pub const PREF_THEME: &str = "npt.theme";
 /// Storage key for the Patches table's hidden columns (a JSON list of column ids).
 pub const PREF_PATCH_COLUMNS: &str = "npt.columns.patches";
+/// Storage key for the results tab last shown (`util::tab_id`).
+pub const PREF_TAB: &str = "npt.tab";
+/// Storage key for the Patches view mode (`util::group_by_pref`).
+pub const PREF_PATCH_VIEW: &str = "npt.view.patches";
 
 /// Pins the colour theme on `<html data-theme="…">`, or removes the attribute so
 /// `prefers-color-scheme` decides.

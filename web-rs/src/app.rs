@@ -197,6 +197,16 @@ pub fn App() -> impl IntoView {
         api::set_root_theme(theme.attr());
         api::set_ui_pref_str(api::PREF_THEME, theme.pref_value());
     });
+    // The results tab and the Patches view mode, remembered per machine.
+    Effect::new(move |_| {
+        api::set_ui_pref_str(api::PREF_TAB, util::tab_id(state.ui.active_tab.get()));
+    });
+    Effect::new(move |_| {
+        api::set_ui_pref_str(
+            api::PREF_PATCH_VIEW,
+            &util::group_by_pref(state.query.group_by.get()),
+        );
+    });
 
     if state.session.web_mode.get_untracked() {
         // A demo URL carrying `#view=…` opens that view (after the demo's facets

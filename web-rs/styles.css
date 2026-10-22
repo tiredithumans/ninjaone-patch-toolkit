@@ -624,7 +624,19 @@ tbody tr:hover {
 
 .patch-name {
   white-space: normal;
-  max-width: 360px;
+  min-width: 220px;
+  max-width: 420px;
+}
+
+/* At most two lines, the rest behind an ellipsis (the full text is the title).
+   On an inner span: `-webkit-box` on the cell itself would drop its table-cell
+   layout. */
+.clamp-2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
 }
 
 .empty,
@@ -2374,31 +2386,39 @@ tbody tr:hover {
 }
 
 /* --- Patches tab: changes since the previous comparable run ---------------- */
+/* One line: the baseline and three counts, each opening its list below. */
 .changes {
-  margin: 0 0 12px;
-  padding: 10px 12px;
+  margin: 0 0 8px;
+  padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel-2);
 }
-.changes-title {
-  margin: 0 0 6px;
-  font-size: 13px;
-  color: var(--text);
-}
-.changes-lists {
+.changes-strip {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
 }
-.changes-group > summary {
-  cursor: pointer;
-  font-size: 13px;
+.changes-title {
+  font-size: 12.5px;
+  font-weight: 600;
   color: var(--text);
+}
+.changes-toggle {
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 2px 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.changes-toggle:hover {
+  background: var(--panel);
 }
 .changes-count {
-  display: inline-block;
-  min-width: 3ch;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -2406,9 +2426,10 @@ tbody tr:hover {
 .changes-new .changes-count { color: var(--warn); }
 .changes-resolved .changes-count { color: var(--accent-2); }
 .changes-failed .changes-count { color: var(--danger); }
-.changes-table { margin-top: 6px; }
+.changes-list { margin-top: 6px; }
+.changes-table { margin-top: 0; }
 .changes-note {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   font-size: 12px;
   color: var(--muted);
 }
@@ -2472,6 +2493,38 @@ tbody tr:hover {
 
 .patches-toolbar .view-modes {
   margin: 0;
+}
+
+.patches-toolbar {
+  margin: 0 0 8px;
+}
+
+.patches-toolbar .pager {
+  margin: 0;
+}
+
+.patches-toolbar .pager .btn {
+  padding: 5px 10px;
+}
+
+/* The count beside a tab's name: what is waiting there. */
+.tab-badge {
+  display: inline-block;
+  min-width: 1.6em;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.tab-on .tab-badge {
+  color: var(--text);
 }
 
 .column-menu {

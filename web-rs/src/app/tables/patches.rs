@@ -99,17 +99,19 @@ pub(super) fn PatchesTable() -> impl IntoView {
                     }
                 }
             >
-                <Pager
-                    page=Signal::derive(page)
-                    page_count=Signal::derive(page_count)
-                    summary=Signal::derive(pager_summary)
-                    on_page=go_to
-                />
                 <Show when=move || state.action_surface_visible()>
                     <ActionBar/>
                 </Show>
+                // The pager shares the view row rather than taking one of its own
+                // above the action bar.
                 <div class="row patches-toolbar">
                     <ViewModeSwitch/>
+                    <Pager
+                        page=Signal::derive(page)
+                        page_count=Signal::derive(page_count)
+                        summary=Signal::derive(pager_summary)
+                        on_page=go_to
+                    />
                     <Show when=move || state.query.group_by.get().is_none()>
                         <ColumnMenu/>
                     </Show>
@@ -197,7 +199,12 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                             <td>{r.os_name.clone().unwrap_or_default()}</td>
                                             <td>{r.patch_type.clone()}</td>
                                             <td>{r.kb.clone().unwrap_or_default()}</td>
-                                            <td class="patch-name">{r.name.clone()}</td>
+                                            // Two lines at most, the full name on hover: a long
+                                            // cumulative-update title wrapped to six lines
+                                            // and made every row ~100px tall.
+                                            <td class="patch-name">
+                                                <span class="clamp-2" title=r.name.clone()>{r.name.clone()}</span>
+                                            </td>
                                             <td>
                                                 <span class=sev>{r.severity.clone()}</span>
                                             </td>
@@ -524,13 +531,15 @@ fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
                                         }}
                                     </td>
                                     <td class="patch-name">
-                                        {move || {
-                                            if by_device() {
-                                                second.name.clone()
-                                            } else {
-                                                second.organization.clone()
-                                            }
-                                        }}
+                                        <span class="clamp-2">
+                                            {move || {
+                                                if by_device() {
+                                                    second.name.clone()
+                                                } else {
+                                                    second.organization.clone()
+                                                }
+                                            }}
+                                        </span>
                                     </td>
                                     <td><span class=sev>{r.severity.clone()}</span></td>
                                     <td><span class=stat>{r.status.clone()}</span></td>
