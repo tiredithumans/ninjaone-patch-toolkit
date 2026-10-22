@@ -1,5 +1,6 @@
-//! Inline-SVG dashboard charts for the Results panel: per-org compliance bars, a
-//! pending-patch severity breakdown, and a pending-patch age histogram. The shapes
+//! Inline-SVG dashboard charts for the Results panel: a pending-patch severity
+//! breakdown, a pending-patch age histogram, and the Trend sparklines. The Within
+//! SLA bars are drawn inside the compliance tables' cells instead. The shapes
 //! are hand-drawn `<svg>` (no JS charting lib — WASM-friendly) sized off the compact
 //! aggregates the backend ships in `QueryResult` (it never sends every detail row).
 //!
@@ -46,8 +47,6 @@ fn severity_total(c: &SeverityCounts) -> usize {
 }
 
 // Fixed SVG coordinate spaces; CSS scales them down responsively (max-width:100%).
-const COMPLIANCE_VW: f64 = 480.0;
-const COMPLIANCE_ROW_H: i32 = 42;
 const SEV_TRACK: f64 = 600.0;
 const AGE_FULL_H: f64 = 120.0;
 const AGE_BAR_W: i32 = 64;
@@ -55,7 +54,7 @@ const AGE_GAP: i32 = 22;
 
 /// Linear bar length: `value/max` of `track` px, guarding a zero/empty max and
 /// clamping so an out-of-range value never overshoots the track.
-fn bar_width_px(value: f64, max: f64, track: f64) -> f64 {
+pub(crate) fn bar_width_px(value: f64, max: f64, track: f64) -> f64 {
     if max <= 0.0 {
         0.0
     } else {
@@ -72,14 +71,8 @@ fn bar_height_px(count: usize, max: usize, full: f64) -> f64 {
     }
 }
 
-/// Within SLA bar fill class, by `util::PCT_BANDS`: 95% or more, 80% to under 95%,
-/// under 80%.
-fn compliance_fill_class(pct: f64) -> &'static str {
-    util::pct_band_class(pct)
-}
-
-/// The key under every Within SLA bar chart: what each bar colour means.
-fn pct_legend() -> impl IntoView {
+/// The key to the Within SLA bars in the compliance tables: what each colour means.
+pub(crate) fn pct_legend() -> impl IntoView {
     view! {
         <ul class="chart-legend">
             {util::PCT_BANDS
@@ -171,16 +164,12 @@ pub(crate) fn severity_breakdown(c: &SeverityCounts) -> Vec<(&'static str, &'sta
         .collect()
 }
 
-/// The compliance overview charts (compliance / severity / age) shown at the top of
-/// the Compliance tab, above the per-org table. The caller gates on a query result.
+/// The compliance overview charts (severity / age) shown side by side near the top
+/// of the Compliance tab. The caller gates on a query result.
 #[component]
 pub(crate) fn ComplianceCharts() -> impl IntoView {
     view! {
         <div class="charts">
-            <div class="chart-card">
-                <h3 class="chart-title">"Within SLA by organization"</h3>
-                <ComplianceBars/>
-            </div>
             <div class="chart-card">
                 <h3 class="chart-title">"Pending patches by severity"</h3>
                 <SeverityBreakdown/>
@@ -190,112 +179,6 @@ pub(crate) fn ComplianceCharts() -> impl IntoView {
                 <AgeHistogram/>
             </div>
         </div>
-    }
-}
-
-/// Renders the horizontal compliance-bar SVG from `(label, pct)` pairs — shared by the
-/// per-organization and per-OS compliance charts.
-fn compliance_bars(title: &str, items: Vec<(String, f64)>) -> AnyView {
-    if items.is_empty() {
-        return view! { <p class="empty">"No compliance data."</p> }.into_any();
-    }
-    let h = items.len() as i32 * COMPLIANCE_ROW_H;
-    let aria = util::chart_label(
-        title,
-        &items
-            .iter()
-            .map(|(label, pct)| (label.clone(), format_pct(*pct)))
-            .collect::<Vec<_>>(),
-    );
-    view! {
-        <svg
-            class="chart"
-            role="img"
-            aria-label=aria
-            width=COMPLIANCE_VW.to_string()
-            height=h.to_string()
-            viewBox=format!("0 0 {COMPLIANCE_VW:.0} {h}")
-        >
-            {items
-                .into_iter()
-                .enumerate()
-                .map(|(i, (label, pct))| {
-                    let y0 = i as i32 * COMPLIANCE_ROW_H;
-                    let label_y = (y0 + 14).to_string();
-                    let bar_y = (y0 + 20).to_string();
-                    let w = format!("{:.1}", bar_width_px(pct, 100.0, COMPLIANCE_VW));
-                    let fill = compliance_fill_class(pct);
-                    view! {
-                        <g>
-                            <text x="0" y=label_y.clone() class="chart-lbl">
-                                {label}
-                            </text>
-                            <text
-                                x=COMPLIANCE_VW.to_string()
-                                y=label_y
-                                text-anchor="end"
-                                class="chart-val"
-                            >
-                                {format_pct(pct)}
-                            </text>
-                            <rect
-                                class="chart-track"
-                                x="0"
-                                y=bar_y.clone()
-                                width=COMPLIANCE_VW.to_string()
-                                height="10"
-                                rx="5"
-                            ></rect>
-                            <rect class=fill x="0" y=bar_y width=w height="10" rx="5"></rect>
-                        </g>
-                    }
-                })
-                .collect_view()}
-        </svg>
-        {pct_legend()}
-    }
-    .into_any()
-}
-
-#[component]
-fn ComplianceBars() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    view! {
-        {move || {
-            let items = state.query.result.with(|r| {
-                r.as_ref()
-                    .map(|r| {
-                        r.compliance
-                            .iter()
-                            .map(|b| (b.organization.clone(), b.within_sla_pct))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            });
-            compliance_bars("Within SLA by organization", items)
-        }}
-    }
-}
-
-/// Per-OS compliance bars (the "Compliance by OS" section). Same shape as the per-org
-/// bars, reading the `compliance_by_os` rollup.
-#[component]
-pub(crate) fn ComplianceByOsBars() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    view! {
-        {move || {
-            let items = state.query.result.with(|r| {
-                r.as_ref()
-                    .map(|r| {
-                        r.compliance_by_os
-                            .iter()
-                            .map(|b| (b.os.clone(), b.within_sla_pct))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            });
-            compliance_bars("Within SLA by OS", items)
-        }}
     }
 }
 
@@ -450,7 +333,7 @@ fn AgeHistogram() -> impl IntoView {
                             view! {
                                 <g>
                                     <rect
-                                        class="bar-good"
+                                        class="age-bar"
                                         x=x.to_string()
                                         y=format!("{y:.1}")
                                         width=AGE_BAR_W.to_string()
@@ -504,13 +387,6 @@ mod tests {
         assert_eq!(bar_height_px(0, 0, 100.0), 0.0, "empty histogram → no bar");
         assert_eq!(bar_height_px(5, 10, 100.0), 50.0);
         assert_eq!(bar_height_px(10, 10, 80.0), 80.0);
-    }
-
-    #[test]
-    fn compliance_fill_class_thresholds() {
-        assert_eq!(compliance_fill_class(96.0), "bar-good");
-        assert_eq!(compliance_fill_class(85.0), "bar-warn");
-        assert_eq!(compliance_fill_class(50.0), "bar-bad");
     }
 
     #[test]

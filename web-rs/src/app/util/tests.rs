@@ -3940,7 +3940,7 @@ fn the_within_sla_bands_match_their_colours() {
     let css = include_str!("../../../styles.css");
     for (_, _, class) in PCT_BANDS {
         for selector in [
-            format!(".chart .{class}"),
+            format!(".pct-bar__fill.{class}"),
             format!(".chart-swatch.{class}"),
             format!(".kpi-value.{class}"),
         ] {

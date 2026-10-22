@@ -369,14 +369,18 @@ impl AppState {
                         ))
                         .with_action(ToastAction::ViewJobs),
                     );
-                    self.actions.watched.update(|w| {
-                        w.push(util::WatchedBatch {
-                            job_ids: batch.jobs.iter().map(|j| j.id).collect(),
-                            label,
-                            dry_run,
-                        })
-                    });
-                    self.announce_settled_batches();
+                    // A batch already settled as it returned (every device skipped,
+                    // say) is said by the toast above; watching it would only announce
+                    // it later, on some unrelated job's update.
+                    if batch.jobs.iter().any(|j| !j.state.is_terminal()) {
+                        self.actions.watched.update(|w| {
+                            w.push(util::WatchedBatch {
+                                job_ids: batch.jobs.iter().map(|j| j.id).collect(),
+                                label,
+                                dry_run,
+                            })
+                        });
+                    }
                 }
                 // Kept in the dialog, which stays open: a toast behind the overlay
                 // vanished after a few seconds and left a Run button that could
@@ -400,22 +404,28 @@ impl AppState {
         });
     }
 
-    /// Announces each watched dispatch whose jobs have all settled. Called after
-    /// every merge of job rows. The toast slot holds one message, so an error on
-    /// screen is not replaced by an announcement — the Jobs tab still has the rows.
+    /// Announces every watched dispatch whose jobs have all settled, in one toast.
+    /// Called after every merge of job rows. The toast slot holds one message, so
+    /// an error on screen is not replaced: the batches stay watched and this tries
+    /// again once the error has had its time.
     pub(in crate::app) fn announce_settled_batches(self) {
+        let error_showing = self
+            .ui
+            .toast
+            .with_untracked(|t| t.as_ref().is_some_and(|t| t.error));
+        if error_showing {
+            gloo_timers::callback::Timeout::new(12_500, move || self.announce_settled_batches())
+                .forget();
+            return;
+        }
         let mut done = Vec::new();
         self.actions.jobs.with_untracked(|jobs| {
             self.actions
                 .watched
                 .update(|w| done = util::take_finished_batches(w, jobs));
         });
-        let error_showing = self
-            .ui
-            .toast
-            .with_untracked(|t| t.as_ref().is_some_and(|t| t.error));
-        if let Some(msg) = done.pop().filter(|_| !error_showing) {
-            self.notify(Toast::ok(msg).with_action(ToastAction::ViewJobs));
+        if !done.is_empty() {
+            self.notify(Toast::ok(done.join(" ")).with_action(ToastAction::ViewJobs));
         }
     }
 

@@ -272,6 +272,15 @@ what is still in flight. The empty Failures tab offers "Include failed installs 
 query never asked for them. "Changes since …" is one strip: the three counts open their lists
 below it, and its caveats stay printed under it.
 
+**Compliance is one page with jump links.** Read for a report, it is wanted in one scroll, so it
+stays one page; a strip of section links (`SectionJumps`, buttons calling `scroll_into_view` —
+an `href="#…"` would overwrite the web demo's view code in the URL fragment) reaches each part.
+The Within SLA % cell draws its band-coloured bar (`.pct-bar__fill.bar-*`, held to `PCT_BANDS` by
+`the_within_sla_bands_match_their_colours`) instead of a bar chart above each table repeating the
+column, and the severity and age charts share a row. The definitions stay in "How these numbers
+are calculated"; above it only the SLA windows and the scope note (which every surface prints)
+remain.
+
 **Filters.** Two bars, placed where they act. The **scope bar** under the top bar holds the device
 scope and the patch Type — every tab honours them — as compact pickers (`filters::Picker`, generic
 over `util::Named`, so the id-keyed lookups and the value/label choices share one control). The
