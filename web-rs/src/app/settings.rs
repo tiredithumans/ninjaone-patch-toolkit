@@ -14,10 +14,15 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
     // back to the Settings button on close.
     let (dialog, on_tab) = modal::focus_trap();
     let close = move || state.ui.show_settings.set(false);
-    // Escape closes it — unless the update splash is open over it, which handles
-    // its own Escape; both listeners see the same key press.
+    // Escape closes it — unless the update splash is open over it. Both listeners
+    // see the same key press, and the splash's (registered at launch) runs first
+    // and clears `update`, so it marks the press spent rather than leave this one
+    // to read a splash that is already gone.
     let esc = window_event_listener(leptos::ev::keydown, move |ev| {
-        if ev.key() == "Escape" && state.updates.update.get_untracked().is_none() {
+        if ev.key() == "Escape"
+            && !ev.default_prevented()
+            && state.updates.update.get_untracked().is_none()
+        {
             close();
         }
     });

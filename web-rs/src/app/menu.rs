@@ -135,6 +135,13 @@ pub(crate) fn Popover(
 ) -> impl IntoView {
     let root: NodeRef<Div> = NodeRef::new();
     dismiss_on_outside(open, root);
+    // Closed when its button goes disabled (the selection cleared, the bar blocked),
+    // rather than left open over controls that no longer apply.
+    Effect::new(move |_| {
+        if disabled.get() {
+            open.set(false);
+        }
+    });
     // Which way the panel opens, decided as it opens: toward the side of the
     // window with room. The action bar wraps, so the same button sits at the left
     // edge of one window and the right edge of another, and a panel opening the

@@ -26,6 +26,9 @@ pub(crate) fn UpdateSplash() -> impl IntoView {
             && !state.updates.update_busy.get_untracked()
         {
             state.updates.update.set(None);
+            // Spent: Settings, open under the splash, must not take this same
+            // Escape as its own and close too.
+            ev.prevent_default();
         }
     });
     view! {
