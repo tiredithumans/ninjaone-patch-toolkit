@@ -54,6 +54,11 @@ impl AppState {
         f.patch_type.track();
         f.statuses.track();
         f.install_days.track();
+        // `current_filter` reads the custom install range too; untracked, the web
+        // demo's URL fragment kept a stale range until another control moved.
+        f.install_custom.track();
+        f.install_after_date.track();
+        f.install_before_date.track();
         self.ui.active_tab.track();
         self.query.group_by.track();
         self.query.patches_sort.track();
