@@ -11,6 +11,19 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- Patch rows mark patches whose install usually needs a restart (Linux kernel and core libraries,
+  Windows cumulative updates, macOS updates) as "reboot likely", and exports add a Reboot Expected
+  column.
+- The Needs Reboot list, the Devices sheet and device details show NinjaOne's reason for a
+  pending reboot.
+
+### Fixed
+
+- The export's Needs Reboot column is now Device Reboot Pending: it reports whether the device is
+  waiting on a reboot, not whether that patch needs one.
+
 ## [0.19.1] - 2026-10-22
 
 ### Fixed

@@ -65,6 +65,7 @@ fn result_with_devices(names: &[&str]) -> QueryResult {
                 os_name: None,
                 node_class: None,
                 needs_reboot: false,
+                reboot_likely: false,
                 offline: false,
                 patch_type: "OS",
                 kb: None,
@@ -557,6 +558,60 @@ async fn concurrent_cold_fetches_collapse_onto_one_request() {
         1,
         "the second caller must wait on the first fetch, not start its own"
     );
+}
+
+/// The inventory carries NinjaOne's reboot reason from `/queries/device-health`,
+/// and a health feed the token cannot read costs the reasons, never the inventory.
+#[tokio::test]
+async fn the_inventory_carries_reboot_reasons_and_survives_a_health_failure() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let inventory = || {
+        Mock::given(method("GET"))
+            .and(path("/api/v2/devices-detailed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": 1, "systemName": "web-01", "os": { "needsReboot": true } },
+                { "id": 2, "systemName": "web-02" }
+            ])))
+    };
+
+    let server = MockServer::start().await;
+    inventory().mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/device-health"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "results": [
+                { "deviceId": 1, "pendingRebootReason": "Windows Update", "alertCount": 2 },
+                { "deviceId": 2, "activeJobCount": 0 }
+            ],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+    let devices = AppState::seeded(server.uri())
+        .fleet_devices(None)
+        .await
+        .expect("inventory");
+    let reasons: Vec<Option<&str>> = devices
+        .iter()
+        .map(|d| d.pending_reboot_reason.as_deref())
+        .collect();
+    assert_eq!(reasons, [Some("Windows Update"), None]);
+
+    let forbidden = MockServer::start().await;
+    inventory().mount(&forbidden).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/device-health"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&forbidden)
+        .await;
+    let devices = AppState::seeded(forbidden.uri())
+        .fleet_devices(None)
+        .await
+        .expect("a health failure must not fail the inventory");
+    assert_eq!(devices.len(), 2);
+    assert!(devices.iter().all(|d| d.pending_reboot_reason.is_none()));
 }
 
 #[test]

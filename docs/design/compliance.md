@@ -519,6 +519,31 @@ fleet — and the wiremock fixtures fed `releaseDate`, so CI proved only that th
 rather than inflating `181+ days`; they still count as aged in the SLA rollup (`unwrap_or(true)`
 — can't prove recent).
 
+## There is no per-patch reboot field in the NinjaOne API
+
+`DeviceOSPatch` and `DeviceSoftwarePatch` say nothing about reboots. The only signal is the
+device's `os.needsReboot`, which turns on *after* an install. The detail export once headed that
+flag "Needs Reboot" on every row, so a pending Linux kernel update read "No" until it was
+installed. The rows now carry two flags:
+
+- `PatchRow.needs_reboot` is the device's flag, exported as **Device Reboot Pending**. NinjaOne's
+  free-form `pendingRebootReason` comes from `/queries/device-health`. It is fetched inside the
+  device-inventory cache fill (same TTL, same `invalidate_fleet_devices`), and a failure costs the
+  reasons, never the query. It is shown verbatim on the Needs Reboot list, the Devices sheet and
+  the drill-down.
+- `PatchRow.reboot_likely` is `rows::reboot_likely`, a per-patch estimate from the name, OS rows
+  only, keyed by the device's `nodeClass` family. It covers Linux kernel and core-library
+  packages (the RHEL `needs-restarting -r` and Debian `reboot-required` lists, normalized from
+  NEVRA/Debian spellings, minus headers, devel and tools), Windows cumulative, rollup,
+  servicing-stack and feature updates, and macOS system updates. It answers **Likely or blank,
+  never No**, because a name it does not recognize says nothing, and printing "No" for it would
+  repeat the bug. It is memoized per (family, title) in the join. `PatchGroup.reboot_likely` is
+  any member's, for every grouping.
+
+Both are defined once in `rows::REBOOT_COLUMN_NOTES`, which feeds the About sheet's Definitions
+block (the Patches sheet streams, so it has no footnotes) and the chips' tooltips through the
+`web-rs` mirror pinned by `the_wording_matches_the_backend`.
+
 ## This app keeps its own first-seen record
 
 `timestamp` is "Date/Time when data was collected/updated", and nothing in the spec says whether

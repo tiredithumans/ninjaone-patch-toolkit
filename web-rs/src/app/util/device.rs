@@ -41,11 +41,18 @@ pub(crate) fn device_facts(d: &DeviceSummary) -> Vec<(&'static str, String)> {
             if d.offline { "Offline" } else { "Online" }.to_string(),
         ),
         ("Last contact", or_dash(&d.last_contact)),
-        (
-            "Needs reboot",
-            if d.needs_reboot { "Yes" } else { "No" }.to_string(),
-        ),
+        ("Needs reboot", needs_reboot_label(d)),
     ]
+}
+
+/// "Yes — <NinjaOne's reason>" when the device reports why, so the drill-down says
+/// what is waiting on the reboot rather than only that something is.
+fn needs_reboot_label(d: &DeviceSummary) -> String {
+    match (d.needs_reboot, d.reboot_reason.as_deref().map(str::trim)) {
+        (true, Some(reason)) if !reason.is_empty() => format!("Yes \u{2014} {reason}"),
+        (true, _) => "Yes".to_string(),
+        (false, _) => "No".to_string(),
+    }
 }
 
 /// Whether a counted device is Within SLA — "Yes", or "No — 3 pending past SLA" —

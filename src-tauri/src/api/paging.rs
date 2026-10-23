@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use super::{NinjaApiClient, ReplaySafety};
 use crate::error::truncate_body;
-use crate::model::{Device, Location, Organization, Patch, Role};
+use crate::model::{Device, DeviceHealth, Location, Organization, Patch, Role};
 
 pub(super) const DEFAULT_PAGE_SIZE: u32 = 500;
 /// Page size for the high-volume `/queries/*` reporting endpoints (patches and
@@ -387,6 +387,13 @@ impl PagedRow for Location {
 impl PagedRow for Role {
     fn row_id(&self) -> Option<i64> {
         Some(self.id)
+    }
+}
+
+impl PagedRow for DeviceHealth {
+    /// `/queries/device-health` pages by cursor; `deviceId` is not a row id.
+    fn row_id(&self) -> Option<i64> {
+        None
     }
 }
 

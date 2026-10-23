@@ -20,7 +20,7 @@ use compliance::ComplianceTab;
 pub(crate) use device::DeviceDetailModal;
 use device::DeviceLink;
 use failures::FailuresTable;
-use patches::PatchesTable;
+use patches::{PatchesTable, reboot_likely_chip};
 use reboot::RebootTable;
 use trend::TrendTab;
 

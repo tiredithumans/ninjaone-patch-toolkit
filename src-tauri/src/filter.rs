@@ -500,6 +500,7 @@ mod tests {
             offline: None,
             os: None,
             last_contact: None,
+            pending_reboot_reason: None,
         }
     }
 

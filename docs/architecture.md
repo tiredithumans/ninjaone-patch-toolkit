@@ -38,6 +38,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── join.rs                  # device↔patch join, Interner, DeviceLabels, build_rows
 │   ├── compliance.rs            # compliance / by-OS / per-device rollups (build_device_summaries), rollup_device, scope note, SlaCutoffs
 │   ├── record.rs                # PatchRecord: the per-record view (severity, pending, effective first seen) every rollup reads
+│   ├── reboot.rs                # reboot_likely: the per-patch reboot estimate from the patch name (the API has no reboot field)
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
 │   ├── backlog.rs · install_time.rs  # worst devices / offline backlog; first seen → installed median
 │   ├── groups.rs                # grouping, sorting, paging, device_detail, rows_by_device over the cache

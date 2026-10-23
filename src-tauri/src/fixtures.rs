@@ -34,12 +34,13 @@ use crate::model::{Device, Location, Organization, OsInfo, Patch, PatchStatus, R
 use crate::rows::{
     ComplianceBucket, DeviceBacklog, DeviceSummary, FirstSeenTracking, GroupBy, InstallLatency,
     InstallWindow, LookupMaps, OFFLINE_BACKLOG_NOTE, OsCompliance, PCT_BANDS, PatchFamilies,
-    PatchRecord, PatchSource, QueryResult, QuerySummary, SlaCutoffs, StuckDevice, TableColumn,
-    WORST_DEVICES_NOTE, build_age_buckets, build_approval_backlog, build_compliance,
-    build_compliance_by_os, build_device_backlogs, build_device_summaries, build_failures,
-    build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
-    calculation_notes, compliance_scope_note, device_detail, headline_figures, page_rows,
-    rows_by_device, slice_groups, sort_device_summaries, uncounted_orgs, uncounted_orgs_note,
+    PatchRecord, PatchSource, QueryResult, QuerySummary, REBOOT_COLUMN_NOTES, SlaCutoffs,
+    StuckDevice, TableColumn, WORST_DEVICES_NOTE, build_age_buckets, build_approval_backlog,
+    build_compliance, build_compliance_by_os, build_device_backlogs, build_device_summaries,
+    build_failures, build_groups, build_query_scope, build_rows, build_severity_by_org,
+    build_time_to_install, calculation_notes, compliance_scope_note, device_detail,
+    headline_figures, page_rows, rows_by_device, slice_groups, sort_device_summaries,
+    uncounted_orgs, uncounted_orgs_note,
 };
 use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaExempt, SlaPolicy};
 
@@ -125,6 +126,7 @@ fn device(id: i64, name: &str, class: &str, os: &str, offline: bool) -> Device {
             needs_reboot: Some(true),
         }),
         last_contact: Some(days_ago(1)),
+        pending_reboot_reason: None,
     }
 }
 
@@ -247,7 +249,10 @@ fn ipc_fixture_is_current() {
     // One device per `RollupScope`: included, offline, and online but unpatchable;
     // and a second organization whose only device is offline.
     let devices = [
-        device(1, "web-01", "WINDOWS_SERVER", "Windows Server 2022", false),
+        Device {
+            pending_reboot_reason: Some("Windows Update".into()),
+            ..device(1, "web-01", "WINDOWS_SERVER", "Windows Server 2022", false)
+        },
         device(2, "web-02", "WINDOWS_SERVER", "Windows Server 2022", true),
         device(3, "core-sw-01", "NMS_SWITCH", "Cisco IOS XE", false),
         Device {
@@ -721,6 +726,7 @@ fn ipc_fixture_is_current() {
             ),
             "worstDevicesNote": WORST_DEVICES_NOTE,
             "offlineBacklogNote": OFFLINE_BACKLOG_NOTE,
+            "rebootColumnNotes": REBOOT_COLUMN_NOTES,
             "pctBands": PCT_BANDS.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
             "columns": {
                 "compliance": headers(&ComplianceBucket::COLUMNS),

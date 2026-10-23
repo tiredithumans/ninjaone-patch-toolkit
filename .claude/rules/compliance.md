@@ -57,6 +57,10 @@ Violating these silently misreports a fleet.
   → `docs/design/compliance.md#a-percentage-never-rounds-up-to-100`
 - **There is no patch release date in the API.** `PatchRecord::first_seen` is detection time; keep
   "First seen" / "since first seen" naming; fixtures must emit `timestamp`.
+- **There is no per-patch reboot field.** `PatchRow.needs_reboot` is the device's flag (exported
+  "Device Reboot Pending"); `reboot_likely` is `rows::reboot_likely`'s name-based estimate, OS rows
+  only, Likely or blank, never No. Both are defined in `rows::REBOOT_COLUMN_NOTES`.
+  → `docs/design/compliance.md#there-is-no-per-patch-reboot-field-in-the-ninjaone-api`
 - **First seen is the earlier of NinjaOne's time and `crate::first_seen`'s record** (identity
   `changes::write_patch_key`; undated stays undated; merged from the whole fetched feed per family
   at its own fetch time; saved only on `StoreOutcome::Stored`; offline devices carried over).

@@ -1063,6 +1063,7 @@ mod tests {
                 os_name: Some("Windows Server 2022".into()),
                 node_class: None,
                 needs_reboot: true,
+                reboot_reason: None,
                 offline: false,
                 pending_count: 3,
                 rollup_scope: crate::rows::RollupScope::Included,

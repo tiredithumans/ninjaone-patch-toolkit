@@ -41,6 +41,7 @@
           "unknown": 0
         },
         "pendingCount": 3,
+        "rebootReason": "Windows Update",
         "rollupScope": "included",
         "urgentPastSla": 2
       },
@@ -63,6 +64,7 @@
           "osName": "Windows Server 2022",
           "patchType": "OS",
           "productIdentifier": null,
+          "rebootLikely": true,
           "severity": "Critical",
           "severityRank": 7,
           "status": "PENDING"
@@ -92,6 +94,7 @@
             "osName": "Windows Server 2022",
             "patchType": "OS",
             "productIdentifier": null,
+            "rebootLikely": true,
             "severity": "Critical",
             "severityRank": 7,
             "status": "PENDING"
@@ -109,6 +112,7 @@
           "label": "web-01",
           "needsReboot": true,
           "offline": false,
+          "rebootLikely": true,
           "rows": 5,
           "severity": "Critical",
           "severityRank": 7,
@@ -121,6 +125,7 @@
           "label": "web-02",
           "needsReboot": true,
           "offline": true,
+          "rebootLikely": true,
           "rows": 1,
           "severity": "Critical",
           "severityRank": 7,
@@ -148,6 +153,7 @@
         "osName": "Windows Server 2022",
         "patchType": "OS",
         "productIdentifier": null,
+        "rebootLikely": true,
         "severity": "Critical",
         "severityRank": 7,
         "status": "PENDING"
@@ -170,6 +176,7 @@
         "osName": "Windows Server 2022",
         "patchType": "OS",
         "productIdentifier": null,
+        "rebootLikely": false,
         "severity": "Important",
         "severityRank": 6,
         "status": "APPROVED"
@@ -890,6 +897,7 @@
             "unknown": 0
           },
           "pendingCount": 0,
+          "rebootReason": null,
           "rollupScope": "nonPatchable",
           "urgentPastSla": 0
         },
@@ -918,6 +926,7 @@
             "unknown": 0
           },
           "pendingCount": 3,
+          "rebootReason": "Windows Update",
           "rollupScope": "included",
           "urgentPastSla": 2
         },
@@ -946,6 +955,7 @@
             "unknown": 0
           },
           "pendingCount": 1,
+          "rebootReason": null,
           "rollupScope": "offline",
           "urgentPastSla": 0
         },
@@ -974,6 +984,7 @@
             "unknown": 0
           },
           "pendingCount": 0,
+          "rebootReason": null,
           "rollupScope": "offline",
           "urgentPastSla": 0
         }
@@ -997,6 +1008,7 @@
           "osName": "Windows Server 2022",
           "patchType": "OS",
           "productIdentifier": null,
+          "rebootLikely": true,
           "severity": "Critical",
           "severityRank": 7,
           "status": "PENDING"
@@ -1019,6 +1031,7 @@
           "osName": "Windows Server 2022",
           "patchType": "OS",
           "productIdentifier": null,
+          "rebootLikely": false,
           "severity": "Important",
           "severityRank": 6,
           "status": "APPROVED"
@@ -1041,6 +1054,7 @@
           "osName": "Windows Server 2022",
           "patchType": "OS",
           "productIdentifier": null,
+          "rebootLikely": true,
           "severity": "Critical",
           "severityRank": 7,
           "status": "PENDING"
@@ -1063,6 +1077,7 @@
           "osName": "Windows Server 2022",
           "patchType": "SOFTWARE",
           "productIdentifier": "chrome-uuid",
+          "rebootLikely": false,
           "severity": "Recommended",
           "severityRank": 3,
           "status": "PENDING"
@@ -1085,6 +1100,7 @@
           "osName": "Windows Server 2022",
           "patchType": "OS",
           "productIdentifier": null,
+          "rebootLikely": true,
           "severity": "Critical",
           "severityRank": 7,
           "status": "INSTALLED"
@@ -1107,6 +1123,7 @@
           "osName": "Windows Server 2022",
           "patchType": "OS",
           "productIdentifier": null,
+          "rebootLikely": false,
           "severity": "Critical",
           "severityRank": 7,
           "status": "FAILED"
@@ -1491,7 +1508,8 @@
         "Device Role",
         "Device",
         "OS",
-        "Pending Patches"
+        "Pending Patches",
+        "Reboot Reason"
       ],
       "stuck": [
         "Device",
@@ -1548,6 +1566,16 @@
       "95% or more",
       "80% to under 95%",
       "under 80%"
+    ],
+    "rebootColumnNotes": [
+      [
+        "Device Reboot Pending",
+        "NinjaOne reports a reboot waiting on the device now. It is the device's flag, set after an install, so it does not say whether a pending patch will need one."
+      ],
+      [
+        "Reboot Expected",
+        "Likely when the patch name marks a restart: a Linux kernel or core-library package, a Windows cumulative, rollup, servicing-stack or feature update, or a macOS system update. NinjaOne's patch records carry no reboot field, so this is an estimate, and a blank means no signal rather than no reboot."
+      ]
     ],
     "scopeNote": "Compliance covers online Windows, macOS and Linux devices only (2 offline and 1 non-patchable devices excluded).",
     "slaPolicy": "30 days (default); Critical 14 days, Important 30 days, Security 30 days, Moderate 60 days, Recommended 60 days, Low 90 days; no SLA: Optional",

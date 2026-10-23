@@ -137,6 +137,11 @@ pub struct PatchRow {
     /// so both halves read the same field off the same row.
     #[serde(default)]
     pub needs_reboot: bool,
+    /// Whether installing this row's patch is likely to need a reboot — the
+    /// backend's estimate from the patch name (`rows::reboot_likely`). `false` is
+    /// "no signal", not "no reboot"; `needs_reboot` is the device's own flag.
+    #[serde(default)]
+    pub reboot_likely: bool,
     pub patch_type: String,
     pub kb: Option<String>,
     pub name: String,
@@ -175,6 +180,9 @@ pub struct DeviceSummary {
     pub pending_count: usize,
     #[serde(default)]
     pub needs_reboot: bool,
+    /// NinjaOne's `pendingRebootReason`, verbatim.
+    #[serde(default)]
+    pub reboot_reason: Option<String>,
     #[serde(default)]
     pub rollup_scope: RollupScope,
     #[serde(default)]
@@ -561,6 +569,9 @@ pub struct PatchGroup {
     pub severity_rank: u8,
     pub offline: bool,
     pub needs_reboot: bool,
+    /// Whether any member's patch is likely to need a reboot.
+    #[serde(default)]
+    pub reboot_likely: bool,
 }
 
 /// One page of group headers plus the total. Mirrors `rows::GroupPage`.

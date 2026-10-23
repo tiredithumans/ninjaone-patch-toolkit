@@ -188,6 +188,11 @@ pub struct PatchGroup {
     pub device_id: Option<i64>,
     pub offline: bool,
     pub needs_reboot: bool,
+    /// Whether any member row's patch is likely to need a reboot
+    /// ([`PatchRow::reboot_likely`]). Unlike the device state above this has an
+    /// answer for a patch group too: it is a property of the patches, not of one
+    /// device.
+    pub reboot_likely: bool,
 }
 
 /// Builds every group over the cached rows, ordered most-urgent-first.
@@ -209,6 +214,7 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
         device_id: Option<i64>,
         offline: bool,
         needs_reboot: bool,
+        reboot_likely: bool,
         /// Product groups only: each member title and how many rows carry it, for
         /// [`product_display_name`]. Keyed by the rows' shared `Arc`s, so this is
         /// one entry per distinct version, not per row.
@@ -243,6 +249,7 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                         device_id: (r.device_id != ORPHAN_DEVICE_ID).then_some(r.device_id),
                         offline: r.offline,
                         needs_reboot: r.needs_reboot,
+                        reboot_likely: false,
                         titles: HashMap::new(),
                     },
                     // A product group's label and sublabel are settled once every
@@ -259,11 +266,13 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                         device_id: None,
                         offline: false,
                         needs_reboot: false,
+                        reboot_likely: false,
                         titles: HashMap::new(),
                     },
                 }),
         };
         acc.rows += 1;
+        acc.reboot_likely |= r.reboot_likely;
         if group_by == GroupBy::Product && product_of(r).is_some() {
             *acc.titles.entry(Arc::clone(&r.name)).or_default() += 1;
         }
@@ -309,6 +318,7 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 device_id: a.device_id,
                 offline: a.offline,
                 needs_reboot: a.needs_reboot,
+                reboot_likely: a.reboot_likely,
             }
         })
         .collect();

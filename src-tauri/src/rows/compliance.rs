@@ -29,6 +29,9 @@ pub struct DeviceSummary {
     pub os_name: Option<String>,
     pub node_class: Option<String>,
     pub needs_reboot: bool,
+    /// NinjaOne's `pendingRebootReason` for the device ([`Device::pending_reboot_reason`]),
+    /// verbatim.
+    pub reboot_reason: Option<String>,
     /// Carried so the Needs Reboot tab's device selection can count offline targets
     /// before planning — an action against an offline device is queued, not run.
     pub offline: bool,
@@ -128,6 +131,7 @@ pub fn build_device_summaries(
                 os_name: d.os_name(),
                 node_class: d.node_class.clone(),
                 needs_reboot: d.needs_reboot(),
+                reboot_reason: d.pending_reboot_reason.clone(),
                 pending_count: 0,
                 offline: d.is_offline(),
                 rollup_scope: RollupScope::of(d),
@@ -580,7 +584,7 @@ impl DeviceSummary {
     /// report, which previously hardcoded its own `<th>` row and had already
     /// diverged in wording ("Role" vs "Device Role", "Pending patches" vs "Pending
     /// Patches") from the workbook it is meant to mirror.
-    pub const COLUMNS: [TableColumn<DeviceSummary>; 6] = [
+    pub const COLUMNS: [TableColumn<DeviceSummary>; 7] = [
         ("Organization", |d| TableCell::Text(d.organization.clone())),
         ("Location", |d| {
             TableCell::Text(d.location.clone().unwrap_or_default())
@@ -593,6 +597,9 @@ impl DeviceSummary {
             TableCell::Text(d.os_name.clone().unwrap_or_default())
         }),
         ("Pending Patches", |d| TableCell::Count(d.pending_count)),
+        ("Reboot Reason", |d| {
+            TableCell::opt_text(d.reboot_reason.as_deref())
+        }),
     ];
 
     /// The workbook's Devices sheet: one row per in-scope device, with its
@@ -603,7 +610,7 @@ impl DeviceSummary {
     /// current patch records, so a 0 there would read as "clean" when it means
     /// "unknown", which is the exact misreading the exclusion exists to prevent.
     /// The band columns are one per [`SeverityCounts::BANDS`] entry, in its order.
-    pub const DEVICE_COLUMNS: [TableColumn<DeviceSummary>; 21] = [
+    pub const DEVICE_COLUMNS: [TableColumn<DeviceSummary>; 22] = [
         ("Organization", |d| TableCell::text(&d.organization)),
         ("Location", |d| TableCell::opt_text(d.location.as_deref())),
         ("Device Role", |d| {
@@ -637,6 +644,9 @@ impl DeviceSummary {
         }),
         ("Needs Reboot", |d| {
             TableCell::text(if d.needs_reboot { "Yes" } else { "No" })
+        }),
+        ("Reboot Reason", |d| {
+            TableCell::opt_text(d.reboot_reason.as_deref())
         }),
         ("Last Contact", |d| TableCell::DateTime(d.last_contact_ts)),
     ];
