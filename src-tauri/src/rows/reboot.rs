@@ -230,6 +230,31 @@ mod tests {
         }
     }
 
+    /// Spelled exactly as NinjaOne listed a RHEL 9 server's pending OS patches:
+    /// package, a space, then the version-release. The kernel packages that load
+    /// into the running system are likely; the userland built from the same source
+    /// (perf bindings, kernel tools) and unrelated packages are not.
+    #[test]
+    fn a_real_fleets_rhel_9_patch_names_are_classified() {
+        for name in [
+            "kernel-core 5.14.0-687.60.1.el9_8",
+            "kernel-modules-core 5.14.0-687.60.1.el9_8",
+            "kernel-modules 5.14.0-687.60.1.el9_8",
+            "kernel 5.14.0-687.60.1.el9_8",
+        ] {
+            assert!(reboot_likely(OsFamily::Linux, name), "{name:?}");
+        }
+        for name in [
+            "python3-perf 5.14.0-687.60.1.el9_8",
+            "kernel-tools-libs 5.14.0-687.60.1.el9_8",
+            "kernel-tools 5.14.0-687.60.1.el9_8",
+            "expat 2.5.0-6.el9_8.7",
+            "ca-certificates 2026.2.92_v9.0.319-90.3.el9_8",
+        ] {
+            assert!(!reboot_likely(OsFamily::Linux, name), "{name:?}");
+        }
+    }
+
     #[test]
     fn core_runtime_libraries_are_likely() {
         for name in [
