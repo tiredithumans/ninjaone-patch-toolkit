@@ -26,7 +26,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
-tauri-plugin-updater = "2"
+# `zip` (a default feature) only adds a Windows `.zip` and Linux `.AppImage.tar.gz`
+# extract path. Our releases publish bare signed `.exe`/`.msi`/`.AppImage`, so it
+# was dead code that pinned zip 4.x and its extraction advisories.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 anyhow = "1.0"
 # `simd-unsafe` is on by default in 0.23 and is the crate's *only* source of
 # `unsafe`; without it base64 is `#![forbid(unsafe_code)]`. It only accelerates the
