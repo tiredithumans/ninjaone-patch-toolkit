@@ -2339,6 +2339,38 @@ tbody tr:hover {
   padding: 1px 6px;
 }
 
+/* A row's flags beside the device or patch name: "reboot pending", "reboot
+   likely", "job running". */
+td .chip-note {
+  display: inline-block;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+td.patch-name .chip-note {
+  margin: 2px 0 0;
+}
+
+/* NinjaOne reports a job running on the device (`RunningJobChip`). */
+.chip-live {
+  color: var(--info-fg);
+  border-color: var(--info);
+}
+
+/* The Jobs tab's "Running in NinjaOne" section, above the dispatched-jobs list. */
+.live-jobs {
+  margin-bottom: 18px;
+}
+
+.live-jobs .jobs-toolbar {
+  align-items: baseline;
+}
+
+.live-jobs-asof {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .group-members {
   border-top: 1px solid var(--border);
 }

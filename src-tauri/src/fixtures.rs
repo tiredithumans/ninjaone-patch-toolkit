@@ -24,6 +24,7 @@ use crate::commands::actions::{
 };
 use crate::commands::auth::AuthStatus;
 use crate::commands::diagnostics::AuditRecord;
+use crate::commands::live_jobs::{RunningJobs, running_job_rows};
 use crate::commands::lookups::list_node_classes;
 use crate::commands::patches::QueryProgressEvent;
 use crate::commands::settings::SettingsView;
@@ -32,6 +33,7 @@ use crate::filter::FilterParams;
 use crate::history::RunRecord;
 use crate::model::{
     Device, DeviceGroup, Location, Organization, OsInfo, Patch, PatchStatus, RebootMode, Role,
+    RunningJob,
 };
 use crate::rows::{
     ComplianceBucket, DeviceBacklog, DeviceSummary, FirstSeenTracking, GroupBy, InstallLatency,
@@ -636,6 +638,23 @@ fn ipc_fixture_is_current() {
             "list_locations": locations,
             "list_roles": roles,
             "list_device_groups": device_groups,
+            "list_running_jobs": RunningJobs {
+                fetched_at: FIXTURE_NOW.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                jobs: running_job_rows(
+                    vec![RunningJob {
+                        uid: Some("0d1e3c8a-6f0b-4b7e-9c51-2a7b8d9e0f11".into()),
+                        device_id: Some(1),
+                        job_type: Some("PATCH_MANAGEMENT".into()),
+                        job_status: Some("IN_PROCESS".into()),
+                        subject: Some("OS patch installation".into()),
+                        message: Some("Installing updates".into()),
+                        source_name: Some("Patch window".into()),
+                        create_time: Some(days_ago(0) - 600.0),
+                        update_time: Some(days_ago(0) - 60.0),
+                    }],
+                    &result.devices,
+                ),
+            },
             "list_node_classes": list_node_classes(),
             "query_patches": QuerySummary::from_result(&result, 100),
             "get_patch_rows": page_rows(&result.rows, None, 0, 2),

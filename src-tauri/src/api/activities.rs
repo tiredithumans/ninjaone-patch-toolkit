@@ -2,8 +2,9 @@
 //!
 //! NinjaOne v2 has **no script-output endpoint**, so a job is resolved from the
 //! activity feed, which carries the terminal state plus an exit code. (`/jobs`
-//! would only report what is still in flight — the *absence* of a terminal
-//! activity already tells us that, so polling it too would buy nothing.)
+//! only reports what is still in flight — the *absence* of a terminal activity
+//! already tells us that, so it is never a resolution source. It is read for the
+//! live job status display alone; see `api::jobs`.)
 
 use anyhow::{Result, bail};
 use serde_json::Value;

@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod activities;
 pub mod devices;
+pub mod jobs;
 pub mod lookups;
 mod paging;
 pub mod patches;

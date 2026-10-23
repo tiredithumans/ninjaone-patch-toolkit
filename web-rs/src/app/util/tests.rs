@@ -496,6 +496,7 @@ fn only_groups_still_listed_are_reopened() {
         devices: 0,
         severity: String::new(),
         severity_rank: 0,
+        device_id: None,
         offline: false,
         needs_reboot: false,
         reboot_likely: false,

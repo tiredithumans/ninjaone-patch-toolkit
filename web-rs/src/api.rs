@@ -431,6 +431,7 @@ ipc!(
 );
 
 ipc!(list_jobs() -> Vec<JobReport>);
+ipc!(list_running_jobs() -> RunningJobs);
 ipc!(clear_jobs() -> Vec<JobReport>);
 ipc!(list_scripts() -> Vec<ScriptSummary>);
 ipc!(list_run_as_options(device_id: i64) -> RunAsOptions);

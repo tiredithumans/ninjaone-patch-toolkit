@@ -59,6 +59,8 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   and every send attempt (retries too, via `with_send_guard`) re-checks the `JobSession`
   sampled before the first `.await`.
   → `docs/design/actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim`
+- **`/jobs` is display-only** (`commands::live_jobs`, polled by `util::live_jobs_due`), never a
+  resolution source. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 - **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`,
   at most `MAX_FEED_READS_IN_FLIGHT` in flight): `statusCode` is lifecycle, `activityResult` is
   the verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is

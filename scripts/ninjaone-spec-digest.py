@@ -32,6 +32,7 @@ PATHS = [
     "/devices-detailed",
     "/group/{id}/device-ids",
     "/groups",
+    "/jobs",
     "/locations",
     "/organizations",
     "/queries/device-health",
@@ -54,6 +55,7 @@ SCHEMAS = [
     "DeviceOSPatch",
     "DeviceSoftwarePatch",
     "Group",
+    "Job",
     "Location",
     "NodeRole",
     "OSPatchReport",
@@ -74,6 +76,7 @@ SCHEMAS = [
 # one it does send moved unwatched.
 BRANCHED_FIELDS = [
     "severity", "impact", "status", "type", "activityResult", "statusCode", "rebootMode",
+    "jobType", "jobStatus",
 ]
 
 

@@ -11,6 +11,7 @@ mod changes;
 mod compliance;
 mod device;
 mod failures;
+mod live_jobs;
 mod patches;
 mod reboot;
 mod trend;
@@ -20,6 +21,7 @@ use compliance::ComplianceTab;
 pub(crate) use device::DeviceDetailModal;
 use device::DeviceLink;
 use failures::FailuresTable;
+use live_jobs::{DeviceRunningJobs, LiveJobsPanel, RunningJobChip};
 use patches::{PatchesTable, reboot_likely_chip};
 use reboot::RebootTable;
 use trend::TrendTab;
@@ -183,7 +185,11 @@ pub(crate) fn Results() -> impl IntoView {
                     Tab::Reboot => view! { <RebootTable/> }.into_any(),
                     Tab::Failures => view! { <FailuresTable/> }.into_any(),
                     Tab::Trend => view! { <TrendTab/> }.into_any(),
-                    Tab::Jobs => view! { <JobsTable/> }.into_any(),
+                    Tab::Jobs => view! {
+                        <LiveJobsPanel/>
+                        <JobsTable/>
+                    }
+                        .into_any(),
                 }}
             </div>
         </section>

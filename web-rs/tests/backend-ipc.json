@@ -614,6 +614,23 @@
         "loggedonuser"
       ]
     },
+    "list_running_jobs": {
+      "fetchedAt": "2026-07-01 12:00:00 UTC",
+      "jobs": [
+        {
+          "detail": "OS patch installation",
+          "deviceId": 1,
+          "deviceName": "web-01",
+          "jobType": "OS patching",
+          "organization": "Contoso",
+          "sourceName": "Patch window",
+          "startedAt": "2026-07-01 11:50 UTC",
+          "status": "In progress",
+          "uid": "0d1e3c8a-6f0b-4b7e-9c51-2a7b8d9e0f11",
+          "updatedAt": "2026-07-01 11:59 UTC"
+        }
+      ]
+    },
     "list_scripts": [
       {
         "acceptsDryRun": true,
