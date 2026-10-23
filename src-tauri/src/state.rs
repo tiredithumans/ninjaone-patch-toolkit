@@ -12,7 +12,7 @@ use crate::api::{NinjaApiClient, ProgressFn};
 use crate::auth::AuthState;
 #[cfg(test)]
 use crate::model::PatchRow;
-use crate::model::{Device, Location, Organization, Patch, Role};
+use crate::model::{Device, Location, Organization, Patch, Role, apply_reboot_reasons};
 #[cfg(test)]
 use crate::rows::sort_order;
 use crate::rows::{GroupBy, PatchGroup, QueryResult, RowSort};
@@ -488,8 +488,22 @@ impl AppState {
         let key = self.tenant_key();
         let (devices, _) = self
             .fleet_devices_cache
-            .get_or_fetch(&key, DEVICE_TTL, "device inventory", || {
-                self.api.devices(None, on_progress)
+            .get_or_fetch(&key, DEVICE_TTL, "device inventory", || async {
+                // Fetched with the inventory so the reboot reasons share its TTL and
+                // its invalidation after a reboot. Only the inventory is required: a
+                // health feed the token cannot read costs the reasons, not the query.
+                let (devices, health) = tokio::join!(
+                    self.api.devices(None, on_progress),
+                    self.api.device_health()
+                );
+                let mut devices = devices?;
+                match health {
+                    Ok(health) => apply_reboot_reasons(&mut devices, health),
+                    Err(e) => {
+                        warn!(error = %e, "device health fetch failed; reboot reasons omitted")
+                    }
+                }
+                Ok(devices)
             })
             .await?;
         Ok(devices)

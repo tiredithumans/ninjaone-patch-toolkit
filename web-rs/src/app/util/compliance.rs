@@ -61,6 +61,29 @@ pub(crate) const WORST_DEVICES_NOTE: &str = "Online Windows, macOS and Linux dev
      ranked by pending patches past their severity's SLA (every severity that has one), then \
      by the most urgent backlog.";
 
+/// What the two reboot flags on a patch row mean. Mirrors
+/// `rows::REBOOT_COLUMN_NOTES`, which defines the export's columns of the same names.
+pub(crate) const REBOOT_COLUMN_NOTES: [(&str, &str); 2] = [
+    (
+        "Device Reboot Pending",
+        "NinjaOne reports a reboot waiting on the device now. It is the device's flag, set \
+         after an install, so it does not say whether a pending patch will need one.",
+    ),
+    (
+        "Reboot Expected",
+        "Likely when the patch name marks a restart: a Linux kernel or core-library package, \
+         a Windows cumulative, rollup, servicing-stack or feature update, or a macOS system \
+         update. NinjaOne's patch records carry no reboot field, so this is an estimate, and a \
+         blank means no signal rather than no reboot.",
+    ),
+];
+
+/// The "reboot pending" chip's tooltip.
+pub(crate) const REBOOT_PENDING_HELP: &str = REBOOT_COLUMN_NOTES[0].1;
+
+/// The "reboot likely" chip's tooltip.
+pub(crate) const REBOOT_LIKELY_HELP: &str = REBOOT_COLUMN_NOTES[1].1;
+
 /// One headline figure. Mirrors `rows::HeadlineFigure`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Kpi {

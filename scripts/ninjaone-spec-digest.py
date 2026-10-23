@@ -32,6 +32,7 @@ PATHS = [
     "/devices-detailed",
     "/locations",
     "/organizations",
+    "/queries/device-health",
     "/queries/os-patch-installs",
     "/queries/os-patches",
     "/queries/software-patch-installs",
@@ -47,6 +48,7 @@ PATHS = [
 # out of scope by construction rather than by filtering after the fact.
 SCHEMAS = [
     "Activity",
+    "DeviceHealthSummary",
     "DeviceOSPatch",
     "DeviceSoftwarePatch",
     "Location",

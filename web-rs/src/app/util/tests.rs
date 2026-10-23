@@ -261,6 +261,7 @@ fn sortable(device: &str, sev: &str, installed: Option<&str>) -> PatchRow {
         os_name: None,
         offline: false,
         needs_reboot: false,
+        reboot_likely: false,
         patch_type: "OS".into(),
         kb: None,
         name: "Patch".into(),
@@ -282,6 +283,7 @@ fn sel_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, ty: &str)
         os_name: None,
         offline: false,
         needs_reboot: false,
+        reboot_likely: false,
         patch_type: ty.into(),
         kb: kb.map(Into::into),
         name: name.into(),
@@ -496,6 +498,7 @@ fn only_groups_still_listed_are_reopened() {
         severity_rank: 0,
         offline: false,
         needs_reboot: false,
+        reboot_likely: false,
     };
     let groups = [group("b"), group("a"), group("c")];
     let open: BTreeSet<String> = ["a", "c", "gone"].into_iter().map(String::from).collect();
@@ -3031,6 +3034,7 @@ fn reboot_device(id: i64, name: &str, offline: bool) -> DeviceSummary {
         offline,
         pending_count: 2,
         needs_reboot: true,
+        reboot_reason: None,
         rollup_scope: crate::types::RollupScope::Included,
         pending_by_severity: crate::types::SeverityCounts::default(),
         past_sla: 0,
@@ -3562,6 +3566,7 @@ fn drill_device() -> crate::types::DeviceSummary {
         os_name: Some("Windows Server 2022".into()),
         pending_count: 0,
         needs_reboot: true,
+        reboot_reason: Some("Windows Update".into()),
         offline: false,
         rollup_scope: crate::types::RollupScope::Included,
         pending_by_severity: Default::default(),
@@ -3599,17 +3604,25 @@ fn device_facts_keep_their_shape_when_values_are_missing() {
     };
     assert_eq!(value("Location"), "—");
     assert_eq!(value("Status"), "Online");
-    assert_eq!(value("Needs reboot"), "Yes");
+    assert_eq!(value("Needs reboot"), "Yes \u{2014} Windows Update");
     assert_eq!(value("Last contact"), "2026-06-26 14:31 UTC");
 
     let offline = crate::types::DeviceSummary {
         offline: true,
         last_contact: None,
+        reboot_reason: Some("  ".into()),
         ..drill_device()
     };
     let facts = device_facts(&offline);
     assert!(facts.contains(&("Status", "Offline".into())));
     assert!(facts.contains(&("Last contact", "—".into())));
+    assert!(facts.contains(&("Needs reboot", "Yes".into())));
+
+    let no_reboot = crate::types::DeviceSummary {
+        needs_reboot: false,
+        ..drill_device()
+    };
+    assert!(device_facts(&no_reboot).contains(&("Needs reboot", "No".into())));
 }
 
 /// An excluded device's counts are unknown, not zero — the drill-down says why
@@ -3836,6 +3849,15 @@ fn the_wording_matches_the_backend() {
         assert_eq!(k.value, b["value"], "{} value", k.label);
         assert_eq!(k.detail, b["detail"], "{} detail", k.label);
         assert_eq!(k.definition, b["definition"], "{} definition", k.label);
+    }
+
+    let backend = wording["rebootColumnNotes"]
+        .as_array()
+        .expect("reboot notes");
+    assert_eq!(REBOOT_COLUMN_NOTES.len(), backend.len());
+    for ((term, meaning), b) in REBOOT_COLUMN_NOTES.iter().zip(backend) {
+        assert_eq!(*term, b[0], "term");
+        assert_eq!(*meaning, b[1], "{term}");
     }
 
     let notes = calculation_notes(&r.sla_policy, r.patch_families, &r.first_seen);

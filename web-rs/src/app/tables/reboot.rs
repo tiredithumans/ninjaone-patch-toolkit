@@ -78,6 +78,7 @@ pub(super) fn RebootTable() -> impl IntoView {
                             <th scope="col">"Device"</th>
                             <th scope="col">"OS"</th>
                             <th scope="col">"Pending Patches"</th>
+                            <th scope="col">"Reboot Reason"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -110,6 +111,7 @@ pub(super) fn RebootTable() -> impl IntoView {
                                             <td><DeviceLink device_id=d.device_id name=d.device_name/></td>
                                             <td>{d.os_name.unwrap_or_default()}</td>
                                             <td>{d.pending_count}</td>
+                                            <td>{d.reboot_reason.unwrap_or_default()}</td>
                                         </tr>
                                     }
                                 })

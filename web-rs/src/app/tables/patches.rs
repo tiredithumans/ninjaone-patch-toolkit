@@ -189,7 +189,10 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                             <td>{r.organization.clone()}</td>
                                             <td>{r.location.clone().unwrap_or_default()}</td>
                                             <td>{r.device_role.clone().unwrap_or_default()}</td>
-                                            <td><DeviceLink device_id=r.device_id name=r.device_name.clone()/></td>
+                                            <td>
+                                                <DeviceLink device_id=r.device_id name=r.device_name.clone()/>
+                                                {reboot_pending_chip(r.needs_reboot)}
+                                            </td>
                                             <td>{r.os_name.clone().unwrap_or_default()}</td>
                                             <td>{r.patch_type.clone()}</td>
                                             <td>{r.kb.clone().unwrap_or_default()}</td>
@@ -198,6 +201,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                             // and made every row ~100px tall.
                                             <td class="patch-name">
                                                 <span class="clamp-2" title=r.name.clone()>{r.name.clone()}</span>
+                                                {reboot_likely_chip(r.reboot_likely)}
                                             </td>
                                             <td>
                                                 <span class=sev>{r.severity.clone()}</span>
@@ -384,9 +388,8 @@ fn GroupedPatches() -> impl IntoView {
                                             <span class="group-sub">{sub}</span>
                                             <span class=sev>{g.severity}</span>
                                             <span class="group-count">{count}</span>
-                                            <Show when=move || g.needs_reboot>
-                                                <span class="chip-note">"needs reboot"</span>
-                                            </Show>
+                                            {reboot_pending_chip(g.needs_reboot)}
+                                            {reboot_likely_chip(g.reboot_likely)}
                                             <Show when=move || g.offline>
                                                 <span class="chip-note">"offline"</span>
                                             </Show>
@@ -534,6 +537,19 @@ fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
                                                 }
                                             }}
                                         </span>
+                                        // The member is a patch in a device group and a
+                                        // device in a patch group; each chip names the
+                                        // half the header does not already state.
+                                        {
+                                            let (pending, likely) = (r.needs_reboot, r.reboot_likely);
+                                            move || {
+                                                if by_device() {
+                                                    reboot_likely_chip(likely).into_any()
+                                                } else {
+                                                    reboot_pending_chip(pending).into_any()
+                                                }
+                                            }
+                                        }
                                     </td>
                                     <td><span class=sev>{r.severity.clone()}</span></td>
                                     <td><span class=stat>{r.status.clone()}</span></td>
@@ -545,4 +561,18 @@ fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
             </table>
         </div>
     }
+}
+
+/// "reboot pending": the device's own flag ([`util::REBOOT_PENDING_HELP`]).
+fn reboot_pending_chip(pending: bool) -> impl IntoView {
+    pending.then(|| {
+        view! { <span class="chip-note" title=util::REBOOT_PENDING_HELP>"reboot pending"</span> }
+    })
+}
+
+/// "reboot likely": the backend's estimate for the patch ([`util::REBOOT_LIKELY_HELP`]).
+pub(super) fn reboot_likely_chip(likely: bool) -> impl IntoView {
+    likely.then(|| {
+        view! { <span class="chip-note" title=util::REBOOT_LIKELY_HELP>"reboot likely"</span> }
+    })
 }

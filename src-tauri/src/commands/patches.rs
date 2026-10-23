@@ -14,11 +14,12 @@ use crate::first_seen::{self, Family, Observation, Resolver, TenantLedger};
 use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
     ComplianceBucket, DeviceDetail, FirstSeenTracking, GroupBy, GroupPage, InstallWindow,
-    LookupMaps, PatchFamilies, PatchRecord, PatchSource, QueryResult, QuerySummary, RowSort,
-    SlaCutoffs, build_age_buckets, build_approval_backlog, build_compliance,
-    build_compliance_by_os, build_device_backlogs, build_device_summaries, build_failures,
-    build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
-    group_member_page, page_rows, slice_groups, sort_device_summaries, sort_order, uncounted_orgs,
+    LookupMaps, OS_TYPE_LABEL, PatchFamilies, PatchRecord, PatchSource, QueryResult, QuerySummary,
+    RowSort, SOFTWARE_TYPE_LABEL, SlaCutoffs, build_age_buckets, build_approval_backlog,
+    build_compliance, build_compliance_by_os, build_device_backlogs, build_device_summaries,
+    build_failures, build_groups, build_query_scope, build_rows, build_severity_by_org,
+    build_time_to_install, group_member_page, page_rows, slice_groups, sort_device_summaries,
+    sort_order, uncounted_orgs,
 };
 use crate::settings::{MAX_WINDOW_DAYS, SlaPolicy};
 use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
@@ -777,13 +778,13 @@ fn assemble_result(
             // sheet counted patches the Patches sheet could not show.
             PatchSource {
                 records: scoped_os_current,
-                type_label: "OS",
+                type_label: OS_TYPE_LABEL,
                 status_override: Some(PatchStatus::Pending.api_value()),
                 status_filter: Some(&plan.current_status_set),
             },
             PatchSource {
                 records: scoped_sw_current,
-                type_label: "SOFTWARE",
+                type_label: SOFTWARE_TYPE_LABEL,
                 status_override: Some(PatchStatus::Pending.api_value()),
                 status_filter: Some(&plan.current_status_set),
             },
@@ -806,13 +807,13 @@ fn assemble_result(
                 .unwrap_or(PatchStatus::Installed.api_value());
             sources.push(PatchSource {
                 records: &os_install_records,
-                type_label: "OS",
+                type_label: OS_TYPE_LABEL,
                 status_override: Some(install_label),
                 status_filter: Some(&plan.install_status_set),
             });
             sources.push(PatchSource {
                 records: &sw_install_records,
-                type_label: "SOFTWARE",
+                type_label: SOFTWARE_TYPE_LABEL,
                 status_override: Some(install_label),
                 status_filter: Some(&plan.install_status_set),
             });

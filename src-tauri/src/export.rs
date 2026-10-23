@@ -10,9 +10,9 @@ use crate::model::PatchRow;
 use crate::rows::{
     ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceSummary,
     FailureGroup, FirstSeenTracking, InstallLatency, OFFLINE_BACKLOG_NOTE, OsCompliance,
-    PatchFamilies, QueryScope, StuckDevice, TIME_TO_INSTALL_NOTE, TableCell, TableColumn,
-    TimeToInstall, WORST_DEVICES_NOTE, calculation_notes, clamp_cell, headline_figures,
-    uncounted_orgs_note, utc_text,
+    PatchFamilies, QueryScope, REBOOT_COLUMN_NOTES, StuckDevice, TIME_TO_INSTALL_NOTE, TableCell,
+    TableColumn, TimeToInstall, WORST_DEVICES_NOTE, calculation_notes, clamp_cell,
+    headline_figures, uncounted_orgs_note, utc_text,
 };
 use crate::settings::SlaPolicy;
 
@@ -22,7 +22,7 @@ const MAX_SHEET_DATA_ROWS: usize = 1_048_575;
 /// The Patches detail-sheet columns. Only the workbook renders this table, so it
 /// lives here rather than on `PatchRow` — but it is declared the same way as the
 /// shared ones so header and value stay a single declaration.
-pub(crate) const DETAIL_COLUMNS: [TableColumn<PatchRow>; 15] = [
+pub(crate) const DETAIL_COLUMNS: [TableColumn<PatchRow>; 16] = [
     ("Organization", |r| TableCell::text(&r.organization)),
     ("Location", |r| TableCell::opt_text(r.location.as_deref())),
     ("Device Role", |r| {
@@ -38,8 +38,15 @@ pub(crate) const DETAIL_COLUMNS: [TableColumn<PatchRow>; 15] = [
     ("Patch", |r| TableCell::text(&r.name)),
     ("Severity", |r| TableCell::text(r.severity)),
     ("Status", |r| TableCell::text(&r.status)),
-    ("Needs Reboot", |r| {
+    // The device's flag, not the patch's: a pending kernel update on a device with
+    // nothing installed yet reads "No" here. Headed so it cannot be read as "this
+    // patch needs no reboot", which is what "Needs Reboot" invited.
+    ("Device Reboot Pending", |r| {
         TableCell::text(if r.needs_reboot { "Yes" } else { "No" })
+    }),
+    // An estimate from the patch name, so blank (no signal) rather than "No".
+    ("Reboot Expected", |r| {
+        TableCell::text(if r.reboot_likely { "Likely" } else { "" })
     }),
     // The flag the compliance sheets' scope note talks about. `PatchRow` has
     // carried it all along and the in-app table draws an "offline" chip from it,
@@ -60,14 +67,15 @@ pub(crate) const DETAIL_COLUMNS: [TableColumn<PatchRow>; 15] = [
 // error — previously the widths were an unchecked `&[f64]` literal passed inline,
 // so a column added at one site and not the other silently misaligned the sheet.
 const DETAIL_WIDTHS: [f64; DETAIL_COLUMNS.len()] = [
-    24.0, 18.0, 18.0, 22.0, 26.0, 18.0, 11.0, 12.0, 40.0, 11.0, 11.0, 13.0, 9.0, 20.0, 20.0,
+    24.0, 18.0, 18.0, 22.0, 26.0, 18.0, 11.0, 12.0, 40.0, 11.0, 11.0, 13.0, 13.0, 9.0, 20.0, 20.0,
 ];
 const SUMMARY_WIDTHS: [f64; ComplianceBucket::COLUMNS.len()] =
     [28.0, 10.0, 12.0, 14.0, 14.0, 16.0, 16.0, 17.0, 18.0, 22.0];
 const OS_SUMMARY_WIDTHS: [f64; OsCompliance::COLUMNS.len()] =
     [28.0, 10.0, 12.0, 14.0, 14.0, 16.0, 16.0, 17.0, 18.0, 22.0];
 const STUCK_WIDTHS: [f64; StuckDevice::COLUMNS.len()] = [26.0, 24.0, 22.0, 20.0];
-const REBOOT_WIDTHS: [f64; DeviceSummary::COLUMNS.len()] = [24.0, 18.0, 18.0, 22.0, 26.0, 14.0];
+const REBOOT_WIDTHS: [f64; DeviceSummary::COLUMNS.len()] =
+    [24.0, 18.0, 18.0, 22.0, 26.0, 14.0, 30.0];
 const FAILURE_WIDTHS: [f64; FailureGroup::COLUMNS.len()] =
     [11.0, 11.0, 12.0, 40.0, 16.0, 20.0, 60.0];
 const WORST_WIDTHS: [f64; DeviceBacklog::WORST_COLUMNS.len()] =
@@ -77,7 +85,7 @@ const OFFLINE_WIDTHS: [f64; DeviceBacklog::OFFLINE_COLUMNS.len()] =
 const INSTALL_TIME_WIDTHS: [f64; InstallLatency::COLUMNS.len()] = [14.0, 28.0, 17.0, 34.0, 20.0];
 const DEVICE_WIDTHS: [f64; DeviceSummary::DEVICE_COLUMNS.len()] = [
     24.0, 18.0, 18.0, 22.0, 26.0, 8.0, 24.0, 11.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0,
-    10.0, 16.0, 13.0, 13.0, 18.0,
+    10.0, 16.0, 13.0, 13.0, 30.0, 18.0,
 ];
 
 /// The one number format every date-time cell is written with. The values are UTC
@@ -576,6 +584,13 @@ fn write_about_sheet(
         sheet.write_string(row, 0, term)?;
         sheet.write_string(row, 1, meaning)?;
     }
+    // The Patches sheet streams, so it has no footnotes of its own; its two reboot
+    // columns are defined here with the rest.
+    for (term, meaning) in REBOOT_COLUMN_NOTES {
+        row += 1;
+        sheet.write_string(row, 0, term)?;
+        sheet.write_string(row, 1, meaning)?;
+    }
 
     sheet.write_string(row + 2, 0, meta.scope_note)?;
     apply_widths(sheet, &ABOUT_WIDTHS)?;
@@ -873,6 +888,7 @@ mod tests {
             os_name: Some("Windows Server 2022".into()),
             node_class: Some("WINDOWS_SERVER".into()),
             needs_reboot: true,
+            reboot_likely: false,
             offline: false,
             patch_type: "OS",
             kb: Some("KB5040434".into()),
@@ -898,6 +914,7 @@ mod tests {
             os_name: Some("Windows Server 2022".into()),
             node_class: None,
             needs_reboot,
+            reboot_reason: needs_reboot.then(|| "Windows Update".into()),
             pending_count: 4,
             offline: false,
             rollup_scope: crate::rows::RollupScope::Included,
@@ -1341,6 +1358,66 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The reboot columns say whose flag each is: the device's pending reboot as
+    /// Yes/No, and the patch's estimate as "Likely" or blank — never "No", which is
+    /// what a pending kernel update used to read.
+    #[test]
+    fn the_detail_sheet_separates_the_device_reboot_flag_from_the_patch_estimate() {
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = std::env::temp_dir().join("npt-export-reboot.xlsx");
+        let rows = vec![
+            PatchRow {
+                needs_reboot: false,
+                reboot_likely: true,
+                ..sample_row()
+            },
+            PatchRow {
+                needs_reboot: true,
+                reboot_likely: false,
+                ..sample_row()
+            },
+        ];
+        write_workbook(
+            &path.to_string_lossy(),
+            &rows,
+            &[],
+            &[],
+            &[],
+            &[],
+            &no_backlogs(),
+            &ApprovalBacklog::default(),
+            &meta(),
+        )
+        .unwrap();
+
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let range = wb.worksheet_range("Patches").unwrap();
+        let col = |title: &str| {
+            DETAIL_COLUMNS
+                .iter()
+                .position(|(t, _)| *t == title)
+                .unwrap_or_else(|| panic!("no {title:?} column")) as u32
+        };
+        let cell = |row: u32, title: &str| range.get_value((row, col(title))).unwrap().to_string();
+        assert!(DETAIL_COLUMNS.iter().all(|(t, _)| *t != "Needs Reboot"));
+        assert_eq!(cell(1, "Device Reboot Pending"), "No");
+        assert_eq!(cell(1, "Reboot Expected"), "Likely");
+        assert_eq!(cell(2, "Device Reboot Pending"), "Yes");
+        assert_eq!(cell(2, "Reboot Expected"), "");
+
+        // Both are defined on the About sheet, since the streamed Patches sheet
+        // carries no notes of its own.
+        let about = wb.worksheet_range("About").unwrap();
+        for (term, _) in REBOOT_COLUMN_NOTES {
+            assert!(
+                about.rows().any(|r| r.first().is_some_and(|c| *c == term)),
+                "About defines {term:?}"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn omits_empty_sheets_and_writes_the_reboot_sheet() {
         use calamine::{Reader, Xlsx, open_workbook};
@@ -1393,6 +1470,11 @@ mod tests {
             "Organization"
         );
         assert_eq!(reboot_range.get_value((1, 3)).unwrap().to_string(), "srv07");
+        assert_eq!(
+            reboot_range.get_value((1, 6)).unwrap().to_string(),
+            "Windows Update",
+            "the reboot list carries NinjaOne's reason"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

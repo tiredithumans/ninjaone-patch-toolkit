@@ -453,6 +453,7 @@ fn dev(id: i64, org: i64) -> Device {
         offline: Some(false),
         os: None,
         last_contact: None,
+        pending_reboot_reason: None,
     }
 }
 

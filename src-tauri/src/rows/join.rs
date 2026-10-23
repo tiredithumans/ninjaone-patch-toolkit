@@ -12,7 +12,7 @@ use crate::model::{
     Device, Location, Organization, PatchRow, PatchStatus, Role, Severity, row_status,
 };
 
-use super::PatchRecord;
+use super::{OsFamily, PatchRecord, reboot_likely};
 
 /// Placeholder for a name the join could not resolve — an orphan device, a device
 /// reporting no OS, or a patch whose organization is not in the lookups.
@@ -73,6 +73,14 @@ impl LookupMaps {
         id.and_then(|i| self.roles.get(&i)).map(String::as_str)
     }
 }
+
+/// [`PatchSource::type_label`] of the OS families — the only rows the reboot
+/// estimate reads, since a third-party update restarts an application, not the
+/// machine.
+pub const OS_TYPE_LABEL: &str = "OS";
+
+/// [`PatchSource::type_label`] of the third-party families.
+pub const SOFTWARE_TYPE_LABEL: &str = "SOFTWARE";
 
 /// One slice of fetched patches tagged with its family and (for installs) a status
 /// to apply when the record omits one.
@@ -137,6 +145,7 @@ struct DeviceLabels {
     device_role: Option<Arc<str>>,
     os_name: Option<Arc<str>>,
     node_class: Option<Arc<str>>,
+    os_family: Option<OsFamily>,
     needs_reboot: bool,
     offline: bool,
 }
@@ -152,6 +161,7 @@ impl DeviceLabels {
                 device_role: None,
                 os_name: None,
                 node_class: None,
+                os_family: None,
                 needs_reboot: false,
                 offline: false,
             };
@@ -163,6 +173,7 @@ impl DeviceLabels {
             device_role: pool.intern_opt(maps.role_name_str(d.node_role_id)),
             os_name: pool.intern_opt(d.os_name_str()),
             node_class: pool.intern_opt(d.node_class.as_deref()),
+            os_family: OsFamily::of(d.node_class.as_deref()),
             needs_reboot: d.needs_reboot(),
             offline: d.is_offline(),
         }
@@ -201,7 +212,11 @@ pub fn build_rows(
     // reported after the loop, so a six-figure fleet logs one line per distinct
     // value rather than one per row.
     let mut unmapped_severities: BTreeSet<String> = BTreeSet::new();
+    // The reboot estimate, once per distinct title per OS family: one cumulative
+    // update recurs on every Windows device missing it.
+    let mut reboot_memo: [HashMap<Arc<str>, bool>; 3] = Default::default();
     for source in sources {
+        let os_source = source.type_label == OS_TYPE_LABEL;
         for record in source.records {
             let patch = record.patch;
             if let Some(allowed) = source.status_filter {
@@ -284,6 +299,13 @@ pub fn build_rows(
             let device_labels = labels
                 .entry(patch.device_id)
                 .or_insert_with(|| DeviceLabels::resolve(device, maps, &mut pool));
+            let name = pool.intern(&name_buf);
+            let likely = match device_labels.os_family {
+                Some(family) if os_source => *reboot_memo[family.index()]
+                    .entry(Arc::clone(&name))
+                    .or_insert_with(|| reboot_likely(family, &name)),
+                _ => false,
+            };
 
             rows.push(PatchRow {
                 device_id: patch.device_id.unwrap_or(ORPHAN_DEVICE_ID),
@@ -294,10 +316,11 @@ pub fn build_rows(
                 os_name: device_labels.os_name.clone(),
                 node_class: device_labels.node_class.clone(),
                 needs_reboot: device_labels.needs_reboot,
+                reboot_likely: likely,
                 offline: device_labels.offline,
                 patch_type: source.type_label,
                 kb: pool.intern_opt(patch.kb_number.as_deref()),
-                name: pool.intern(&name_buf),
+                name,
                 severity: severity.label(),
                 severity_rank: severity.rank(),
                 status: pool.intern(status),

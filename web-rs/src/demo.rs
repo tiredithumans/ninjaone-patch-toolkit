@@ -161,6 +161,10 @@ fn row(
             // A name is not an identity, and that lookup was also the reason a demo
             // group header could disagree with the backend's.
             needs_reboot: REBOOT_DEVICE_NAMES.contains(&device),
+            // Every sample OS title is one the backend's name-based estimate marks
+            // likely — cumulative updates, a macOS update, a kernel package — and
+            // it never marks a third-party one.
+            reboot_likely: patch_type == "OS",
             patch_type: patch_type.to_string(),
             kb: opt(kb),
             name: name.to_string(),
@@ -265,6 +269,7 @@ fn demo_rows() -> Vec<DemoRow> {
         row("Fabrikam Inc", "Cloud — us-east-1", "Application Server", "FAB-LNX-APP3", "Ubuntu 22.04 LTS", "Software", "", "OpenSSL 3.0.16 (libssl)", "Critical", "PENDING", "2026-06-08", "", "LINUX_SERVER"),
         row("Fabrikam Inc", "Cloud — us-east-1", "Application Server", "FAB-LNX-APP3", "Ubuntu 22.04 LTS", "Software", "", "Docker Engine 28.1.1", "Important", "INSTALLED", "2026-06-06", "2026-06-10", "LINUX_SERVER"),
         row("Fabrikam Inc", "Cloud — us-east-1", "Web Server", "FAB-LNX-WEB1", "Ubuntu 22.04 LTS", "Software", "", "nginx 1.27.5", "Important", "PENDING", "2026-06-07", "", "LINUX_SERVER"),
+        row("Fabrikam Inc", "Cloud — us-east-1", "Application Server", "FAB-LNX-APP3", "Ubuntu 22.04 LTS", "OS", "", "linux-image-5.15.0-139-generic", "Security", "PENDING", "2026-06-10", "", "LINUX_SERVER"),
         row("Fabrikam Inc", "Cloud — us-east-1", "Web Server", "FAB-LNX-WEB1", "Ubuntu 22.04 LTS", "Software", "", "OpenSSL 3.0.16 (libssl)", "Critical", "FAILED", "2026-06-08", "2026-06-11", "LINUX_SERVER"),
         row("Fabrikam Inc", "Cloud — us-east-1", "Workstation", "FAB-WKS-3310", "Windows 11 Pro", "OS", "KB5062554", "2026-06 Cumulative Update for Windows 11 24H2 (KB5062554)", "Critical", "PENDING", "2026-06-10", "", "WINDOWS_WORKSTATION"),
         row("Fabrikam Inc", "Cloud — us-east-1", "Workstation", "FAB-WKS-3310", "Windows 11 Pro", "Software", "", "Microsoft Edge 137.0.3296.62", "Low", "INSTALLED", "2026-06-11", "2026-06-12", "WINDOWS_WORKSTATION"),
@@ -458,6 +463,19 @@ const REBOOT_DEVICE_NAMES: [&str; 5] = [
     "FAB-LNX-WEB1",
 ];
 
+/// A stand-in for NinjaOne's free-form `pendingRebootReason`.
+fn sample_reboot_reason(row: &PatchRow) -> String {
+    if row
+        .os_name
+        .as_deref()
+        .is_some_and(|os| os.starts_with("Windows"))
+    {
+        "Windows Update".to_string()
+    } else {
+        "Package updates installed".to_string()
+    }
+}
+
 /// The Needs Reboot list: the reboot devices' own rollups, so its Pending Patches
 /// column and the drill-down opened from it are the same number. The demo used to
 /// hardcode those counts, which a drill-down built from the sample rows would then
@@ -525,6 +543,7 @@ fn sample_device_summary(device_id: i64, failed_queried: bool) -> Option<DeviceS
         os_name: first.os_name.clone(),
         pending_count: pending,
         needs_reboot: first.needs_reboot,
+        reboot_reason: first.needs_reboot.then(|| sample_reboot_reason(first)),
         offline: first.offline,
         // Every sample device is a Windows, macOS or Linux agent.
         rollup_scope: RollupScope::Included,
@@ -1178,9 +1197,12 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 // `grouping_matches_the_backend_byte_for_byte` caught.
                 offline: matches!(group_by, GroupBy::Device) && r.offline,
                 needs_reboot: matches!(group_by, GroupBy::Device) && r.needs_reboot,
+                reboot_likely: false,
             }
         });
         entry.rows += 1;
+        // A property of the patches, so every grouping takes any member's.
+        entry.reboot_likely |= r.reboot_likely;
         if rank > entry.severity_rank {
             entry.severity_rank = rank;
             entry.severity = r.severity.clone();
@@ -1671,6 +1693,10 @@ mod tests {
                 assert_eq!(
                     got.needs_reboot, want.needs_reboot,
                     "{group_by:?} needs_reboot"
+                );
+                assert_eq!(
+                    got.reboot_likely, want.reboot_likely,
+                    "{group_by:?} reboot_likely"
                 );
             }
             let keys: Vec<String> = fixture

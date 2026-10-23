@@ -60,6 +60,39 @@ pub struct Device {
     /// Absent on a sparse record, which renders blank rather than as the epoch.
     #[serde(default)]
     pub last_contact: Option<f64>,
+    /// NinjaOne's free-form `pendingRebootReason` for this device, merged in from
+    /// `/queries/device-health` ([`apply_reboot_reasons`]) — `devices-detailed` does
+    /// not carry it. Shown verbatim beside the reboot flag; `None` when the device
+    /// reports none or the health feed could not be read.
+    #[serde(skip)]
+    pub pending_reboot_reason: Option<String>,
+}
+
+/// One `/queries/device-health` record, reduced to the field this app reads. The
+/// schema (`DeviceHealthSummary`) carries threat, alert and vulnerability counts as
+/// well; none of them is decoded, so a vendor change to one cannot fail the page.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceHealth {
+    #[serde(default)]
+    pub device_id: Option<i64>,
+    #[serde(default)]
+    pub pending_reboot_reason: Option<String>,
+}
+
+/// Copies each device's [`DeviceHealth::pending_reboot_reason`] onto the inventory,
+/// skipping blank reasons and records for devices the inventory does not hold.
+pub fn apply_reboot_reasons(devices: &mut [Device], health: Vec<DeviceHealth>) {
+    let reasons: std::collections::HashMap<i64, String> = health
+        .into_iter()
+        .filter_map(|h| {
+            let reason = h.pending_reboot_reason?.trim().to_string();
+            Some((h.device_id?, reason)).filter(|(_, r)| !r.is_empty())
+        })
+        .collect();
+    for d in devices {
+        d.pending_reboot_reason = reasons.get(&d.id).cloned();
+    }
 }
 
 impl Device {
@@ -566,7 +599,15 @@ pub struct PatchRow {
     pub device_role: Option<Arc<str>>,
     pub os_name: Option<Arc<str>>,
     pub node_class: Option<Arc<str>>,
+    /// The **device's** `os.needsReboot`: a reboot is pending on it right now,
+    /// whatever this row's patch is. Exported as "Device Reboot Pending". It says
+    /// nothing about whether *this* patch will need one — that is
+    /// [`reboot_likely`](Self::reboot_likely).
     pub needs_reboot: bool,
+    /// Whether installing this patch is likely to need a reboot, estimated from its
+    /// name ([`crate::rows::reboot_likely`]); NinjaOne's patch records carry no
+    /// reboot field. `false` means "no signal", not "no reboot".
+    pub reboot_likely: bool,
     /// Mirrors `Device::is_offline()`. Carried on the row so the frontend can show
     /// which selected devices an action would be *queued* for rather than run now.
     pub offline: bool,
@@ -903,6 +944,7 @@ mod tests {
             offline: None,
             os: None,
             last_contact: None,
+            pending_reboot_reason: None,
         }
     }
 

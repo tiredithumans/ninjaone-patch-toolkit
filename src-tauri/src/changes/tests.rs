@@ -19,6 +19,7 @@ fn row(device_id: i64, kb: Option<&str>, name: &str, status: &str) -> PatchRow {
         os_name: None,
         node_class: None,
         needs_reboot: false,
+        reboot_likely: false,
         offline: false,
         patch_type: if kb.is_some() { "OS" } else { "SOFTWARE" },
         kb: kb.map(Into::into),

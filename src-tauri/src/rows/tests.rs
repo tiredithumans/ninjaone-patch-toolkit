@@ -66,6 +66,7 @@ fn device_band_headers_follow_the_bands() {
         os_name: None,
         node_class: None,
         needs_reboot: false,
+        reboot_reason: None,
         pending_count: 0,
         offline: false,
         rollup_scope: RollupScope::Included,
@@ -198,6 +199,7 @@ fn device(id: i64, org: i64, os: &str) -> Device {
             needs_reboot: Some(id % 2 == 0),
         }),
         last_contact: None,
+        pending_reboot_reason: None,
     }
 }
 
@@ -311,6 +313,118 @@ fn build_rows_resolves_names_and_applies_os_filter() {
     assert_eq!(rows[0].location.as_deref(), Some("HQ"));
     assert_eq!(rows[0].device_role.as_deref(), Some("Domain Controller"));
     assert_eq!(rows[0].patch_type, "OS");
+}
+
+/// The reported bug: a pending kernel update on a Linux device with nothing waiting
+/// on a reboot yet exported as "Needs Reboot: No". The device flag stays the
+/// device's; the patch's own estimate says the install will need one. A
+/// third-party record never gets the estimate, and neither does a device whose
+/// class patch management does not cover.
+#[test]
+fn a_pending_kernel_update_is_reboot_likely_on_a_device_with_no_reboot_pending() {
+    let linux = Device {
+        node_class: Some("LINUX_SERVER".into()),
+        ..device(1, 10, "Ubuntu 22.04 LTS")
+    };
+    let switch = Device {
+        node_class: Some("NMS_SWITCH".into()),
+        ..device(3, 10, "Cisco IOS XE")
+    };
+    assert!(!linux.needs_reboot(), "device 1 reports no pending reboot");
+    let by_id = HashMap::from([(1, &linux), (3, &switch)]);
+    let named = |device_id: i64, name: &str| Patch {
+        kb_number: None,
+        name: Some(name.into()),
+        ..patch(device_id, "MANUAL", "SECURITY", Some(2))
+    };
+    let os = vec![
+        named(1, "linux-image-6.8.0-45-generic"),
+        named(1, "linux-headers-6.8.0-45-generic"),
+        named(3, "linux-image-6.8.0-45-generic"),
+    ];
+    let sw = vec![named(1, "linux-image-6.8.0-45-generic")];
+    let rows = build_rows(
+        &by_id,
+        &maps(),
+        &[
+            PatchSource {
+                records: &refs(&os),
+                type_label: OS_TYPE_LABEL,
+                status_override: None,
+                status_filter: None,
+            },
+            PatchSource {
+                records: &refs(&sw),
+                type_label: SOFTWARE_TYPE_LABEL,
+                status_override: None,
+                status_filter: None,
+            },
+        ],
+        &FilterParams::default().prepare(),
+    );
+    let estimates: Vec<(i64, &str, &str, bool, bool)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.device_id,
+                r.patch_type,
+                &*r.name,
+                r.needs_reboot,
+                r.reboot_likely,
+            )
+        })
+        .collect();
+    assert_eq!(
+        estimates,
+        [
+            (1, "OS", "linux-image-6.8.0-45-generic", false, true),
+            (1, "OS", "linux-headers-6.8.0-45-generic", false, false),
+            (3, "OS", "linux-image-6.8.0-45-generic", false, false),
+            (1, "SOFTWARE", "linux-image-6.8.0-45-generic", false, false),
+        ]
+    );
+}
+
+/// NinjaOne's reboot reason reaches the device summary verbatim; a blank reason or
+/// one for a device outside the inventory does not.
+#[test]
+fn reboot_reasons_merge_onto_the_inventory() {
+    let mut devices = vec![
+        device(1, 10, "Windows Server 2022"),
+        device(2, 10, "Windows Server 2022"),
+    ];
+    crate::model::apply_reboot_reasons(
+        &mut devices,
+        vec![
+            crate::model::DeviceHealth {
+                device_id: Some(2),
+                pending_reboot_reason: Some(" Windows Update ".into()),
+            },
+            crate::model::DeviceHealth {
+                device_id: Some(1),
+                pending_reboot_reason: Some("  ".into()),
+            },
+            crate::model::DeviceHealth {
+                device_id: Some(99),
+                pending_reboot_reason: Some("Orphan".into()),
+            },
+        ],
+    );
+    assert_eq!(devices[0].pending_reboot_reason, None);
+    assert_eq!(
+        devices[1].pending_reboot_reason.as_deref(),
+        Some("Windows Update")
+    );
+    let refs: Vec<&Device> = devices.iter().collect();
+    let summaries = build_device_summaries(&refs, &[], None, &sla30(), &maps());
+    let reason = |id: i64| {
+        summaries
+            .iter()
+            .find(|d| d.device_id == id)
+            .and_then(|d| d.reboot_reason.clone())
+    };
+    assert_eq!(reason(2).as_deref(), Some("Windows Update"));
+    assert_eq!(reason(1), None);
 }
 
 #[test]
@@ -1655,6 +1769,7 @@ fn failed_row(device_id: i64, device: &str, kb: &str, installed_ts: Option<i64>)
         os_name: None,
         node_class: None,
         needs_reboot: false,
+        reboot_likely: false,
         offline: false,
         patch_type: "OS",
         kb: Some(kb.into()),
@@ -2488,6 +2603,9 @@ fn demo_grouping_fixture_is_current() {
     rows[1].offline = true;
     rows[2].needs_reboot = true;
     rows[3].offline = true;
+    // A group's estimate is any member's: the KB5040434 group spans this row and
+    // web-02's, which carries none.
+    rows[0].reboot_likely = true;
 
     let fixture = serde_json::json!({
         "_comment": "Generated by rows::tests::demo_grouping_fixture_is_current. \

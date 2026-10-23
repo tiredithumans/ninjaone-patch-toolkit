@@ -209,6 +209,24 @@ pub fn calculation_notes(
     ]
 }
 
+/// What the detail rows' two reboot columns mean, for the About sheet's Definitions
+/// block and the in-app chips' tooltips. Neither is a compliance figure, so they sit
+/// outside [`calculation_notes`], which the Compliance tab prints.
+pub const REBOOT_COLUMN_NOTES: [(&str, &str); 2] = [
+    (
+        "Device Reboot Pending",
+        "NinjaOne reports a reboot waiting on the device now. It is the device's flag, set \
+         after an install, so it does not say whether a pending patch will need one.",
+    ),
+    (
+        "Reboot Expected",
+        "Likely when the patch name marks a restart: a Linux kernel or core-library package, \
+         a Windows cumulative, rollup, servicing-stack or feature update, or a macOS system \
+         update. NinjaOne's patch records carry no reboot field, so this is an estimate, and a \
+         blank means no signal rather than no reboot.",
+    ),
+];
+
 /// How many organizations [`uncounted_orgs_note`] names before "and N more".
 pub const UNCOUNTED_ORGS_LIMIT: usize = 10;
 

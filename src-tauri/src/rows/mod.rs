@@ -9,14 +9,15 @@
 //! aggregates), `backlog` (worst devices + offline backlog), `install_time`
 //! (first seen → installed), `groups` (sort / page / group), `scope` (export
 //! provenance), `table` (the shared column definition), `record` (the per-record
-//! view the rollups read), `wording` (the sentences every surface prints about what
-//! a figure means). This file holds the result types every one of them feeds.
+//! view the rollups read), `reboot` (the per-patch reboot estimate), `wording` (the
+//! sentences every surface prints about what a figure means). This file holds the result types every one of them feeds.
 
 mod backlog;
 mod compliance;
 mod groups;
 mod install_time;
 mod join;
+mod reboot;
 mod record;
 mod rollups;
 mod scope;
@@ -28,6 +29,7 @@ pub use compliance::*;
 pub use groups::*;
 pub use install_time::*;
 pub use join::*;
+pub use reboot::*;
 pub use record::*;
 pub use rollups::*;
 pub use scope::*;

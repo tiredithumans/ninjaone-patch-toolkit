@@ -1,8 +1,8 @@
 use anyhow::Result;
 
-use super::paging::DEFAULT_PAGE_SIZE;
+use super::paging::{DEFAULT_PAGE_SIZE, REPORTING_PAGE_SIZE};
 use super::{NinjaApiClient, ProgressFn, df_query};
-use crate::model::Device;
+use crate::model::{Device, DeviceHealth};
 
 impl NinjaApiClient {
     /// Fetches devices that match the optional `df` (device filter) DSL string,
@@ -19,5 +19,12 @@ impl NinjaApiClient {
             on_progress,
         )
         .await
+    }
+
+    /// Whole-fleet `/queries/device-health`, read only for each device's
+    /// `pendingRebootReason`. Cursor-paged like the other `/queries/*` feeds.
+    pub async fn device_health(&self) -> Result<Vec<DeviceHealth>> {
+        self.get_paginated_reporting("/queries/device-health", &[], REPORTING_PAGE_SIZE, None)
+            .await
     }
 }
