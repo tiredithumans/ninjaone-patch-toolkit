@@ -30,7 +30,9 @@ use crate::commands::settings::SettingsView;
 use crate::commands::update::UpdateInfo;
 use crate::filter::FilterParams;
 use crate::history::RunRecord;
-use crate::model::{Device, Location, Organization, OsInfo, Patch, PatchStatus, RebootMode, Role};
+use crate::model::{
+    Device, DeviceGroup, Location, Organization, OsInfo, Patch, PatchStatus, RebootMode, Role,
+};
 use crate::rows::{
     ComplianceBucket, DeviceBacklog, DeviceSummary, FirstSeenTracking, GroupBy, InstallLatency,
     InstallWindow, LookupMaps, OFFLINE_BACKLOG_NOTE, OsCompliance, PCT_BANDS, PatchFamilies,
@@ -99,6 +101,7 @@ const INSTANCE: &str = "https://app.ninjarmm.com";
 const ORG_ID: i64 = 10;
 const LOCATION_ID: i64 = 100;
 const ROLE_ID: i64 = 2;
+const DEVICE_GROUP_ID: i64 = 7;
 /// An organization whose only device is offline, so it has no counted device and
 /// the result names it in `uncounted_orgs`.
 const OTHER_ORG_ID: i64 = 11;
@@ -244,7 +247,11 @@ fn ipc_fixture_is_current() {
         name: "Domain Controller".into(),
         node_class: Some("WINDOWS_SERVER".into()),
     }];
-    let maps = LookupMaps::build(&orgs, &locations, &roles);
+    let device_groups = vec![DeviceGroup {
+        id: DEVICE_GROUP_ID,
+        name: "Patch ring 1".into(),
+    }];
+    let maps = LookupMaps::build(&orgs, &locations, &roles, &device_groups);
 
     // One device per `RollupScope`: included, offline, and online but unpatchable;
     // and a second organization whose only device is offline.
@@ -586,6 +593,7 @@ fn ipc_fixture_is_current() {
                 organization_ids: vec![ORG_ID],
                 location_ids: vec![LOCATION_ID],
                 role_ids: vec![ROLE_ID],
+                device_group_ids: vec![DEVICE_GROUP_ID],
                 node_classes: vec!["WINDOWS_SERVER".into()],
                 os_name_contains: Some("2022".into()),
                 search: Some("KB5040434".into()),
@@ -627,6 +635,7 @@ fn ipc_fixture_is_current() {
             "list_orgs": orgs,
             "list_locations": locations,
             "list_roles": roles,
+            "list_device_groups": device_groups,
             "list_node_classes": list_node_classes(),
             "query_patches": QuerySummary::from_result(&result, 100),
             "get_patch_rows": page_rows(&result.rows, None, 0, 2),

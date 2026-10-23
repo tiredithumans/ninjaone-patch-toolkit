@@ -33,6 +33,10 @@ impl AppState {
             &self.filters.role_ids.get_untracked(),
             self.lookups.roles.get_untracked().into_iter(),
         );
+        let device_groups = util::names_for(
+            &self.filters.group_ids.get_untracked(),
+            self.lookups.device_groups.get_untracked().into_iter(),
+        );
         let selected = self.filters.selected_classes.get_untracked();
         let os_types = self
             .lookups
@@ -53,6 +57,7 @@ impl AppState {
             organizations,
             locations,
             roles,
+            device_groups,
             os_types,
             os_name: non_empty(self.filters.os_name.get_untracked()),
             patch_type: self.filters.patch_type.get_untracked(),

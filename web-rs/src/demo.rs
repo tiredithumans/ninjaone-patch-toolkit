@@ -26,10 +26,10 @@ use crate::app::util::{
 use crate::types::QueryResult;
 use crate::types::{
     AgeBucket, ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceDetail,
-    DeviceSummary, FailureGroup, FilterParams, FirstSeenTracking, GroupBy, InstallLatency,
-    Location, NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies, PatchGroup,
-    PatchRow, Role, RollupScope, SeverityCounts, SlaBySeverity, SlaExempt, SlaPolicy, StuckDevice,
-    TimeToInstall,
+    DeviceGroup, DeviceSummary, FailureGroup, FilterParams, FirstSeenTracking, GroupBy,
+    InstallLatency, Location, NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies,
+    PatchGroup, PatchRow, Role, RollupScope, SeverityCounts, SlaBySeverity, SlaExempt, SlaPolicy,
+    StuckDevice, TimeToInstall,
 };
 use crate::types::{ChangeItem, RunChanges};
 
@@ -63,6 +63,28 @@ const ROLES: [(i64, &str); 6] = [
     (104, "Workstation"),
     (105, "Database Server"),
     (106, "File Server"),
+];
+
+/// Device groups (NinjaOne saved searches) and their members by device name. A group
+/// is not on the device record, so the demo — like the backend, which reads
+/// `/group/{id}/device-ids` per query — looks membership up rather than reading it
+/// off the row.
+const DEVICE_GROUPS: [(i64, &str, &[&str]); 2] = [
+    (
+        201,
+        "Patch ring 1 — pilot",
+        &[
+            "SEA-WKS-1042",
+            "SEA-WKS-1077",
+            "ATX-WKS-2207",
+            "FAB-WKS-3310",
+        ],
+    ),
+    (
+        202,
+        "Internet-facing servers",
+        &["SEA-WEB01", "DCA-WEB02", "FAB-LNX-WEB1"],
+    ),
 ];
 
 /// A sample patch row plus the identity keys the device facets filter on. `row` is
@@ -223,6 +245,17 @@ pub fn sample_roles() -> Vec<Role> {
     ROLES
         .iter()
         .map(|(id, name)| Role {
+            id: *id,
+            name: name.to_string(),
+        })
+        .collect()
+}
+
+/// Device groups for the demo's Group picker.
+pub fn sample_device_groups() -> Vec<DeviceGroup> {
+    DEVICE_GROUPS
+        .iter()
+        .map(|(id, name, _)| DeviceGroup {
             id: *id,
             name: name.to_string(),
         })
@@ -1028,6 +1061,10 @@ fn device_matches(d: &DemoRow, f: &FilterParams) -> bool {
     any(&f.organization_ids, d.org_id)
         && any(&f.location_ids, d.location_id)
         && any(&f.role_ids, d.role_id)
+        && (f.device_group_ids.is_empty()
+            || DEVICE_GROUPS.iter().any(|(id, _, members)| {
+                f.device_group_ids.contains(id) && members.contains(&d.row.device_name.as_str())
+            }))
         && (f.node_classes.is_empty()
             || f.node_classes
                 .iter()
@@ -1316,6 +1353,30 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect()
+    }
+
+    /// A group keeps the rows of its member devices, and two groups keep either's.
+    #[test]
+    fn a_device_group_keeps_only_its_members() {
+        let devices = |groups: Vec<i64>| {
+            let f = FilterParams {
+                device_group_ids: groups,
+                ..filter()
+            };
+            let mut names: Vec<String> = filtered_result(&f, "ALL", &all_statuses(), Some(3650))
+                .rows
+                .into_iter()
+                .map(|r| r.device_name)
+                .collect();
+            names.sort();
+            names.dedup();
+            names
+        };
+        assert_eq!(
+            devices(vec![202]),
+            ["DCA-WEB02", "FAB-LNX-WEB1", "SEA-WEB01"]
+        );
+        assert_eq!(devices(vec![201, 202]).len(), 7);
     }
 
     #[test]

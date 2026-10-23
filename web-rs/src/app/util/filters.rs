@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{FilterParams, Location, NodeClass, Organization, PatchQueryArgs, Role};
+use crate::types::{
+    DeviceGroup, FilterParams, Location, NodeClass, Organization, PatchQueryArgs, Role,
+};
 
 use super::super::AppliedFilters;
 
@@ -100,6 +102,7 @@ pub(crate) struct FilterInputs {
     pub organization_ids: Vec<i64>,
     pub location_ids: Vec<i64>,
     pub role_ids: Vec<i64>,
+    pub device_group_ids: Vec<i64>,
     pub node_classes: Vec<String>,
     pub severities: Vec<String>,
     pub os_name: String,
@@ -151,6 +154,7 @@ pub(crate) fn filter_params(i: FilterInputs) -> FilterParams {
         organization_ids: i.organization_ids,
         location_ids: i.location_ids,
         role_ids: i.role_ids,
+        device_group_ids: i.device_group_ids,
         node_classes: i.node_classes,
         os_name_contains: non_empty(i.os_name),
         search: non_empty(i.search),
@@ -343,7 +347,7 @@ pub(crate) const REGION_CUSTOM: &str = "custom";
 
 /// Anything a multi-select picker can list: a key and a display name.
 ///
-/// The three lookups (`Organization`/`Location`/`Role`) are separate types with the
+/// The id lookups (`Organization`/`Location`/`Role`/`DeviceGroup`) are separate types with the
 /// same two fields, and the OS-type, status and severity facets are value/label
 /// pairs keyed by string, so one trait keeps the picker, the chip row and the
 /// snapshot generic over all of them instead of repeating each.
@@ -374,6 +378,16 @@ impl Named for Location {
 }
 
 impl Named for Role {
+    type Key = i64;
+    fn key(&self) -> i64 {
+        self.id
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Named for DeviceGroup {
     type Key = i64;
     fn key(&self) -> i64 {
         self.id
@@ -457,6 +471,7 @@ fn canonical_query(args: &PatchQueryArgs) -> PatchQueryArgs {
     c.filter.organization_ids.sort_unstable();
     c.filter.location_ids.sort_unstable();
     c.filter.role_ids.sort_unstable();
+    c.filter.device_group_ids.sort_unstable();
     if !needs_install_window(&c.statuses) {
         c.install_after_days = None;
         c.filter.installed_after = None;
@@ -573,6 +588,7 @@ pub(crate) fn filter_chips(f: &AppliedFilters) -> Vec<FilterChip> {
         ("Org", &f.organizations),
         ("Location", &f.locations),
         ("Role", &f.roles),
+        ("Group", &f.device_groups),
     ] {
         if !names.is_empty() {
             out.push(FilterChip {

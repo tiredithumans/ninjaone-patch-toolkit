@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 
 use crate::filter::PreparedFilter;
 use crate::model::{
-    Device, Location, Organization, PatchRow, PatchStatus, Role, Severity, row_status,
+    Device, DeviceGroup, Location, Organization, PatchRow, PatchStatus, Role, Severity, row_status,
 };
 
 use super::{OsFamily, PatchRecord, reboot_likely};
@@ -32,14 +32,26 @@ pub struct LookupMaps {
     pub orgs: HashMap<i64, String>,
     pub locations: HashMap<i64, String>,
     pub roles: HashMap<i64, String>,
+    /// Device group names, for the export's scope block only — no row carries a
+    /// group.
+    pub device_groups: HashMap<i64, String>,
 }
 
 impl LookupMaps {
-    pub fn build(orgs: &[Organization], locations: &[Location], roles: &[Role]) -> Self {
+    pub fn build(
+        orgs: &[Organization],
+        locations: &[Location],
+        roles: &[Role],
+        device_groups: &[DeviceGroup],
+    ) -> Self {
         Self {
             orgs: orgs.iter().map(|o| (o.id, o.name.clone())).collect(),
             locations: locations.iter().map(|l| (l.id, l.name.clone())).collect(),
             roles: roles.iter().map(|r| (r.id, r.name.clone())).collect(),
+            device_groups: device_groups
+                .iter()
+                .map(|g| (g.id, g.name.clone()))
+                .collect(),
         }
     }
 

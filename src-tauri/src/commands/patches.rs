@@ -490,6 +490,8 @@ struct FetchedSources {
     devices: Arc<Vec<Device>>,
     current: CurrentPatches,
     lookups: Lookups,
+    /// Every device in any selected device group; `None` when no group is selected.
+    device_group_members: Option<HashSet<i64>>,
     os_installs: Vec<Patch>,
     sw_installs: Vec<Patch>,
     /// What this app has recorded about when each pending patch was first seen.
@@ -501,6 +503,25 @@ struct FetchedSources {
 pub(crate) struct QueryRun {
     pub result: QueryResult,
     pub observation: Observation,
+}
+
+/// The members of every selected device group, unioned — a device in any of them
+/// is in scope. Read per query, never cached: a group is a saved search whose
+/// membership moves with the fleet. Sequential, because a selection is a handful
+/// of groups and each is one small request. `None` when no group is selected; on a
+/// failure, the group that failed, so the error can name it.
+async fn device_group_members(
+    api: &NinjaApiClient,
+    ids: &[i64],
+) -> Result<Option<HashSet<i64>>, (i64, anyhow::Error)> {
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let mut members = HashSet::new();
+    for &id in ids {
+        members.extend(api.device_group_members(id).await.map_err(|e| (id, e))?);
+    }
+    Ok(Some(members))
 }
 
 /// The fetch→scope→join→rollup core of [`query_patches`], split out so it can be
@@ -556,11 +577,12 @@ where
     // reach its cache, so the retry started cold and hit exactly the same odds
     // again. Letting every leg finish means the query still fails (the `?`s below
     // are unchanged), but the fleet caches are warm for the retry.
-    let (devices, current, lookup_sets, ledger, os_installs, sw_installs) = tokio::join!(
+    let (devices, current, lookup_sets, ledger, group_members, os_installs, sw_installs) = tokio::join!(
         devices_fut,
         current_fut,
         lookups,
         ledger_fut,
+        device_group_members(api, &plan.filter.device_group_ids),
         async {
             if plan.want_installs && plan.include_os {
                 api.fleet_os_patch_installs(
@@ -596,6 +618,16 @@ where
     let devices = devices?;
     let current = current?;
     let lookups = lookup_sets?;
+    // Named from the lookups when they resolve it: "Patch ring 1" says which
+    // selection failed where "group 7" does not.
+    let device_group_members = group_members.map_err(|(id, e)| {
+        let name = lookups
+            .device_groups
+            .iter()
+            .find(|g| g.id == id && !g.name.is_empty())
+            .map_or_else(|| format!("#{id}"), |g| format!("\"{}\"", g.name));
+        e.context(format!("couldn't read the members of device group {name}"))
+    })?;
     let ledger = ledger?;
     let os_installs = os_installs?;
     let sw_installs = sw_installs?;
@@ -628,6 +660,7 @@ where
         devices,
         current,
         lookups,
+        device_group_members,
         os_installs,
         sw_installs,
         ledger,
@@ -683,16 +716,20 @@ fn assemble_result(
         &src.lookups.orgs,
         &src.lookups.locations,
         &src.lookups.roles,
+        &src.lookups.device_groups,
     );
 
     // Scope the whole-fleet caches to the selected identity facets (org/location/
-    // role/class) client-side — this is what makes a re-filter a no-refetch
+    // role/group/class) client-side — this is what makes a re-filter a no-refetch
     // operation, replacing the old per-query device/patch `df`. `devices_by_id` then
     // holds only in-scope devices, so every downstream rollup is scoped through it.
     // One prepared filter for the whole assembly: it lowers the text needles and
     // parses the severities once, and it is what both the device scoping below and
     // the row join use — so a device the scope excludes cannot reappear as a row.
-    let prepared = plan.filter.prepare();
+    let prepared = plan
+        .filter
+        .prepare()
+        .with_device_group_members(src.device_group_members.as_ref());
     let has_scope = prepared.has_scope();
     let scoped_devices: Vec<&Device> = src
         .devices

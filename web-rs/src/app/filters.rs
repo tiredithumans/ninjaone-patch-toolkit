@@ -92,6 +92,22 @@ pub(crate) fn ScopeBar() -> impl IntoView {
                 disabled=loading
                 searchable=true
             />
+            // NinjaOne device groups (saved searches). Disabled while the tenant has
+            // none, or the token cannot list them.
+            <Picker
+                label="Groups"
+                all_label="All"
+                options=Signal::derive(move || state.lookups.device_groups.get())
+                selected=state.filters.group_ids
+                on_toggle=Callback::new(move |id: i64| {
+                    state.filters.toggle_id(state.filters.group_ids, id)
+                })
+                on_clear=Callback::new(move |()| state.filters.group_ids.set(Vec::new()))
+                disabled=Signal::derive(move || {
+                    loading.get() || state.lookups.device_groups.with(Vec::is_empty)
+                })
+                searchable=true
+            />
             <Picker
                 label="OS type"
                 all_label="All"

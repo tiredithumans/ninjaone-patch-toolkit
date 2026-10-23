@@ -1,11 +1,11 @@
-//! Scope lookups: the org/role/location/OS-type lists behind the filter pickers,
+//! Scope lookups: the org/role/group/location/OS-type lists behind the filter pickers,
 //! the organization toggle that reloads locations, and demo-mode seeding.
 
 use super::*;
 
 impl AppState {
     pub(in crate::app) fn load_lookups(self) {
-        self.lookups.lookups_pending.set(3);
+        self.lookups.lookups_pending.set(4);
         spawn_local(async move {
             match api::list_orgs().await {
                 Ok(o) => self.lookups.orgs.set(o),
@@ -17,6 +17,13 @@ impl AppState {
             match api::list_roles().await {
                 Ok(r) => self.lookups.roles.set(r),
                 Err(e) => self.notify(Toast::err(format!("Couldn't load roles: {e}"))),
+            }
+            self.lookups.lookup_done();
+        });
+        spawn_local(async move {
+            match api::list_device_groups().await {
+                Ok(g) => self.lookups.device_groups.set(g),
+                Err(e) => self.notify(Toast::err(format!("Couldn't load device groups: {e}"))),
             }
             self.lookups.lookup_done();
         });
@@ -118,6 +125,7 @@ impl AppState {
     pub(in crate::app) fn enter_demo(self) {
         self.lookups.orgs.set(demo::sample_orgs());
         self.lookups.roles.set(demo::sample_roles());
+        self.lookups.device_groups.set(demo::sample_device_groups());
         // Every location up front, matching the signed-in path: with no organization
         // selected the demo's location picker would otherwise be empty and disabled.
         self.lookups.locations.set(demo::sample_locations(&[]));

@@ -12,7 +12,9 @@ use crate::api::{NinjaApiClient, ProgressFn};
 use crate::auth::AuthState;
 #[cfg(test)]
 use crate::model::PatchRow;
-use crate::model::{Device, Location, Organization, Patch, Role, apply_reboot_reasons};
+use crate::model::{
+    Device, DeviceGroup, Location, Organization, Patch, Role, apply_reboot_reasons,
+};
 #[cfg(test)]
 use crate::rows::sort_order;
 use crate::rows::{GroupBy, PatchGroup, QueryResult, RowSort};
@@ -156,7 +158,7 @@ pub struct Memo<T> {
     pub memo: Option<Arc<T>>,
 }
 
-/// The three reference lists, cached as one value.
+/// The reference lists, cached as one value.
 ///
 /// One `TenantCache` entry rather than three, because they are fetched together and
 /// are only ever meaningful together — a row labelled with this tenant's orgs and
@@ -168,6 +170,7 @@ pub struct LookupSet {
     pub orgs: Vec<Organization>,
     pub locations: Vec<Location>,
     pub roles: Vec<Role>,
+    pub device_groups: Vec<DeviceGroup>,
 }
 
 /// The two current-patch families live in separate `TenantCache` slots rather than
@@ -450,7 +453,7 @@ impl AppState {
         let (set, _) = self
             .lookups_cache
             .get_or_fetch(&key, LOOKUP_TTL, "lookups", || async {
-                let (orgs, locations, roles) = tokio::try_join!(
+                let (orgs, locations, roles, device_groups) = tokio::try_join!(
                     self.api.organizations(),
                     async {
                         // Locations only supply optional row labels, so a failure
@@ -466,11 +469,23 @@ impl AppState {
                         })
                     },
                     self.api.roles(),
+                    async {
+                        // Groups only feed one optional facet; a token or tenant that
+                        // cannot list them loses that picker, not every query.
+                        Ok::<_, anyhow::Error>(match self.api.device_groups().await {
+                            Ok(groups) => groups,
+                            Err(e) => {
+                                warn!(error = %e, "device groups fetch failed; the Group filter will be empty");
+                                Vec::new()
+                            }
+                        })
+                    },
                 )?;
                 Ok(LookupSet {
                     orgs,
                     locations,
                     roles,
+                    device_groups,
                 })
             })
             .await?;

@@ -25,6 +25,17 @@ pub struct Role {
     pub node_class: Option<String>,
 }
 
+/// A NinjaOne device group — a saved search (`GET /groups`). Its membership is not on
+/// the device records; it is read per query from `/group/{id}/device-ids`. Named
+/// `DeviceGroup` because "group" already means the Patches table's grouping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceGroup {
+    pub id: i64,
+    /// The spec does not require it; a nameless group is still selectable.
+    #[serde(default)]
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OsInfo {
     #[serde(default)]

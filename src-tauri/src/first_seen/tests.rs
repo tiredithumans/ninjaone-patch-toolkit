@@ -155,7 +155,7 @@ fn the_cap_keeps_the_oldest_observations() {
 fn the_ledger_key_is_the_changes_diff_key() {
     let d = device(7, false);
     let by_id = HashMap::from([(7, &d)]);
-    let maps = LookupMaps::build(&[], &[], &[]);
+    let maps = LookupMaps::build(&[], &[], &[], &[]);
     let os = os_patch(7, "KB5040434", "MANUAL");
     let sw: Patch = serde_json::from_value(software_patch_json(
         7,

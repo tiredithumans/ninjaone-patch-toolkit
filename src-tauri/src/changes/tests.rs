@@ -437,7 +437,7 @@ fn the_newest_snapshot_survives_even_over_the_byte_budget() {
 /// separate everything that changes which rows a run can see.
 #[test]
 fn the_scope_key_is_order_insensitive_and_separates_what_it_must() {
-    let maps = LookupMaps::build(&[], &[], &[]);
+    let maps = LookupMaps::build(&[], &[], &[], &[]);
     let key = |filter: FilterParams, statuses: &[PatchStatus], families, days| {
         let scope = build_query_scope(&filter, &maps, families, statuses, None);
         scope_key(&scope.fingerprint, families, days)

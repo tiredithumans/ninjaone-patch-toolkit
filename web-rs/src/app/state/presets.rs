@@ -38,11 +38,13 @@ impl AppState {
             self.filters.org_ids.set(Vec::new());
             self.filters.loc_ids.set(Vec::new());
             self.filters.role_ids.set(Vec::new());
+            self.filters.group_ids.set(Vec::new());
             // So are the lists themselves: the switch drops the grant, and until the
             // next sign-in reloads them the pickers offered the old tenant's names.
             self.lookups.orgs.set(Vec::new());
             self.lookups.locations.set(Vec::new());
             self.lookups.roles.set(Vec::new());
+            self.lookups.device_groups.set(Vec::new());
         }
     }
 
@@ -60,6 +62,7 @@ impl AppState {
             self.filters.install_days.set(d);
         }
         self.filters.role_ids.set(f.role_ids);
+        self.filters.group_ids.set(f.device_group_ids);
         self.filters.selected_classes.set(f.node_classes);
         self.filters.selected_severities.set(f.severities);
         self.filters

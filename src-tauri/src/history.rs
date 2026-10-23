@@ -661,7 +661,7 @@ mod tests {
         use crate::model::PatchStatus;
         use crate::rows::{LookupMaps, PatchFamilies, build_query_scope};
 
-        let maps = LookupMaps::build(&[], &[], &[]);
+        let maps = LookupMaps::build(&[], &[], &[], &[]);
         let families = PatchFamilies {
             os: true,
             software: true,

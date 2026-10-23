@@ -236,6 +236,7 @@ fn maps() -> LookupMaps {
         orgs: HashMap::from([(10, "Contoso".to_string())]),
         locations: HashMap::from([(100, "HQ".to_string())]),
         roles: HashMap::from([(2, "Domain Controller".to_string())]),
+        device_groups: HashMap::from([(7, "Patch ring 1".to_string())]),
     }
 }
 
@@ -1918,6 +1919,7 @@ fn scope_filter() -> FilterParams {
         organization_ids: Vec::new(),
         location_ids: Vec::new(),
         role_ids: Vec::new(),
+        device_group_ids: Vec::new(),
         node_classes: Vec::new(),
         os_name_contains: None,
         search: None,
@@ -2097,6 +2099,7 @@ fn the_scope_block_names_every_active_facet() {
     filter.organization_ids = vec![10, 77];
     filter.location_ids = vec![100];
     filter.role_ids = vec![2];
+    filter.device_group_ids = vec![7, 8];
     filter.node_classes = vec!["WINDOWS_SERVER".into()];
     filter.os_name_contains = Some("Server 2019".into());
     filter.severities = vec!["CRITICAL".into(), "IMPORTANT".into()];
@@ -2124,6 +2127,7 @@ fn the_scope_block_names_every_active_facet() {
     assert_eq!(facet(&scope, "Organizations"), Some("Contoso, id 77"));
     assert_eq!(facet(&scope, "Locations"), Some("HQ"));
     assert_eq!(facet(&scope, "Device roles"), Some("Domain Controller"));
+    assert_eq!(facet(&scope, "Device groups"), Some("id 8, Patch ring 1"));
     assert_eq!(facet(&scope, "OS type"), Some("WINDOWS_SERVER"));
     assert_eq!(facet(&scope, "OS name contains"), Some("Server 2019"));
     assert_eq!(facet(&scope, "Patch type"), Some("OS patches only"));
@@ -2160,6 +2164,7 @@ fn the_scope_block_names_every_active_facet() {
             "Organizations",
             "Locations",
             "Device roles",
+            "Device groups",
             "OS type",
             "OS name contains",
             "Patch type",

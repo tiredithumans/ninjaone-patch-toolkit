@@ -216,6 +216,9 @@
             "detectedAfter": 1777723200,
             "detectedBefore": 1782820800,
             "detectedWithinDays": 30,
+            "deviceGroupIds": [
+              7
+            ],
             "installedAfter": 1780315200,
             "installedBefore": 1782820800,
             "locationIds": [
@@ -266,6 +269,12 @@
       },
       "tenantChanged": false
     },
+    "list_device_groups": [
+      {
+        "id": 7,
+        "name": "Patch ring 1"
+      }
+    ],
     "list_jobs": [
       {
         "activityId": 9000,

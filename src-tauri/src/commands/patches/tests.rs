@@ -385,6 +385,7 @@ fn lookups() -> Lookups {
         }],
         locations: vec![],
         roles: vec![],
+        device_groups: vec![],
     })
 }
 
@@ -1327,6 +1328,7 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
         ],
         locations: vec![],
         roles: vec![],
+        device_groups: vec![],
     });
 
     let mut a = args(PatchType::Os, vec![PatchStatus::Pending]);
@@ -1378,6 +1380,94 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
     assert_eq!(&*result.compliance[0].organization, "Alpha");
     assert_eq!(result.compliance[0].urgent_pending, 1);
 }
+/// A device-group scope reads each selected group's members at query time and
+/// narrows the cached fleet to them; a group whose members cannot be read fails
+/// the query, named, rather than widening it to every device.
+#[tokio::test]
+async fn a_device_group_scope_narrows_to_its_members_and_fails_closed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/group/7/device-ids"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([10, 99])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/group/9/device-ids"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let api = client(&server);
+    let lookups = || {
+        Arc::new(LookupSet {
+            orgs: vec![Organization {
+                id: 1,
+                name: "Alpha".into(),
+            }],
+            locations: vec![],
+            roles: vec![],
+            device_groups: vec![
+                crate::model::DeviceGroup {
+                    id: 7,
+                    name: "Ring 1".into(),
+                },
+                crate::model::DeviceGroup {
+                    id: 9,
+                    name: "Ring 2".into(),
+                },
+            ],
+        })
+    };
+    let run = |groups: Vec<i64>| {
+        let mut a = args(PatchType::Os, vec![PatchStatus::Pending]);
+        a.filter.device_group_ids = groups;
+        let (api, lookups) = (&api, lookups());
+        async move {
+            run_query(
+                api,
+                async { Ok::<_, anyhow::Error>(lookups) },
+                async { Ok::<_, anyhow::Error>(Arc::new(vec![dev(10, 1), dev(20, 1)])) },
+                async {
+                    Ok::<_, anyhow::Error>(CurrentPatches {
+                        os: Arc::new(vec![
+                            cur(10, "KB1", "MANUAL", "CRITICAL"),
+                            cur(20, "KB2", "MANUAL", "CRITICAL"),
+                        ]),
+                        sw: Arc::new(Vec::new()),
+                        fetched_at: fixed_now(),
+                        os_fetched_at: Some(fixed_now()),
+                        sw_fetched_at: Some(fixed_now()),
+                    })
+                },
+                no_ledger(),
+                30,
+                SlaPolicy::default(),
+                "https://app.ninjarmm.com".into(),
+                a,
+                fixed_now(),
+                &|_: &'static str, _: usize| {},
+            )
+            .await
+        }
+    };
+
+    let result = run(vec![7]).await.expect("query").result;
+    assert_eq!(
+        result.devices_total, 1,
+        "only the group's member is in scope"
+    );
+    let kbs: Vec<_> = result.rows.iter().map(|r| r.kb.as_deref()).collect();
+    assert_eq!(kbs, [Some("KB1")]);
+
+    let err = match run(vec![7, 9]).await {
+        Ok(_) => panic!("an unreadable group must fail the query"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains("couldn't read the members of device group \"Ring 2\""),
+        "{err}"
+    );
+}
+
 /// NinjaOne stamps every record "now" — the case the ledger exists for. A record
 /// this app first saw 60 days ago is aged from then: past its 30-day SLA, in the
 /// 31–60 day bucket, its row's First Seen 60 days back, and counted as dated by the
@@ -1397,6 +1487,7 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
         }],
         locations: vec![],
         roles: vec![],
+        device_groups: vec![],
     });
     let sixty_days_ago = fixed_now() - Duration::days(60);
     let ledger = TenantLedger::recorded("t", &[seen_before], sixty_days_ago);
@@ -1473,6 +1564,7 @@ async fn a_scoped_query_observes_the_whole_fleets_feed() {
         orgs: vec![],
         locations: vec![],
         roles: vec![],
+        device_groups: vec![],
     });
     let mut a = args(PatchType::Os, vec![PatchStatus::Pending]);
     a.filter.organization_ids = vec![1];

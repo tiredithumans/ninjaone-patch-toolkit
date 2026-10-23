@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{Device, Severity};
@@ -14,7 +16,11 @@ use crate::settings::MAX_WINDOW_DAYS;
 /// `os_name_contains`, `search`, and `severities` are applied client-side against
 /// patch rows after fetch.
 ///
-/// The three identity facets are **multi-select**: each holds zero or more ids, where
+/// Device groups are the one identity facet the device records cannot answer: a
+/// group is a saved search, so its membership is fetched per query and handed to
+/// [`PreparedFilter::with_device_group_members`]. It is never sent in the `df`.
+///
+/// The id facets are **multi-select**: each holds zero or more ids, where
 /// empty means "every one of them". They deserialize from either a bare id or a list
 /// (see [`ids`]) so a preset saved when they were single-valued still loads.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29,6 +35,10 @@ pub struct FilterParams {
     /// Selected device roles; empty = every role.
     #[serde(alias = "roleId", deserialize_with = "ids")]
     pub role_ids: Vec<i64>,
+    /// Selected NinjaOne device groups; empty = every device. A device in any of
+    /// them is in scope.
+    #[serde(deserialize_with = "ids")]
+    pub device_group_ids: Vec<i64>,
     /// NinjaOne node classes (e.g. `WINDOWS_SERVER`). The coarse "OS Type" facet.
     pub node_classes: Vec<String>,
     /// Granular OS-name substring, matched client-side against `device.os.name`.
@@ -121,7 +131,8 @@ impl FilterParams {
         .collect()
     }
 
-    /// Whether any device-scope facet (org/location/role/class/OS name) is active.
+    /// Whether any device-scope facet (org/location/role/group/class/OS name) is
+    /// active.
     /// When none is, the query spans the whole fleet and
     /// [`PreparedFilter::device_allowed`] matches every device (so orphan patches
     /// whose device isn't in inventory are kept rather than scoped out).
@@ -133,6 +144,7 @@ impl FilterParams {
         !self.organization_ids.is_empty()
             || !self.location_ids.is_empty()
             || !self.role_ids.is_empty()
+            || !self.device_group_ids.is_empty()
             || self.node_classes.iter().any(|c| !c.trim().is_empty())
             || self
                 .os_name_contains
@@ -146,6 +158,9 @@ impl FilterParams {
     /// rows even when matching devices exist — so the node-class facet is omitted
     /// here and applied client-side via the device join in `rows::build_rows`. Only
     /// the identity facets (which the query endpoints do honor) are sent server-side.
+    /// Device groups are left out too: the grammar documents no group token, and an
+    /// unhonored clause is dropped silently, so a group-only scope pulls the tenant's
+    /// install history and narrows it here.
     ///
     /// This clause is a **bandwidth optimization, not the scope boundary**:
     /// `rows::build_rows` re-checks every joined row against the same client-side
@@ -221,6 +236,8 @@ impl FilterParams {
             organization_ids: &self.organization_ids,
             location_ids: &self.location_ids,
             role_ids: &self.role_ids,
+            device_group_ids: &self.device_group_ids,
+            device_group_members: None,
             node_classes: &self.node_classes,
             has_scope: self.has_identity_scope(),
             os_name_needle,
@@ -285,6 +302,11 @@ pub struct PreparedFilter<'a> {
     organization_ids: &'a [i64],
     location_ids: &'a [i64],
     role_ids: &'a [i64],
+    device_group_ids: &'a [i64],
+    /// Every device in any selected group, fetched per query. `None` while the
+    /// caller has not supplied it, and then an active group facet matches nothing:
+    /// a scope that cannot be checked must not widen to the whole fleet.
+    device_group_members: Option<&'a HashSet<i64>>,
     node_classes: &'a [String],
     /// Cached [`FilterParams::has_identity_scope`] — read once per patch in the row
     /// join, which is the largest loop in the app.
@@ -299,7 +321,14 @@ pub struct PreparedFilter<'a> {
     detected_before: Option<i64>,
 }
 
-impl PreparedFilter<'_> {
+impl<'a> PreparedFilter<'a> {
+    /// Supplies the selected device groups' members (see
+    /// [`FilterParams::device_group_ids`]), which no device record carries.
+    pub fn with_device_group_members(mut self, members: Option<&'a HashSet<i64>>) -> Self {
+        self.device_group_members = members;
+        self
+    }
+
     /// Whether any device-scope facet is active; see
     /// [`FilterParams::has_identity_scope`].
     pub fn has_scope(&self) -> bool {
@@ -307,7 +336,8 @@ impl PreparedFilter<'_> {
     }
 
     /// Client-side device-scope match against a cached device: keeps it only when it
-    /// satisfies every active facet (org / location / role / node-class / OS name).
+    /// satisfies every active facet (org / location / role / device group /
+    /// node-class / OS name).
     ///
     /// This is the device-query equivalent of the old `df` `class in (...)` +
     /// identity clauses, moved client-side so a scope change re-filters the
@@ -330,6 +360,13 @@ impl PreparedFilter<'_> {
             return false;
         }
         if !id_allowed(self.role_ids, device.node_role_id) {
+            return false;
+        }
+        if !self.device_group_ids.is_empty()
+            && !self
+                .device_group_members
+                .is_some_and(|members| members.contains(&device.id))
+        {
             return false;
         }
         // Compared with `eq_ignore_ascii_case` rather than uppercasing both sides:
@@ -618,6 +655,37 @@ mod tests {
         assert!(f.patch_filter().is_none());
         assert!(allows(&f, &device(1, 2, 3, "LINUX_SERVER")));
         assert!(!allows(&f, &device(1, 2, 3, "WINDOWS_SERVER")));
+    }
+
+    /// A device group is a saved search, so its members come from outside the
+    /// device record. With them supplied, a device in any selected group is in
+    /// scope; without them, the facet matches nothing rather than everything — a
+    /// scope that cannot be checked must not widen to the whole fleet. It is never
+    /// sent in the install `df`.
+    #[test]
+    fn a_device_group_scope_matches_its_members_and_fails_closed_without_them() {
+        let f = FilterParams {
+            device_group_ids: vec![7, 8],
+            ..Default::default()
+        };
+        assert!(f.has_identity_scope());
+        assert!(f.patch_filter().is_none());
+        let member = device(1, 2, 3, "WINDOWS_SERVER");
+        let outsider = Device {
+            id: 2,
+            ..device(1, 2, 3, "WINDOWS_SERVER")
+        };
+        assert!(!allows(&f, &member), "no member set supplied");
+
+        let members = HashSet::from([1]);
+        let prepared = f.prepare().with_device_group_members(Some(&members));
+        assert!(prepared.device_allowed(&member));
+        assert!(!prepared.device_allowed(&outsider));
+
+        // Inactive facet: the member set is irrelevant.
+        let none = FilterParams::default();
+        let prepared = none.prepare().with_device_group_members(None);
+        assert!(prepared.device_allowed(&outsider));
     }
 
     /// The `df` tokens are NinjaOne's, and a wrong one is invisible: the server
