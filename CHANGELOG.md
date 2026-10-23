@@ -11,6 +11,10 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-23
+
+Clearer reboot information, a device group filter, and live job status from NinjaOne.
+
 ### Added
 
 - Patch rows mark patches whose install usually needs a restart (Linux kernel and core libraries,
