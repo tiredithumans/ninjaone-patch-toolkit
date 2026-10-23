@@ -11,6 +11,12 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- The software remediation script can update Microsoft Edge, and its log says how to fix error
+  0x800706BA under a Windows credential. Re-import `remediation/Install-SelectedSoftwarePatches.ps1`
+  into the NinjaOne library to pick it up.
+
 ## [0.20.0] - 2026-10-23
 
 Clearer reboot information, a device group filter, and live job status from NinjaOne.

@@ -280,6 +280,9 @@ function Get-ProductPackageMap {
         '7zip'                       = '7zip.7zip'
         '7zipx64'                    = '7zip.7zip'
         'mozillafirefox'             = 'Mozilla.Firefox'
+        'edgex64'                    = 'Microsoft.Edge'
+        'edgex86'                    = 'Microsoft.Edge'
+        'microsoftedge'              = 'Microsoft.Edge'
         'notepad++'                  = 'Notepad++.Notepad++'
         'awscommandlineinterfacex64' = 'Amazon.AWSCLI'
         'awscommandlineinterface'    = 'Amazon.AWSCLI'
@@ -344,7 +347,12 @@ function Get-WinGetHostHint {
     if ($Edition -eq 'Desktop' -and $IsSystem) {
         return ' Microsoft.WinGet.Client does not run as SYSTEM in Windows PowerShell 5.1: install PowerShell 7 on this device (the script switches to it by itself), or set Run as to a Windows credential.'
     }
-    return ' If App Installer is missing or out of date on this device, run Repair-WinGetPackageManager -AllUsers -Latest there once.'
+    $hint = ' If App Installer is missing or out of date on this device, run Repair-WinGetPackageManager -AllUsers -Latest there once.'
+    # Registration is per account, and SYSTEM never signs in, so this fix only fits a credential.
+    if (-not $IsSystem) {
+        $hint += ' Error 0x800706BA usually means App Installer is not registered for the Run-as account: a service account that has never signed in interactively has no registration, so run Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe as that account once.'
+    }
+    return $hint
 }
 
 function Install-WinGetModule {
