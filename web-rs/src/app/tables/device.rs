@@ -106,6 +106,10 @@ pub(crate) fn DeviceDetailModal() -> impl IntoView {
 /// Facts, rollup and rows for a loaded device.
 #[component]
 fn DrillBody(detail: DeviceDetail, sort: RwSignal<Option<RowSort>>) -> impl IntoView {
+    let running = detail
+        .device
+        .as_ref()
+        .map(|d| view! { <DeviceRunningJobs device_id=d.device_id/> });
     let summary = detail.device.map(|d| view! { <DeviceHealth device=d/> });
     let note = util::device_rows_note(detail.rows.len(), detail.rows_total);
     let rows = detail.rows;
@@ -118,6 +122,7 @@ fn DrillBody(detail: DeviceDetail, sort: RwSignal<Option<RowSort>>) -> impl Into
     };
     view! {
         {summary}
+        {running}
         <h3 class="chart-title">"Patch rows"</h3>
         <p class="scope-note">
             "The device's rows on the Patches tab — every patch filter applies. The counts above ignore Status, Severity, Search and the date filters."

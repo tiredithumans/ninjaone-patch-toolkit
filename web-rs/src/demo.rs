@@ -28,8 +28,8 @@ use crate::types::{
     AgeBucket, ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceDetail,
     DeviceGroup, DeviceSummary, FailureGroup, FilterParams, FirstSeenTracking, GroupBy,
     InstallLatency, Location, NodeClass, OrgSeverity, Organization, OsCompliance, PatchFamilies,
-    PatchGroup, PatchRow, Role, RollupScope, SeverityCounts, SlaBySeverity, SlaExempt, SlaPolicy,
-    StuckDevice, TimeToInstall,
+    PatchGroup, PatchRow, Role, RollupScope, RunningJob, RunningJobs, SeverityCounts,
+    SlaBySeverity, SlaExempt, SlaPolicy, StuckDevice, TimeToInstall,
 };
 use crate::types::{ChangeItem, RunChanges};
 
@@ -249,6 +249,46 @@ pub fn sample_roles() -> Vec<Role> {
             name: name.to_string(),
         })
         .collect()
+}
+
+/// The sample's running NinjaOne jobs, on whichever of their devices `rows` still
+/// lists — the backend likewise scopes them to the result's devices.
+pub fn sample_running_jobs(rows: &[PatchRow]) -> RunningJobs {
+    let jobs = [
+        (
+            "SEA-WEB01",
+            "OS patching",
+            "In progress",
+            "Installing 1 update",
+        ),
+        (
+            "FAB-LNX-WEB1",
+            "Script",
+            "Started",
+            "Apply selected updates",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(device, job_type, status, detail)| {
+        let row = rows.iter().find(|r| r.device_name == device)?;
+        Some(RunningJob {
+            uid: None,
+            device_id: row.device_id,
+            device_name: row.device_name.clone(),
+            organization: row.organization.clone(),
+            job_type: job_type.to_string(),
+            status: status.to_string(),
+            detail: Some(detail.to_string()),
+            source_name: Some("Patch window".to_string()),
+            started_at: Some("2026-06-26 14:20 UTC".to_string()),
+            updated_at: Some("2026-06-26 14:31 UTC".to_string()),
+        })
+    })
+    .collect();
+    RunningJobs {
+        fetched_at: GENERATED_AT.to_string(),
+        jobs,
+    }
 }
 
 /// Device groups for the demo's Group picker.
@@ -1232,6 +1272,7 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 // patch installed on forty machines would be meaningless. Copying the
                 // first row's state into a patch group is what
                 // `grouping_matches_the_backend_byte_for_byte` caught.
+                device_id: matches!(group_by, GroupBy::Device).then_some(r.device_id),
                 offline: matches!(group_by, GroupBy::Device) && r.offline,
                 needs_reboot: matches!(group_by, GroupBy::Device) && r.needs_reboot,
                 reboot_likely: false,
@@ -1750,6 +1791,7 @@ mod tests {
                     got.severity_rank, want.severity_rank,
                     "{group_by:?} severity_rank"
                 );
+                assert_eq!(got.device_id, want.device_id, "{group_by:?} device_id");
                 assert_eq!(got.offline, want.offline, "{group_by:?} offline");
                 assert_eq!(
                     got.needs_reboot, want.needs_reboot,

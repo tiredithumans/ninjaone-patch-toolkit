@@ -79,6 +79,44 @@ pub struct Device {
     pub pending_reboot_reason: Option<String>,
 }
 
+/// One `GET /jobs` record: a job NinjaOne reports as running. Read for display only —
+/// a dispatched action still resolves from `/activities`. `device` (a whole node
+/// record) and `data` are not decoded, so a change to either cannot drop the row.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningJob {
+    /// The activity series uid, shared with `Activity::series_uid`.
+    #[serde(default)]
+    pub uid: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<i64>,
+    #[serde(default)]
+    pub job_type: Option<String>,
+    #[serde(default)]
+    pub job_status: Option<String>,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    /// The policy or configuration element that started it.
+    #[serde(default)]
+    pub source_name: Option<String>,
+    #[serde(default)]
+    pub create_time: Option<f64>,
+    #[serde(default)]
+    pub update_time: Option<f64>,
+}
+
+impl RunningJob {
+    pub fn started_at(&self) -> Option<DateTime<Utc>> {
+        self.create_time.and_then(unix_to_datetime)
+    }
+
+    pub fn updated_at(&self) -> Option<DateTime<Utc>> {
+        self.update_time.and_then(unix_to_datetime)
+    }
+}
+
 /// One `/queries/device-health` record, reduced to the field this app reads. The
 /// schema (`DeviceHealthSummary`) carries threat, alert and vulnerability counts as
 /// well; none of them is decoded, so a vendor change to one cannot fail the page.

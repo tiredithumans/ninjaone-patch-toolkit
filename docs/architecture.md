@@ -30,7 +30,8 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── patches.rs               # current patches + install-history endpoints
 │   ├── actions.rs               # WRITE path: patch scan/apply, reboot, script/run, automation-script library
 │   ├── activities.rs            # /activities feed used to resolve dispatched jobs
-│   └── lookups.rs               # orgs / all-locations / roles / node classes
+│   ├── jobs.rs                  # /jobs: what NinjaOne reports running, for display only
+│   └── lookups.rs               # orgs / all-locations / roles / device groups (+ a group's members)
 ├── src/filter.rs                # FilterParams → install-query df + PreparedFilter::device_allowed / row facets
 ├── src/model.rs                 # domain types (Device, Patch, PatchType, PatchStatus, Severity, …)
 ├── src/rows/                    # join → PatchRow and every rollup off the cached result
@@ -56,7 +57,8 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, SLA policy, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
 ├── src/fixtures.rs              # test-only: generates web-rs/tests/*.json (assert_fixture_current) + the IPC fixture
-├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, lookups, patches, settings, update)
+├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, live_jobs, lookups, patches, settings, update)
+├── src/commands/live_jobs.rs    # read-only: NinjaOne's running patch-ops jobs on the current result's devices
 ├── src/commands/actions/        # mod.rs handlers · confirm.rs request_hash · plan.rs build_plan · dispatch.rs send_action · poller.rs poll_tick · tests.rs
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
 ├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint); main window starts hidden
@@ -68,10 +70,10 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ├── src/app/
 │   ├── state.rs                 # AppState wrapper + Copy sub-structs by concern; no test module — logic goes to util
 │   ├── state/                   # impl AppState, one file per concern (no test modules)
-│   │   └── query.rs · view.rs · selection.rs · actions.rs · lookups.rs · presets.rs · view_link.rs
+│   │   └── query.rs · view.rs · selection.rs · actions.rs · live_jobs.rs · lookups.rs · presets.rs · view_link.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
 │   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
-│   ├── tables/                  # one file per results tab (+ changes panel, backlog, device drill-down dialog)
+│   ├── tables/                  # one file per results tab (+ changes panel, backlog, device drill-down dialog, live_jobs chip/panel)
 │   ├── header.rs                # top bar: brand, run controls, Export / account / ⋯ menus
 │   ├── controls.rs              # run controls, export menu, presets, view-link notices
 │   ├── menu.rs                  # MenuButton + dismiss_on_outside: menus and pickers (never aria-modal)

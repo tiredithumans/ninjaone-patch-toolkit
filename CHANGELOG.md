@@ -19,6 +19,9 @@ version and start a fresh `[Unreleased]`.
 - The Needs Reboot list, the Devices sheet and device details show NinjaOne's reason for a
   pending reboot.
 - Filter by NinjaOne device group.
+- See the patching, script and reboot jobs NinjaOne is running right now: a "job running" mark on
+  devices, a list in device details, and a Running in NinjaOne section on the Jobs tab, refreshed
+  every 30 seconds.
 
 ### Fixed
 

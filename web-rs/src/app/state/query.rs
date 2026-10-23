@@ -439,6 +439,10 @@ impl AppState {
             .patches_sort
             .set(self.query.sort_on_next_run.get_untracked());
         self.query.sort_on_next_run.set(None);
+        // No backend to poll: the sample's running jobs, scoped to this result.
+        self.live_jobs
+            .jobs
+            .set(Some(demo::sample_running_jobs(&r.rows)));
         self.query.result.set(Some(r));
         // Same reason as the live path: a grouped view's headers and members don't
         // ride along with the result, so they'd otherwise describe the last query.
@@ -487,6 +491,7 @@ impl AppState {
         // instead, and a tick must not carry into another operator's (or tenant's)
         // first dispatch.
         self.actions.override_window.set(false);
+        self.live_jobs.clear();
         // A run queued behind one from the old session would fire into the new
         // one (or, signed out, just to say "Sign in first").
         self.run.queued.set(None);

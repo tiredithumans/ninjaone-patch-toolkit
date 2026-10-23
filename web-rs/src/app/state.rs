@@ -14,6 +14,7 @@ use leptos::task::spawn_local;
 use super::*;
 
 mod actions;
+mod live_jobs;
 mod lookups;
 mod presets;
 mod query;
@@ -783,6 +784,41 @@ impl ActionState {
     }
 }
 
+/// What NinjaOne reports running on the current result's devices
+/// (`list_running_jobs`), read on a cadence while the window is visible.
+#[derive(Clone, Copy)]
+pub(crate) struct LiveJobsState {
+    /// The last successful read; `None` before one, and after the session ends.
+    pub(super) jobs: RwSignal<Option<RunningJobs>>,
+    /// Why the last read failed, shown in place of a toast on every retry.
+    pub(super) error: RwSignal<Option<String>>,
+    pub(super) in_flight: RwSignal<bool>,
+    pub(super) last_poll: RwSignal<Option<util::LivePoll>>,
+    /// Stamps each read; a reply whose stamp has moved on (a newer read, or the
+    /// session ended) is dropped.
+    pub(super) seq: RwSignal<u64>,
+}
+
+impl LiveJobsState {
+    pub(super) fn new() -> Self {
+        Self {
+            jobs: RwSignal::new(None),
+            error: RwSignal::new(None),
+            in_flight: RwSignal::new(false),
+            last_poll: RwSignal::new(None),
+            seq: RwSignal::new(0),
+        }
+    }
+
+    pub(super) fn clear(self) {
+        self.seq.update(|s| *s = s.wrapping_add(1));
+        self.jobs.set(None);
+        self.error.set(None);
+        self.in_flight.set(false);
+        self.last_poll.set(None);
+    }
+}
+
 /// All reactive state, shared via context as one `Copy` value (`RwSignal` handles
 /// are `Copy`, so the wrapper and every group above are too). Fields are grouped
 /// by concern; methods that orchestrate across groups stay on this wrapper.
@@ -797,6 +833,7 @@ pub struct AppState {
     pub(super) updates: UpdateState,
     pub(super) ui: UiState,
     pub(super) actions: ActionState,
+    pub(super) live_jobs: LiveJobsState,
 }
 
 impl AppState {
@@ -811,6 +848,7 @@ impl AppState {
             updates: UpdateState::new(),
             ui: UiState::new(),
             actions: ActionState::new(),
+            live_jobs: LiveJobsState::new(),
         }
     }
 

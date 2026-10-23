@@ -2,6 +2,7 @@ pub mod actions;
 pub mod auth;
 pub mod diagnostics;
 pub mod export;
+pub mod live_jobs;
 pub mod lookups;
 pub mod patches;
 pub mod settings;

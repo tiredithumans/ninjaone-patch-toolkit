@@ -107,6 +107,39 @@ pub struct Role {
     pub name: String,
 }
 
+/// One job NinjaOne reports running on a device in the current result. Mirrors
+/// `commands::live_jobs::RunningJobRow`; the labels are the backend's.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(rename_all = "camelCase")]
+pub struct RunningJob {
+    #[serde(default)]
+    pub uid: Option<String>,
+    pub device_id: i64,
+    pub device_name: String,
+    pub organization: String,
+    pub job_type: String,
+    pub status: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub source_name: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+/// What NinjaOne reported running, and when it was asked. Mirrors
+/// `commands::live_jobs::RunningJobs`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(rename_all = "camelCase")]
+pub struct RunningJobs {
+    pub fetched_at: String,
+    pub jobs: Vec<RunningJob>,
+}
+
 /// A NinjaOne device group (saved search). Mirrors `model::DeviceGroup`.
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
@@ -579,6 +612,10 @@ pub struct PatchGroup {
     pub devices: usize,
     pub severity: String,
     pub severity_rank: u8,
+    /// A device group's device; `None` for a patch or product group. Read for the
+    /// header's "job running" chip.
+    #[serde(default)]
+    pub device_id: Option<i64>,
     pub offline: bool,
     pub needs_reboot: bool,
     /// Whether any member's patch is likely to need a reboot.

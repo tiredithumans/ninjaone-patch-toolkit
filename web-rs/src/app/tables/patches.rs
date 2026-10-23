@@ -192,6 +192,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                             <td>
                                                 <DeviceLink device_id=r.device_id name=r.device_name.clone()/>
                                                 {reboot_pending_chip(r.needs_reboot)}
+                                                <RunningJobChip device_id=r.device_id/>
                                             </td>
                                             <td>{r.os_name.clone().unwrap_or_default()}</td>
                                             <td>{r.patch_type.clone()}</td>
@@ -390,6 +391,7 @@ fn GroupedPatches() -> impl IntoView {
                                             <span class="group-count">{count}</span>
                                             {reboot_pending_chip(g.needs_reboot)}
                                             {reboot_likely_chip(g.reboot_likely)}
+                                            {g.device_id.map(|id| view! { <RunningJobChip device_id=id/> })}
                                             <Show when=move || g.offline>
                                                 <span class="chip-note">"offline"</span>
                                             </Show>

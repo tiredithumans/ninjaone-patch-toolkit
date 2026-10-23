@@ -190,7 +190,14 @@ pub fn App() -> impl IntoView {
     // while the window is hidden — a tick re-pages the whole-fleet patch feeds, and
     // nobody is reading a minimized window — and restarts once a run lands. The
     // rule and the arithmetic are `util::refresh_hold` / `util::advance_refresh`.
-    gloo_timers::callback::Interval::new(1000, move || state.tick_auto_refresh()).forget();
+    //
+    // The same ticker reads NinjaOne's running jobs on their own cadence
+    // (`util::live_jobs_due`), which holds only while the window is hidden.
+    gloo_timers::callback::Interval::new(1000, move || {
+        state.tick_auto_refresh();
+        state.tick_live_jobs();
+    })
+    .forget();
 
     // Colour theme: applied on launch and on every change, remembered per machine.
     Effect::new(move |_| {

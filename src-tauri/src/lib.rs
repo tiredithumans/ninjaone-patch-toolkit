@@ -121,6 +121,7 @@ pub fn run() {
             commands::lookups::list_locations,
             commands::lookups::list_roles,
             commands::lookups::list_device_groups,
+            commands::live_jobs::list_running_jobs,
             commands::lookups::list_node_classes,
             commands::patches::query_patches,
             commands::patches::get_patch_rows,
