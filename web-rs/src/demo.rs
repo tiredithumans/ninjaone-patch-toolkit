@@ -1694,6 +1694,10 @@ mod tests {
                     got.needs_reboot, want.needs_reboot,
                     "{group_by:?} needs_reboot"
                 );
+                assert_eq!(
+                    got.reboot_likely, want.reboot_likely,
+                    "{group_by:?} reboot_likely"
+                );
             }
             let keys: Vec<String> = fixture
                 .rows
