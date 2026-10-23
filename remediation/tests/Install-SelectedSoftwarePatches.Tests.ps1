@@ -189,8 +189,18 @@ Describe 'ConvertTo-ProductKey' {
         @{ Title = '7-Zip 24.08 (x64)'; Key = '7zipx64' }
         @{ Title = 'Notepad++ 8.6.9'; Key = 'notepad++' }
         @{ Title = 'AWS Command Line Interface v2.17.0'; Key = 'awscommandlineinterface' }
+        @{ Title = 'Edge (X64)'; Key = 'edgex64' }
+        @{ Title = 'Edge (X86)'; Key = 'edgex86' }
+        @{ Title = 'Microsoft Edge 137.0.3296.62'; Key = 'microsoftedge' }
     ) {
         ConvertTo-ProductKey -Title $Title | Should -BeExactly $Key
+    }
+
+    It 'maps every Edge title to the one Microsoft.Edge package' {
+        $map = Get-ProductPackageMap
+        foreach ($title in @('Edge (X64)', 'Edge (X86)', 'Microsoft Edge 137.0.3296.62')) {
+            $map[(ConvertTo-ProductKey -Title $title)] | Should -BeExactly 'Microsoft.Edge'
+        }
     }
 
     It 'gives every mapped key a non-empty package id' {
@@ -219,6 +229,21 @@ Describe 'Resolve-ScriptHost' {
     It 'tells SYSTEM in Windows PowerShell how to fix the device' {
         Get-WinGetHostHint -Edition 'Desktop' -IsSystem $true | Should -Match 'PowerShell 7'
         Get-WinGetHostHint -Edition 'Core' -IsSystem $true | Should -Match 'Repair-WinGetPackageManager'
+    }
+
+    It 'tells a credential run in <Edition> how to register App Installer for its account' -ForEach @(
+        @{ Edition = 'Desktop' }
+        @{ Edition = 'Core' }
+    ) {
+        $hint = Get-WinGetHostHint -Edition $Edition -IsSystem $false
+        $hint | Should -Match '0x800706BA'
+        $hint | Should -Match 'Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft\.DesktopAppInstaller_8wekyb3d8bbwe'
+    }
+
+    It 'gives SYSTEM in PowerShell 7 no per-account registration advice' {
+        $hint = Get-WinGetHostHint -Edition 'Core' -IsSystem $true
+        $hint | Should -Not -Match '0x800706BA'
+        $hint | Should -Not -Match 'Add-AppxPackage'
     }
 }
 
@@ -252,6 +277,17 @@ Describe 'Install-SelectedProduct' {
     It 'reports a mapped package that is not installed as NotOffered' {
         Mock Get-InstalledWinGetPackage { @() }
         (Install-SelectedProduct -Title $chrome -DryRun $true).State | Should -BeExactly 'NotOffered'
+    }
+
+    It 'looks an Edge title up under Microsoft.Edge' {
+        Mock Get-InstalledWinGetPackage -ParameterFilter { $Id -eq 'Microsoft.Edge' } {
+            @([pscustomobject]@{
+                    Id = 'Microsoft.Edge'; Name = 'Microsoft Edge'; InstalledVersion = '137.0.3296.62'
+                    IsUpdateAvailable = $true; AvailableVersions = @('138.0.3351.55')
+                })
+        }
+        Mock Get-InstalledWinGetPackage { throw 'looked up the wrong package id' }
+        (Install-SelectedProduct -Title 'Edge (X64)' -DryRun $true).State | Should -BeExactly 'WouldInstall'
     }
 
     It 'ignores a package whose id is not the mapped one' {
