@@ -22,10 +22,11 @@ lists individual patches per server, and exports to Excel.
   redirect). Read‑only scope `monitoring offline_access` by default; `management` is added
   only when you switch on **Patch actions**. Refresh token stored in the OS keyring; the
   client secret is optional (Native app registrations have none).
-- **Advanced filtering** — Organization, Location, Device Role, and OS Type. OS Type is
-  both the coarse NinjaOne node‑class facet and a granular OS‑name substring filter; both
-  are matched client‑side against the device inventory (NinjaOne's patch queries ignore
-  `class` in `df`).
+- **Advanced filtering** — Organization, Location, Device Role, Device Group, and OS Type.
+  OS Type is both the coarse NinjaOne node‑class facet and a granular OS‑name substring
+  filter; both are matched client‑side against the device inventory (NinjaOne's patch queries
+  ignore `class` in `df`). Device Group membership (NinjaOne saved searches) is read fresh on
+  every query.
 - **Per‑server patch listing** by **type** (All / OS / Software) and **status**
   (Pending / Approved / Rejected / Installed, plus Failed). Installed patches are pulled
   from the patch‑install history endpoints over a configurable window.

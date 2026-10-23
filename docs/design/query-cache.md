@@ -89,7 +89,7 @@ The rule: return a summary only when the rows behind it are readable.
 
 `save_settings` reports `tenant_changed` on its `SettingsView` (both halves of the tenant key —
 instance *and* client id), and `apply_settings_view` calls `clear_session()` and resets the
-org/location/role scope ids (they belong to the previous tenant's lookups). `clear_session` drops
+org/location/role/group scope ids (they belong to the previous tenant's lookups). `clear_session` drops
 everything `commands::auth::clear_session_state` drops backend-side — the result, the job list and
 any pending confirmation — and the sign-in, sign-out and Re-authorize handlers call it too.
 Without it the previous session's rows stayed rendered against a cache that had already been
@@ -205,8 +205,10 @@ The device inventory and current patches (OS + 3rd-party) are fetched **whole-fl
 and cached in `AppState` (`fleet_devices_cache`, `DEVICE_TTL` ~15 min since devices change rarely;
 the current patches in `fleet_current_os` / `fleet_current_sw`, refreshed on `force_refresh` or
 past `CURRENT_PATCHES_TTL`). `run_query` then scopes them to the selected identity facets
-(org/location/role/class) **client-side** via `FilterParams::device_allowed` — so changing
-org/location/role/type/severity re-filters the cache with **no** round trip. This is why
+(org/location/role/group/class) **client-side** via `FilterParams::device_allowed` — so changing
+org/location/role/type/severity re-filters the cache with **no** round trip. A device group is the
+exception: its membership is one small read per selected group per query (see
+[filter.md](./filter.md#device-groups-are-read-per-query-and-fail-closed)). This is why
 `query_patches` takes the cached devices/current as *futures* (concurrent cold fetch) and why there
 is no separate per-query device-filter fetch.
 

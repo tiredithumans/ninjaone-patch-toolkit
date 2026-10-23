@@ -282,7 +282,7 @@ pub(crate) fn tab_scope(tab: Tab) -> Option<&'static str> {
         ),
         Tab::Compliance => Some(
             "The pending backlog for the selected device scope: device scope (Org / Location / \
-             Role / OS Type / OS name) and patch Type. Status, Severity, Search, First-seen and \
+             Role / Group / OS Type / OS name) and patch Type. Status, Severity, Search, First-seen and \
              Installed-within are ignored here, except in First seen → installed.",
         ),
         Tab::Reboot => Some(

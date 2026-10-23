@@ -104,6 +104,7 @@ pub fn build_query_scope(
     let organizations = id_facet(&filter.organization_ids, &maps.orgs);
     let locations = id_facet(&filter.location_ids, &maps.locations);
     let roles = id_facet(&filter.role_ids, &maps.roles);
+    let device_groups = id_facet(&filter.device_group_ids, &maps.device_groups);
     // Trimmed, and a blank value is no facet at all — the same reading
     // `has_identity_scope` and `prepare` give it. A whitespace-only needle matched
     // everything but still cost the export its whole-fleet line.
@@ -169,6 +170,7 @@ pub fn build_query_scope(
         ("Organizations", organizations),
         ("Locations", locations),
         ("Device roles", roles),
+        ("Device groups", device_groups),
         ("OS type", os_types),
         ("OS name contains", os_name.clone()),
     ] {
@@ -283,6 +285,11 @@ fn fingerprint(
     if let Some(w) = install_history.filter(|w| w.relative_days.is_none()) {
         let before = w.before.map(|b| b.to_string()).unwrap_or_default();
         parts.push(("installed", format!("{}..{before}", w.after)));
+    }
+    // Appended only when selected, for the same reason: the facet is newer than
+    // every trend line recorded without it.
+    if !filter.device_group_ids.is_empty() {
+        parts.push(("group", ids(&filter.device_group_ids)));
     }
     // JSON rather than a hand-joined string: the needles are free text, and an
     // escaped encoding cannot let one facet's value forge another's boundary.

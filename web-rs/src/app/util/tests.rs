@@ -1021,6 +1021,7 @@ fn identity_and_text_facets_pass_through_with_blanks_dropped() {
         organization_ids: vec![7, 11],
         location_ids: vec![8],
         role_ids: vec![9],
+        device_group_ids: vec![12],
         node_classes: vec!["WINDOWS_SERVER".into()],
         severities: vec!["CRITICAL".into()],
         os_name: "  Windows 11  ".into(),
@@ -1030,6 +1031,7 @@ fn identity_and_text_facets_pass_through_with_blanks_dropped() {
     assert_eq!(f.organization_ids, vec![7, 11]);
     assert_eq!(f.location_ids, vec![8]);
     assert_eq!(f.role_ids, vec![9]);
+    assert_eq!(f.device_group_ids, vec![12]);
     assert_eq!(f.node_classes, vec!["WINDOWS_SERVER".to_string()]);
     assert_eq!(f.severities, vec!["CRITICAL".to_string()]);
     // Trimmed, and a whitespace-only box is "no filter" rather than a search
@@ -1798,6 +1800,7 @@ fn filter_chips_emits_only_non_default_facets() {
         organizations: vec!["Acme".to_string(), "Globex".to_string()],
         locations: vec!["HQ".to_string()],
         roles: vec!["Server".to_string()],
+        device_groups: vec!["Ring 1".to_string()],
         os_types: vec!["Windows Server".to_string()],
         os_name: Some("2022".to_string()),
         patch_type: "OS".to_string(),
@@ -1818,6 +1821,7 @@ fn filter_chips_emits_only_non_default_facets() {
             "Org: Acme, Globex",
             "Location: HQ",
             "Role: Server",
+            "Group: Ring 1",
             "OS Type: Windows Server",
             "OS name: 2022",
             "Type: OS",
@@ -1828,10 +1832,10 @@ fn filter_chips_emits_only_non_default_facets() {
             "Install history: last 30d",
         ]
     );
-    // The first six facets reach every tab (Type included: only the families
+    // The first seven facets reach every tab (Type included: only the families
     // fetched are in the fleet rollups); the rest narrow the rows only.
-    assert!(chips.iter().take(6).all(|c| !c.patch));
-    assert!(chips.iter().skip(6).all(|c| c.patch));
+    assert!(chips.iter().take(7).all(|c| !c.patch));
+    assert!(chips.iter().skip(7).all(|c| c.patch));
 }
 
 /// Builds an `AuthStatus` in the state the named step leaves it in.

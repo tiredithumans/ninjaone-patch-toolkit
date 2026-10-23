@@ -74,8 +74,8 @@ impl AppState {
             self.ui.pending_view.set(Some(PendingView {
                 warning: format!(
                     "This view was shared from {from}, but this app is on {here}. Its \
-                     organization, location and role picks belong to that instance — any \
-                     this one doesn't list are dropped."
+                     organization, location, role and group picks belong to that instance — \
+                     any this one doesn't list are dropped."
                 ),
                 view,
             }));
@@ -98,9 +98,16 @@ impl AppState {
             .roles
             .with_untracked(|r| r.iter().map(|r| r.id).collect());
         let (orgs, dropped_orgs) = util::prune_unknown_ids(filter.organization_ids, &known_orgs);
+        let known_groups: Vec<i64> = self
+            .lookups
+            .device_groups
+            .with_untracked(|g| g.iter().map(|g| g.id).collect());
         let (roles, dropped_roles) = util::prune_unknown_ids(filter.role_ids, &known_roles);
+        let (groups, dropped_groups) =
+            util::prune_unknown_ids(filter.device_group_ids, &known_groups);
         filter.organization_ids = orgs;
         filter.role_ids = roles;
+        filter.device_group_ids = groups;
         let classes = self.lookups.node_classes.get_untracked();
         if !classes.is_empty() {
             filter
@@ -123,9 +130,9 @@ impl AppState {
             self.query.reset_members();
         }
         self.query.sort_on_next_run.set(view.sort);
-        let dropped = dropped_orgs + dropped_roles;
+        let dropped = dropped_orgs + dropped_roles + dropped_groups;
         self.notify(Toast::ok(if dropped > 0 {
-            format!("View applied — {dropped} organization/role pick(s) not in this instance were ignored")
+            format!("View applied — {dropped} organization/role/group pick(s) not in this instance were ignored")
         } else {
             "View applied".to_string()
         }));

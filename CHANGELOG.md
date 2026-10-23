@@ -18,6 +18,7 @@ version and start a fresh `[Unreleased]`.
   column.
 - The Needs Reboot list, the Devices sheet and device details show NinjaOne's reason for a
   pending reboot.
+- Filter by NinjaOne device group.
 
 ### Fixed
 

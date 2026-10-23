@@ -2,10 +2,10 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::UiError;
-use crate::model::{Location, Organization, Role};
+use crate::model::{DeviceGroup, Location, Organization, Role};
 use crate::state::AppState;
 
-/// The three reference lists all come from the same tenant-scoped cache
+/// The reference lists all come from the same tenant-scoped cache
 /// (`AppState::lookups`), which the device→row join already populates. Fetching them
 /// per command instead meant startup pulled organizations and roles twice — once for
 /// the dropdowns and again for the join — and a scope change re-fetched locations
@@ -40,6 +40,14 @@ pub async fn list_locations(
 pub async fn list_roles(state: State<'_, AppState>) -> Result<Vec<Role>, UiError> {
     let lookups = state.lookups().await.map_err(UiError::from)?;
     Ok(lookups.roles.clone())
+}
+
+/// NinjaOne device groups, for the Group facet. Empty when the tenant has none or
+/// the token cannot list them.
+#[tauri::command]
+pub async fn list_device_groups(state: State<'_, AppState>) -> Result<Vec<DeviceGroup>, UiError> {
+    let lookups = state.lookups().await.map_err(UiError::from)?;
+    Ok(lookups.device_groups.clone())
 }
 
 #[derive(Debug, Serialize)]

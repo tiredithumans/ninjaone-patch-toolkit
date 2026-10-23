@@ -312,6 +312,7 @@ ipc!(sign_out() -> ());
 ipc!(list_orgs() -> Vec<Organization>);
 ipc!(list_locations(org_ids: Vec<i64>) -> Vec<Location>);
 ipc!(list_roles() -> Vec<Role>);
+ipc!(list_device_groups() -> Vec<DeviceGroup>);
 ipc!(list_node_classes() -> Vec<NodeClass>);
 
 // --- Patches + export --------------------------------------------------------

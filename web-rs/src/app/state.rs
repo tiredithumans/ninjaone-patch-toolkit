@@ -42,6 +42,7 @@ pub(crate) struct AppliedFilters {
     pub organizations: Vec<String>,
     pub locations: Vec<String>,
     pub roles: Vec<String>,
+    pub device_groups: Vec<String>,
     pub os_types: Vec<String>,
     pub os_name: Option<String>,
     pub patch_type: String,
@@ -152,14 +153,15 @@ impl SessionState {
     }
 }
 
-/// The org/location/role/OS-type reference lists that fill the scope dropdowns.
+/// The org/location/role/group/OS-type reference lists that fill the scope dropdowns.
 #[derive(Clone, Copy)]
 pub(crate) struct LookupState {
     pub(super) orgs: RwSignal<Vec<Organization>>,
     pub(super) locations: RwSignal<Vec<Location>>,
     pub(super) roles: RwSignal<Vec<Role>>,
+    pub(super) device_groups: RwSignal<Vec<DeviceGroup>>,
     pub(super) node_classes: RwSignal<Vec<NodeClass>>,
-    /// Count of in-flight org/role/class lookup requests; > 0 means "loading".
+    /// Count of in-flight org/role/group/location lookup requests; > 0 means "loading".
     pub(super) lookups_pending: RwSignal<u32>,
 }
 
@@ -169,6 +171,7 @@ impl LookupState {
             orgs: RwSignal::new(Vec::new()),
             locations: RwSignal::new(Vec::new()),
             roles: RwSignal::new(Vec::new()),
+            device_groups: RwSignal::new(Vec::new()),
             node_classes: RwSignal::new(Vec::new()),
             lookups_pending: RwSignal::new(0),
         }
@@ -192,6 +195,7 @@ pub(crate) struct FilterState {
     pub(super) org_ids: RwSignal<Vec<i64>>,
     pub(super) loc_ids: RwSignal<Vec<i64>>,
     pub(super) role_ids: RwSignal<Vec<i64>>,
+    pub(super) group_ids: RwSignal<Vec<i64>>,
     pub(super) selected_classes: RwSignal<Vec<String>>,
     pub(super) selected_severities: RwSignal<Vec<String>>,
     pub(super) os_name: RwSignal<String>,
@@ -216,6 +220,7 @@ impl FilterState {
             org_ids: RwSignal::new(Vec::new()),
             loc_ids: RwSignal::new(Vec::new()),
             role_ids: RwSignal::new(Vec::new()),
+            group_ids: RwSignal::new(Vec::new()),
             selected_classes: RwSignal::new(Vec::new()),
             selected_severities: RwSignal::new(Vec::new()),
             os_name: RwSignal::new(String::new()),
@@ -273,6 +278,7 @@ impl FilterState {
         self.org_ids.track();
         self.loc_ids.track();
         self.role_ids.track();
+        self.group_ids.track();
         self.selected_classes.track();
         self.selected_severities.track();
         self.os_name.track();
@@ -296,6 +302,7 @@ impl FilterState {
             organization_ids: self.org_ids.get_untracked(),
             location_ids: self.loc_ids.get_untracked(),
             role_ids: self.role_ids.get_untracked(),
+            device_group_ids: self.group_ids.get_untracked(),
             node_classes: self.selected_classes.get_untracked(),
             severities: self.selected_severities.get_untracked(),
             os_name: self.os_name.get_untracked(),

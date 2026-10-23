@@ -23,6 +23,10 @@ pub struct FilterParams {
     pub location_ids: Vec<i64>,
     /// Selected device roles; empty = every role.
     pub role_ids: Vec<i64>,
+    /// Selected NinjaOne device groups; empty = every device. Defaulted so a view
+    /// link or preset made before the facet existed still decodes.
+    #[serde(default)]
+    pub device_group_ids: Vec<i64>,
     pub node_classes: Vec<String>,
     pub os_name_contains: Option<String>,
     pub search: Option<String>,
@@ -99,6 +103,14 @@ pub struct Location {
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 pub struct Role {
+    pub id: i64,
+    pub name: String,
+}
+
+/// A NinjaOne device group (saved search). Mirrors `model::DeviceGroup`.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub struct DeviceGroup {
     pub id: i64,
     pub name: String,
 }
