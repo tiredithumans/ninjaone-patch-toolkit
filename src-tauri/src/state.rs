@@ -307,12 +307,21 @@ pub struct AppState {
 /// or PKCE verifier to wherever `Location` pointed, and an acting POST would be
 /// dispatched again to a host we never chose. No endpoint we call redirects on
 /// success, so a 3xx surfaces as a plain non-2xx error instead.
+///
+/// Connecting (DNS included) has its own 15 s budget inside the 45 s total. With
+/// only the total, a host that never answered the SYN held every attempt for the
+/// full 45 s and a read's three retries for minutes. It is 15 s rather than a
+/// tighter 10 because a local firewall (LuLu) can stall a freshly built binary's
+/// first connect for 7–11 s, and that connect must still succeed. A connect
+/// timeout surfaces as `is_connect()`, so an acting POST that never connected is
+/// a plain failure — never replayed, and not mistaken for an unknown outcome.
 pub(crate) fn build_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(concat!(
             "ninjaone-patch-toolkit/",
             env!("CARGO_PKG_VERSION")
         ))
+        .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(45))
         .redirect(reqwest::redirect::Policy::none())
         .build()

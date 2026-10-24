@@ -922,6 +922,49 @@ fn retry_after_is_capped() {
     );
 }
 
+/// A resolver that never answers, so the connect budget runs out without any
+/// network: an unroutable address can fail fast with "network unreachable" on a
+/// CI runner instead of timing out, which would test nothing.
+struct NeverResolves(Arc<std::sync::atomic::AtomicUsize>);
+
+impl reqwest::dns::Resolve for NeverResolves {
+    fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(std::future::pending())
+    }
+}
+
+/// A connect timeout means no connection was ever made, so an acting POST that
+/// hits one is a plain failure: not replayed, and not an unknown outcome that would
+/// send the operator to check a device the request never reached.
+#[tokio::test]
+async fn a_connect_timeout_on_an_acting_post_is_a_plain_failure_and_not_replayed() {
+    let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(Arc::new(NeverResolves(Arc::clone(&lookups))))
+        .connect_timeout(Duration::from_millis(300))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("build client");
+    let auth = AuthState::seeded(http.clone(), "http://ninja.invalid".into(), "test-token");
+    let err = NinjaApiClient::new(http, auth)
+        .device_reboot(1, crate::model::RebootMode::Normal, "patching")
+        .await
+        .expect_err("nothing ever connects");
+
+    let cause = err
+        .chain()
+        .find_map(|e| e.downcast_ref::<reqwest::Error>())
+        .expect("a reqwest error underneath");
+    assert!(cause.is_connect() && cause.is_timeout(), "{cause:?}");
+    assert!(!is_outcome_unknown(&err), "{err:#}");
+    assert_eq!(
+        lookups.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "an action is never re-sent on a connect failure"
+    );
+}
 #[tokio::test]
 async fn get_timeout_is_replayed() {
     use wiremock::matchers::{method, path};
