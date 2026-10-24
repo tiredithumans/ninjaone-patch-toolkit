@@ -400,16 +400,22 @@ impl AppState {
                 }
                 // The batch went out; only its reply failed to decode. Re-plan would
                 // send it again, so close the dialog and point at Jobs, which the
-                // backend's job store fills regardless.
+                // backend's job store fills regardless. Treated like the Ok arm
+                // without the count: a spurious stale banner is the worst case.
                 Err(e) if e.code.as_deref() == Some(crate::types::ERR_REPLY_UNREADABLE) => {
                     self.actions.pending.set(None);
                     self.actions.confirm_input.set(String::new());
                     self.actions.dispatch_error.set(None);
                     self.actions.override_window.set(false);
+                    if mutating {
+                        self.actions.results_stale.set(true);
+                    }
+                    self.live_jobs.wake();
                     self.notify(
-                        Toast::err(
-                            "Dispatched, but the reply could not be read. Check Jobs before sending again.",
-                        )
+                        Toast::err(format!(
+                            "Dispatched, but the reply could not be read ({}). Check Jobs before sending again.",
+                            e.message
+                        ))
                         .with_action(ToastAction::ViewJobs),
                     );
                     self.refresh_jobs();

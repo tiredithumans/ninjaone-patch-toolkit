@@ -831,7 +831,8 @@ impl LiveJobsState {
     }
 
     /// Back to the full cadence: a dispatch just went out, so jobs are likely to
-    /// start. Does not read at once; the next read comes 30 s after the last.
+    /// start. The next read comes once 30 s have passed since the last one — at
+    /// once if they already have.
     pub(super) fn wake(self) {
         self.last_poll.update(|p| {
             if let Some(p) = p {

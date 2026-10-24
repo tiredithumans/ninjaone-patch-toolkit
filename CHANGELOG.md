@@ -20,6 +20,7 @@ version and start a fresh `[Unreleased]`.
 ### Changed
 
 - A query can scope to at most 50 device groups.
+- Live job status is checked every 30 seconds, less often while NinjaOne reports nothing running.
 
 ### Fixed
 
@@ -32,6 +33,11 @@ version and start a fresh `[Unreleased]`.
   instead of staying blank for up to fifteen.
 - Job status checks slow down while NinjaOne is returning errors instead of retrying every 15
   seconds.
+- Switching tenant or signing out no longer shows the previous tenant's organizations, locations,
+  roles or scripts in the pickers.
+- Drilling into an organization no longer keeps a location from another organization in the query.
+- If a dispatch's confirmation can't be read, the dialog now closes and points to Jobs instead of
+  offering to send it again.
 
 ## [0.20.0] - 2026-10-23
 
