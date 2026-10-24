@@ -285,13 +285,14 @@ impl NinjaApiClient {
                     };
                     return Err(anyhow::Error::new(e).context(CursorReplayUnsafe(why.into())));
                 }
-                // A connect failure means the request never reached the server, so
-                // replaying it can't double-execute or move a cursor — but actions
-                // never take this arm, because `is_connect()` can be reported for a
-                // connection that died mid-flight and we won't re-dispatch an action
-                // on a maybe. A cursor page does: the worst a mislabelled in-flight
-                // failure costs it is rows, which the end-of-scan count check logs,
-                // against a whole query failed on every refused connection.
+                // A connect failure is raised before a request is written (connector,
+                // pool checkout, TLS, proxy), so replaying it can't double-execute or
+                // move a cursor. Actions still never take this arm, as a defensive
+                // choice: that guarantee rests on reqwest's internal classification,
+                // not on anything this client can observe, and we won't re-dispatch
+                // an action on a maybe. A cursor page does take it: a misclassified
+                // failure would cost rows the end-of-scan count check logs, against a
+                // whole query failed on every refused connection.
                 Err(e)
                     if e.is_connect()
                         && attempt < MAX_RETRIES
@@ -401,21 +402,24 @@ enum Retry {
 
 /// The retry policy, as a pure decision so it can be tested without a server.
 ///
-/// The `Idempotent`-only guard on 5xx is the load-bearing part and the reason this
-/// is worth reading on its own. A reporting pull is dozens of *sequential* cursor
-/// pages, so a gateway 502 on a late page used to discard every page already
-/// accumulated — 5xx is by far the most common transient failure on that path. But
-/// a 5xx on an acting POST is exactly the ambiguity [`ReplaySafety::ActOnce`]
-/// exists for: the gateway may have failed *after* the job reached the device
-/// queue, so writes fail through to `JobState::Unknown` and are polled rather than
-/// replayed. 429 and 401 stay retryable for every request — the gateway rejected
-/// it before it could reach a device or move a cursor.
+/// The 5xx arm is the load-bearing part, and it is decided by [`ReplaySafety`]:
 ///
-/// A [`ReplaySafety::CursorPage`] gets no 5xx retry either, for a different reason:
-/// NinjaOne keeps the scan's position server-side, keyed by the cursor's stable
-/// name, so a gateway that failed after the backend advanced would answer the
-/// replay with the *next* page and a whole `pageSize` of rows would vanish. The
-/// caller fails it with [`CursorReplayUnsafe`] and the scan starts over instead.
+/// - **`Idempotent`** — a read that carries no server-side state (a single-shot
+///   GET, an `after` page, the request that opens a cursor scan) is simply asked
+///   for again; 5xx is by far the most common transient failure on a reporting
+///   pull.
+/// - **`ActOnce`** — not retried. A 5xx on an acting POST is exactly the ambiguity
+///   this policy exists for: the gateway may have failed *after* the job reached
+///   the device queue, so writes fail through to `JobState::Unknown` and are polled
+///   rather than replayed.
+/// - **`CursorPage`** — not retried either, for a different reason. NinjaOne keeps
+///   the scan's position server-side, keyed by the cursor's stable name, so a
+///   gateway that failed after the backend advanced would answer the replay with
+///   the *next* page and a whole `pageSize` of rows would vanish. The caller fails
+///   it with [`CursorReplayUnsafe`] and the scan starts over instead.
+///
+/// 429 and 401 stay retryable for all three — the gateway rejected the request
+/// before it could reach a device or move a cursor.
 fn retry_for(
     status: StatusCode,
     replay: ReplaySafety,

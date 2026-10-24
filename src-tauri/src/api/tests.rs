@@ -4,10 +4,12 @@ use serde_json::json;
 
 use crate::model::{Organization, Patch};
 
-/// The `Idempotent`-only guard on 5xx is what keeps an acting POST from being
-/// replayed into a second reboot or script run: the gateway may have failed
-/// *after* the job reached the device queue. 429 and 401 are safe for both —
-/// the request was rejected before it could reach a device.
+/// The 5xx arm is decided by the replay policy. A read is retried; an acting POST
+/// never is, or it could be replayed into a second reboot or script run (the
+/// gateway may have failed *after* the job reached the device queue); a cursor page
+/// never is either (`a_cursor_page_is_not_retried_on_a_5xx_but_is_on_a_rejection`).
+/// 429 and 401 are safe for all three — the request was rejected before it could
+/// reach a device or move a cursor.
 #[test]
 fn a_5xx_is_retried_for_reads_but_never_for_writes() {
     for status in [

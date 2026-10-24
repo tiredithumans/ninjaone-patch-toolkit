@@ -102,7 +102,8 @@ async fn restart_scan<T>(
     warn!(
         path,
         rows = all.len(),
-        total = ?scan.announced_total,
+        // Bare, as the empty-page warning always printed it; 0 when none was announced.
+        total = scan.announced_total.unwrap_or(0),
         restart = *restarts,
         reason,
         "restarting the scan"
@@ -659,9 +660,13 @@ pub(super) struct PageCursor {
 /// that *did* return rows, so an uninterpretable cursor is a fetch that stops
 /// early — and the caller has no way to tell a truncated fleet from a complete
 /// one. Reporting a partial fleet as complete understates every compliance number
-/// derived from it. The sibling `results` handling already bails loudly on a
-/// malformed envelope for exactly this reason; this arm used to return `None` and
-/// stop silently.
+/// derived from it. This arm used to return `None` and stop silently.
+///
+/// It fails at once even on a cursor page, where a malformed `results` restarts
+/// the scan first: that one is a body that would not decode, which cannot cheaply
+/// be told apart from a page truncated in transit, while a cursor of an unknown
+/// shape came in a body that decoded whole — the server's deliberate answer, which
+/// every fresh scan would repeat.
 pub(super) fn next_cursor(value: Option<&Value>) -> Result<Option<PageCursor>> {
     let Some(value) = value else {
         return Ok(None);

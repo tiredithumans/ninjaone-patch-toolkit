@@ -111,7 +111,9 @@ A **lost cursor page** takes the same path and spends the same budget: a request
 that timed out, drew a 5xx, or came back as a 2xx whose body could not be read fails with the
 `CursorReplayUnsafe` type (see [below](#the-timeout-and-5xx-arms-are-idempotent-only)) rather than
 being retried in place. The restart is logged at `warn` with its reason, and `pages` is not reset,
-so `MAX_PAGES` still bounds the whole fetch. An empty page at or
+so `MAX_PAGES` still bounds the whole fetch. The cost is deliberate: a fetch tolerates two lost
+pages, each paid for with a full re-page from the start, so a gateway flaky enough to lose a third
+now fails a query it used to "complete" with rows silently missing. An empty page at or
 past the count, or from an endpoint that announces none, ends the scan exactly as before
 (`an_empty_page_at_or_without_an_announced_count_ends_the_scan`).
 
@@ -131,8 +133,13 @@ open on every cursor seen, which bounds how slow a scan may run before the serve
 with no usable `name`, a number, an array). It is only consulted after a page that *returned
 rows* — the caller checks `page_len == 0` first — so treating an unknown shape as "finished" ends
 the fetch mid-fleet and hands back a partial result that looks complete, understating every
-compliance number derived from it. This mirrors the `results`-not-an-array arm, which has always
-bailed.
+compliance number derived from it. The `results`-not-an-array arm refuses to read a malformed
+envelope as zero rows for the same reason, but on a cursor page it restarts the scan first and
+fails only once `SCAN_RESTARTS` is spent: it is part of decoding the body, and a body that will
+not decode cannot cheaply be told apart from one truncated in transit — a page the server already
+counts as delivered. A cursor of an unknown shape arrived in a body that decoded whole, so it is
+the server's deliberate answer, would come back the same from every fresh scan, and fails at once
+rather than spending two full re-pages to reach the same error.
 
 ## The timeout and 5xx arms are `Idempotent`-only
 
