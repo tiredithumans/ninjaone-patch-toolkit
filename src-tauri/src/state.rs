@@ -23,7 +23,7 @@ use crate::settings::Settings;
 mod cache;
 mod jobs;
 
-use cache::TenantCache;
+use cache::{Fetched, TenantCache};
 pub use jobs::JobSession;
 use jobs::PendingConfirm;
 
@@ -265,12 +265,16 @@ pub struct AppState {
     /// the clear alone cannot stop a plan, dispatch or poll tick already in flight
     /// from writing the departed session's state back afterwards.
     job_epoch: AtomicU64,
-    /// Monotonic query generation, bumped by [`AppState::begin_query`]. Queries
-    /// overlap routinely — an auto-refresh tick fires while a manual Run is still
-    /// paging the fleet — and whichever *finished* last used to win the cache
-    /// regardless of which started last. Since the frontend renders the summary of
-    /// the run it started last, the two could disagree: the visible table came from
-    /// one query while paging, export and the HTML report read another.
+    /// Monotonic query generation, bumped by [`AppState::begin_query`]. Before the
+    /// frontend queued its runs (it now refuses a silent auto-refresh tick and
+    /// queues a manual Run while one is in flight), an auto-refresh tick could fire
+    /// while a manual Run was still paging the fleet, and whichever *finished* last
+    /// won the cache regardless of which started last. Since the frontend renders the
+    /// summary of the run it started last, the two could disagree: the visible table
+    /// came from one query while paging, export and the HTML report read another. The
+    /// gate stays as the backend's own guarantee against a stale or hand-built
+    /// frontend; the overlap that still happens is a query against `plan_action` or
+    /// `cached_current_patches`, which the cache epochs cover.
     ///
     /// Owned here rather than taken from the frontend's `query_id`, which is a
     /// display hint for dropping stale progress events — a stale or malicious
@@ -453,7 +457,11 @@ impl AppState {
         let (set, _) = self
             .lookups_cache
             .get_or_fetch(&key, LOOKUP_TTL, "lookups", || async {
-                let (orgs, locations, roles, device_groups) = tokio::try_join!(
+                // Each optional feed reports whether it fell back, so the set is
+                // stored as degraded — capped at FORCE_MIN_INTERVAL rather than
+                // LOOKUP_TTL — and a blip is retried within a minute instead of
+                // being served as the answer for five.
+                let (orgs, (locations, locations_failed), roles, (device_groups, groups_failed)) = tokio::try_join!(
                     self.api.organizations(),
                     async {
                         // Locations only supply optional row labels, so a failure
@@ -461,10 +469,10 @@ impl AppState {
                         // tenant-wide locations outage isn't silently rendered as
                         // blank location names.
                         Ok::<_, anyhow::Error>(match self.api.all_locations().await {
-                            Ok(locs) => locs,
+                            Ok(locs) => (locs, false),
                             Err(e) => {
-                                warn!(error = %e, "locations fetch failed; rows will omit location names");
-                                Vec::new()
+                                warn!(error = %e, "locations fetch failed; rows will omit location names until a retry");
+                                (Vec::new(), true)
                             }
                         })
                     },
@@ -473,19 +481,22 @@ impl AppState {
                         // Groups only feed one optional facet; a token or tenant that
                         // cannot list them loses that picker, not every query.
                         Ok::<_, anyhow::Error>(match self.api.device_groups().await {
-                            Ok(groups) => groups,
+                            Ok(groups) => (groups, false),
                             Err(e) => {
-                                warn!(error = %e, "device groups fetch failed; the Group filter will be empty");
-                                Vec::new()
+                                warn!(error = %e, "device groups fetch failed; the Group filter will be empty until a retry");
+                                (Vec::new(), true)
                             }
                         })
                     },
                 )?;
-                Ok(LookupSet {
-                    orgs,
-                    locations,
-                    roles,
-                    device_groups,
+                Ok(Fetched {
+                    value: LookupSet {
+                        orgs,
+                        locations,
+                        roles,
+                        device_groups,
+                    },
+                    degraded: locations_failed || groups_failed,
                 })
             })
             .await?;
@@ -506,19 +517,28 @@ impl AppState {
             .get_or_fetch(&key, DEVICE_TTL, "device inventory", || async {
                 // Fetched with the inventory so the reboot reasons share its TTL and
                 // its invalidation after a reboot. Only the inventory is required: a
-                // health feed the token cannot read costs the reasons, not the query.
+                // health feed the token cannot read costs the reasons, not the query
+                // — and only until FORCE_MIN_INTERVAL, since the entry is stored as
+                // degraded rather than hiding every reason for the full DEVICE_TTL.
                 let (devices, health) = tokio::join!(
                     self.api.devices(None, on_progress),
                     self.api.device_health()
                 );
                 let mut devices = devices?;
-                match health {
-                    Ok(health) => apply_reboot_reasons(&mut devices, health),
-                    Err(e) => {
-                        warn!(error = %e, "device health fetch failed; reboot reasons omitted")
+                let degraded = match health {
+                    Ok(health) => {
+                        apply_reboot_reasons(&mut devices, health);
+                        false
                     }
-                }
-                Ok(devices)
+                    Err(e) => {
+                        warn!(error = %e, "device health fetch failed; reboot reasons omitted until a retry");
+                        true
+                    }
+                };
+                Ok(Fetched {
+                    value: devices,
+                    degraded,
+                })
             })
             .await?;
         Ok(devices)
@@ -562,7 +582,12 @@ impl AppState {
                             &key,
                             current_patches_ttl(force),
                             "current OS patches",
-                            || self.api.fleet_os_patches(None, None, on_os),
+                            || async {
+                                self.api
+                                    .fleet_os_patches(None, None, on_os)
+                                    .await
+                                    .map(Fetched::complete)
+                            },
                         )
                         .await
                         .map(Some),
@@ -577,7 +602,12 @@ impl AppState {
                             &key,
                             current_patches_ttl(force),
                             "current software patches",
-                            || self.api.fleet_software_patches(None, None, on_sw),
+                            || async {
+                                self.api
+                                    .fleet_software_patches(None, None, on_sw)
+                                    .await
+                                    .map(Fetched::complete)
+                            },
                         )
                         .await
                         .map(Some),
@@ -650,9 +680,11 @@ impl AppState {
     /// Three races close here, and they need different treatment:
     ///
     /// *Supersession.* Ordering by completion rather than by start let an
-    /// auto-refresh tick clobber a manual Run: the two overlap routinely, a warm
-    /// cache can let either finish first, and the frontend renders the summary of the
-    /// run *it* started last. Dropping the superseded write keeps the cache — read by
+    /// auto-refresh tick clobber a manual Run: the two used to overlap, a warm cache
+    /// can let either finish first, and the frontend renders the summary of the run
+    /// *it* started last. The frontend now queues runs rather than overlapping them,
+    /// so this is the backend's defence against a stale or hand-built frontend, not
+    /// a routine path. Dropping the superseded write keeps the cache — read by
     /// export, the HTML report and row paging — consistent with the summary on
     /// screen.
     ///
@@ -695,7 +727,7 @@ impl AppState {
                 if self.result_epoch.load(Ordering::SeqCst) != token.result_epoch {
                     return StoreOutcome::SessionCleared;
                 }
-                *slot = Some(CachedResult {
+                let displaced = slot.replace(CachedResult {
                     tenant: token.tenant,
                     result: Arc::new(result),
                     // Both memos are built on first request, not here: most queries
@@ -704,6 +736,11 @@ impl AppState {
                     groups: None,
                     sorted: None,
                 });
+                // Release the lock before the previous result is freed: it can be the
+                // last handle on a whole-fleet row set, and freeing that under a `std`
+                // mutex on an async worker stalls every paging read behind it.
+                drop(slot);
+                drop(displaced);
                 StoreOutcome::Stored
             }
             // Once poisoned the slot stays poisoned: `with_current_result` returns
@@ -859,9 +896,13 @@ impl AppState {
         // so one is routinely in flight at sign-out. The store re-reads this under the
         // slot lock, so whichever order the two interleave, the write loses.
         self.result_epoch.fetch_add(1, Ordering::SeqCst);
-        if let Ok(mut slot) = self.last_result.lock() {
-            *slot = None;
-        }
+        let old = match self.last_result.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(_) => None,
+        };
+        // Freed after the lock is released, as `TenantCache::invalidate` does: the
+        // rows can be a whole fleet's.
+        drop(old);
     }
 
     /// Drops **only** the whole-fleet current-patch caches — both families, since an

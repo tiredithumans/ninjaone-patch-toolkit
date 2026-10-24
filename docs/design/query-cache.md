@@ -7,27 +7,53 @@ Code: `src-tauri/src/state.rs` (`AppState`), `src-tauri/src/state/cache.rs` (`Te
 
 ## One cache protocol, one type
 
-`TenantCache<T>` (`state/cache.rs`) owns the whole five-step protocol every TTL'd slot needs:
+`TenantCache<T>` (`state/cache.rs`) owns the whole protocol every TTL'd slot needs:
 
-1. probe the slot — tenant match **and** within the TTL — and return a hit;
-2. take the single-flight gate, so the loser of a race waits instead of paging a
+1. sample the epoch on *entry*, before the first probe;
+2. probe the slot — tenant match **and** within the TTL — and return a hit;
+3. take the single-flight gate, so the loser of a race waits instead of paging a
    six-figure feed a second time;
-3. re-probe under the gate, which is what turns that wait into a cache hit;
-4. sample the epoch *before* the fetch;
-5. store only if the epoch is unchanged when the slot lock is retaken.
+4. re-probe under the gate, which is what turns that wait into a cache hit;
+5. store only if the epoch is unchanged when the slot lock is retaken;
+6. a degraded fetch (an optional sub-feed failed and fell back to empty) stores under a
+   capped TTL, `FORCE_MIN_INTERVAL`, never the slot's full TTL.
 
 Step 5 is the subtle one. Without it, a fetch already in flight when an invalidation
 lands writes its pre-invalidation rows straight back and restarts the TTL on exactly
 the data the caller wanted gone — and the tenant stamp cannot cover it, because a
 sign-out or a post-action invalidation is the *same* tenant.
 
+Step 1 used to come after the gate, while the caller had read its tenant key before
+calling. A tenant switch that landed while a caller was parked behind another fetch
+went unseen, and the store went ahead under the departed tenant's key. Sampled at
+entry, any invalidation during the wait declines the store. The cost is that a caller
+which waited across a same-tenant invalidation does not cache its fresh fetch; the next
+caller does.
+
+Step 6 exists because the fallbacks were cached exactly like a clean fetch: a `/groups`
+or `/locations` failure left the Group filter or the location names blank for the full
+five-minute `LOOKUP_TTL`, a `/queries/device-health` failure hid every reboot reason for
+the fifteen-minute `DEVICE_TTL`, and a forced refresh cleared neither. The fetch closure
+returns `Fetched { value, degraded }` and the entry carries the cap, so `peek` serves it
+for `min(ttl, cap)`. The cap is not zero ("don't store"): a token that permanently
+cannot list `/groups` would then refetch the organizations and roles on every query.
+`lookups()` is degraded when locations or groups fell back, `fleet_devices()` when the
+health feed failed; the current-patch families have no optional part and always store
+clean (`Fetched::complete`).
+
+A value displaced from a slot (by `invalidate` or by a store) is dropped after the slot
+lock is released, not under it. The slots hold whole-fleet `Vec`s, and freeing six
+figures of rows under a `std` mutex on an async worker stalls every other reader of the
+slot for the length of the free. `clear_last_result` and `store_last_result_if_current`
+do the same for the result slot.
+
 This was written out four times: lookups, the device inventory, and the two
 current-patch families. Prose did not keep the copies in step. `lookups_epoch`'s own
 field comment read "Mirrors `devices_epoch`/`current_epoch`, which the lookups cache
-was missing" — step 5 was absent there until someone noticed, and step 2 was never
-added at all, so concurrent callers on a cold cache each paged the reference lists
-independently. Both are now structural: a fifth cache cannot be declared without the
-protocol, because the protocol *is* the type.
+was missing" — the epoch check was absent there until someone noticed, and the gate
+was never added at all, so concurrent callers on a cold cache each paged the reference
+lists independently. Both are now structural: a fifth cache cannot be declared without
+the protocol, because the protocol *is* the type.
 
 `AppState` went from 18 hand-managed synchronization primitives (8 `std` mutexes,
 3 `tokio` mutexes, 6 `AtomicU64`, 1 `AtomicBool`) to 8 plus four `TenantCache`
@@ -227,13 +253,23 @@ is warm. Don't merge them back into one pair.
 A whole-fleet fetch runs for minutes, so a mutating action's `invalidate_current_patches()`
 routinely lands while one is in flight. An unconditional store lets the in-flight fetch write its
 pre-action rows straight back with `CURRENT_PATCHES_TTL` restarted on them — the tenant stamp
-cannot catch this, it is the same tenant. `devices_epoch` / `current_epoch` are sampled before the
-fetch and re-read **under the slot lock** at the store; the invalidators bump the epoch *before*
-clearing the slot, so the two orderings both lose the write. Separately, each cache has a
+cannot catch this, it is the same tenant. Each slot's epoch is sampled on entry to
+`get_or_fetch` and re-read **under the slot lock** at the store; the invalidators bump the epoch
+*before* clearing the slot, so the two orderings both lose the write. Separately, each cache has a
 `tokio::Mutex` fetch gate (mirroring `AuthState::refresh_lock`) with a re-check after acquiring:
-queries overlap by design, and on a cold cache both callers would otherwise page the entire
-inventory / third-party feed independently. Per family, so an OS-only query never waits on an
-in-flight third-party fetch.
+on a cold cache two callers would otherwise page the entire inventory / third-party feed
+independently. Per family, so an OS-only query never waits on an in-flight third-party fetch.
+
+The frontend no longer overlaps queries with each other (`run_decision` in
+`web-rs/src/app/util/query.rs` refuses a silent auto-refresh tick and queues a manual Run while
+one is in flight), so the overlap these gates meet in practice is a query against `plan_action`
+(which reads `fleet_devices`) or `cached_current_patches`. The query generation gate stays as the
+backend's own defence against a stale or hand-built frontend.
+
+The job poller invalidates **at most once per tick**, however many mutating kinds settle in it —
+every bump makes a whole-fleet fetch in flight discard its rows. It is deliberately not debounced
+across ticks, and there is no "mark stale without bumping the epoch": a fetch started before a
+settle must never store.
 
 ### `force_refresh`
 

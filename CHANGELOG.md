@@ -23,11 +23,6 @@ version and start a fresh `[Unreleased]`.
 
 ### Fixed
 
-- A query scoped to device groups returns sooner, and names a group that no longer exists.
-- An Installed or Failed query reports a failed fleet fetch right away instead of after the
-  install history finishes downloading.
-- A patch feed whose page was lost to a timeout or gateway error is re-read from the start instead
-  of silently skipping rows.
 - Job status checks slow down while NinjaOne is returning errors instead of retrying every 15
   seconds.
 
