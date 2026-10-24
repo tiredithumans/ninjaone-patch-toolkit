@@ -54,15 +54,26 @@ fn only_a_forced_reboot_demands_a_typed_confirmation() {
 /// A partial dispatch (its session ended mid-batch) must not land in the dialog,
 /// whose way forward is Re-plan: that would send again to devices that already
 /// acted. Every other dispatch failure stays in the dialog as before.
+///
+/// Nor must a dispatch whose reply could not be decoded: the batch went out, and
+/// its uncoded error used to keep the dialog open on "Dispatch failed… Re-plan".
 #[test]
-fn only_a_partial_dispatch_leaves_the_confirmation_dialog() {
+fn only_a_partial_or_unreadable_dispatch_leaves_the_confirmation_dialog() {
     assert!(dispatch_error_keeps_dialog(None));
     assert!(dispatch_error_keeps_dialog(Some("somethingElse")));
     assert!(!dispatch_error_keeps_dialog(Some(
         crate::types::ERR_PARTIAL_DISPATCH
     )));
+    assert!(!dispatch_error_keeps_dialog(Some(
+        crate::types::ERR_REPLY_UNREADABLE
+    )));
     // The wire value the backend's `error::ERR_PARTIAL_DISPATCH` sends.
     assert_eq!(crate::types::ERR_PARTIAL_DISPATCH, "partialDispatch");
+    // Frontend-only, so it must not collide with a code the backend does send.
+    assert_ne!(
+        crate::types::ERR_REPLY_UNREADABLE,
+        crate::types::ERR_PARTIAL_DISPATCH
+    );
 }
 
 #[test]

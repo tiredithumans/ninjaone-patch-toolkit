@@ -1249,6 +1249,12 @@ impl ActionPlan {
 /// have acted. Re-planning it would send to them again.
 pub const ERR_PARTIAL_DISPATCH: &str = "partialDispatch";
 
+/// **Frontend-only**, never sent by the backend: the command *succeeded* but its
+/// reply did not decode into the mirror (`api::invoke_coded` tags it). For
+/// `run_action` that means the batch went out, so the dialog must not offer to send
+/// it again.
+pub const ERR_REPLY_UNREADABLE: &str = "replyUnreadable";
+
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]

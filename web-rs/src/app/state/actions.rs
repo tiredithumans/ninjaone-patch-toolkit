@@ -395,6 +395,22 @@ impl AppState {
                 Err(e) if util::dispatch_error_keeps_dialog(e.code.as_deref()) => {
                     self.actions.dispatch_error.set(Some(e.message));
                 }
+                // The batch went out; only its reply failed to decode. Re-plan would
+                // send it again, so close the dialog and point at Jobs, which the
+                // backend's job store fills regardless.
+                Err(e) if e.code.as_deref() == Some(crate::types::ERR_REPLY_UNREADABLE) => {
+                    self.actions.pending.set(None);
+                    self.actions.confirm_input.set(String::new());
+                    self.actions.dispatch_error.set(None);
+                    self.actions.override_window.set(false);
+                    self.notify(
+                        Toast::err(
+                            "Dispatched, but the reply could not be read. Check Jobs before sending again.",
+                        )
+                        .with_action(ToastAction::ViewJobs),
+                    );
+                    self.refresh_jobs();
+                }
                 // A partial dispatch from an ended session: `clear_session` has
                 // usually closed the dialog already, so an error set there would never
                 // be seen, and the dialog's Re-plan would re-send to devices that
