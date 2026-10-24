@@ -122,6 +122,15 @@ Without it the previous session's rows stayed rendered against a cache that had 
 dropped: Next page came back blank under "Rows 101–200 of N" and Export said "Run a query before
 exporting" beside a visible table — the same divergence one layer up.
 
+`clear_session` also moves `session.epoch`, and every lookup-like load — the four
+`load_lookups` lists, `load_scripts` and `refresh_jobs` — captures it before its await and drops
+a reply whose epoch moved (`util::outlived_session`, the same shape as `is_superseded`). Those
+replies used to land unconditionally, so one in flight at a sign-out or tenant switch repainted
+the previous tenant's org, role, group and script pickers after the clear, and an old org id then
+scoped the new tenant's query. The picked library script id and its parameters are cleared too:
+script ids are per tenant, so a carried id ran nothing or another tenant's script by the same
+number. A tenant switch also empties the script list (it reloads at the next sign-in).
+
 Locations are derived client-side. `load_lookups` keeps the full list (`all_locations`, each
 entry with its `organization_id`), and `load_locations` derives the picker's list for the org
 scope with `util::scope_locations` / `locations_for` — the backend `list_locations` rule (empty

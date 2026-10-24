@@ -128,6 +128,10 @@ pub(crate) struct SessionState {
     /// which is the same observation in a build where it is expected and fine.
     /// Replaces the whole UI with an error rather than falling back to sample data.
     pub(super) backend_missing: RwSignal<bool>,
+    /// Moved by `clear_session` (sign-out, sign-in, re-authorization, tenant
+    /// switch). Every lookup-like load stamps itself with it before its await and
+    /// drops a reply that lands after it moved (`util::outlived_session`).
+    pub(super) epoch: RwSignal<u64>,
 }
 
 impl SessionState {
@@ -138,7 +142,18 @@ impl SessionState {
             demo: RwSignal::new(false),
             web_mode: RwSignal::new(false),
             backend_missing: RwSignal::new(false),
+            epoch: RwSignal::new(0),
         }
+    }
+
+    /// The stamp a load captures before its await. Untracked.
+    pub(super) fn epoch(self) -> u64 {
+        self.epoch.get_untracked()
+    }
+
+    /// Whether a reply stamped `epoch` belongs to a session that has ended.
+    pub(super) fn outlived(self, epoch: u64) -> bool {
+        util::outlived_session(self.epoch.get_untracked(), epoch)
     }
 
     pub(super) fn is_authed(self) -> bool {

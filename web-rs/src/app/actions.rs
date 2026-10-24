@@ -522,7 +522,16 @@ pub(crate) fn ReauthorizeLink() -> impl IntoView {
                                 // The backend dropped the session's result and
                                 // jobs for the fresh grant; storing the new status
                                 // is what clears the blocked reason.
+                                //
+                                // The sign-in stays up across this, so nothing
+                                // reloads the lookups — yet the clear drops any
+                                // still in flight (a re-authorize right after
+                                // launch). Same tenant, so ask again.
+                                let reload = state.lookups.lookups_pending.get_untracked() > 0;
                                 state.clear_session();
+                                if reload {
+                                    state.load_lookups();
+                                }
                                 state.session.refresh_auth();
                                 state.notify(Toast::ok("Re-authorized"));
                             }

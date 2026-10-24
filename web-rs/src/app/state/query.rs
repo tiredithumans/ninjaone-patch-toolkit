@@ -480,6 +480,13 @@ impl AppState {
         // lost.
         self.run.query_seq.update(|s| *s = util::next_query_seq(*s));
         self.run.progress.set(Progress::default());
+        // The same for every lookup-like load (the pickers, the script library,
+        // the job list): a reply asked for in the ended session is dropped on
+        // landing, so it cannot repaint the previous tenant's names. Its count
+        // goes with it; a load started after this owns the counter.
+        self.session.epoch.update(|e| *e = util::next_query_seq(*e));
+        self.lookups.lookups_pending.set(0);
+        self.actions.scripts_loading.set(false);
         self.actions.jobs.set(Vec::new());
         self.actions.watched.set(Vec::new());
         self.actions.script_dialog.set(false);
@@ -491,6 +498,11 @@ impl AppState {
         // instead, and a tick must not carry into another operator's (or tenant's)
         // first dispatch.
         self.actions.override_window.set(false);
+        // A library script id names a script in *this* tenant's library; carried
+        // over it ran nothing (the picker showed "Select a script…" over it) or
+        // another tenant's script that happens to share the number.
+        self.actions.script_id.set(None);
+        self.actions.script_params.set(String::new());
         self.live_jobs.clear();
         // A run queued behind one from the old session would fire into the new
         // one (or, signed out, just to say "Sign in first").

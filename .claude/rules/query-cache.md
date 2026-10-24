@@ -16,7 +16,8 @@ paths:
   summary; `TenantChanged`/`Poisoned` are errors (`commands::patches::summary_for`).
   → `docs/design/query-cache.md#the-write-is-generation--and-tenant-gated`
 - **Tenant switch, sign-out, sign-in and re-authorize all call `clear_session()`** on the
-  frontend and `clear_session_state` on the backend.
+  frontend and `clear_session_state` on the backend, and every lookup-like reply is dropped when
+  the session epoch moved (`util::outlived_session`).
   → `docs/design/query-cache.md#a-tenant-switch-a-sign-out-a-sign-in-and-a-re-authorization-all-clear-the-frontend`
 - **Paging/grouping/sorting commands (and `device_detail`) return empty on a cache miss, never
   an error.** Sort/group memos live in `CachedResult` (built on `spawn_blocking`, stored only if

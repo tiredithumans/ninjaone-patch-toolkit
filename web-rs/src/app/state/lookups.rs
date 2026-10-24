@@ -4,10 +4,20 @@
 use super::*;
 
 impl AppState {
+    /// Loads the org/role/group/location lists. Each reply is dropped if the
+    /// session ended while it was in flight (`clear_session` moved the epoch): it
+    /// describes the previous session — often the previous tenant — and painting it
+    /// would offer, and let a query be scoped to, organizations that are not there.
+    /// A dropped reply does not count itself done either; `clear_session` already
+    /// reset the counter, and a newer load owns it now.
     pub(in crate::app) fn load_lookups(self) {
+        let epoch = self.session.epoch();
         self.lookups.lookups_pending.set(4);
         spawn_local(async move {
             let reply = api::list_orgs().await;
+            if self.session.outlived(epoch) {
+                return;
+            }
             match reply {
                 Ok(o) => self.lookups.orgs.set(o),
                 Err(e) => self.notify(Toast::err(format!("Couldn't load organizations: {e}"))),
@@ -16,6 +26,9 @@ impl AppState {
         });
         spawn_local(async move {
             let reply = api::list_roles().await;
+            if self.session.outlived(epoch) {
+                return;
+            }
             match reply {
                 Ok(r) => self.lookups.roles.set(r),
                 Err(e) => self.notify(Toast::err(format!("Couldn't load roles: {e}"))),
@@ -24,6 +37,9 @@ impl AppState {
         });
         spawn_local(async move {
             let reply = api::list_device_groups().await;
+            if self.session.outlived(epoch) {
+                return;
+            }
             match reply {
                 Ok(g) => self.lookups.device_groups.set(g),
                 Err(e) => self.notify(Toast::err(format!("Couldn't load device groups: {e}"))),
@@ -37,6 +53,9 @@ impl AppState {
         // derived from it client-side (`load_locations`).
         spawn_local(async move {
             let reply = api::list_locations(Vec::new()).await;
+            if self.session.outlived(epoch) {
+                return;
+            }
             match reply {
                 Ok(locs) => {
                     self.lookups.all_locations.set(Some(locs));

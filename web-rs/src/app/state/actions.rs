@@ -86,9 +86,16 @@ impl AppState {
         if !self.can_act() {
             return;
         }
+        let epoch = self.session.epoch();
         self.actions.scripts_loading.set(true);
         spawn_local(async move {
-            match api::list_scripts().await {
+            let reply = api::list_scripts().await;
+            // The previous session's library (maybe the previous tenant's). Its
+            // loading flag went with it in `clear_session`.
+            if self.session.outlived(epoch) {
+                return;
+            }
+            match reply {
                 Ok(list) => self.actions.scripts.set(list),
                 Err(e) => self.notify(Toast::err(format!("Couldn't load scripts: {e}"))),
             }
@@ -433,8 +440,14 @@ impl AppState {
         if self.session.web_mode.get_untracked() || self.session.demo.get_untracked() {
             return;
         }
+        let epoch = self.session.epoch();
         spawn_local(async move {
-            if let Ok(jobs) = api::list_jobs().await {
+            let reply = api::list_jobs().await;
+            // `clear_session` emptied the list the backend had just dropped.
+            if self.session.outlived(epoch) {
+                return;
+            }
+            if let Ok(jobs) = reply {
                 self.actions.jobs.set(jobs);
                 self.announce_settled_batches();
             }

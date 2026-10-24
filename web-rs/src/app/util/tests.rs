@@ -385,6 +385,18 @@ fn query_seq_wraps_and_compares_by_equality() {
     assert!(is_superseded(next_query_seq(mine), mine));
 }
 
+/// A lookup, script-library or job-list reply asked for before a sign-out,
+/// sign-in, re-authorization or tenant switch must not repaint after it: the
+/// previous tenant's organization ids would then scope the new tenant's query.
+#[test]
+fn a_reply_from_an_ended_session_is_dropped() {
+    let epoch = 3;
+    assert!(!outlived_session(epoch, epoch), "same session: applied");
+    // `clear_session` moves the epoch with the same wrapping step as a run.
+    assert!(outlived_session(next_query_seq(epoch), epoch));
+    assert!(outlived_session(next_query_seq(u64::MAX), u64::MAX));
+}
+
 /// A manual run is a new scope and a silent refresh the same scope with fresher
 /// data; `run_plan` is where that difference is decided, and this pins it.
 #[test]

@@ -77,6 +77,16 @@ pub(crate) fn is_superseded(current_seq: u64, my_seq: u64) -> bool {
     current_seq != my_seq
 }
 
+/// Whether a lookup-like reply (the org/role/group/location lists, the script
+/// library, the job list) was asked for in a session that has since ended — a
+/// sign-out, sign-in, re-authorization or tenant switch moved `session.epoch`
+/// while it was in flight. Such a reply describes the previous session (often the
+/// previous tenant) and must not repaint the pickers: an old organization id would
+/// then scope the new tenant's query. Same shape as [`is_superseded`].
+pub(crate) fn outlived_session(current_epoch: u64, my_epoch: u64) -> bool {
+    current_epoch != my_epoch
+}
+
 /// Folds one more manual request into the queued-run slot. The slot holds the
 /// `force` flag the queued run will use: several clicks while one run is in flight
 /// collapse into a single re-run (it reads the filters as they are when it starts,
