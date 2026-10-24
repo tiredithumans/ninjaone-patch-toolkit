@@ -25,9 +25,22 @@ whole fleet.
 A NinjaOne device group is a saved search. `GET /groups` lists the groups (a non-fatal lookup
 leg: a token that cannot list them loses the picker, not every query), but no device record says
 which groups it belongs to. So `run_query` reads `/group/{id}/device-ids` for each selected group
-on every query, in the same `join!` as the other legs, and unions the results. It never caches
-them, because membership moves with the fleet. `assemble_result` hands the set to
+on every query, once the lookups have resolved (see below), and unions the results. It never
+caches them, because membership moves with the fleet. `assemble_result` hands the set to
 `PreparedFilter::with_device_group_members`.
+
+The selection is checked before any read. More than `MAX_GROUPS_PER_QUERY` (50) groups is
+refused: every group costs a read on every query, auto-refresh ticks included, and the ids
+arrive unchecked from presets and view links. It is refused, never truncated, because dropping
+groups would quietly narrow the scope and a narrower scope reads as a healthier fleet. The check
+runs in `query_patches` before the query token is claimed, so a refused selection never
+supersedes a good query in flight; `QueryPlan::build` re-checks it, as with the install range.
+The group reads then wait for the lookups so each id can be checked against the `/groups`
+listing: an id the listing lacks (a group deleted since the preset was saved) fails the query as
+"no longer exists" without spending a request on a 404. An empty listing means the lookup failed
+and fell back, so nothing is checked, matching the frontend's `prune_unknown_ids`. The reads run
+four at a time (`GROUP_READ_CONCURRENCY`), not in sequence, because each is a full round trip
+and the query waits on its slowest leg.
 
 `device_allowed` **fails closed**: with groups selected and no member set supplied, no device
 passes, because a scope that cannot be checked must not widen to the whole fleet. A membership

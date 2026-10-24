@@ -251,6 +251,13 @@ status-pushed-down (too large to cache). The summary carries `data_fetched_at` (
 data was last fetched, distinct from `generated_at`) for the UI's "patch data as of …" label. The
 whole-fleet caches are tenant-scoped, so `clear_lookups_cache` drops them too.
 
+The pull runs in the same `join!` as the cache legs, which all finish even when one fails so the
+caches are warm for the retry. The uncached legs (install history, device-group members) do the
+opposite: they abort when a devices, current-patch or lookup leg fails, because the query is
+already lost and minutes of sequential paging would only hold its error back. A `watch` flag
+carries the failure, so a leg that starts waiting after it was raised still sees it; the error
+surfaced is still the cache leg's.
+
 ### Scoping borrows, never clones
 
 `assemble_result` filters the cached `Arc`s into one `Vec<rows::PatchRecord>` — a borrowed view

@@ -1468,6 +1468,323 @@ async fn a_device_group_scope_narrows_to_its_members_and_fails_closed() {
     );
 }
 
+/// A pending OS query over devices 10, 20 and 30 (org 1, one critical patch each),
+/// scoped to `groups`, with `known` as the cached `/groups` listing.
+async fn group_scoped_query(
+    api: &NinjaApiClient,
+    groups: Vec<i64>,
+    known: Vec<crate::model::DeviceGroup>,
+) -> anyhow::Result<QueryRun> {
+    let mut a = args(PatchType::Os, vec![PatchStatus::Pending]);
+    a.filter.device_group_ids = groups;
+    let lookups = Arc::new(LookupSet {
+        orgs: vec![Organization {
+            id: 1,
+            name: "Alpha".into(),
+        }],
+        locations: vec![],
+        roles: vec![],
+        device_groups: known,
+    });
+    run_query(
+        api,
+        async { Ok::<_, anyhow::Error>(lookups) },
+        async { Ok::<_, anyhow::Error>(Arc::new(vec![dev(10, 1), dev(20, 1), dev(30, 1)])) },
+        async {
+            Ok::<_, anyhow::Error>(CurrentPatches {
+                os: Arc::new(vec![
+                    cur(10, "KB1", "MANUAL", "CRITICAL"),
+                    cur(20, "KB2", "MANUAL", "CRITICAL"),
+                    cur(30, "KB3", "MANUAL", "CRITICAL"),
+                ]),
+                sw: Arc::new(Vec::new()),
+                fetched_at: fixed_now(),
+                os_fetched_at: Some(fixed_now()),
+                sw_fetched_at: Some(fixed_now()),
+            })
+        },
+        no_ledger(),
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        a,
+        fixed_now(),
+        &|_: &'static str, _: usize| {},
+    )
+    .await
+}
+
+fn group(id: i64, name: &str) -> crate::model::DeviceGroup {
+    crate::model::DeviceGroup {
+        id,
+        name: name.into(),
+    }
+}
+
+/// A preset or view link can carry a group deleted since it was saved. Checked
+/// against the `/groups` listing, it fails the query naming the id, without a
+/// request that could only 404. An empty listing (the lookup failed and fell back)
+/// checks nothing: the read goes out and decides.
+#[tokio::test]
+async fn a_group_missing_from_the_listing_fails_before_any_read() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/group/42/device-ids"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([10])))
+        .expect(0)
+        .named("the unknown group's members")
+        .mount(&server)
+        .await;
+    let api = client(&server);
+    let err = match group_scoped_query(&api, vec![42], vec![group(7, "Ring 1")]).await {
+        Ok(_) => panic!("a deleted group must fail the query"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("device group #42 no longer exists"), "{err}");
+    server.verify().await;
+
+    let unlisted = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/group/42/device-ids"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([10])))
+        .expect(1)
+        .mount(&unlisted)
+        .await;
+    let result = group_scoped_query(&client(&unlisted), vec![42], vec![])
+        .await
+        .expect("an unlisted id is read when the listing is empty")
+        .result;
+    assert_eq!(result.devices_total, 1);
+}
+
+/// A selection past the cap is refused before any request, never truncated —
+/// dropping groups would quietly narrow the scope.
+#[tokio::test]
+async fn an_over_cap_group_selection_is_refused_before_any_read() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"^/api/v2/group/\d+/device-ids$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([10])))
+        .expect(0)
+        .named("any group's members")
+        .mount(&server)
+        .await;
+    let ids: Vec<i64> = (1..=MAX_GROUPS_PER_QUERY as i64 + 1).collect();
+    let known = ids.iter().map(|&id| group(id, "g")).collect();
+    let err = match group_scoped_query(&client(&server), ids, known).await {
+        Ok(_) => panic!("an over-cap selection must be refused"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains(&format!("at most {MAX_GROUPS_PER_QUERY} device groups")),
+        "{err}"
+    );
+    server.verify().await;
+
+    // At the cap is still a query.
+    let ok = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"^/api/v2/group/\d+/device-ids$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([10])))
+        .expect(MAX_GROUPS_PER_QUERY as u64)
+        .mount(&ok)
+        .await;
+    let ids: Vec<i64> = (1..=MAX_GROUPS_PER_QUERY as i64).collect();
+    let known = ids.iter().map(|&id| group(id, "g")).collect();
+    group_scoped_query(&client(&ok), ids, known)
+        .await
+        .expect("a selection at the cap runs");
+}
+
+/// Several groups are each read once, in whatever order the reads land, and a
+/// device in any of them is in scope.
+#[tokio::test]
+async fn several_groups_are_each_read_and_their_members_unioned() {
+    let server = MockServer::start().await;
+    for (id, members) in [(7, json!([10])), (8, json!([20, 10]))] {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v2/group/{id}/device-ids")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(members))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let result = group_scoped_query(
+        &client(&server),
+        vec![7, 8],
+        vec![group(7, "Ring 1"), group(8, "Ring 2")],
+    )
+    .await
+    .expect("query")
+    .result;
+    assert_eq!(result.devices_total, 2, "devices 10 and 20, not 30");
+    let mut kbs: Vec<_> = result.rows.iter().map(|r| r.kb.as_deref()).collect();
+    kbs.sort();
+    assert_eq!(kbs, [Some("KB1"), Some("KB2")]);
+}
+
+/// Once the device inventory has failed the query is lost, so the per-query legs —
+/// the install-history pull and the group reads, which fill no cache — stop rather
+/// than run on and hold the error back. The error is still the inventory's.
+#[tokio::test]
+async fn a_failed_fleet_leg_abandons_the_install_history_pull() {
+    let server = MockServer::start().await;
+    let slow = std::time::Duration::from_secs(5);
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patch-installs"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "results": [], "cursor": "" }))
+                .set_delay(slow),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/group/7/device-ids"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!([10]))
+                .set_delay(slow),
+        )
+        .mount(&server)
+        .await;
+    let api = client(&server);
+    let mut a = args(PatchType::Os, vec![PatchStatus::Installed]);
+    a.filter.device_group_ids = vec![7];
+    let lookups = Arc::new(LookupSet {
+        orgs: vec![],
+        locations: vec![],
+        roles: vec![],
+        device_groups: vec![group(7, "Ring 1")],
+    });
+    let query = run_query(
+        &api,
+        async { Ok::<_, anyhow::Error>(lookups) },
+        async { Err::<Arc<Vec<Device>>, _>(anyhow::anyhow!("device inventory unavailable")) },
+        async {
+            Ok::<_, anyhow::Error>(CurrentPatches {
+                os: Arc::new(Vec::new()),
+                sw: Arc::new(Vec::new()),
+                fetched_at: fixed_now(),
+                os_fetched_at: Some(fixed_now()),
+                sw_fetched_at: Some(fixed_now()),
+            })
+        },
+        no_ledger(),
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        a,
+        fixed_now(),
+        &|_: &'static str, _: usize| {},
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), query)
+        .await
+        .expect("the query must not wait out the install-history pull");
+    let err = match outcome {
+        Ok(_) => panic!("a failed inventory must fail the query"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("device inventory unavailable"), "{err}");
+}
+
+/// The lookups are a cache leg too: once they fail, the install-history pull stops
+/// rather than hold the lookups' error back. Their failure also means the group
+/// reads, which wait on them, never start.
+#[tokio::test]
+async fn a_failed_lookups_leg_abandons_the_install_history_pull() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patch-installs"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "results": [], "cursor": "" }))
+                .set_delay(std::time::Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/group/7/device-ids"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([10])))
+        .expect(0)
+        .named("the group read behind the failed lookups")
+        .mount(&server)
+        .await;
+    let api = client(&server);
+    let mut a = args(PatchType::Os, vec![PatchStatus::Installed]);
+    a.filter.device_group_ids = vec![7];
+    let query = run_query(
+        &api,
+        async { Err::<Lookups, _>(anyhow::anyhow!("lookups unavailable")) },
+        async { Ok::<_, anyhow::Error>(Arc::new(vec![dev(10, 1)])) },
+        async {
+            Ok::<_, anyhow::Error>(CurrentPatches {
+                os: Arc::new(Vec::new()),
+                sw: Arc::new(Vec::new()),
+                fetched_at: fixed_now(),
+                os_fetched_at: Some(fixed_now()),
+                sw_fetched_at: Some(fixed_now()),
+            })
+        },
+        no_ledger(),
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        a,
+        fixed_now(),
+        &|_: &'static str, _: usize| {},
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), query)
+        .await
+        .expect("the query must not wait out the install-history pull");
+    let err = match outcome {
+        Ok(_) => panic!("failed lookups must fail the query"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("lookups unavailable"), "{err}");
+    server.verify().await;
+}
+
+/// The member reads overlap: two groups that each answer in 300 ms take about
+/// 300 ms together, where reading them in turn takes at least 600.
+#[tokio::test]
+async fn group_member_reads_overlap() {
+    let server = MockServer::start().await;
+    for (id, members) in [(7, json!([10])), (8, json!([20]))] {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v2/group/{id}/device-ids")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(members)
+                    .set_delay(std::time::Duration::from_millis(400)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let started = std::time::Instant::now();
+    let result = group_scoped_query(
+        &client(&server),
+        vec![7, 8],
+        vec![group(7, "Ring 1"), group(8, "Ring 2")],
+    )
+    .await
+    .expect("query")
+    .result;
+    let elapsed = started.elapsed();
+    assert_eq!(result.devices_total, 2);
+    // Two 400 ms reads in turn take at least 800 ms; overlapped they take about
+    // 400 ms. The 700 ms line leaves a loaded CI runner 300 ms of slack.
+    assert!(
+        elapsed < std::time::Duration::from_millis(700),
+        "the reads ran in turn: {elapsed:?}"
+    );
+}
+
 /// NinjaOne stamps every record "now" — the case the ledger exists for. A record
 /// this app first saw 60 days ago is aged from then: past its 30-day SLA, in the
 /// 31–60 day bucket, its row's First Seen 60 days back, and counted as dated by the
