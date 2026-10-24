@@ -122,6 +122,15 @@ Without it the previous session's rows stayed rendered against a cache that had 
 dropped: Next page came back blank under "Rows 101–200 of N" and Export said "Run a query before
 exporting" beside a visible table — the same divergence one layer up.
 
+Locations are derived client-side. `load_lookups` keeps the full list (`all_locations`, each
+entry with its `organization_id`), and `load_locations` derives the picker's list for the org
+scope with `util::scope_locations` / `locations_for` — the backend `list_locations` rule (empty
+scope = every location; under a selection a location with no org is excluded) — and prunes the
+selection in the same synchronous call. It used to re-invoke `list_locations(orgs)` per org
+toggle: an IPC round trip with no supersede guard, whose replies could apply out of order, and
+whose await let `drill_to_org` run its query before the prune, so another org's location stayed
+in the drilled query and it came back empty.
+
 ## Paging commands return empty on a miss, never an error
 
 The three paging commands all return empty on a cache miss. A miss is a normal transient (tenant

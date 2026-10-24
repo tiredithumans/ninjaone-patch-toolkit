@@ -1648,6 +1648,85 @@ fn loc(id: i64, name: &str, org_id: i64) -> Location {
     }
 }
 
+fn ids(locs: &[Location]) -> Vec<i64> {
+    locs.iter().map(|l| l.id).collect()
+}
+
+/// The backend's `list_locations` rule, applied client-side: no organization
+/// selected offers every location (an org-less one included); a selection offers
+/// only its organizations' locations, and an org-less one is never among them.
+#[test]
+fn locations_follow_the_org_scope_like_the_backend_filter() {
+    let orphan = Location {
+        id: 99,
+        name: "Unassigned".into(),
+        organization_id: None,
+    };
+    let all = vec![
+        loc(10, "HQ", 1),
+        loc(20, "Depot", 2),
+        loc(11, "Lab", 1),
+        orphan,
+    ];
+    assert_eq!(ids(&locations_for(&all, &[])), vec![10, 20, 11, 99]);
+    assert_eq!(ids(&locations_for(&all, &[1])), vec![10, 11]);
+    assert_eq!(ids(&locations_for(&all, &[2, 1])), vec![10, 20, 11]);
+    assert!(
+        locations_for(&all, &[7]).is_empty(),
+        "an org with no locations"
+    );
+}
+
+/// The demo's picker and the signed-in one must offer the same list for the
+/// same scope, now that the signed-in one derives it from the full list.
+#[test]
+fn locations_for_matches_the_demo_sample_for_every_scope() {
+    let all = crate::demo::sample_locations(&[]);
+    for orgs in [
+        vec![],
+        vec![1],
+        vec![2],
+        vec![1, 2],
+        vec![1, 2, 3],
+        vec![999],
+    ] {
+        assert_eq!(
+            ids(&locations_for(&all, &orgs)),
+            ids(&crate::demo::sample_locations(&orgs)),
+            "orgs {orgs:?}"
+        );
+    }
+}
+
+/// Narrowing the org scope prunes the location selection in the same call, so a
+/// drill-down that runs right after reads a selection with no other org's site
+/// left in it — the async reload let `drill_run` read the stale one, and the
+/// drilled query came back empty.
+#[test]
+fn narrowing_the_org_scope_prunes_the_location_selection_at_once() {
+    let all = vec![loc(10, "HQ", 1), loc(20, "Depot", 2), loc(11, "Lab", 1)];
+    let (offered, selected) = scope_locations(Some(&all), &[2], vec![10, 20]);
+    assert_eq!(ids(&offered), vec![20]);
+    assert_eq!(selected, vec![20], "org 1's HQ is dropped");
+
+    // Back to every organization: everything is offered, nothing is dropped.
+    let (offered, selected) = scope_locations(Some(&all), &[], vec![10, 20]);
+    assert_eq!(ids(&offered), vec![10, 20, 11]);
+    assert_eq!(selected, vec![10, 20]);
+
+    // A preset restored before the list arrived keeps its ids; pruning against a
+    // list that is not there would drop all of them. The list's arrival prunes.
+    let (offered, selected) = scope_locations(None, &[1], vec![10, 20]);
+    assert!(offered.is_empty());
+    assert_eq!(selected, vec![10, 20]);
+    let (_, selected) = scope_locations(Some(&all), &[1], selected);
+    assert_eq!(selected, vec![10]);
+
+    // A tenant with no locations at all is a loaded, empty list: prune to nothing.
+    let (_, selected) = scope_locations(Some(&[]), &[], vec![10]);
+    assert!(selected.is_empty());
+}
+
 /// Selected ids resolve in the lookup's order, and an id with no lookup row is
 /// dropped rather than rendered as a bare number.
 #[test]

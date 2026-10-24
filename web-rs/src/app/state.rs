@@ -158,6 +158,10 @@ impl SessionState {
 #[derive(Clone, Copy)]
 pub(crate) struct LookupState {
     pub(super) orgs: RwSignal<Vec<Organization>>,
+    /// Every location in the tenant, `None` until it has loaded. The picker's list
+    /// is derived from it per org scope (`util::scope_locations`), client-side.
+    pub(super) all_locations: RwSignal<Option<Vec<Location>>>,
+    /// The locations offered under the current organization scope.
     pub(super) locations: RwSignal<Vec<Location>>,
     pub(super) roles: RwSignal<Vec<Role>>,
     pub(super) device_groups: RwSignal<Vec<DeviceGroup>>,
@@ -170,6 +174,7 @@ impl LookupState {
     pub(super) fn new() -> Self {
         Self {
             orgs: RwSignal::new(Vec::new()),
+            all_locations: RwSignal::new(None),
             locations: RwSignal::new(Vec::new()),
             roles: RwSignal::new(Vec::new()),
             device_groups: RwSignal::new(Vec::new()),
