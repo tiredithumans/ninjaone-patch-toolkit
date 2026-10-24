@@ -19,8 +19,8 @@ version and start a fresh `[Unreleased]`.
 
 ### Fixed
 
-- A query scoped to several device groups reads them together and fails at once when one of them
-  no longer exists.
+- A query scoped to several device groups reads them together, and fails at once when one of
+  them no longer exists or a fleet fetch has already failed.
 
 ## [0.20.0] - 2026-10-23
 

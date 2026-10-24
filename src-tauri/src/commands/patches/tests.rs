@@ -1627,6 +1627,71 @@ async fn several_groups_are_each_read_and_their_members_unioned() {
     assert_eq!(kbs, [Some("KB1"), Some("KB2")]);
 }
 
+/// Once the device inventory has failed the query is lost, so the per-query legs —
+/// the install-history pull and the group reads, which fill no cache — stop rather
+/// than run on and hold the error back. The error is still the inventory's.
+#[tokio::test]
+async fn a_failed_fleet_leg_abandons_the_install_history_pull() {
+    let server = MockServer::start().await;
+    let slow = std::time::Duration::from_secs(5);
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patch-installs"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "results": [], "cursor": "" }))
+                .set_delay(slow),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/group/7/device-ids"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!([10]))
+                .set_delay(slow),
+        )
+        .mount(&server)
+        .await;
+    let api = client(&server);
+    let mut a = args(PatchType::Os, vec![PatchStatus::Installed]);
+    a.filter.device_group_ids = vec![7];
+    let lookups = Arc::new(LookupSet {
+        orgs: vec![],
+        locations: vec![],
+        roles: vec![],
+        device_groups: vec![group(7, "Ring 1")],
+    });
+    let query = run_query(
+        &api,
+        async { Ok::<_, anyhow::Error>(lookups) },
+        async { Err::<Arc<Vec<Device>>, _>(anyhow::anyhow!("device inventory unavailable")) },
+        async {
+            Ok::<_, anyhow::Error>(CurrentPatches {
+                os: Arc::new(Vec::new()),
+                sw: Arc::new(Vec::new()),
+                fetched_at: fixed_now(),
+                os_fetched_at: Some(fixed_now()),
+                sw_fetched_at: Some(fixed_now()),
+            })
+        },
+        no_ledger(),
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        a,
+        fixed_now(),
+        &|_: &'static str, _: usize| {},
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), query)
+        .await
+        .expect("the query must not wait out the install-history pull");
+    let err = match outcome {
+        Ok(_) => panic!("a failed inventory must fail the query"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("device inventory unavailable"), "{err}");
+}
+
 /// NinjaOne stamps every record "now" — the case the ledger exists for. A record
 /// this app first saw 60 days ago is aged from then: past its 30-day SLA, in the
 /// 31–60 day bucket, its row's First Seen 60 days back, and counted as dated by the

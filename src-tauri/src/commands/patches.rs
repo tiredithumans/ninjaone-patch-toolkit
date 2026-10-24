@@ -5,7 +5,7 @@ use anyhow::Context as _;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
 use crate::api::{NinjaApiClient, ProgressFn};
@@ -583,6 +583,26 @@ async fn device_group_members(
     Ok(Some(members))
 }
 
+/// Runs an uncached leg of [`run_query`] unless a cache leg has already failed.
+///
+/// The query fails at that point whatever this leg returns, so letting a
+/// minutes-long install-history pull finish only delays the error the operator
+/// sees. A `watch` rather than a `Notify`, because `wait_for` reads the current
+/// value first: a failure flagged before this leg starts waiting is not missed.
+/// The cancellation error itself is never shown — the cache leg's error is
+/// surfaced first.
+async fn unless_fleet_failed<T>(
+    failed: &watch::Receiver<bool>,
+    leg: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let mut failed = failed.clone();
+    tokio::select! {
+        r = leg => r,
+        // A dropped sender (`Err`) disables this branch rather than cancelling.
+        Ok(_) = failed.wait_for(|&f| f) => Err(anyhow::anyhow!("cancelled: a fleet fetch failed")),
+    }
+}
+
 /// The fetch→scope→join→rollup core of [`query_patches`], split out so it can be
 /// driven in tests against a mock NinjaOne server without a Tauri `AppHandle`/`State`.
 ///
@@ -635,22 +655,43 @@ where
     // pull therefore cancelled minutes of sequential cursor paging before it could
     // reach its cache, so the retry started cold and hit exactly the same odds
     // again. Letting every leg finish means the query still fails (the `?`s below
-    // are unchanged), but the fleet caches are warm for the retry.
+    // are unchanged), but the fleet caches are warm for the retry. The reverse does
+    // not hold: the uncached legs (group members, install history) fill no cache, so
+    // once a devices, current-patch or lookup leg has failed they are abandoned via
+    // `fleet_failed` rather than left running for minutes before the error surfaces.
+    let (fleet_failed_tx, fleet_failed) = watch::channel(false);
+    let flag_failure = |failed: bool| {
+        if failed {
+            fleet_failed_tx.send_replace(true);
+        }
+    };
     let (devices, current, lookup_leg, ledger, os_installs, sw_installs) = tokio::join!(
-        devices_fut,
-        current_fut,
+        async {
+            let r = devices_fut.await;
+            flag_failure(r.is_err());
+            r
+        },
+        async {
+            let r = current_fut.await;
+            flag_failure(r.is_err());
+            r
+        },
         // The group reads wait for the lookups so the selection can be checked
         // against `/groups` before any request is spent on it. The lookups are
         // cached and usually resolve at once, so this costs nothing on a warm query.
         async {
-            let lookups = lookups.await?;
-            let members =
-                device_group_members(api, &lookups.device_groups, &plan.filter.device_group_ids)
-                    .await;
+            let lookups = lookups.await;
+            flag_failure(lookups.is_err());
+            let lookups = lookups?;
+            let members = unless_fleet_failed(
+                &fleet_failed,
+                device_group_members(api, &lookups.device_groups, &plan.filter.device_group_ids),
+            )
+            .await;
             anyhow::Ok((lookups, members))
         },
         ledger_fut,
-        async {
+        unless_fleet_failed(&fleet_failed, async {
             if plan.want_installs && plan.include_os {
                 api.fleet_os_patch_installs(
                     patch_df_ref,
@@ -663,8 +704,8 @@ where
             } else {
                 Ok(Vec::new())
             }
-        },
-        async {
+        }),
+        unless_fleet_failed(&fleet_failed, async {
             if plan.want_installs && plan.include_sw {
                 api.fleet_software_patch_installs(
                     patch_df_ref,
@@ -677,7 +718,7 @@ where
             } else {
                 Ok(Vec::new())
             }
-        },
+        }),
     );
     // Surfaced in the same order `try_join!` would have, so the operator sees the
     // same first error; the difference is only that the siblings were allowed to
