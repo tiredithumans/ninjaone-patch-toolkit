@@ -58,6 +58,37 @@ pub fn is_outcome_unknown(err: &anyhow::Error) -> bool {
     err.downcast_ref::<OutcomeUnknown>().is_some()
 }
 
+/// The failure of a [`ReplaySafety::CursorPage`] request whose response was lost
+/// after the request may have reached NinjaOne: a timeout or a connection lost in
+/// flight, a 5xx, or a 2xx whose body could not be read.
+///
+/// NinjaOne keeps a scan's position server-side, keyed by the cursor's stable
+/// `name`, so the server may already have advanced past the page we never saw, and
+/// re-sending the name would be answered with the *next* page — a whole `pageSize`
+/// of rows skipped without an error. The pagination loop turns this into a restart
+/// of the scan rather than a replay. Test with [`is_cursor_replay_unsafe`], which
+/// sees through any `.context()` layered on top.
+#[derive(Debug)]
+struct CursorReplayUnsafe(String);
+
+impl fmt::Display for CursorReplayUnsafe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} — the server may already have moved its cursor past this page, so the \
+             cursor was not re-sent",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for CursorReplayUnsafe {}
+
+/// Whether `err` (or anything it wraps) is a [`CursorReplayUnsafe`].
+fn is_cursor_replay_unsafe(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<CursorReplayUnsafe>().is_some()
+}
+
 /// Asked before every attempt of an acting request; `false` stops it unsent.
 /// See [`NinjaApiClient::with_send_guard`].
 pub type SendGuard = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -93,9 +124,16 @@ pub fn is_send_refused(err: &anyhow::Error) -> bool {
 /// 401) are replayed regardless of the policy: the gateway refused the request
 /// before it ever reached the device queue, so re-sending cannot double-execute
 /// anything.
+///
+/// A cursor page sits between the two. Reading it changes nothing on a device, but
+/// it does move the scan's server-side position, so a lost response cannot be
+/// re-asked for: `CursorPage` fails those same arms with [`CursorReplayUnsafe`],
+/// and the pagination loop restarts the scan. A connect failure, 429 and 401 never
+/// reached the handler and are retried as for `Idempotent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplaySafety {
     Idempotent,
+    CursorPage,
     ActOnce,
 }
 
@@ -167,9 +205,11 @@ impl NinjaApiClient {
     ///
     /// Split from [`Self::request_raw`] so the typed page decoder can reuse the
     /// retry policy verbatim instead of growing a second copy of it — the arms here
-    /// (`ActOnce` → [`OutcomeUnknown`] on an in-flight failure or a 5xx,
-    /// `Idempotent`-only retries on 5xx/connect, 429/401 for both) are what keep an
-    /// acting POST from being replayed into a second reboot.
+    /// (`ActOnce` → [`OutcomeUnknown`] and `CursorPage` → [`CursorReplayUnsafe`] on
+    /// an in-flight failure or a 5xx, `Idempotent`-only retries on timeout/5xx,
+    /// connect retries for everything but `ActOnce`, 429/401 for all) are what keep
+    /// an acting POST from being replayed into a second reboot and a cursor from
+    /// being replayed past a page.
     async fn send_with_retry(
         &self,
         method: Method,
@@ -231,14 +271,31 @@ impl NinjaApiClient {
                     };
                     return Err(anyhow::Error::new(e).context(OutcomeUnknown(why.into())));
                 }
+                // The same ambiguity on a cursor page: the server may have advanced
+                // the scan before the response was lost, and re-sending its name
+                // would be answered with the page after this one.
+                Err(e)
+                    if replay == ReplaySafety::CursorPage && !e.is_connect() && !e.is_builder() =>
+                {
+                    warn!(%method, %url, ?e, "cursor page lost in flight; not re-sent");
+                    let why = if e.is_timeout() {
+                        "the cursor page timed out after it was sent"
+                    } else {
+                        "the connection failed while the cursor page was in flight"
+                    };
+                    return Err(anyhow::Error::new(e).context(CursorReplayUnsafe(why.into())));
+                }
                 // A connect failure means the request never reached the server, so
-                // replaying it can't double-execute — but only reads take this arm,
-                // because `is_connect()` can be reported for a connection that died
-                // mid-flight and we won't re-dispatch an action on a maybe.
+                // replaying it can't double-execute or move a cursor — but actions
+                // never take this arm, because `is_connect()` can be reported for a
+                // connection that died mid-flight and we won't re-dispatch an action
+                // on a maybe. A cursor page does: the worst a mislabelled in-flight
+                // failure costs it is rows, which the end-of-scan count check logs,
+                // against a whole query failed on every refused connection.
                 Err(e)
                     if e.is_connect()
                         && attempt < MAX_RETRIES
-                        && replay == ReplaySafety::Idempotent =>
+                        && replay != ReplaySafety::ActOnce =>
                 {
                     attempt += 1;
                     warn!(?e, attempt, "connect failed, retrying");
@@ -286,6 +343,13 @@ impl NinjaApiClient {
                 // is NinjaOne refusing the request and stays a plain error.
                 if status.is_server_error() && replay == ReplaySafety::ActOnce {
                     return Err(anyhow::Error::new(OutcomeUnknown(format!(
+                        "NinjaOne answered {status} to {method} {url}: {text}"
+                    ))));
+                }
+                // Likewise a gateway may fail a cursor page after the backend has
+                // moved the scan on, so the pagination loop restarts it instead.
+                if status.is_server_error() && replay == ReplaySafety::CursorPage {
+                    return Err(anyhow::Error::new(CursorReplayUnsafe(format!(
                         "NinjaOne answered {status} to {method} {url}: {text}"
                     ))));
                 }
@@ -344,8 +408,14 @@ enum Retry {
 /// a 5xx on an acting POST is exactly the ambiguity [`ReplaySafety::ActOnce`]
 /// exists for: the gateway may have failed *after* the job reached the device
 /// queue, so writes fail through to `JobState::Unknown` and are polled rather than
-/// replayed. 429 and 401 stay retryable for both — the gateway rejected the
-/// request before it could reach a device.
+/// replayed. 429 and 401 stay retryable for every request — the gateway rejected
+/// it before it could reach a device or move a cursor.
+///
+/// A [`ReplaySafety::CursorPage`] gets no 5xx retry either, for a different reason:
+/// NinjaOne keeps the scan's position server-side, keyed by the cursor's stable
+/// name, so a gateway that failed after the backend advanced would answer the
+/// replay with the *next* page and a whole `pageSize` of rows would vanish. The
+/// caller fails it with [`CursorReplayUnsafe`] and the scan starts over instead.
 fn retry_for(
     status: StatusCode,
     replay: ReplaySafety,

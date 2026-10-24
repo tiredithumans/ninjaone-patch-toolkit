@@ -11,12 +11,14 @@ paths:
   a second reqwest/cursor loop. → `docs/design/api-client.md`
 - **Both pagination branches require forward progress, measured against the *whole* cursor** —
   (`name` is a stable handle; the position rides in `offset`). **A stall is an error, not a short
-  read; an unreadable cursor is an error, not end-of-pages; 5xx/connect retries are
-  `Idempotent`-only.** → `docs/design/api-client.md#both-pagination-branches-require-forward-progress--and-neither-may-stop-quietly`
-- **An empty page short of the cursor's announced `count` restarts the scan without a cursor
-  (bounded), then an error — never re-send that cursor; a terminal cursor short of it is a
-  warning.** NinjaOne's normal end is a non-empty last page.
-  → `docs/design/api-client.md#an-empty-page-short-of-the-cursors-announced-count-restarts-the-scan-then-an-error`
+  read; an unreadable cursor is an error, not end-of-pages; timeout/5xx retries are
+  `Idempotent`-only (a cursor page is `CursorPage`); connect retries are never `ActOnce`.**
+  → `docs/design/api-client.md#both-pagination-branches-require-forward-progress--and-neither-may-stop-quietly`
+- **An empty page short of the cursor's announced `count`, or a cursor page whose response was
+  lost (timeout, 5xx, unreadable 2xx), restarts the scan without a cursor under the shared
+  `SCAN_RESTARTS` budget, then an error — never re-send that cursor; a terminal cursor short of
+  the count is a warning.** NinjaOne's normal end is a non-empty last page.
+  → `docs/design/api-client.md#a-broken-or-lost-cursor-page-restarts-the-scan-then-an-error`
 - **reqwest has `default-features = false`; keep `gzip`, `http2`, `system-proxy`, `charset`.**
   → `docs/design/api-client.md#reqwests-default-features-are-off-so-every-one-it-drops-must-be-re-added-explicitly`
 - **Verify endpoint shapes/params/enums against the spec, never from memory:**
