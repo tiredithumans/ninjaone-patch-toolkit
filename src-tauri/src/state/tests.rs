@@ -519,8 +519,103 @@ async fn a_lookups_invalidation_during_a_fetch_is_not_undone_by_that_fetch() {
     );
 }
 
-/// Queries overlap by design (an auto-refresh tick fires while a manual Run is
-/// still paging), so on a cold cache both used to page the entire inventory
+/// Serves `/organizations` and `/roles` empty, `failing` once with a 403 and then
+/// `body`, and the remaining optional lookup feed empty. Returns the lookups seen
+/// on the first call (degraded), within the cap, and after it.
+///
+/// A 403 rather than a 5xx: `retry_for` retries a GET's 5xx inside the same call
+/// (2 s, 4 s, 8 s), so a one-off 503 never reaches the fallback at all. A 403 is
+/// also the realistic case — a token missing the scope.
+async fn lookups_across_a_failed_optional_feed(
+    failing: &str,
+    body: serde_json::Value,
+) -> (Arc<LookupSet>, Arc<LookupSet>, Arc<LookupSet>, usize) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    for p in [
+        "/api/v2/organizations",
+        "/api/v2/roles",
+        "/api/v2/locations",
+        "/api/v2/groups",
+    ] {
+        if p == failing {
+            continue;
+        }
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+    }
+    // Mounted first, so it answers the first request. Once it is used up a second
+    // request would fall through to the 200 mock, so what proves the call inside
+    // the cap made no request is the hit count asserted below, not `expect(1)`.
+    Mock::given(method("GET"))
+        .and(path(failing))
+        .respond_with(ResponseTemplate::new(403))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(failing))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    let state = AppState::seeded(server.uri());
+
+    let first = state.lookups().await.expect("a failed optional feed");
+    let within = state.lookups().await.expect("within the cap");
+    assert_eq!(
+        hits(&server, failing).await,
+        1,
+        "inside the cap the degraded set is served from cache"
+    );
+    // Past the degraded cap, still well inside LOOKUP_TTL.
+    state
+        .lookups_cache
+        .age(FORCE_MIN_INTERVAL + Duration::from_secs(1));
+    let after = state.lookups().await.expect("past the cap");
+    let orgs_fetches = hits(&server, "/api/v2/organizations").await;
+    (first, within, after, orgs_fetches)
+}
+
+/// A `/groups` failure fell back to no groups and that empty list was cached for
+/// the full LOOKUP_TTL, so one blip left the Group filter blank for five minutes
+/// and a forced refresh did not clear it. Nothing mounted an error for `/groups`
+/// at all, so the fallback had never run under test.
+#[tokio::test]
+async fn a_failed_group_list_is_retried_after_a_minute_not_five() {
+    let (first, within, after, orgs_fetches) = lookups_across_a_failed_optional_feed(
+        "/api/v2/groups",
+        serde_json::json!([{ "id": 7, "name": "Patch ring 1" }]),
+    )
+    .await;
+    assert!(first.device_groups.is_empty(), "the query still succeeds");
+    assert!(within.device_groups.is_empty());
+    let groups: Vec<i64> = after.device_groups.iter().map(|g| g.id).collect();
+    assert_eq!(groups, [7], "the groups appear once the cap has passed");
+    assert_eq!(orgs_fetches, 2, "one fetch per expiry, not one per call");
+}
+
+/// Same for `/locations`: a blip blanked every location name for five minutes.
+#[tokio::test]
+async fn a_failed_location_list_is_retried_after_a_minute_not_five() {
+    let (first, within, after, _) = lookups_across_a_failed_optional_feed(
+        "/api/v2/locations",
+        serde_json::json!([{ "id": 3, "name": "HQ", "organizationId": 1 }]),
+    )
+    .await;
+    assert!(first.locations.is_empty());
+    assert!(within.locations.is_empty());
+    let names: Vec<&str> = after.locations.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["HQ"]);
+}
+
+/// On a cold cache two callers (a query and `plan_action`, or a query from a stale
+/// frontend that does not queue its runs) used to page the entire inventory
 /// independently — the largest fetch in the app, run twice.
 #[tokio::test]
 async fn concurrent_cold_fetches_collapse_onto_one_request() {
@@ -561,7 +656,9 @@ async fn concurrent_cold_fetches_collapse_onto_one_request() {
 }
 
 /// The inventory carries NinjaOne's reboot reason from `/queries/device-health`,
-/// and a health feed the token cannot read costs the reasons, never the inventory.
+/// and a health feed the token cannot read costs the reasons, never the inventory
+/// — and only until the degraded cap. The inventory without reasons used to be
+/// cached for the full 15-minute DEVICE_TTL.
 #[tokio::test]
 async fn the_inventory_carries_reboot_reasons_and_survives_a_health_failure() {
     use wiremock::matchers::{method, path};
@@ -576,42 +673,72 @@ async fn the_inventory_carries_reboot_reasons_and_survives_a_health_failure() {
             ])))
     };
 
+    let health = || {
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/device-health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    { "deviceId": 1, "pendingRebootReason": "Windows Update", "alertCount": 2 },
+                    { "deviceId": 2, "activeJobCount": 0 }
+                ],
+                "cursor": ""
+            })))
+    };
+    let reasons_of = |devices: &[Device]| -> Vec<Option<String>> {
+        devices
+            .iter()
+            .map(|d| d.pending_reboot_reason.clone())
+            .collect()
+    };
+
     let server = MockServer::start().await;
     inventory().mount(&server).await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/queries/device-health"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "results": [
-                { "deviceId": 1, "pendingRebootReason": "Windows Update", "alertCount": 2 },
-                { "deviceId": 2, "activeJobCount": 0 }
-            ],
-            "cursor": ""
-        })))
-        .mount(&server)
-        .await;
+    health().mount(&server).await;
     let devices = AppState::seeded(server.uri())
         .fleet_devices(None)
         .await
         .expect("inventory");
-    let reasons: Vec<Option<&str>> = devices
-        .iter()
-        .map(|d| d.pending_reboot_reason.as_deref())
-        .collect();
-    assert_eq!(reasons, [Some("Windows Update"), None]);
+    assert_eq!(
+        reasons_of(&devices),
+        [Some("Windows Update".to_string()), None]
+    );
 
+    // A 403 (not a 5xx, which `retry_for` retries inside the call) once, then the
+    // feed recovers.
     let forbidden = MockServer::start().await;
     inventory().mount(&forbidden).await;
     Mock::given(method("GET"))
         .and(path("/api/v2/queries/device-health"))
         .respond_with(ResponseTemplate::new(403))
+        .up_to_n_times(1)
+        .expect(1)
         .mount(&forbidden)
         .await;
-    let devices = AppState::seeded(forbidden.uri())
+    health().mount(&forbidden).await;
+    let state = AppState::seeded(forbidden.uri());
+    let devices = state
         .fleet_devices(None)
         .await
         .expect("a health failure must not fail the inventory");
     assert_eq!(devices.len(), 2);
     assert!(devices.iter().all(|d| d.pending_reboot_reason.is_none()));
+
+    let within = state.fleet_devices(None).await.expect("within the cap");
+    assert!(
+        Arc::ptr_eq(&devices, &within),
+        "served from cache inside the cap"
+    );
+
+    state
+        .fleet_devices_cache
+        .age(FORCE_MIN_INTERVAL + Duration::from_secs(1));
+    let after = state.fleet_devices(None).await.expect("past the cap");
+    assert_eq!(
+        reasons_of(&after),
+        [Some("Windows Update".to_string()), None],
+        "the reasons appear once the cap has passed, not after DEVICE_TTL"
+    );
+    assert_eq!(hits(&forbidden, "/api/v2/devices-detailed").await, 2);
 }
 
 #[test]
@@ -669,8 +796,9 @@ fn a_query_started_after_the_clear_stores_normally() {
     );
 }
 
-/// An auto-refresh tick and a manual Run overlap routinely and do not finish in
-/// start order. The run that started last owns the cache, because that is the one
+/// Two overlapping queries (an auto-refresh tick during a manual Run, before the
+/// frontend queued its runs; now only a stale or hand-built frontend) do not finish
+/// in start order. The run that started last owns the cache, because that is the one
 /// whose summary the frontend renders — otherwise the visible table and the rows
 /// behind paging/export come from different queries.
 #[test]

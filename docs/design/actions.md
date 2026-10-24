@@ -368,6 +368,14 @@ on, so every default preview used to raise the banner and its Refresh link force
 refetch. See [query-cache.md](./query-cache.md#the-stores-are-epoch-gated-and-the-fetches-are-single-flight)
 for how the invalidation survives an in-flight fetch.
 
+The poller invalidates **at most once per tick** (`settle_tick` keeps one bool, set by the
+`invalidate_after` call that actually dropped something, so a scan settling first does not use
+it up). The dedupe used to be per kind, so an apply and a reboot settling in the same tick bumped
+every epoch twice, and each bump makes a whole-fleet fetch already in flight discard its rows.
+One bool is enough because every mutating kind drops the same slots (`can_reboot` is
+`is_mutating`). It is not debounced across ticks and never "marks stale" without bumping the
+epoch: a fetch started before a settle must not store.
+
 ## Job state is tenant-stamped; the poller is single-claim
 
 Job state lives in `AppState.jobs` (methods in `state/jobs.rs`), mirroring `last_result` — a
@@ -489,6 +497,14 @@ at most `MAX_FEED_READS_IN_FLIGHT` (8) are in flight per tick. They used to be s
 once, so a 500-device batch put 500 GETs on the wire every 15 s and a 429 parked them all on
 the same `Retry-After`. The bound is a constant, not the "Dispatch concurrency" setting, so
 lowering that setting to send cautiously does not also slow every status check.
+
+The tick interval is 15 s and **backs off after failed reads**: `resolve_pending` returns how many
+feed reads failed, and `poller::next_poll_interval` doubles the wait after any failure, up to 60 s,
+and resets to 15 s on the first clean tick. A read error is swallowed per device, since it says
+nothing about the job, so with a flat interval an outage or a rate limit had the poller re-send
+every device's read every 15 s for up to the 45-minute timeout, adding load to the API that was
+failing. The timeout still decides a job's fate; the backoff only costs up to a minute of latency
+on a verdict.
 
 That floor is only as good as `dispatched_ts`, so a job's dispatch time is taken once it holds
 its permit and has passed the session check (`dispatch::send_if_current`), as its POST goes out.

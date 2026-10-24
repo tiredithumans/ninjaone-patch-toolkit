@@ -710,16 +710,28 @@ fn every_mutating_command_checks_that_actions_are_enabled() {
 /// The invalidation rule lived in two places that disagreed: dispatch dropped the
 /// device inventory only for `Reboot`, the poller dropped it for every settled
 /// batch including scans. One function now answers for both.
+///
+/// The scan half of this test used to compare `settings.actions.enabled` before and
+/// after, which `invalidate_after` never touches, so it passed whatever the scan
+/// invalidated. It reads the cache epochs now.
 #[test]
 fn only_mutating_kinds_invalidate_and_a_scan_invalidates_nothing() {
     let state = AppState::new().expect("build state");
 
-    // A scan changes nothing on the device, so neither cache is dropped.
-    let before = state.settings_snapshot().actions.enabled;
-    invalidate_after(ActionKind::OsPatchScan, false, &state);
-    assert_eq!(state.settings_snapshot().actions.enabled, before);
+    // A scan changes nothing on the device, so no cache is dropped.
+    for scan in [ActionKind::OsPatchScan, ActionKind::SoftwarePatchScan] {
+        let before = state.cache_epochs();
+        assert!(!invalidate_after(scan, false, &state));
+        assert_eq!(
+            state.cache_epochs(),
+            before,
+            "{scan:?} must invalidate nothing"
+        );
+        assert!(!scan.can_reboot());
+    }
 
-    // Every mutating kind can move os.needsReboot, so both caches go.
+    // Every mutating kind can move os.needsReboot, so the device cache and both
+    // current-patch families go.
     for kind in [
         ActionKind::OsPatchApply,
         ActionKind::SoftwarePatchApply,
@@ -733,9 +745,13 @@ fn only_mutating_kinds_invalidate_and_a_scan_invalidates_nothing() {
             kind.can_reboot(),
             "{kind:?} can set the pending-reboot flag, so the device cache must drop"
         );
-        invalidate_after(kind, false, &state);
+        let (devices, os, sw) = state.cache_epochs();
+        assert!(invalidate_after(kind, false, &state));
+        let (devices_after, os_after, sw_after) = state.cache_epochs();
+        assert!(devices_after > devices, "{kind:?} must drop the devices");
+        assert!(os_after > os, "{kind:?} must drop the OS patches");
+        assert!(sw_after > sw, "{kind:?} must drop the software patches");
     }
-    assert!(!ActionKind::OsPatchScan.can_reboot());
 }
 
 /// A dry run of a mutating kind changes nothing on the device, so it must not
@@ -744,11 +760,19 @@ fn only_mutating_kinds_invalidate_and_a_scan_invalidates_nothing() {
 #[test]
 fn a_dry_run_invalidates_nothing() {
     let state = AppState::new().expect("build state");
-    let (devices_before, current_before) = state.cache_epochs();
-    invalidate_after(ActionKind::OsPatchRemediate, true, &state);
-    assert_eq!(state.cache_epochs(), (devices_before, current_before));
-    invalidate_after(ActionKind::OsPatchRemediate, false, &state);
-    assert_ne!(state.cache_epochs(), (devices_before, current_before));
+    let before = state.cache_epochs();
+    assert!(!invalidate_after(
+        ActionKind::OsPatchRemediate,
+        true,
+        &state
+    ));
+    assert_eq!(state.cache_epochs(), before);
+    assert!(invalidate_after(
+        ActionKind::OsPatchRemediate,
+        false,
+        &state
+    ));
+    assert_ne!(state.cache_epochs(), before);
 }
 
 /// A remediation runs the script configured in Settings, so its detail names that
@@ -937,7 +961,7 @@ async fn a_tick_reads_each_devices_feed_once_and_resolves_every_job_on_it() {
     ];
     let mut claimed = HashSet::new();
     let mut confirmed = HashSet::new();
-    let updates = poller::resolve_pending(
+    let (updates, _) = poller::resolve_pending(
         &mock_api(&server),
         pending,
         &mut claimed,
@@ -980,7 +1004,7 @@ async fn resolved_against_a_completed_apply(pending: Vec<JobReport>) -> Vec<JobR
         ])))
         .mount(&server)
         .await;
-    let updates = poller::resolve_pending(
+    let (updates, _) = poller::resolve_pending(
         &mock_api(&server),
         pending,
         &mut HashSet::new(),
@@ -1011,6 +1035,116 @@ async fn a_tick_within_one_session_settles_its_jobs() {
     assert!(tick.settled_any);
     assert_ne!(state.cache_epochs(), before, "a settled apply invalidates");
     assert_eq!(tick.closing.len(), 1);
+}
+
+/// A tick invalidates once, however many mutating kinds settle in it. The dedupe
+/// was per kind, so an apply and a reboot settling together bumped every epoch
+/// twice — and each bump costs any whole-fleet fetch in flight its rows. It is not
+/// debounced *across* ticks: each tick that settles something still invalidates.
+#[test]
+fn a_tick_invalidates_once_however_many_kinds_settle() {
+    let state = AppState::new().expect("build state");
+    let ts = Utc::now().timestamp();
+    let jobs = vec![
+        pending_job(1, 7, ActionKind::OsPatchApply, ts - 30),
+        pending_job(2, 8, ActionKind::Reboot, ts - 30),
+        pending_job(3, 9, ActionKind::OsPatchScan, ts - 30),
+        pending_job(4, 7, ActionKind::SoftwarePatchApply, ts - 20),
+        pending_job(5, 8, ActionKind::Script, ts - 20),
+    ];
+    assert!(state.append_jobs(&state.job_session(), jobs.clone()));
+    let (session, _) = state.pending_jobs();
+    // Settled in the order `ids` gives, not vector order, so the test can put the
+    // scan first: the dedupe must key on "did anything get dropped", not on "did
+    // a job settle".
+    let settled = |ids: &[u64]| -> Vec<JobReport> {
+        ids.iter()
+            .map(|id| {
+                let mut j = jobs.iter().find(|j| j.id == *id).cloned().expect("job");
+                j.finish(JobState::Completed, Utc::now());
+                j
+            })
+            .collect()
+    };
+
+    let (d0, os0, sw0) = state.cache_epochs();
+    // A scan settles first in the tick: it invalidates nothing, so it must not
+    // use up the tick's one invalidation either.
+    let tick = poller::settle_tick(&state, &session, settled(&[3, 1, 2]));
+    assert_eq!(tick.applied.len(), 3);
+    assert_eq!(
+        state.cache_epochs(),
+        (d0 + 1, os0 + 1, sw0 + 1),
+        "an apply and a reboot in one tick: one bump per cache"
+    );
+
+    let tick = poller::settle_tick(&state, &session, settled(&[4, 5]));
+    assert_eq!(tick.applied.len(), 2);
+    assert_eq!(
+        state.cache_epochs(),
+        (d0 + 2, os0 + 2, sw0 + 2),
+        "the next tick that settles something invalidates again"
+    );
+}
+
+/// The poll interval doubles after a tick with a failed feed read, caps at a
+/// minute, and returns to 15 s after the first clean tick.
+#[test]
+fn the_poll_interval_backs_off_on_failed_reads_and_resets_when_clean() {
+    use std::time::Duration;
+    let base = Duration::from_secs(15);
+    let mut interval = base;
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        interval = poller::next_poll_interval(interval, true);
+        seen.push(interval.as_secs());
+    }
+    assert_eq!(seen, [30, 60, 60, 60]);
+    assert_eq!(poller::next_poll_interval(interval, false), base);
+    assert_eq!(poller::next_poll_interval(base, false), base);
+}
+
+/// A failed read is swallowed per device — it says nothing about the job — but the
+/// tick reports it, so the poller can slow down instead of re-sending every read
+/// every 15 s into an outage. A 403 rather than a 500: `retry_for` retries a GET's
+/// 5xx inside the call with a 2/4/8 s backoff, which reaches the same `Err` here
+/// only after 14 s.
+#[tokio::test]
+async fn a_failed_feed_read_is_counted_and_holds_the_job() {
+    let server = MockServer::start().await;
+    let now = Utc::now();
+    let ts = now.timestamp();
+    Mock::given(method("GET"))
+        .and(path("/api/v2/activities"))
+        .and(query_param("df", "id=7"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/activities"))
+        .and(query_param("df", "id=8"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+
+    let pending = vec![
+        pending_job(1, 7, ActionKind::OsPatchApply, ts - 30),
+        pending_job(2, 8, ActionKind::OsPatchApply, ts - 30),
+    ];
+    let (updates, failed_reads) = poller::resolve_pending(
+        &mock_api(&server),
+        pending,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+        now,
+        8,
+    )
+    .await;
+    assert_eq!(failed_reads, 1, "one of the two device reads failed");
+    assert!(
+        updates.is_empty(),
+        "a failed read holds the job: {updates:?}"
+    );
 }
 
 /// A tick awaits the feed reads, and a sign-out and sign-in (same instance) can
@@ -1126,7 +1260,7 @@ async fn two_same_kind_jobs_on_one_device_share_a_read_but_not_an_activity() {
         pending_job(1, 7, ActionKind::OsPatchScan, ts - 30),
         pending_job(2, 7, ActionKind::OsPatchApply, ts - 20),
     ];
-    let updates = poller::resolve_pending(
+    let (updates, _) = poller::resolve_pending(
         &mock_api(&server),
         pending,
         &mut HashSet::new(),
@@ -1203,7 +1337,7 @@ async fn a_confirmed_series_narrows_the_next_read() {
     let mut claimed = HashSet::new();
     let mut confirmed = HashSet::new();
 
-    let first =
+    let (first, _) =
         poller::resolve_pending(&api, vec![job], &mut claimed, &mut confirmed, now, 8).await;
     assert_eq!(first[0].state, JobState::Running);
     assert!(confirmed.contains("uid-9"));
@@ -1265,7 +1399,7 @@ async fn a_tick_keeps_at_most_the_cap_of_reads_in_flight() {
             )
         })
         .collect();
-    let updates = poller::resolve_pending(
+    let (updates, _) = poller::resolve_pending(
         &mock_api(&server),
         pending,
         &mut HashSet::new(),

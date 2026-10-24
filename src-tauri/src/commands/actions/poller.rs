@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use tauri::{AppHandle, Manager};
@@ -10,13 +11,18 @@ use tracing::warn;
 
 use super::dispatch::invalidate_after;
 use super::{ActionProgressEvent, emit_progress};
-use crate::actions::{ActionKind, JobReport, JobState, audit};
+use crate::actions::{JobReport, JobState, audit};
 use crate::api::NinjaApiClient;
 use crate::model::Activity;
 use crate::state::{AppState, JobSession};
 
 /// How often the poller re-reads the activity feed for unresolved jobs.
-const POLL_INTERVAL_SECS: u64 = 15;
+const POLL_INTERVAL: Duration = Duration::from_secs(15);
+
+/// The slowest the poller backs off to after failed feed reads. A job's 45-minute
+/// timeout still decides its fate, so a minute between reads costs at most a
+/// minute of latency on its verdict.
+const MAX_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How many `/activities` reads one tick keeps in flight. The default dispatch
 /// concurrency, but not that setting: an operator who lowers "Dispatch
@@ -41,8 +47,9 @@ pub(super) fn spawn_job_poller(app: &AppHandle) {
         // Lives with the poller task: a fresh poller starts empty and simply reads
         // device-wide until it has seen each one again.
         let mut confirmed_series: HashSet<String> = HashSet::new();
+        let mut interval = POLL_INTERVAL;
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
+            tokio::time::sleep(interval).await;
 
             let (session, pending, api) = {
                 let state = app.state::<AppState>();
@@ -62,21 +69,38 @@ pub(super) fn spawn_job_poller(app: &AppHandle) {
                 }
             }
 
-            poll_tick(&app, &session, pending, api, &mut confirmed_series).await;
+            let failed_reads = poll_tick(&app, &session, pending, api, &mut confirmed_series).await;
+            interval = next_poll_interval(interval, failed_reads > 0);
         }
     });
 }
 
+/// The wait before the next tick: doubled after a tick with any failed feed read,
+/// up to [`MAX_POLL_INTERVAL`], and back to [`POLL_INTERVAL`] after a clean one.
+///
+/// The interval used to be a flat 15 s. A read error is swallowed per device (it
+/// says nothing about the job), so during a NinjaOne outage or a rate limit the
+/// poller re-sent every device's read every 15 s for up to the 45-minute job
+/// timeout, adding load to exactly the API that was failing.
+pub(super) fn next_poll_interval(prev: Duration, any_failed: bool) -> Duration {
+    if any_failed {
+        (prev * 2).min(MAX_POLL_INTERVAL)
+    } else {
+        POLL_INTERVAL
+    }
+}
+
 /// One pass over the unresolved jobs: read each device's activity feed, advance
 /// every job it resolves, invalidate what a settled action changed, close out the
-/// audit records and tell the frontend.
+/// audit records and tell the frontend. Returns how many feed reads failed, for
+/// the backoff.
 async fn poll_tick(
     app: &AppHandle,
     session: &JobSession,
     pending: Vec<JobReport>,
     api: NinjaApiClient,
     confirmed_series: &mut HashSet<String>,
-) {
+) -> usize {
     let now = Utc::now();
     // Activity ids already bound to a job, so the third-tier correlation
     // heuristic can't hand the same activity to two jobs. Seeded from the
@@ -89,7 +113,7 @@ async fn poll_tick(
         .iter()
         .filter_map(|j| j.activity_id)
         .collect();
-    let updates = resolve_pending(
+    let (updates, failed_reads) = resolve_pending(
         &api,
         pending,
         &mut claimed,
@@ -118,6 +142,7 @@ async fn poll_tick(
             jobs: tick.applied,
         },
     );
+    failed_reads
 }
 
 /// What a tick hands back to the async half of [`poll_tick`]: the rows to emit and
@@ -162,22 +187,23 @@ pub(super) fn settle_tick(
     let read_on_this_tenant = state.is_session_tenant(session);
     let mut applied = Vec::with_capacity(applied_ids.len());
     let mut closing = Vec::new();
-    // Deduped so a 200-device batch does not bump the epochs 200 times; a handful
-    // of variants makes a Vec the right container.
-    let mut invalidated: Vec<ActionKind> = Vec::new();
+    // At most once per tick, whatever settled. It was deduped per kind, so an apply
+    // and a reboot settling together bumped every epoch twice — and each bump makes
+    // a whole-fleet fetch already in flight discard its rows. One bool suffices
+    // because every mutating kind invalidates the same slots (`can_reboot` is
+    // `is_mutating`). Not debounced across ticks, and never "mark stale without
+    // bumping": a fetch started before a settle must not store (query-cache.md).
+    let mut invalidated = false;
     let mut settled_any = false;
     for job in updates {
         let was_applied = applied_ids.contains(&job.id);
         if job.state.is_terminal() {
             settled_any |= was_applied;
-            if was_applied || read_on_this_tenant {
+            if (was_applied || read_on_this_tenant) && !invalidated {
                 // Patch state changes on completion, not on dispatch — and only for
                 // the kinds that actually changed something. Same rule as the
                 // dispatch site, via the same function.
-                if !invalidated.contains(&job.kind) {
-                    invalidated.push(job.kind);
-                    invalidate_after(job.kind, job.dry_run, state);
-                }
+                invalidated = invalidate_after(job.kind, job.dry_run, state);
             }
             if was_applied {
                 closing.push(audit::AuditEntry::closing(
@@ -275,7 +301,7 @@ pub(super) async fn resolve_pending(
     confirmed_series: &mut HashSet<String>,
     now: DateTime<Utc>,
     max_reads: usize,
-) -> Vec<JobReport> {
+) -> (Vec<JobReport>, usize) {
     let mut feeds: HashMap<i64, anyhow::Result<Vec<Activity>>> = HashMap::new();
     let sem = Arc::new(Semaphore::new(max_reads.max(1)));
     let mut set = tokio::task::JoinSet::new();
@@ -303,6 +329,7 @@ pub(super) async fn resolve_pending(
         }
     }
 
+    let failed_reads = feeds.values().filter(|feed| feed.is_err()).count();
     for job in &pending {
         if let (Some(uid), Some(Ok(list))) = (job.series_uid.as_deref(), feeds.get(&job.device_id))
             && list.iter().any(|a| a.series_uid.as_deref() == Some(uid))
@@ -341,5 +368,5 @@ pub(super) async fn resolve_pending(
             updates.push(job);
         }
     }
-    updates
+    (updates, failed_reads)
 }
