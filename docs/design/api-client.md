@@ -11,9 +11,14 @@ from endpoint names or memory.**
 ## Reuse the shared retry + pagination
 
 Every call goes through `NinjaApiClient`: `{base}/api/v2{path}`, bearer auth, retry on timeout
-and **5xx** (`Idempotent` requests only) / connect failure (anything but `ActOnce`) / 429 (honors
-`Retry-After`, capped at `MAX_RETRY_AFTER_SECS` = 60 s — the header is server-controlled, and an
-uncapped value parked a dispatch for as long as it asked) / 401 (forces a token refresh). A cursor
+and **5xx** (`Idempotent` requests only, after a 2/4/8 s `backoff` stretched by up to 25% jitter)
+/ connect failure (anything but `ActOnce`; connecting has its own 15 s budget inside the 45 s
+total, see `build_http_client`) / 429 (honors `Retry-After` in seconds or as an HTTP-date, capped
+at `MAX_RETRY_AFTER_SECS` = 60 s — the header is server-controlled, and an uncapped value parked a
+dispatch for as long as it asked — plus up to 1 s of jitter, and pauses **every** request on the
+client, see [below](#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant))
+/ 401 (forces a token refresh). Each attempt's token is bound to the tenant the URL was built for;
+a tenant switch mid-request aborts it with `TenantMoved`. A cursor
 page whose response was lost is not retried in place: the scan starts over (see
 [below](#a-broken-or-lost-cursor-page-restarts-the-scan-then-an-error)). `get_paginated` handles **both** a bare JSON array **and** the
 `{ results, cursor }` envelope, where `cursor` may be a string or a `{ name, offset, … }` object;
@@ -43,6 +48,31 @@ paged type is a compile error rather than a silently non-advancing cursor.
 `retry_for(status, replay, attempt, retry_after)` returns `Retry::{No, Wait, Reauth}`, and
 `decode_response` handles the body — extracted from a ~300-line `request_raw` so the policy can be
 tested without a server.
+
+## A 429 pauses the whole client, and each attempt's token is bound to the URL's tenant
+
+Three independent sources send on the one production client at once: a query's seven concurrent
+legs, the job poller's `/activities` reads (up to `MAX_FEED_READS_IN_FLIGHT`), and the `/jobs`
+poll. A rate limit is the tenant's, but a 429 used to pause only the request that drew it, so the
+others kept sending into it and drew 429s of their own. `NinjaApiClient` now holds a shared
+`paused_until` deadline (every clone, `with_send_guard` included, shares it): every 429 — the one
+that exhausts a request's retries too — extends it to now + the capped delay + jitter, never
+shortening it, and every attempt sits it out before it asks for a token or the send guard. The
+wait is not an attempt. The backoff and the 429 wait are both jittered so the legs a burst failed
+together do not come back together (`a_429_pauses_every_request_the_client_sends`,
+`the_429_that_ends_a_request_still_pauses_its_siblings`, `backoff_is_jittered_by_at_most_a_quarter`).
+
+`send_with_retry` builds the URL once but asked for a token on every attempt, and
+`apply_settings` swaps the host and clears the tokens under one write lock. A read waiting out a
+backoff or a 429 across a tenant switch therefore refreshed for the **new** tenant and sent that
+bearer token to the **old** host; the old host's 401 then invalidated the new tenant's live token
+and forced another refresh grant, up to `MAX_RETRIES` times per request. Writes were covered by the
+send guard; reads were not. The request now captures `tenant_stamp()` with its URL and asks
+`AuthState::access_token_for(&stamp)` each attempt, which fails with `TenantMoved` once the tenant
+has moved (see [auth.md](./auth.md#sign-out-sticks-the-session-generation)). The request is
+abandoned without a retry and without invalidating anything; an `ActOnce` request also carries
+`SendRefused`, since every earlier attempt was a rejection
+(`a_tenant_switch_during_a_429_wait_abandons_the_request`).
 
 ## Both pagination branches require forward progress — and neither may stop quietly
 

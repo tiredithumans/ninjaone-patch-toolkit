@@ -51,6 +51,14 @@ generation has moved on, deletes the keyring entry of the tenant the refresh **s
 tenant's. A refresh also reads host, client id, secret and refresh token in one lock acquisition
 (`refresh_grant`), so the four cannot come from different tenants.
 
+A request is stamped too. The API client builds its URL from `tenant_stamp()` once and asks
+`access_token_for(&stamp)` on every attempt, which fails with `TenantMoved` (`is_tenant_moved`)
+instead of handing out a token once `apply_settings` has moved the tenant: the fresh path compares
+the tenant under the same read lock that reads the token, and the refresh path compares the grant's
+stamp before it POSTs. Plain `access_token()` refreshed for whichever tenant was current, so a read
+waiting out a 429 across a switch sent tenant B's token to host A
+([api-client.md](./api-client.md#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant)).
+
 ## `expires_in` is clamped
 
 The server's `expires_in` is clamped to 60 s ..= 24 h, and the refresh skew is

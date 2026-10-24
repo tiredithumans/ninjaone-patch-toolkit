@@ -409,11 +409,15 @@ close exactly-once (below).
 The same check also runs **before every attempt of the POST**, retries included. The dispatch
 client is `state.api.with_send_guard(still_current)`, and `send_with_retry` asks the guard for an
 `ActOnce` request after it has the token, then fails with `api::SendRefused` (recorded as "not
-sent") if the session ended. A 429 parks a POST for up to 60 s per retry and a 401 re-sends at
+sent") if the session ended. A 429 parks a POST for up to 61 s per retry (the capped `Retry-After`
+plus jitter), plus any pause another request's 429 has set, and a 401 re-sends at
 once, each time reading the token live from the shared `AuthState`. Before this, a sign-out and
 another operator's sign-in during that wait re-sent the departed session's action under the new
 operator's grant, and a tenant switch sent it to the old instance with the new grant. Every
-earlier attempt was a definite rejection, so "not sent" is accurate.
+earlier attempt was a definite rejection, so "not sent" is accurate. A tenant switch is now
+caught one step earlier, for reads too: the token itself is bound to the URL's tenant, and an
+`ActOnce` request stopped that way also fails with `SendRefused`
+([api-client.md](./api-client.md#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant)).
 
 **Residual window:** the guard is asked once per attempt, before `send()`. A session that ends
 after that check and before the request reaches the server still sends that one attempt. It

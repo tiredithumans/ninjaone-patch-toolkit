@@ -13,11 +13,11 @@ use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::fmt;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
-use crate::auth::AuthState;
+use crate::auth::{AuthState, is_tenant_moved};
 use crate::error::{redirect_hint, truncate_body};
 
 const MAX_RETRIES: u8 = 3;
@@ -25,6 +25,13 @@ const MAX_RETRIES: u8 = 3;
 /// and an uncapped value parked the request — and, on a dispatch, the operator's
 /// whole batch — for as long as the server cared to ask, with nothing on screen.
 const MAX_RETRY_AFTER_SECS: u64 = 60;
+/// The most [`backoff`] stretches a delay, as a fraction of it. Without it every
+/// leg of a query that failed together retried together, in lockstep, at 2, 4 and
+/// 8 s — re-creating the burst that failed them.
+const MAX_BACKOFF_JITTER: f64 = 0.25;
+/// The most added to a 429's wait, for the same reason: the shared pause releases
+/// every waiting request at one instant, and the server would see them all at once.
+const MAX_RATE_LIMIT_JITTER_MS: u64 = 1000;
 
 /// The failure of a [`ReplaySafety::ActOnce`] request that may nonetheless have
 /// reached NinjaOne: a timeout or a connection lost after the request was sent, a
@@ -142,6 +149,15 @@ pub struct NinjaApiClient {
     http: reqwest::Client,
     auth: AuthState,
     send_guard: Option<SendGuard>,
+    /// When the last 429 said this client may send again; shared by every clone.
+    ///
+    /// A rate limit is the tenant's, not the request's, but only the request that
+    /// drew the 429 used to wait: a query's seven concurrent legs, up to eight
+    /// poller reads and the `/jobs` poll kept sending into it and drew 429s of
+    /// their own. Every attempt now waits this out before it asks for a token. A
+    /// `std` mutex because it is only ever held to copy or bump an `Instant`, never
+    /// across an await.
+    paused_until: Arc<Mutex<Option<Instant>>>,
 }
 
 impl NinjaApiClient {
@@ -150,6 +166,7 @@ impl NinjaApiClient {
             http,
             auth,
             send_guard: None,
+            paused_until: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -158,15 +175,45 @@ impl NinjaApiClient {
     ///
     /// A dispatch checks its session before it sends, but a 429 then parks the
     /// request for up to a minute per retry, and a 401 re-sends at once with a fresh
-    /// token. Every attempt reads the token and base URL live from the shared
-    /// `AuthState`, so a sign-out and another operator's sign-in during that wait
-    /// re-sent the departed session's reboot under the new operator's grant, and a
-    /// tenant switch sent it to the old instance with the new one's token. The guard
-    /// is asked after the token is in hand, the last point before the bytes leave.
+    /// token. Every attempt read the token live from the shared `AuthState`, so a
+    /// sign-out and another operator's sign-in during that wait re-sent the
+    /// departed session's reboot under the new operator's grant. The guard is asked
+    /// after the token is in hand, the last point before the bytes leave.
+    ///
+    /// A tenant switch no longer needs the guard: every request, reads included, is
+    /// stamped with the tenant its URL was built for, and
+    /// [`AuthState::access_token_for`] refuses a token once that tenant has moved
+    /// (see [`Self::send_with_retry`]). The guard remains for what the stamp cannot
+    /// see — the session ending under an unchanged tenant.
+    ///
+    /// The clone shares the rate-limit pause with `self`: a dispatch is as subject
+    /// to the tenant's 429 as the query that drew it.
     pub fn with_send_guard(&self, guard: SendGuard) -> Self {
         Self {
             send_guard: Some(guard),
             ..self.clone()
+        }
+    }
+
+    /// How much of the shared rate-limit pause is left, if any. The lock is held
+    /// only to copy the deadline.
+    fn pause_left(&self) -> Option<Duration> {
+        let until = *self
+            .paused_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        pause_remaining(until, Instant::now())
+    }
+
+    /// Extends the shared pause to `until`. Never shortens it: a later 429 with a
+    /// smaller `Retry-After` does not lift the wait an earlier one asked for.
+    fn pause_until(&self, until: Instant) {
+        let mut paused = self
+            .paused_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if paused.is_none_or(|current| current < until) {
+            *paused = Some(until);
         }
     }
 
@@ -210,6 +257,14 @@ impl NinjaApiClient {
     /// connect retries for everything but `ActOnce`, 429/401 for all) are what keep
     /// an acting POST from being replayed into a second reboot and a cursor from
     /// being replayed past a page.
+    ///
+    /// Each attempt first sits out the client-wide 429 pause (not an attempt in
+    /// itself), then asks for a token bound to the tenant the URL was built for. A
+    /// tenant switch during a wait aborts the request with
+    /// [`crate::auth::TenantMoved`] — no retry, and no token invalidated, because
+    /// sending it would have handed the new tenant's bearer token to the old host
+    /// and let that host's 401 invalidate the new tenant's live token, up to three
+    /// refresh grants per request.
     async fn send_with_retry(
         &self,
         method: Method,
@@ -218,11 +273,31 @@ impl NinjaApiClient {
         body: Option<Value>,
         replay: ReplaySafety,
     ) -> Result<reqwest::Response> {
-        let base = self.auth.base_url();
-        let url = format!("{base}/api/v2{path}");
+        let tenant = self.auth.tenant_stamp();
+        let url = format!("{}/api/v2{path}", tenant.base_url());
         let mut attempt = 0u8;
         loop {
-            let token = self.auth.access_token().await?;
+            // Re-read after every sleep: another request's 429 may have pushed the
+            // deadline out while this one was waiting.
+            while let Some(wait) = self.pause_left() {
+                debug!(%method, %url, ?wait, "waiting out a rate limit");
+                tokio::time::sleep(wait).await;
+            }
+            let token = match self.auth.access_token_for(&tenant).await {
+                Ok(token) => token,
+                // Every earlier attempt was a rejection (429, 401), so an action
+                // stopped here never reached a device: "not sent", like the guard.
+                Err(e) if replay == ReplaySafety::ActOnce && is_tenant_moved(&e) => {
+                    warn!(%method, %url, attempt, "acting request stopped: the tenant changed");
+                    return Err(e.context(SendRefused));
+                }
+                Err(e) => {
+                    if is_tenant_moved(&e) {
+                        warn!(%method, %url, attempt, "request abandoned: the tenant changed");
+                    }
+                    return Err(e);
+                }
+            };
             if replay == ReplaySafety::ActOnce
                 && let Some(guard) = &self.send_guard
                 && !guard()
@@ -307,7 +382,22 @@ impl NinjaApiClient {
             };
 
             let status = resp.status();
-            match retry_for(status, replay, attempt, retry_after_secs(&resp)) {
+            let retry_after = retry_after_secs(&resp);
+            // A rate limit applies to every request this client sends, so it
+            // becomes the shared pause, which the top of the loop waits out for
+            // this request and every other one alike. Set on every 429, the last
+            // attempt's included: this request gives up, but the limit it reports
+            // still holds for the siblings that would otherwise keep sending.
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                let delay = rate_limit_delay(retry_after) + rate_limit_jitter();
+                warn!(%method, %url, %status, attempt, ?delay, "rate limited; pausing every request");
+                self.pause_until(Instant::now() + delay);
+            }
+            match retry_for(status, replay, attempt, retry_after) {
+                Retry::Wait(_) if status == StatusCode::TOO_MANY_REQUESTS => {
+                    attempt += 1;
+                    continue;
+                }
                 Retry::Wait(delay) => {
                     attempt += 1;
                     warn!(%method, %url, %status, attempt, ?delay, "retrying");
@@ -433,9 +523,7 @@ fn retry_for(
         // The server tells us how long to wait; second-guessing it is how a client
         // turns a soft rate limit into a hard one. It is still capped: the value is
         // server-controlled, and one absurd header must not hang a dispatch.
-        StatusCode::TOO_MANY_REQUESTS => Retry::Wait(Duration::from_secs(
-            retry_after.unwrap_or(5).min(MAX_RETRY_AFTER_SECS),
-        )),
+        StatusCode::TOO_MANY_REQUESTS => Retry::Wait(rate_limit_delay(retry_after)),
         StatusCode::UNAUTHORIZED => Retry::Reauth,
         s if s.is_server_error() && replay == ReplaySafety::Idempotent => {
             Retry::Wait(backoff(attempt + 1))
@@ -449,7 +537,43 @@ fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
     resp.headers()
         .get("Retry-After")
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
+        .and_then(|s| parse_retry_after(s, chrono::Utc::now()))
+}
+
+/// A `Retry-After` value as seconds from `now`: either form RFC 9110 allows.
+///
+/// Only delay-seconds used to be read, so a server that sent the HTTP-date form
+/// got the 5 s default whatever it asked for. The date is parsed as RFC 2822,
+/// which covers the IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) servers send;
+/// the gap is rounded up so the retry never lands early, a past date means "now",
+/// and the result is clamped like the seconds form.
+fn parse_retry_after(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<u64> {
+    let value = value.trim();
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(secs);
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let gap_ms = (at.with_timezone(&chrono::Utc) - now)
+        .num_milliseconds()
+        .max(0) as u64;
+    Some(gap_ms.div_ceil(1000).min(MAX_RETRY_AFTER_SECS))
+}
+
+/// The wait a 429 asks for: its `Retry-After`, 5 s without a usable one, capped.
+fn rate_limit_delay(retry_after: Option<u64>) -> Duration {
+    Duration::from_secs(retry_after.unwrap_or(5).min(MAX_RETRY_AFTER_SECS))
+}
+
+/// How long is left of a pause that ends at `until`, or `None` once it is over.
+fn pause_remaining(until: Option<Instant>, now: Instant) -> Option<Duration> {
+    until
+        .and_then(|until| until.checked_duration_since(now))
+        .filter(|left| !left.is_zero())
+}
+
+/// The random extra on a 429's wait, up to [`MAX_RATE_LIMIT_JITTER_MS`].
+fn rate_limit_jitter() -> Duration {
+    Duration::from_millis(rand::random_range(0..=MAX_RATE_LIMIT_JITTER_MS))
 }
 
 /// Reads a successful response into a `Value`.
@@ -479,13 +603,20 @@ async fn decode_response(resp: reqwest::Response) -> Result<Value> {
     Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
 }
 
-/// Exponential backoff for a retryable *transport* or 5xx failure: 2s, 4s, 8s.
+/// Exponential backoff for a retryable *transport* or 5xx failure: 2s, 4s, 8s,
+/// each stretched by up to [`MAX_BACKOFF_JITTER`] so concurrent legs that failed
+/// together do not retry together.
 ///
 /// Deliberately not used for 429 — there the server tells us how long to wait via
 /// `Retry-After`, and second-guessing it is how a client turns a soft rate limit
 /// into a hard one.
 fn backoff(attempt: u8) -> Duration {
-    Duration::from_secs(2u64.pow(attempt as u32))
+    jittered_backoff(attempt, rand::random_range(0.0..=MAX_BACKOFF_JITTER))
+}
+
+/// [`backoff`] with its random fraction supplied, so the curve is testable.
+fn jittered_backoff(attempt: u8, jitter: f64) -> Duration {
+    Duration::from_secs(2u64.pow(attempt as u32)).mul_f64(1.0 + jitter)
 }
 
 /// The `df` (device filter) query parameter, or none at all. An empty filter is
