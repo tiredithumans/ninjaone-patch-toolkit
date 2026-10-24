@@ -17,6 +17,11 @@ version and start a fresh `[Unreleased]`.
   0x800706BA under a Windows credential. Re-import `remediation/Install-SelectedSoftwarePatches.ps1`
   into the NinjaOne library to pick it up.
 
+### Fixed
+
+- A query scoped to several device groups reads them together and fails at once when one of them
+  no longer exists.
+
 ## [0.20.0] - 2026-10-23
 
 Clearer reboot information, a device group filter, and live job status from NinjaOne.

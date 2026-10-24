@@ -29,6 +29,17 @@ on every query, in the same `join!` as the other legs, and unions the results. I
 them, because membership moves with the fleet. `assemble_result` hands the set to
 `PreparedFilter::with_device_group_members`.
 
+The selection is checked before any read. More than `MAX_GROUPS_PER_QUERY` (50) groups is
+refused in `QueryPlan::build`: every group costs a read on every query, auto-refresh ticks
+included, and the ids arrive unchecked from presets and view links. It is refused, never
+truncated, because dropping groups would quietly narrow the scope and a narrower scope reads as
+a healthier fleet. The group reads then wait for the lookups so each id can be checked against
+the `/groups` listing: an id the listing lacks (a group deleted since the preset was saved)
+fails the query as "no longer exists" without spending a request on a 404. An empty listing
+means the lookup failed and fell back, so nothing is checked, matching the frontend's
+`prune_unknown_ids`. The reads run four at a time (`GROUP_READ_CONCURRENCY`), not in sequence,
+because each is a full round trip and the query waits on its slowest leg.
+
 `device_allowed` **fails closed**: with groups selected and no member set supplied, no device
 passes, because a scope that cannot be checked must not widen to the whole fleet. A membership
 read that fails fails the query, naming the group. The facet is never put in the install `df`,

@@ -14,6 +14,10 @@ paths:
 - **Device groups are read per query (`/group/{id}/device-ids`) and fail closed**: no member set
   passed to `with_device_group_members` means no device passes; an unreadable group fails the
   query. → `docs/design/filter.md#device-groups-are-read-per-query-and-fail-closed`
+- **A group selection is capped and checked before any read**: over `MAX_GROUPS_PER_QUERY` is
+  refused (never truncated), an id missing from a non-empty `/groups` listing fails as "no
+  longer exists", and the reads run `GROUP_READ_CONCURRENCY` at a time.
+  → `docs/design/filter.md#device-groups-are-read-per-query-and-fail-closed`
 
 **New filter facet** — a device facet extends `PreparedFilter::device_allowed` (+
 `has_identity_scope`, and `patch_filter` if the install `df` honors it); a patch facet is a

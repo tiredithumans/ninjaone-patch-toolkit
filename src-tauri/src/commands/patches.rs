@@ -5,13 +5,15 @@ use anyhow::Context as _;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::changes::{self, RunSnapshot};
 use crate::error::UiError;
 use crate::filter::FilterParams;
 use crate::first_seen::{self, Family, Observation, Resolver, TenantLedger};
-use crate::model::{Device, Patch, PatchRow, PatchStatus, PatchType};
+use crate::model::{Device, DeviceGroup, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
     ComplianceBucket, DeviceDetail, FirstSeenTracking, GroupBy, GroupPage, InstallWindow,
     LookupMaps, OS_TYPE_LABEL, PatchFamilies, PatchRecord, PatchSource, QueryResult, QuerySummary,
@@ -42,6 +44,19 @@ const FIRST_PAGE_ROWS: usize = 100;
 /// single IPC response — the exact whole-fleet serialization the paging design
 /// exists to avoid.
 const MAX_PAGE_LIMIT: usize = 1_000;
+
+/// Most device groups one query may scope to. Every selected group costs a member
+/// read on every query, the auto-refresh ticks included, and the selection arrives
+/// from the frontend (a view link, a preset) unchecked. Fifty is far past any
+/// hand-picked selection yet bounds the fan-out a stale or crafted one can cause. A
+/// larger selection is refused, never truncated: dropping groups would silently
+/// narrow the scope, and a narrower scope reads as a healthier fleet.
+const MAX_GROUPS_PER_QUERY: usize = 50;
+
+/// Member reads in flight at once. Enough that a several-group scope costs about
+/// one round trip; few enough not to burst the tenant's rate limit alongside the
+/// whole-fleet legs running in the same `join!`.
+const GROUP_READ_CONCURRENCY: usize = 4;
 
 /// Clamps a requested page window to something the backend is willing to serve.
 fn clamp_page(limit: usize) -> usize {
@@ -403,6 +418,14 @@ impl QueryPlan {
                 Some((now - Duration::days(days.clamp(0, MAX_WINDOW_DAYS))).timestamp());
         }
         let patch_df = filter.patch_filter();
+        // Before any fetch: refused here, the query costs no request at all.
+        if filter.device_group_ids.len() > MAX_GROUPS_PER_QUERY {
+            anyhow::bail!(
+                "a query can scope to at most {MAX_GROUPS_PER_QUERY} device groups; {} are \
+                 selected — narrow the selection",
+                filter.device_group_ids.len()
+            );
+        }
 
         // Install *results* ("Installed" and "Failed") route to the
         // `*-patch-installs` history endpoints; the rest (MANUAL/APPROVED/REJECTED)
@@ -507,19 +530,55 @@ pub(crate) struct QueryRun {
 
 /// The members of every selected device group, unioned — a device in any of them
 /// is in scope. Read per query, never cached: a group is a saved search whose
-/// membership moves with the fleet. Sequential, because a selection is a handful
-/// of groups and each is one small request. `None` when no group is selected; on a
-/// failure, the group that failed, so the error can name it.
+/// membership moves with the fleet. `None` when no group is selected.
+///
+/// `known` is the cached `/groups` listing. An id it does not list fails closed
+/// before any request — a preset or view link can carry a group deleted since, and
+/// its read would only 404. An empty listing means the lookup failed and fell back,
+/// so nothing is checked: "not listed" is not "does not exist", as in the
+/// frontend's `prune_unknown_ids`. The reads run [`GROUP_READ_CONCURRENCY`] at a
+/// time rather than in sequence, because each is a full round trip and the query
+/// waits on the slowest leg. The first failure names its group.
 async fn device_group_members(
     api: &NinjaApiClient,
+    known: &[DeviceGroup],
     ids: &[i64],
-) -> Result<Option<HashSet<i64>>, (i64, anyhow::Error)> {
+) -> anyhow::Result<Option<HashSet<i64>>> {
     if ids.is_empty() {
         return Ok(None);
     }
-    let mut members = HashSet::new();
+    if !known.is_empty()
+        && let Some(&missing) = ids.iter().find(|&&id| !known.iter().any(|g| g.id == id))
+    {
+        anyhow::bail!("device group #{missing} no longer exists — remove it from the scope");
+    }
+    // Named from the listing when it has one: "Ring 1" says which selection failed
+    // where "group 7" does not.
+    let name = |id: i64| {
+        known
+            .iter()
+            .find(|g| g.id == id && !g.name.is_empty())
+            .map_or_else(|| format!("#{id}"), |g| format!("\"{}\"", g.name))
+    };
+
+    let sem = Arc::new(Semaphore::new(GROUP_READ_CONCURRENCY));
+    let mut set: JoinSet<(i64, anyhow::Result<Vec<i64>>)> = JoinSet::new();
     for &id in ids {
-        members.extend(api.device_group_members(id).await.map_err(|e| (id, e))?);
+        let (api, sem) = (api.clone(), Arc::clone(&sem));
+        set.spawn(async move {
+            // Never closed, so the acquire cannot fail; a closed semaphore would
+            // only lift the bound, not skip the read.
+            let _permit = sem.acquire_owned().await;
+            (id, api.device_group_members(id).await)
+        });
+    }
+    let mut members = HashSet::new();
+    // Returning early drops the set, which aborts the reads still in flight.
+    while let Some(joined) = set.join_next().await {
+        let (id, read) = joined.context("a device group read task failed")?;
+        let read = read
+            .with_context(|| format!("couldn't read the members of device group {}", name(id)))?;
+        members.extend(read);
     }
     Ok(Some(members))
 }
@@ -577,12 +636,20 @@ where
     // reach its cache, so the retry started cold and hit exactly the same odds
     // again. Letting every leg finish means the query still fails (the `?`s below
     // are unchanged), but the fleet caches are warm for the retry.
-    let (devices, current, lookup_sets, ledger, group_members, os_installs, sw_installs) = tokio::join!(
+    let (devices, current, lookup_leg, ledger, os_installs, sw_installs) = tokio::join!(
         devices_fut,
         current_fut,
-        lookups,
+        // The group reads wait for the lookups so the selection can be checked
+        // against `/groups` before any request is spent on it. The lookups are
+        // cached and usually resolve at once, so this costs nothing on a warm query.
+        async {
+            let lookups = lookups.await?;
+            let members =
+                device_group_members(api, &lookups.device_groups, &plan.filter.device_group_ids)
+                    .await;
+            anyhow::Ok((lookups, members))
+        },
         ledger_fut,
-        device_group_members(api, &plan.filter.device_group_ids),
         async {
             if plan.want_installs && plan.include_os {
                 api.fleet_os_patch_installs(
@@ -617,17 +684,8 @@ where
     // finish and cache.
     let devices = devices?;
     let current = current?;
-    let lookups = lookup_sets?;
-    // Named from the lookups when they resolve it: "Patch ring 1" says which
-    // selection failed where "group 7" does not.
-    let device_group_members = group_members.map_err(|(id, e)| {
-        let name = lookups
-            .device_groups
-            .iter()
-            .find(|g| g.id == id && !g.name.is_empty())
-            .map_or_else(|| format!("#{id}"), |g| format!("\"{}\"", g.name));
-        e.context(format!("couldn't read the members of device group {name}"))
-    })?;
+    let (lookups, group_members) = lookup_leg?;
+    let device_group_members = group_members?;
     let ledger = ledger?;
     let os_installs = os_installs?;
     let sw_installs = sw_installs?;
