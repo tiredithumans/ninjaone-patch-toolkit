@@ -53,6 +53,19 @@ const MAX_PAGE_LIMIT: usize = 1_000;
 /// narrow the scope, and a narrower scope reads as a healthier fleet.
 const MAX_GROUPS_PER_QUERY: usize = 50;
 
+/// Refuses a device-group selection past [`MAX_GROUPS_PER_QUERY`]. Shared by the
+/// pre-check in [`query_patches`] and its backstop in [`QueryPlan::build`].
+fn check_group_cap(ids: &[i64]) -> Result<(), String> {
+    if ids.len() > MAX_GROUPS_PER_QUERY {
+        return Err(format!(
+            "a query can scope to at most {MAX_GROUPS_PER_QUERY} device groups; {} are \
+             selected — narrow the selection",
+            ids.len()
+        ));
+    }
+    Ok(())
+}
+
 /// Member reads in flight at once. Enough that a several-group scope costs about
 /// one round trip; few enough not to burst the tenant's rate limit alongside the
 /// whole-fleet legs running in the same `join!`.
@@ -130,6 +143,9 @@ pub async fn query_patches(
             .install_range(Utc::now().timestamp())
             .map_err(UiError::new)?;
     }
+    // Before the token too, for the same reason: a refused selection must not
+    // supersede a good query in flight. `QueryPlan::build` re-checks it.
+    check_group_cap(&args.filter.device_group_ids).map_err(UiError::new)?;
     let settings = state.settings_snapshot();
     // Claimed before any fetch so overlapping queries are ordered by *start*, and so
     // the result is stamped with the tenant it was actually fetched under. Redeemed
@@ -418,14 +434,9 @@ impl QueryPlan {
                 Some((now - Duration::days(days.clamp(0, MAX_WINDOW_DAYS))).timestamp());
         }
         let patch_df = filter.patch_filter();
-        // Before any fetch: refused here, the query costs no request at all.
-        if filter.device_group_ids.len() > MAX_GROUPS_PER_QUERY {
-            anyhow::bail!(
-                "a query can scope to at most {MAX_GROUPS_PER_QUERY} device groups; {} are \
-                 selected — narrow the selection",
-                filter.device_group_ids.len()
-            );
-        }
+        // Before any fetch, so a refused selection costs no request at all. The
+        // backstop for `query_patches`' pre-check, which runs before the token.
+        check_group_cap(&filter.device_group_ids).map_err(anyhow::Error::msg)?;
 
         // Install *results* ("Installed" and "Failed") route to the
         // `*-patch-installs` history endpoints; the rest (MANUAL/APPROVED/REJECTED)
@@ -677,8 +688,9 @@ where
             r
         },
         // The group reads wait for the lookups so the selection can be checked
-        // against `/groups` before any request is spent on it. The lookups are
-        // cached and usually resolve at once, so this costs nothing on a warm query.
+        // against `/groups` before any request is spent on it. When the lookups are
+        // warm they resolve at once and this costs nothing; on a cold lookup cache
+        // the group reads start one lookup round trip later.
         async {
             let lookups = lookups.await;
             flag_failure(lookups.is_err());

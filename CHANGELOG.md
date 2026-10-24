@@ -17,10 +17,15 @@ version and start a fresh `[Unreleased]`.
   0x800706BA under a Windows credential. Re-import `remediation/Install-SelectedSoftwarePatches.ps1`
   into the NinjaOne library to pick it up.
 
+### Changed
+
+- A query can scope to at most 50 device groups.
+
 ### Fixed
 
-- A query scoped to several device groups reads them together, and fails at once when one of
-  them no longer exists or a fleet fetch has already failed.
+- A query scoped to device groups returns sooner, and names a group that no longer exists.
+- An Installed or Failed query reports a failed fleet fetch right away instead of after the
+  install history finishes downloading.
 
 ## [0.20.0] - 2026-10-23
 
