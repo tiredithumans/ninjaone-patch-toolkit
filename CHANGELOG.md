@@ -11,6 +11,11 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-23
+
+Fewer and safer NinjaOne requests: lost patch-feed pages are re-read instead of skipped, rate
+limits pause the whole app, and a tenant switch can no longer leak into in-flight requests.
+
 ### Added
 
 - The software remediation script can update Microsoft Edge, and its log says how to fix error
@@ -21,25 +26,25 @@ version and start a fresh `[Unreleased]`.
 
 - A query can scope to at most 50 device groups.
 - Live job status is checked every 30 seconds, less often while NinjaOne reports nothing running.
+- Each try to reach a NinjaOne host that isn't answering gives up after 15 seconds instead of 45.
 
 ### Fixed
 
+- A patch feed whose page was lost to a timeout or gateway error is re-read from the start instead
+  of silently skipping rows.
+- When NinjaOne asks the app to slow down, every request waits, not just the one that was told.
+- Switching tenant or signing out no longer shows the previous tenant's organizations, locations,
+  roles or scripts in the pickers, and a request still retrying across the switch is abandoned.
 - A query scoped to device groups returns sooner, and names a group that no longer exists.
 - An Installed or Failed query reports a failed fleet fetch right away instead of after the
   install history finishes downloading.
-- A patch feed whose page was lost to a timeout or gateway error is re-read from the start instead
-  of silently skipping rows.
 - Device groups, location names and reboot reasons that fail to load are retried after a minute
   instead of staying blank for up to fifteen.
 - Job status checks slow down while NinjaOne is returning errors instead of retrying every 15
   seconds.
-- Switching tenant or signing out no longer shows the previous tenant's organizations, locations,
-  roles or scripts in the pickers.
 - Drilling into an organization no longer keeps a location from another organization in the query.
 - If a dispatch's confirmation can't be read, the dialog now closes and points to Jobs instead of
   offering to send it again.
-- Each try to reach a NinjaOne host that isn't answering now gives up after 15 seconds instead of 45.
-- When NinjaOne asks the app to slow down, every request waits, not just the one that was told.
 
 ## [0.20.0] - 2026-10-23
 
