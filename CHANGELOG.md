@@ -28,6 +28,8 @@ version and start a fresh `[Unreleased]`.
   install history finishes downloading.
 - A patch feed whose page was lost to a timeout or gateway error is re-read from the start instead
   of silently skipping rows.
+- Job status checks slow down while NinjaOne is returning errors instead of retrying every 15
+  seconds.
 
 ## [0.20.0] - 2026-10-23
 

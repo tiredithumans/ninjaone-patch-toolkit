@@ -906,15 +906,14 @@ impl AppState {
         self.fleet_devices_cache.invalidate();
     }
 
-    /// The device and current-patch cache epochs, for tests that assert an
-    /// invalidation did (or did not) happen without racing a fetch. Both families
-    /// share one number because `invalidate_current_patches` always bumps them
-    /// together; the OS slot's is the representative.
+    /// The device, current-OS and current-software cache epochs, for tests that
+    /// assert an invalidation did (or did not) happen without racing a fetch.
     #[cfg(test)]
-    pub(crate) fn cache_epochs(&self) -> (u64, u64) {
+    pub(crate) fn cache_epochs(&self) -> (u64, u64, u64) {
         (
             self.fleet_devices_cache.epoch(),
             self.fleet_current_os.epoch(),
+            self.fleet_current_sw.epoch(),
         )
     }
 }

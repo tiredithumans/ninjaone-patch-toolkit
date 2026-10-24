@@ -465,12 +465,15 @@ pub(super) fn carries_dry_run_flag(params: &str) -> bool {
 /// settled batch — including scans, which change nothing. So an apply left
 /// `os.needsReboot` stale for up to the 15-minute device TTL if the poller happened
 /// not to run, and a scan triggered a spurious whole-fleet device refetch.
-pub(super) fn invalidate_after(kind: ActionKind, dry_run: bool, state: &AppState) {
+///
+/// Returns whether anything was dropped, so the poller can stop after the first
+/// invalidation in a tick.
+pub(super) fn invalidate_after(kind: ActionKind, dry_run: bool, state: &AppState) -> bool {
     // A dry run previews a mutating kind without touching the device, so the
     // caches are as fresh after it as before. Dropping them here cost a
     // whole-fleet refetch per preview — and `dry_run` is the default.
     if dry_run || !kind.is_mutating() {
-        return;
+        return false;
     }
     // The device's pending list is about to change, and the 120 s current-patch TTL
     // would otherwise keep serving pre-action data.
@@ -480,6 +483,7 @@ pub(super) fn invalidate_after(kind: ActionKind, dry_run: bool, state: &AppState
         // os.needsReboot, which lives in the 15-minute device cache.
         state.invalidate_fleet_devices();
     }
+    true
 }
 
 /// The one-line description a job and its audit records carry.

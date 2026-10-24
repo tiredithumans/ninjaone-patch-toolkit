@@ -52,7 +52,8 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   → `docs/design/actions.md#there-is-one-dispatch-surface-and-the-run-options-are-shared`
 - **After a non-dry-run mutating action call `invalidate_current_patches()`** (and
   `invalidate_fleet_devices()` after a reboot); never `clear_lookups_cache()`; never drop
-  `last_result`. A dry run invalidates nothing and raises no stale banner.
+  `last_result`. A dry run invalidates nothing and raises no stale banner. The poller
+  invalidates at most once per tick (never debounced across ticks, never stale-without-bump).
   → `docs/design/actions.md#after-a-mutating-action-invalidate-the-current-patch-cache`
 - **Jobs are tenant-stamped; the poller is single-claim** (`try_claim_job_poller` /
   `release_job_poller_if_idle`). Dispatch appends jobs before claiming. Every write-path store
@@ -62,7 +63,8 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **`/jobs` is display-only** (`commands::live_jobs`, polled by `util::live_jobs_due`), never a
   resolution source. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 - **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`,
-  at most `MAX_FEED_READS_IN_FLIGHT` in flight): `statusCode` is lifecycle, `activityResult` is
+  at most `MAX_FEED_READS_IN_FLIGHT` in flight; the 15 s interval backs off to 60 s after failed
+  reads via `poller::next_poll_interval`): `statusCode` is lifecycle, `activityResult` is
   the verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is
   applied client-side; `is_action_activity(kind, type)` and `is_run_code(kind, code)` accept only
   the types and codes that kind emits. Native runs write start and end as separate activities
