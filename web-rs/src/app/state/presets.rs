@@ -46,9 +46,6 @@ impl AppState {
             self.lookups.locations.set(Vec::new());
             self.lookups.roles.set(Vec::new());
             self.lookups.device_groups.set(Vec::new());
-            // Library scripts are per tenant too. `clear_session` already dropped
-            // the picked id; the list goes until the next sign-in reloads it.
-            self.actions.scripts.set(Vec::new());
         }
     }
 

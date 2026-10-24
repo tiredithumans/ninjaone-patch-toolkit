@@ -129,7 +129,10 @@ replies used to land unconditionally, so one in flight at a sign-out or tenant s
 the previous tenant's org, role, group and script pickers after the clear, and an old org id then
 scoped the new tenant's query. The picked library script id and its parameters are cleared too:
 script ids are per tenant, so a carried id ran nothing or another tenant's script by the same
-number. A tenant switch also empties the script list (it reloads at the next sign-in).
+number, and the script list goes with them. A sign-in that reuses the saved grant and a
+re-authorization keep the session signed in, so the auth effects that load lookups and scripts
+on a transition may already have fired; they call `clear_session_and_reload`, which reloads the
+lookups that were in flight and the script list when actions are available.
 
 Locations are derived client-side. `load_lookups` keeps the full list (`all_locations`, each
 entry with its `organization_id`), and `load_locations` derives the picker's list for the org
