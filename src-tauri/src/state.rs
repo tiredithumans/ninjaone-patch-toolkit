@@ -273,8 +273,8 @@ pub struct AppState {
     /// summary of the run it started last, the two could disagree: the visible table
     /// came from one query while paging, export and the HTML report read another. The
     /// gate stays as the backend's own guarantee against a stale or hand-built
-    /// frontend; the overlap that still happens is a query against `plan_action` or
-    /// `cached_current_patches`, which the cache epochs cover.
+    /// frontend; the overlap that still happens is a query against `plan_action`,
+    /// which the cache epochs cover.
     ///
     /// Owned here rather than taken from the frontend's `query_id`, which is a
     /// display hint for dropping stale progress events — a stale or malicious

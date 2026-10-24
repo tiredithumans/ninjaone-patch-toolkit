@@ -549,8 +549,9 @@ async fn lookups_across_a_failed_optional_feed(
             .mount(&server)
             .await;
     }
-    // Mounted first, so it answers the first request; `expect(1)` also proves the
-    // second call inside the cap made no request to the failing feed.
+    // Mounted first, so it answers the first request. Once it is used up a second
+    // request would fall through to the 200 mock, so what proves the call inside
+    // the cap made no request is the hit count asserted below, not `expect(1)`.
     Mock::given(method("GET"))
         .and(path(failing))
         .respond_with(ResponseTemplate::new(403))

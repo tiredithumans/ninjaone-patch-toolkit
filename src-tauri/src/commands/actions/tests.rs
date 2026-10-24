@@ -1054,11 +1054,13 @@ fn a_tick_invalidates_once_however_many_kinds_settle() {
     ];
     assert!(state.append_jobs(&state.job_session(), jobs.clone()));
     let (session, _) = state.pending_jobs();
+    // Settled in the order `ids` gives, not vector order, so the test can put the
+    // scan first: the dedupe must key on "did anything get dropped", not on "did
+    // a job settle".
     let settled = |ids: &[u64]| -> Vec<JobReport> {
-        jobs.iter()
-            .filter(|j| ids.contains(&j.id))
-            .cloned()
-            .map(|mut j| {
+        ids.iter()
+            .map(|id| {
+                let mut j = jobs.iter().find(|j| j.id == *id).cloned().expect("job");
                 j.finish(JobState::Completed, Utc::now());
                 j
             })

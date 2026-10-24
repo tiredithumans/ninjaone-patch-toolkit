@@ -263,7 +263,8 @@ independently. Per family, so an OS-only query never waits on an in-flight third
 The frontend no longer overlaps queries with each other (`run_decision` in
 `web-rs/src/app/util/query.rs` refuses a silent auto-refresh tick and queues a manual Run while
 one is in flight), so the overlap these gates meet in practice is a query against `plan_action`
-(which reads `fleet_devices`) or `cached_current_patches`. The query generation gate stays as the
+(which reads `fleet_devices`; `cached_current_patches` only peeks and never takes the gate). The
+query generation gate stays as the
 backend's own defence against a stale or hand-built frontend.
 
 The job poller invalidates **at most once per tick**, however many mutating kinds settle in it —
