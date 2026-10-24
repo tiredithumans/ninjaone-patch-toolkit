@@ -1109,6 +1109,78 @@ async fn a_429_pauses_every_request_the_client_sends() {
     assert!(a_hits[1].duration_since(a_hits[0]) >= Duration::from_secs(1));
 }
 
+/// A tenant switch during a 429 wait used to send the retry to the old host with
+/// the new tenant's freshly refreshed token, and the old host's 401 then
+/// invalidated it. The retry is abandoned instead: the old host sees nothing more,
+/// the new one sees no refresh, and an action stopped this way is "not sent".
+#[tokio::test]
+async fn a_tenant_switch_during_a_429_wait_abandons_the_request() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let host_a = MockServer::start().await;
+    let host_b = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/a"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+        .expect(1)
+        .mount(&host_a)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/2/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+        .expect(1)
+        .mount(&host_a)
+        .await;
+
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), host_a.uri(), "token-a");
+    let client = NinjaApiClient::new(http, auth.clone());
+    let read = {
+        let client = client.clone();
+        tokio::spawn(async move { client.get_json::<Value>("/a", &[]).await })
+    };
+    let action = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            client
+                .device_patch_scan(2, crate::model::PatchType::Os)
+                .await
+        })
+    };
+    until_paused(&client).await;
+    // Both requests have drawn their 429 once the server has seen two.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while host_a.received_requests().await.unwrap_or_default().len() < 2 {
+        assert!(Instant::now() < deadline, "both requests reach host A once");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    auth.apply_settings(host_b.uri(), Some("client-b".into()), 0, false);
+
+    let read_err = read
+        .await
+        .expect("join")
+        .expect_err("the read is abandoned");
+    assert!(crate::auth::is_tenant_moved(&read_err), "{read_err:#}");
+    let action_err = action
+        .await
+        .expect("join")
+        .expect_err("the action is not sent");
+    assert!(crate::auth::is_tenant_moved(&action_err), "{action_err:#}");
+    assert!(is_send_refused(&action_err), "{action_err:#}");
+    assert!(!is_outcome_unknown(&action_err), "{action_err:#}");
+
+    host_a.verify().await;
+    assert!(
+        host_b
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "nothing — not even a token refresh — goes to the tenant switched to"
+    );
+}
+
 /// A resolver that never answers, so the connect budget runs out without any
 /// network: an unroutable address can fail fast with "network unreachable" on a
 /// CI runner instead of timing out, which would test nothing.

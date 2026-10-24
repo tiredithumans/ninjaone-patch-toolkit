@@ -1375,3 +1375,82 @@ fn a_new_sign_in_clears_a_leftover_legacy_refresh_token() {
 
     assert_eq!(load_keyring(LEGACY_KEYRING_USER_REFRESH).unwrap(), None);
 }
+// --- Tenant-bound tokens ----------------------------------------------------
+
+/// The API client stamps a request with the tenant its URL was built for. Once
+/// `apply_settings` has moved to another tenant, that request gets no token at
+/// all: neither the new tenant's live one nor a freshly refreshed one, so tenant
+/// B's bearer token cannot reach host A.
+#[tokio::test]
+async fn a_token_is_not_handed_out_for_a_tenant_switched_away_from() {
+    let host_b = wiremock::MockServer::start().await;
+    token_endpoint(&host_b, granted("b-access", "b-refresh"), 0).await;
+    let base_b = host_b.uri();
+    let entry_b = saved_refresh_entry(&base_b, "client-bound-b");
+    save_keyring(&entry_b, "saved-b-refresh").unwrap();
+
+    let auth = launched("https://bound-a.example.com", "client-bound-a");
+    let stamp_a = auth.tenant_stamp();
+    auth.apply_settings(base_b.clone(), Some("client-bound-b".into()), 11434, false);
+
+    // B has no token in memory yet: the refresh path must not run for A's request.
+    let err = auth
+        .access_token_for(&stamp_a)
+        .await
+        .expect_err("tenant moved");
+    assert!(is_tenant_moved(&err), "{err:#}");
+    assert_eq!(
+        test_keyring::reads_of(&entry_b),
+        0,
+        "not even B's saved credential is read"
+    );
+
+    // B holds a live token now: it is still not A's to send.
+    auth.store_tokens_blocking(token_response(Some("refresh-b")), auth.grant_stamp(), false)
+        .expect("store B's grant");
+    let err = auth
+        .access_token_for(&stamp_a)
+        .await
+        .expect_err("tenant moved");
+    assert!(is_tenant_moved(&err), "{err:#}");
+    assert_eq!(
+        auth.access_token_for(&auth.tenant_stamp()).await.unwrap(),
+        "access",
+        "B's own requests get B's token"
+    );
+    host_b.verify().await;
+}
+
+/// A request queued behind the refresh lock when the tenant moves must not run
+/// the refresh it was waiting for: that refresh would be the new tenant's grant,
+/// fetched for a request still addressed to the old host.
+#[tokio::test]
+async fn a_request_queued_behind_a_refresh_does_not_refresh_a_new_tenant() {
+    let host_b = wiremock::MockServer::start().await;
+    token_endpoint(&host_b, granted("b-access", "b-refresh"), 0).await;
+    let base_b = host_b.uri();
+    save_keyring(
+        &saved_refresh_entry(&base_b, "client-queued-b"),
+        "saved-b-refresh",
+    )
+    .unwrap();
+
+    let auth = launched("https://queued-a.example.com", "client-queued-a");
+    auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.grant_stamp(), false)
+        .expect("store A's grant");
+    auth.invalidate_access_token("access");
+    let stamp_a = auth.tenant_stamp();
+
+    let held = auth.refresh_lock.lock().await;
+    let queued = {
+        let auth = auth.clone();
+        tokio::spawn(async move { auth.access_token_for(&stamp_a).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    auth.apply_settings(base_b, Some("client-queued-b".into()), 11434, false);
+    drop(held);
+
+    let err = queued.await.expect("join").expect_err("tenant moved");
+    assert!(is_tenant_moved(&err), "{err:#}");
+    host_b.verify().await;
+}

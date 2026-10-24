@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
-use crate::auth::AuthState;
+use crate::auth::{AuthState, is_tenant_moved};
 use crate::error::{redirect_hint, truncate_body};
 
 const MAX_RETRIES: u8 = 3;
@@ -175,11 +175,16 @@ impl NinjaApiClient {
     ///
     /// A dispatch checks its session before it sends, but a 429 then parks the
     /// request for up to a minute per retry, and a 401 re-sends at once with a fresh
-    /// token. Every attempt reads the token and base URL live from the shared
-    /// `AuthState`, so a sign-out and another operator's sign-in during that wait
-    /// re-sent the departed session's reboot under the new operator's grant, and a
-    /// tenant switch sent it to the old instance with the new one's token. The guard
-    /// is asked after the token is in hand, the last point before the bytes leave.
+    /// token. Every attempt read the token live from the shared `AuthState`, so a
+    /// sign-out and another operator's sign-in during that wait re-sent the
+    /// departed session's reboot under the new operator's grant. The guard is asked
+    /// after the token is in hand, the last point before the bytes leave.
+    ///
+    /// A tenant switch no longer needs the guard: every request, reads included, is
+    /// stamped with the tenant its URL was built for, and
+    /// [`AuthState::access_token_for`] refuses a token once that tenant has moved
+    /// (see [`Self::send_with_retry`]). The guard remains for what the stamp cannot
+    /// see — the session ending under an unchanged tenant.
     ///
     /// The clone shares the rate-limit pause with `self`: a dispatch is as subject
     /// to the tenant's 429 as the query that drew it.
@@ -253,8 +258,13 @@ impl NinjaApiClient {
     /// an acting POST from being replayed into a second reboot and a cursor from
     /// being replayed past a page.
     ///
-    /// Each attempt first sits out the client-wide 429 pause, which is not an
-    /// attempt in itself.
+    /// Each attempt first sits out the client-wide 429 pause (not an attempt in
+    /// itself), then asks for a token bound to the tenant the URL was built for. A
+    /// tenant switch during a wait aborts the request with
+    /// [`crate::auth::TenantMoved`] — no retry, and no token invalidated, because
+    /// sending it would have handed the new tenant's bearer token to the old host
+    /// and let that host's 401 invalidate the new tenant's live token, up to three
+    /// refresh grants per request.
     async fn send_with_retry(
         &self,
         method: Method,
@@ -263,8 +273,8 @@ impl NinjaApiClient {
         body: Option<Value>,
         replay: ReplaySafety,
     ) -> Result<reqwest::Response> {
-        let base = self.auth.base_url();
-        let url = format!("{base}/api/v2{path}");
+        let tenant = self.auth.tenant_stamp();
+        let url = format!("{}/api/v2{path}", tenant.base_url());
         let mut attempt = 0u8;
         loop {
             // Re-read after every sleep: another request's 429 may have pushed the
@@ -273,7 +283,21 @@ impl NinjaApiClient {
                 debug!(%method, %url, ?wait, "waiting out a rate limit");
                 tokio::time::sleep(wait).await;
             }
-            let token = self.auth.access_token().await?;
+            let token = match self.auth.access_token_for(&tenant).await {
+                Ok(token) => token,
+                // Every earlier attempt was a rejection (429, 401), so an action
+                // stopped here never reached a device: "not sent", like the guard.
+                Err(e) if replay == ReplaySafety::ActOnce && is_tenant_moved(&e) => {
+                    warn!(%method, %url, attempt, "acting request stopped: the tenant changed");
+                    return Err(e.context(SendRefused));
+                }
+                Err(e) => {
+                    if is_tenant_moved(&e) {
+                        warn!(%method, %url, attempt, "request abandoned: the tenant changed");
+                    }
+                    return Err(e);
+                }
+            };
             if replay == ReplaySafety::ActOnce
                 && let Some(guard) = &self.send_guard
                 && !guard()

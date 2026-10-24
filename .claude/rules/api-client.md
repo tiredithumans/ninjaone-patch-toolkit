@@ -19,6 +19,13 @@ paths:
   `SCAN_RESTARTS` budget, then an error — never re-send that cursor; a terminal cursor short of
   the count is a warning.** NinjaOne's normal end is a non-empty last page.
   → `docs/design/api-client.md#a-broken-or-lost-cursor-page-restarts-the-scan-then-an-error`
+- **A 429 extends the client-wide `paused_until` (shared by every clone, never shortened) and
+  every attempt waits it out first; `backoff` and the 429 wait are jittered; `Retry-After` is
+  read as seconds or an HTTP-date, capped at `MAX_RETRY_AFTER_SECS`.**
+  → `docs/design/api-client.md#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant`
+- **Each attempt's token is bound to the URL's tenant (`access_token_for(&tenant_stamp)`); a moved
+  tenant aborts with `TenantMoved` — no retry, no token invalidation.**
+  → `docs/design/api-client.md#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant`
 - **reqwest has `default-features = false`; keep `gzip`, `http2`, `system-proxy`, `charset`.**
   → `docs/design/api-client.md#reqwests-default-features-are-off-so-every-one-it-drops-must-be-re-added-explicitly`
 - **Verify endpoint shapes/params/enums against the spec, never from memory:**

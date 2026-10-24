@@ -118,13 +118,22 @@ fn scope_claim_from_jwt(access_token: &str) -> Option<String> {
 /// interactive sign-in takes up to three minutes. An operator who changed instance
 /// in Settings during that window had tenant A's refresh token written under tenant
 /// B's entry name — and then handed to tenant B's API host on the next call.
+///
+/// The API client also stamps every request with one: the URL is built from the
+/// stamp's host, and [`AuthState::access_token_for`] hands out a token only while
+/// that host is still the configured tenant.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TenantStamp {
+pub(crate) struct TenantStamp {
     base_url: String,
     client_id: Option<String>,
 }
 
 impl TenantStamp {
+    /// The instance host this tenant's requests and grants go to.
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// This tenant's keyring entry for `prefix`. Derived from the stamp rather than
     /// from whatever is configured *now*, so a grant that outlived a tenant switch
     /// still files (or deletes) its credential under the tenant that issued it.
@@ -155,6 +164,32 @@ struct RefreshGrant {
     client_secret: Option<String>,
     /// The in-memory refresh token, when this session already has one.
     refresh_token: Option<String>,
+}
+
+/// A request's tenant was switched away while it was waiting — out a backoff, a
+/// 429, or the refresh lock — so no token was handed out for it.
+///
+/// Its URL still names the host it was built for, and the token now current
+/// belongs to the tenant switched to: sending one to the other would leak tenant
+/// B's bearer token to host A, and A's 401 would then invalidate B's live token.
+/// The request is abandoned instead, unsent, with nothing invalidated. Test with
+/// [`is_tenant_moved`], which sees through any `.context()` layered on top.
+#[derive(Debug)]
+pub struct TenantMoved;
+
+impl std::fmt::Display for TenantMoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "not sent: the NinjaOne instance or client ID changed while the request was waiting",
+        )
+    }
+}
+
+impl std::error::Error for TenantMoved {}
+
+/// Whether `err` (or anything it wraps) is a [`TenantMoved`].
+pub fn is_tenant_moved(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<TenantMoved>().is_some()
 }
 
 /// The last refresh that failed transiently, kept under `refresh_lock` so the
@@ -362,8 +397,9 @@ impl AuthState {
         }
     }
 
-    /// The tenant currently configured, for stamping a grant that is about to start.
-    fn tenant_stamp(&self) -> TenantStamp {
+    /// The tenant currently configured, for stamping a grant that is about to start
+    /// or a request whose URL is about to be built.
+    pub(crate) fn tenant_stamp(&self) -> TenantStamp {
         self.inner
             .read()
             .map(|g| g.tenant())
@@ -557,7 +593,26 @@ impl AuthState {
     /// returns that failure; one that arrives afterwards still tries afresh, so
     /// there is no cooldown to outlast a blip.
     pub async fn access_token(&self) -> Result<String> {
-        if let Some(token) = self.fresh_access_token()? {
+        self.token_for(None).await
+    }
+
+    /// [`Self::access_token`], but only while `tenant` is still the configured one;
+    /// otherwise [`TenantMoved`], without refreshing anything.
+    ///
+    /// The API client builds a request's URL once and asks for a token on every
+    /// attempt, and a tenant switch (`apply_settings`) can land between the two —
+    /// during a backoff or a 429 wait. Plain `access_token` would then refresh for
+    /// the tenant switched *to* and hand its token to the old host. Both checks sit
+    /// where they cannot race the switch: the fresh path compares the tenant under
+    /// the same read lock that reads the token, and the refresh path compares the
+    /// grant's stamp — read in one acquisition with the credential it would POST —
+    /// before anything leaves.
+    pub async fn access_token_for(&self, tenant: &TenantStamp) -> Result<String> {
+        self.token_for(Some(tenant)).await
+    }
+
+    async fn token_for(&self, tenant: Option<&TenantStamp>) -> Result<String> {
+        if let Some(token) = self.fresh_access_token(tenant)? {
             return Ok(token);
         }
 
@@ -567,11 +622,16 @@ impl AuthState {
         // Re-check under the lock: whoever held it before us may have already
         // refreshed, in which case this call is a cache hit rather than a
         // second grant.
-        if let Some(token) = self.fresh_access_token()? {
+        if let Some(token) = self.fresh_access_token(tenant)? {
             return Ok(token);
         }
 
         let mut grant = self.refresh_grant()?;
+        // Before the shared-failure check and the POST: a grant for another tenant
+        // is neither this caller's failure to share nor its token to fetch.
+        if tenant.is_some_and(|want| *want != grant.stamp.tenant) {
+            return Err(anyhow::Error::new(TenantMoved));
+        }
         // Scoped to the grant: a failure from before a sign-out, a new sign-in or
         // a tenant switch says nothing about the credential now in effect.
         if self.refresh_failures.load(Ordering::Acquire) != failures_before
@@ -668,12 +728,20 @@ impl AuthState {
     }
 
     /// The cached access token, if one is present and not within the staleness
-    /// skew. `None` means a refresh is needed.
-    fn fresh_access_token(&self) -> Result<Option<String>> {
-        Ok(self
+    /// skew. `None` means a refresh is needed. With `tenant`, a configured tenant
+    /// other than it is [`TenantMoved`] — checked under the same lock as the token
+    /// read, so `apply_settings` cannot swap the tenant between the two.
+    fn fresh_access_token(&self, tenant: Option<&TenantStamp>) -> Result<Option<String>> {
+        let inner = self
             .inner
             .read()
-            .map_err(|_| anyhow!("auth state poisoned"))?
+            .map_err(|_| anyhow!("auth state poisoned"))?;
+        if let Some(want) = tenant
+            && (inner.base_url != want.base_url || inner.client_id != want.client_id)
+        {
+            return Err(anyhow::Error::new(TenantMoved));
+        }
+        Ok(inner
             .tokens
             .as_ref()
             .filter(|t| !t.is_stale())
