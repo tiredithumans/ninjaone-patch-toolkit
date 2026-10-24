@@ -10,10 +10,12 @@ from endpoint names or memory.**
 
 ## Reuse the shared retry + pagination
 
-Every call goes through `NinjaApiClient`: `{base}/api/v2{path}`, bearer auth, retry on timeout /
-connect failure / **5xx** / 429 (honors `Retry-After`, capped at `MAX_RETRY_AFTER_SECS` = 60 s —
-the header is server-controlled, and an uncapped value parked a dispatch for as long as it asked)
-/ 401 (forces a token refresh). `get_paginated` handles **both** a bare JSON array **and** the
+Every call goes through `NinjaApiClient`: `{base}/api/v2{path}`, bearer auth, retry on timeout
+and **5xx** (`Idempotent` requests only) / connect failure (anything but `ActOnce`) / 429 (honors
+`Retry-After`, capped at `MAX_RETRY_AFTER_SECS` = 60 s — the header is server-controlled, and an
+uncapped value parked a dispatch for as long as it asked) / 401 (forces a token refresh). A cursor
+page whose response was lost is not retried in place: the scan starts over (see
+[below](#a-broken-or-lost-cursor-page-restarts-the-scan-then-an-error)). `get_paginated` handles **both** a bare JSON array **and** the
 `{ results, cursor }` envelope, where `cursor` may be a string or a `{ name, offset, … }` object;
 it stops when a page returns 0 rows even if the server echoes a stale token. Don't hand-roll a
 second reqwest/cursor loop.
@@ -80,7 +82,7 @@ Note also that `REPORTING_PAGE_SIZE = 5000` rests on the envelope branch tolerat
 cap, **not** on a documented ceiling: the four patch endpoints declare `pageSize` with no maximum
 (the `maximum: 10000` in the spec is on `/queries/logged-on-users`, which this app never calls).
 
-## An empty page short of the cursor's announced `count` restarts the scan, then an error
+## A broken or lost cursor page restarts the scan, then an error
 
 NinjaOne's cursor object carries `count` beside `name` and `offset`. The spec says nothing about
 what it measures; the field logs did: a 6,721-row OS feed and a 559,210-row software feed both
@@ -101,9 +103,17 @@ been the second page, within a few hundred milliseconds of the open.
 
 `get_paginated_reporting` therefore keeps the first cursor's `count` (`cursor_count`) and, on an
 empty page while `all.len() < count`, **starts the scan over** after a short fixed pause
-(`EMPTY_PAGE_RESTARTS` × `EMPTY_PAGE_RESTART_DELAY`): no `cursor` parameter, the rows already paged
-dropped (nothing says which of them the new cursor would serve again), and the count re-read from
-the new cursor. A scan that keeps breaking is reported like the other stalls. An empty page at or
+(`SCAN_RESTARTS` × `SCAN_RESTART_DELAY`, via `restart_scan`): no `cursor` parameter, the rows
+already paged dropped (nothing says which of them the new cursor would serve again), and the count
+re-read from the new cursor. A scan that keeps breaking is reported like the other stalls.
+
+A **lost cursor page** takes the same path and spends the same budget: a request carrying a cursor
+that timed out, drew a 5xx, or came back as a 2xx whose body could not be read fails with the
+`CursorReplayUnsafe` type (see [below](#the-timeout-and-5xx-arms-are-idempotent-only)) rather than
+being retried in place. The restart is logged at `warn` with its reason, and `pages` is not reset,
+so `MAX_PAGES` still bounds the whole fetch. The cost is deliberate: a fetch tolerates two lost
+pages, each paid for with a full re-page from the start, so a gateway flaky enough to lose a third
+now fails a query it used to "complete" with rows silently missing. An empty page at or
 past the count, or from an endpoint that announces none, ends the scan exactly as before
 (`an_empty_page_at_or_without_an_announced_count_ends_the_scan`).
 
@@ -123,18 +133,42 @@ open on every cursor seen, which bounds how slow a scan may run before the serve
 with no usable `name`, a number, an array). It is only consulted after a page that *returned
 rows* — the caller checks `page_len == 0` first — so treating an unknown shape as "finished" ends
 the fetch mid-fleet and hands back a partial result that looks complete, understating every
-compliance number derived from it. This mirrors the `results`-not-an-array arm, which has always
-bailed.
+compliance number derived from it. The `results`-not-an-array arm refuses to read a malformed
+envelope as zero rows for the same reason, but on a cursor page it restarts the scan first and
+fails only once `SCAN_RESTARTS` is spent: it is part of decoding the body, and a body that will
+not decode cannot cheaply be told apart from one truncated in transit — a page the server already
+counts as delivered. A cursor of an unknown shape arrived in a body that decoded whole, so it is
+the server's deliberate answer, would come back the same from every fresh scan, and fails at once
+rather than spending two full re-pages to reach the same error.
 
-## The 5xx and connect arms are `Idempotent`-only
+## The timeout and 5xx arms are `Idempotent`-only
 
-A reporting pull is dozens of *sequential* cursor pages, so a gateway 502 on a late page used to
-discard every page already accumulated — 5xx is the most common transient failure on that path,
-far more so than 429. But a 5xx on an acting POST is exactly the ambiguity
+5xx is the most common transient failure on a reporting pull, far more so than 429, and a read
+that carries no server-side state — a single-shot GET, an `after` page, the request that opens a
+cursor scan — is simply asked for again. But a 5xx on an acting POST is exactly the ambiguity
 `ReplaySafety::ActOnce` exists for (the gateway may have failed *after* the job reached the device
-queue), so writes are never replayed. 429/401 stay replayable for both, but an `ActOnce` request
-on a client built with `with_send_guard` asks the guard before every attempt (see
+queue), so writes are never replayed. A connect failure is retried for everything but `ActOnce`.
+429/401 stay replayable for all three, but an `ActOnce` request on a client built with
+`with_send_guard` asks the guard before every attempt (see
 [actions.md](./actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim)).
+
+**A cursor page is `ReplaySafety::CursorPage`, and is not replayed either.** It changes nothing on
+a device, but it is not idempotent: the position is server-side state keyed by the cursor's stable
+`name` (see [`PageCursor`](#both-pagination-branches-require-forward-progress--and-neither-may-stop-quietly)),
+and the backend advances it when it serves the page, not when the client receives it. A 45 s
+client timeout, or a 502 from a gateway in front of a backend that already answered, therefore
+loses a page the server considers delivered, and re-sending the name is answered with the *next*
+page. That retry used to be the 5xx arm's whole purpose — keeping the accumulated pages of a long
+pull — and it skipped up to `pageSize` (5000) rows per attempt, 15,000 at `MAX_RETRIES`, with no
+error: the forward-progress guards saw the cursor advance, and the end-of-scan shortfall is only a
+warning. The suite could not see it because its 5xx fixture changed the cursor name per page. The
+field has never shown a re-sent cursor recover a scan (the empty-page re-read above was refused or
+ran short), so restarting the scan is the only known-safe recovery: the timeout, in-flight, 5xx
+and unreadable-2xx arms fail a `CursorPage` with `CursorReplayUnsafe` (`is_cursor_replay_unsafe`
+sees through `.context()`), and the pagination loop restarts under the shared budget. A connect
+failure, 429 and 401 never reached the handler and are retried in place.
+`a_lost_cursor_response_restarts_the_scan_instead_of_skipping_a_page` pins it against a server
+that keeps the position the way NinjaOne does.
 
 ## An ambiguous write fails with the `OutcomeUnknown` type, never a phrase
 
