@@ -55,6 +55,11 @@ impl AppState {
                 return;
             }
             let failed = outcome.is_err();
+            let empty = outcome.as_ref().ok().map(|r| r.jobs.is_empty());
+            let empty_streak = self
+                .live_jobs
+                .last_poll
+                .with_untracked(|last| util::next_empty_streak(last.as_ref(), &result_key, empty));
             match outcome {
                 Ok(jobs) => {
                     self.live_jobs.jobs.set(Some(jobs));
@@ -67,6 +72,7 @@ impl AppState {
                 at_ms,
                 failed,
                 result_key,
+                empty_streak,
             }));
         });
     }

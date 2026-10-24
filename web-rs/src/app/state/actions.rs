@@ -363,6 +363,9 @@ impl AppState {
                         // The on-screen result predates the change we just made.
                         self.actions.results_stale.set(true);
                     }
+                    if batch.dispatched > 0 {
+                        self.live_jobs.wake();
+                    }
                     // Stays on this tab: the operator often has a second dispatch
                     // to send from the same selection (Software after OS). It used
                     // to switch to Jobs, so every follow-up was a round trip. The
