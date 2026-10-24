@@ -86,9 +86,16 @@ impl AppState {
         if !self.can_act() {
             return;
         }
+        let epoch = self.session.epoch();
         self.actions.scripts_loading.set(true);
         spawn_local(async move {
-            match api::list_scripts().await {
+            let reply = api::list_scripts().await;
+            // The previous session's library (maybe the previous tenant's). Its
+            // loading flag went with it in `clear_session`.
+            if self.session.outlived(epoch) {
+                return;
+            }
+            match reply {
                 Ok(list) => self.actions.scripts.set(list),
                 Err(e) => self.notify(Toast::err(format!("Couldn't load scripts: {e}"))),
             }
@@ -356,6 +363,9 @@ impl AppState {
                         // The on-screen result predates the change we just made.
                         self.actions.results_stale.set(true);
                     }
+                    if batch.dispatched > 0 {
+                        self.live_jobs.wake();
+                    }
                     // Stays on this tab: the operator often has a second dispatch
                     // to send from the same selection (Software after OS). It used
                     // to switch to Jobs, so every follow-up was a round trip. The
@@ -387,6 +397,28 @@ impl AppState {
                 // only fail again, its single-use token already spent.
                 Err(e) if util::dispatch_error_keeps_dialog(e.code.as_deref()) => {
                     self.actions.dispatch_error.set(Some(e.message));
+                }
+                // The batch went out; only its reply failed to decode. Re-plan would
+                // send it again, so close the dialog and point at Jobs, which the
+                // backend's job store fills regardless. Treated like the Ok arm
+                // without the count: a spurious stale banner is the worst case.
+                Err(e) if e.code.as_deref() == Some(crate::types::ERR_REPLY_UNREADABLE) => {
+                    self.actions.pending.set(None);
+                    self.actions.confirm_input.set(String::new());
+                    self.actions.dispatch_error.set(None);
+                    self.actions.override_window.set(false);
+                    if mutating {
+                        self.actions.results_stale.set(true);
+                    }
+                    self.live_jobs.wake();
+                    self.notify(
+                        Toast::err(format!(
+                            "Dispatched, but the reply could not be read ({}). Check Jobs before sending again.",
+                            e.message
+                        ))
+                        .with_action(ToastAction::ViewJobs),
+                    );
+                    self.refresh_jobs();
                 }
                 // A partial dispatch from an ended session: `clear_session` has
                 // usually closed the dialog already, so an error set there would never
@@ -433,8 +465,14 @@ impl AppState {
         if self.session.web_mode.get_untracked() || self.session.demo.get_untracked() {
             return;
         }
+        let epoch = self.session.epoch();
         spawn_local(async move {
-            if let Ok(jobs) = api::list_jobs().await {
+            let reply = api::list_jobs().await;
+            // `clear_session` emptied the list the backend had just dropped.
+            if self.session.outlived(epoch) {
+                return;
+            }
+            if let Ok(jobs) = reply {
                 self.actions.jobs.set(jobs);
                 self.announce_settled_batches();
             }

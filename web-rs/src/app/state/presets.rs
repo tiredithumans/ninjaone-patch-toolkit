@@ -42,6 +42,7 @@ impl AppState {
             // So are the lists themselves: the switch drops the grant, and until the
             // next sign-in reloads them the pickers offered the old tenant's names.
             self.lookups.orgs.set(Vec::new());
+            self.lookups.all_locations.set(None);
             self.lookups.locations.set(Vec::new());
             self.lookups.roles.set(Vec::new());
             self.lookups.device_groups.set(Vec::new());
@@ -85,12 +86,9 @@ impl AppState {
         self.filters.install_custom.set(custom);
         self.filters.install_after_date.set(after);
         self.filters.install_before_date.set(before);
-        // Load the locations for the restored org scope, then restore the saved
-        // location selection — the list has to exist before the ids can be pruned
-        // against it.
+        // Narrow the locations to the restored org scope, then restore the saved
+        // location selection pruned to that list.
         self.filters.org_ids.set(f.organization_ids);
-        self.filters.loc_ids.set(Vec::new());
-        self.lookups.locations.set(Vec::new());
         self.load_locations(Some(f.location_ids));
     }
 }

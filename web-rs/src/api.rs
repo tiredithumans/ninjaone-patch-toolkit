@@ -223,9 +223,12 @@ async fn invoke_coded<R: DeserializeOwned>(cmd: &str, args: JsValue) -> Result<R
         )));
     }
     match tauri_invoke(cmd, args).await {
-        Ok(value) => {
-            serde_wasm_bindgen::from_value(value).map_err(|e| plain(format!("decode {cmd}: {e}")))
-        }
+        // Coded, unlike the failures above: the command ran, so a caller that
+        // branches on success (a dispatch) must not read this as "nothing happened".
+        Ok(value) => serde_wasm_bindgen::from_value(value).map_err(|e| IpcError {
+            message: format!("decode {cmd}: {e}"),
+            code: Some(ERR_REPLY_UNREADABLE.to_string()),
+        }),
         Err(err) => Err(ipc_error(err)),
     }
 }

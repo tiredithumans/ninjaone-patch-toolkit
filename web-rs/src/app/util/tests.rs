@@ -54,15 +54,26 @@ fn only_a_forced_reboot_demands_a_typed_confirmation() {
 /// A partial dispatch (its session ended mid-batch) must not land in the dialog,
 /// whose way forward is Re-plan: that would send again to devices that already
 /// acted. Every other dispatch failure stays in the dialog as before.
+///
+/// Nor must a dispatch whose reply could not be decoded: the batch went out, and
+/// its uncoded error used to keep the dialog open on "Dispatch failed… Re-plan".
 #[test]
-fn only_a_partial_dispatch_leaves_the_confirmation_dialog() {
+fn only_a_partial_or_unreadable_dispatch_leaves_the_confirmation_dialog() {
     assert!(dispatch_error_keeps_dialog(None));
     assert!(dispatch_error_keeps_dialog(Some("somethingElse")));
     assert!(!dispatch_error_keeps_dialog(Some(
         crate::types::ERR_PARTIAL_DISPATCH
     )));
+    assert!(!dispatch_error_keeps_dialog(Some(
+        crate::types::ERR_REPLY_UNREADABLE
+    )));
     // The wire value the backend's `error::ERR_PARTIAL_DISPATCH` sends.
     assert_eq!(crate::types::ERR_PARTIAL_DISPATCH, "partialDispatch");
+    // Frontend-only, so it must not collide with a code the backend does send.
+    assert_ne!(
+        crate::types::ERR_REPLY_UNREADABLE,
+        crate::types::ERR_PARTIAL_DISPATCH
+    );
 }
 
 #[test]
@@ -383,6 +394,18 @@ fn query_seq_wraps_and_compares_by_equality() {
     // Across the wrap the comparison still behaves.
     let mine = u64::MAX;
     assert!(is_superseded(next_query_seq(mine), mine));
+}
+
+/// A lookup, script-library or job-list reply asked for before a sign-out,
+/// sign-in, re-authorization or tenant switch must not repaint after it: the
+/// previous tenant's organization ids would then scope the new tenant's query.
+#[test]
+fn a_reply_from_an_ended_session_is_dropped() {
+    let epoch = 3;
+    assert!(!outlived_session(epoch, epoch), "same session: applied");
+    // `clear_session` moves the epoch with the same wrapping step as a run.
+    assert!(outlived_session(next_query_seq(epoch), epoch));
+    assert!(outlived_session(next_query_seq(u64::MAX), u64::MAX));
 }
 
 /// A manual run is a new scope and a silent refresh the same scope with fresher
@@ -1646,6 +1669,85 @@ fn loc(id: i64, name: &str, org_id: i64) -> Location {
         name: name.to_string(),
         organization_id: Some(org_id),
     }
+}
+
+fn ids(locs: &[Location]) -> Vec<i64> {
+    locs.iter().map(|l| l.id).collect()
+}
+
+/// The backend's `list_locations` rule, applied client-side: no organization
+/// selected offers every location (an org-less one included); a selection offers
+/// only its organizations' locations, and an org-less one is never among them.
+#[test]
+fn locations_follow_the_org_scope_like_the_backend_filter() {
+    let orphan = Location {
+        id: 99,
+        name: "Unassigned".into(),
+        organization_id: None,
+    };
+    let all = vec![
+        loc(10, "HQ", 1),
+        loc(20, "Depot", 2),
+        loc(11, "Lab", 1),
+        orphan,
+    ];
+    assert_eq!(ids(&locations_for(&all, &[])), vec![10, 20, 11, 99]);
+    assert_eq!(ids(&locations_for(&all, &[1])), vec![10, 11]);
+    assert_eq!(ids(&locations_for(&all, &[2, 1])), vec![10, 20, 11]);
+    assert!(
+        locations_for(&all, &[7]).is_empty(),
+        "an org with no locations"
+    );
+}
+
+/// The demo's picker and the signed-in one must offer the same list for the
+/// same scope, now that the signed-in one derives it from the full list.
+#[test]
+fn locations_for_matches_the_demo_sample_for_every_scope() {
+    let all = crate::demo::sample_locations(&[]);
+    for orgs in [
+        vec![],
+        vec![1],
+        vec![2],
+        vec![1, 2],
+        vec![1, 2, 3],
+        vec![999],
+    ] {
+        assert_eq!(
+            ids(&locations_for(&all, &orgs)),
+            ids(&crate::demo::sample_locations(&orgs)),
+            "orgs {orgs:?}"
+        );
+    }
+}
+
+/// Narrowing the org scope prunes the location selection in the same call, so a
+/// drill-down that runs right after reads a selection with no other org's site
+/// left in it — the async reload let `drill_run` read the stale one, and the
+/// drilled query came back empty.
+#[test]
+fn narrowing_the_org_scope_prunes_the_location_selection_at_once() {
+    let all = vec![loc(10, "HQ", 1), loc(20, "Depot", 2), loc(11, "Lab", 1)];
+    let (offered, selected) = scope_locations(Some(&all), &[2], vec![10, 20]);
+    assert_eq!(ids(&offered), vec![20]);
+    assert_eq!(selected, vec![20], "org 1's HQ is dropped");
+
+    // Back to every organization: everything is offered, nothing is dropped.
+    let (offered, selected) = scope_locations(Some(&all), &[], vec![10, 20]);
+    assert_eq!(ids(&offered), vec![10, 20, 11]);
+    assert_eq!(selected, vec![10, 20]);
+
+    // A preset restored before the list arrived keeps its ids; pruning against a
+    // list that is not there would drop all of them. The list's arrival prunes.
+    let (offered, selected) = scope_locations(None, &[1], vec![10, 20]);
+    assert!(offered.is_empty());
+    assert_eq!(selected, vec![10, 20]);
+    let (_, selected) = scope_locations(Some(&all), &[1], selected);
+    assert_eq!(selected, vec![10]);
+
+    // A tenant with no locations at all is a loaded, empty list: prune to nothing.
+    let (_, selected) = scope_locations(Some(&[]), &[], vec![10]);
+    assert!(selected.is_empty());
 }
 
 /// Selected ids resolve in the lookup's order, and an id with no lookup row is

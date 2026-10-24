@@ -449,7 +449,10 @@ the exit code plus the activity/series correlator.
 `/jobs` is never a resolution source. It lists only what is in flight, and a job leaving it says
 nothing about how it ended. The app reads it only for the live job status display
 (`commands::live_jobs`). That display polls about every 30 seconds while the window is visible
-(`util::live_jobs_due`), backs off for five minutes after a failure, and shows only patch-ops job
+and NinjaOne reports something running, doubling the wait for each empty read in a row up to two
+minutes (`util::idle_wait_ms`; a new result or a dispatch from the app resets it — not gated on a
+dispatch, because the display exists to show jobs NinjaOne runs on its own), backs off for five
+minutes after a failure, and shows only patch-ops job
 types (`PATCH_OPS_JOB_TYPES`) on the current result's devices. A `jobStatus` that means finished
 is dropped. The dispatched-job poller below is untouched by it.
 

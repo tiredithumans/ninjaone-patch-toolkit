@@ -122,6 +122,27 @@ Without it the previous session's rows stayed rendered against a cache that had 
 dropped: Next page came back blank under "Rows 101–200 of N" and Export said "Run a query before
 exporting" beside a visible table — the same divergence one layer up.
 
+`clear_session` also moves `session.epoch`, and every lookup-like load — the four
+`load_lookups` lists, `load_scripts` and `refresh_jobs` — captures it before its await and drops
+a reply whose epoch moved (`util::outlived_session`, the same shape as `is_superseded`). Those
+replies used to land unconditionally, so one in flight at a sign-out or tenant switch repainted
+the previous tenant's org, role, group and script pickers after the clear, and an old org id then
+scoped the new tenant's query. The picked library script id and its parameters are cleared too:
+script ids are per tenant, so a carried id ran nothing or another tenant's script by the same
+number, and the script list goes with them. A sign-in that reuses the saved grant and a
+re-authorization keep the session signed in, so the auth effects that load lookups and scripts
+on a transition may already have fired; they call `clear_session_and_reload`, which reloads the
+lookups that were in flight and the script list when actions are available.
+
+Locations are derived client-side. `load_lookups` keeps the full list (`all_locations`, each
+entry with its `organization_id`), and `load_locations` derives the picker's list for the org
+scope with `util::scope_locations` / `locations_for` — the backend `list_locations` rule (empty
+scope = every location; under a selection a location with no org is excluded) — and prunes the
+selection in the same synchronous call. It used to re-invoke `list_locations(orgs)` per org
+toggle: an IPC round trip with no supersede guard, whose replies could apply out of order, and
+whose await let `drill_to_org` run its query before the prune, so another org's location stayed
+in the drilled query and it came back empty.
+
 ## Paging commands return empty on a miss, never an error
 
 The three paging commands all return empty on a cache miss. A miss is a normal transient (tenant

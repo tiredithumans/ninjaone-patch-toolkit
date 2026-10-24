@@ -521,8 +521,9 @@ pub(crate) fn ReauthorizeLink() -> impl IntoView {
                             Ok(()) => {
                                 // The backend dropped the session's result and
                                 // jobs for the fresh grant; storing the new status
-                                // is what clears the blocked reason.
-                                state.clear_session();
+                                // is what clears the blocked reason. The sign-in
+                                // stays up, so loads the clear drops are reloaded.
+                                state.clear_session_and_reload();
                                 state.session.refresh_auth();
                                 state.notify(Toast::ok("Re-authorized"));
                             }

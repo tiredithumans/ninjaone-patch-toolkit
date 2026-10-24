@@ -130,8 +130,9 @@ pub(crate) fn SignInButton() -> impl IntoView {
                         Ok(()) => {
                             // The backend dropped the previous session's result and
                             // jobs; drop the rendering of them too. The lookups,
-                            // scripts and jobs load off the auth status (see `App`).
-                            state.clear_session();
+                            // scripts and jobs load off the auth status (see `App`),
+                            // which may already have fired for a saved session.
+                            state.clear_session_and_reload();
                             state.session.refresh_auth();
                             state.notify(Toast::ok("Signed in"));
                         }

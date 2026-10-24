@@ -128,6 +128,10 @@ pub(crate) struct SessionState {
     /// which is the same observation in a build where it is expected and fine.
     /// Replaces the whole UI with an error rather than falling back to sample data.
     pub(super) backend_missing: RwSignal<bool>,
+    /// Moved by `clear_session` (sign-out, sign-in, re-authorization, tenant
+    /// switch). Every lookup-like load stamps itself with it before its await and
+    /// drops a reply that lands after it moved (`util::outlived_session`).
+    pub(super) epoch: RwSignal<u64>,
 }
 
 impl SessionState {
@@ -138,7 +142,18 @@ impl SessionState {
             demo: RwSignal::new(false),
             web_mode: RwSignal::new(false),
             backend_missing: RwSignal::new(false),
+            epoch: RwSignal::new(0),
         }
+    }
+
+    /// The stamp a load captures before its await. Untracked.
+    pub(super) fn epoch(self) -> u64 {
+        self.epoch.get_untracked()
+    }
+
+    /// Whether a reply stamped `epoch` belongs to a session that has ended.
+    pub(super) fn outlived(self, epoch: u64) -> bool {
+        util::outlived_session(self.epoch.get_untracked(), epoch)
     }
 
     pub(super) fn is_authed(self) -> bool {
@@ -158,6 +173,10 @@ impl SessionState {
 #[derive(Clone, Copy)]
 pub(crate) struct LookupState {
     pub(super) orgs: RwSignal<Vec<Organization>>,
+    /// Every location in the tenant, `None` until it has loaded. The picker's list
+    /// is derived from it per org scope (`util::scope_locations`), client-side.
+    pub(super) all_locations: RwSignal<Option<Vec<Location>>>,
+    /// The locations offered under the current organization scope.
     pub(super) locations: RwSignal<Vec<Location>>,
     pub(super) roles: RwSignal<Vec<Role>>,
     pub(super) device_groups: RwSignal<Vec<DeviceGroup>>,
@@ -170,6 +189,7 @@ impl LookupState {
     pub(super) fn new() -> Self {
         Self {
             orgs: RwSignal::new(Vec::new()),
+            all_locations: RwSignal::new(None),
             locations: RwSignal::new(Vec::new()),
             roles: RwSignal::new(Vec::new()),
             device_groups: RwSignal::new(Vec::new()),
@@ -808,6 +828,17 @@ impl LiveJobsState {
             last_poll: RwSignal::new(None),
             seq: RwSignal::new(0),
         }
+    }
+
+    /// Back to the full cadence: a dispatch just went out, so jobs are likely to
+    /// start. The next read comes once 30 s have passed since the last one — at
+    /// once if they already have.
+    pub(super) fn wake(self) {
+        self.last_poll.update(|p| {
+            if let Some(p) = p {
+                p.empty_streak = 0;
+            }
+        });
     }
 
     pub(super) fn clear(self) {

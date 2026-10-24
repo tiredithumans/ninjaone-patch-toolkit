@@ -638,11 +638,16 @@ pub(crate) fn can_confirm_action(
 }
 
 /// Whether a failed dispatch's error stays in the confirmation dialog, whose way
-/// forward is Re-plan. A partial dispatch does not: some devices may already have
-/// acted, so a re-plan would send to them again, and the session that opened the
-/// dialog has ended anyway. That one closes the dialog and is shown as a toast.
+/// forward is Re-plan. Two do not, because devices may already have acted and a
+/// re-plan would send to them again: a partial dispatch (the session that opened
+/// the dialog has ended anyway), and a dispatch whose reply could not be read (the
+/// backend ran it; only the decode failed). Those close the dialog and say so in
+/// a toast.
 pub(crate) fn dispatch_error_keeps_dialog(code: Option<&str>) -> bool {
-    code != Some(crate::types::ERR_PARTIAL_DISPATCH)
+    !matches!(
+        code,
+        Some(crate::types::ERR_PARTIAL_DISPATCH | crate::types::ERR_REPLY_UNREADABLE)
+    )
 }
 
 /// The toast after ticking a group whose members were never on screen: how many

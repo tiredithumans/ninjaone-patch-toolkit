@@ -533,6 +533,41 @@ pub(crate) fn matching_options<T: Named + Clone>(options: &[T], needle: &str) ->
         .collect()
 }
 
+/// The locations the picker offers under `org_ids`: every location when no
+/// organization is selected, otherwise those belonging to a selected one. A
+/// location with no organization is offered only under "every organization".
+///
+/// The same rule as the backend's `list_locations` and `demo::sample_locations`,
+/// applied here to the full list `load_lookups` keeps. It used to be an IPC round
+/// trip per org toggle, whose replies could land out of order and whose await let a
+/// drill-down run before the selection was pruned.
+pub(crate) fn locations_for(all: &[Location], org_ids: &[i64]) -> Vec<Location> {
+    all.iter()
+        .filter(|l| org_ids.is_empty() || l.organization_id.is_some_and(|id| org_ids.contains(&id)))
+        .cloned()
+        .collect()
+}
+
+/// The location picker after an org-scope change: the offered list, and the
+/// selection with every id that list no longer offers dropped — an invisible id
+/// would go on narrowing every query with nothing on screen to explain it.
+///
+/// `all` is `None` until the full list has arrived; the selection is then kept
+/// whole, because pruning against a list that is not there yet would drop every id
+/// (a preset applied before the lookups landed). The list's arrival prunes it.
+pub(crate) fn scope_locations(
+    all: Option<&[Location]>,
+    org_ids: &[i64],
+    mut selected: Vec<i64>,
+) -> (Vec<Location>, Vec<i64>) {
+    let Some(all) = all else {
+        return (Vec::new(), selected);
+    };
+    let offered = locations_for(all, org_ids);
+    selected.retain(|id| offered.iter().any(|l| l.id == *id));
+    (offered, selected)
+}
+
 /// Qualifies location names that are ambiguous across the selected organizations.
 ///
 /// With the organization facet multi-select, the location list spans several orgs at

@@ -480,6 +480,13 @@ impl AppState {
         // lost.
         self.run.query_seq.update(|s| *s = util::next_query_seq(*s));
         self.run.progress.set(Progress::default());
+        // The same for every lookup-like load (the pickers, the script library,
+        // the job list): a reply asked for in the ended session is dropped on
+        // landing, so it cannot repaint the previous tenant's names. Its count
+        // goes with it; a load started after this owns the counter.
+        self.session.epoch.update(|e| *e = util::next_query_seq(*e));
+        self.lookups.lookups_pending.set(0);
+        self.actions.scripts_loading.set(false);
         self.actions.jobs.set(Vec::new());
         self.actions.watched.set(Vec::new());
         self.actions.script_dialog.set(false);
@@ -491,11 +498,36 @@ impl AppState {
         // instead, and a tick must not carry into another operator's (or tenant's)
         // first dispatch.
         self.actions.override_window.set(false);
+        // A library script id names a script in *this* tenant's library; carried
+        // over it ran nothing (the picker showed "Select a script…" over it) or
+        // another tenant's script that happens to share the number.
+        self.actions.script_id.set(None);
+        self.actions.script_params.set(String::new());
+        self.actions.scripts.set(Vec::new());
         self.live_jobs.clear();
         // A run queued behind one from the old session would fire into the new
         // one (or, signed out, just to say "Sign in first").
         self.run.queued.set(None);
         self.query.sort_on_next_run.set(None);
+    }
+
+    /// [`clear_session`](Self::clear_session) for a session that goes on signed in:
+    /// a sign-in that reused the saved grant, or a re-authorization. The auth
+    /// effects in `App` load the lookups and scripts on a *transition* to signed in
+    /// (or to able-to-act), and here the status may already have made it — the
+    /// backend held a session at launch, its status landed while Sign in was
+    /// pending, and both effects fired. The clear drops their replies (and empties
+    /// the script list), and nothing would fire again, so the pickers stayed empty
+    /// all session. Reload what was in flight, and the script list whenever
+    /// actions are already available (`load_scripts` is a no-op otherwise, and the
+    /// can-act effect loads it once they become so).
+    pub(in crate::app) fn clear_session_and_reload(self) {
+        let lookups_in_flight = self.lookups.lookups_pending.get_untracked() > 0;
+        self.clear_session();
+        if lookups_in_flight {
+            self.load_lookups();
+        }
+        self.load_scripts();
     }
 
     /// Why auto-refresh is holding right now, if it is — see `util::refresh_hold`

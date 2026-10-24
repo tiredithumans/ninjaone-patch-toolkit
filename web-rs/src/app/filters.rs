@@ -49,10 +49,10 @@ pub(crate) fn ScopeBar() -> impl IntoView {
                 options=Signal::derive(move || state.lookups.orgs.get())
                 selected=state.filters.org_ids
                 // Changing the org scope changes which locations exist, so this one
-                // facet routes through the state method that reloads them (and drops
-                // any selected location that just went away).
+                // facet routes through the state method that re-derives them (and
+                // drops any selected location that just went away).
                 on_toggle=Callback::new(move |id: i64| state.toggle_org(id))
-                // Clear goes through the same reload, or the location list kept
+                // Clear goes through the same re-derive, or the location list kept
                 // offering (and the selection kept) only the cleared orgs' sites.
                 on_clear=Callback::new(move |()| state.clear_orgs())
                 disabled=loading
