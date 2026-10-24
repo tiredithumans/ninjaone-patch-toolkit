@@ -1375,6 +1375,7 @@ fn a_new_sign_in_clears_a_leftover_legacy_refresh_token() {
 
     assert_eq!(load_keyring(LEGACY_KEYRING_USER_REFRESH).unwrap(), None);
 }
+
 // --- Tenant-bound tokens ----------------------------------------------------
 
 /// The API client stamps a request with the tenant its URL was built for. Once

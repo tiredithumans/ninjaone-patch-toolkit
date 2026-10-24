@@ -55,11 +55,12 @@ Three independent sources send on the one production client at once: a query's s
 legs, the job poller's `/activities` reads (up to `MAX_FEED_READS_IN_FLIGHT`), and the `/jobs`
 poll. A rate limit is the tenant's, but a 429 used to pause only the request that drew it, so the
 others kept sending into it and drew 429s of their own. `NinjaApiClient` now holds a shared
-`paused_until` deadline (every clone, `with_send_guard` included, shares it): a 429 extends it to
-now + the capped delay + jitter, never shortening it, and every attempt sits it out before it asks
-for a token or the send guard. The wait is not an attempt. The backoff and the 429 wait are both
-jittered so the legs a burst failed together do not come back together
-(`a_429_pauses_every_request_the_client_sends`, `backoff_is_jittered_by_at_most_a_quarter`).
+`paused_until` deadline (every clone, `with_send_guard` included, shares it): every 429 — the one
+that exhausts a request's retries too — extends it to now + the capped delay + jitter, never
+shortening it, and every attempt sits it out before it asks for a token or the send guard. The
+wait is not an attempt. The backoff and the 429 wait are both jittered so the legs a burst failed
+together do not come back together (`a_429_pauses_every_request_the_client_sends`,
+`the_429_that_ends_a_request_still_pauses_its_siblings`, `backoff_is_jittered_by_at_most_a_quarter`).
 
 `send_with_retry` builds the URL once but asked for a token on every attempt, and
 `apply_settings` swaps the host and clears the tokens under one write lock. A read waiting out a

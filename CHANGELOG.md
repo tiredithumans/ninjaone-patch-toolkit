@@ -38,6 +38,8 @@ version and start a fresh `[Unreleased]`.
 - Drilling into an organization no longer keeps a location from another organization in the query.
 - If a dispatch's confirmation can't be read, the dialog now closes and points to Jobs instead of
   offering to send it again.
+- Each try to reach a NinjaOne host that isn't answering now gives up after 15 seconds instead of 45.
+- When NinjaOne asks the app to slow down, every request waits, not just the one that was told.
 
 ## [0.20.0] - 2026-10-23
 

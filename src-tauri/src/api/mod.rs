@@ -382,15 +382,20 @@ impl NinjaApiClient {
             };
 
             let status = resp.status();
-            match retry_for(status, replay, attempt, retry_after_secs(&resp)) {
-                // A rate limit applies to every request this client sends, so it
-                // becomes the shared pause, which the top of the loop waits out
-                // for this request and every other one alike.
-                Retry::Wait(delay) if status == StatusCode::TOO_MANY_REQUESTS => {
+            let retry_after = retry_after_secs(&resp);
+            // A rate limit applies to every request this client sends, so it
+            // becomes the shared pause, which the top of the loop waits out for
+            // this request and every other one alike. Set on every 429, the last
+            // attempt's included: this request gives up, but the limit it reports
+            // still holds for the siblings that would otherwise keep sending.
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                let delay = rate_limit_delay(retry_after) + rate_limit_jitter();
+                warn!(%method, %url, %status, attempt, ?delay, "rate limited; pausing every request");
+                self.pause_until(Instant::now() + delay);
+            }
+            match retry_for(status, replay, attempt, retry_after) {
+                Retry::Wait(_) if status == StatusCode::TOO_MANY_REQUESTS => {
                     attempt += 1;
-                    let delay = delay + rate_limit_jitter();
-                    warn!(%method, %url, %status, attempt, ?delay, "rate limited; pausing every request");
-                    self.pause_until(Instant::now() + delay);
                     continue;
                 }
                 Retry::Wait(delay) => {
@@ -518,9 +523,7 @@ fn retry_for(
         // The server tells us how long to wait; second-guessing it is how a client
         // turns a soft rate limit into a hard one. It is still capped: the value is
         // server-controlled, and one absurd header must not hang a dispatch.
-        StatusCode::TOO_MANY_REQUESTS => Retry::Wait(Duration::from_secs(
-            retry_after.unwrap_or(5).min(MAX_RETRY_AFTER_SECS),
-        )),
+        StatusCode::TOO_MANY_REQUESTS => Retry::Wait(rate_limit_delay(retry_after)),
         StatusCode::UNAUTHORIZED => Retry::Reauth,
         s if s.is_server_error() && replay == ReplaySafety::Idempotent => {
             Retry::Wait(backoff(attempt + 1))
@@ -554,6 +557,11 @@ fn parse_retry_after(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<
         .num_milliseconds()
         .max(0) as u64;
     Some(gap_ms.div_ceil(1000).min(MAX_RETRY_AFTER_SECS))
+}
+
+/// The wait a 429 asks for: its `Retry-After`, 5 s without a usable one, capped.
+fn rate_limit_delay(retry_after: Option<u64>) -> Duration {
+    Duration::from_secs(retry_after.unwrap_or(5).min(MAX_RETRY_AFTER_SECS))
 }
 
 /// How long is left of a pause that ends at `until`, or `None` once it is over.

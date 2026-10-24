@@ -1109,6 +1109,76 @@ async fn a_429_pauses_every_request_the_client_sends() {
     assert!(a_hits[1].duration_since(a_hits[0]) >= Duration::from_secs(1));
 }
 
+/// The 429 that exhausts a request's retries still pauses the client. `retry_for`
+/// says `No` on the last attempt, and the pause used to be set only on a retry, so
+/// the request gave up and its siblings kept sending into the limit the server had
+/// just reported.
+#[tokio::test]
+async fn the_429_that_ends_a_request_still_pauses_its_siblings() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Every request gets a 429: `Retry-After: 0` until the last attempt, then 1 s.
+    struct Exhausting(Arc<Mutex<Vec<Instant>>>);
+    impl wiremock::Respond for Exhausting {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            let mut at = self.0.lock().expect("arrivals");
+            at.push(Instant::now());
+            let wait = if at.len() > MAX_RETRIES as usize {
+                "1"
+            } else {
+                "0"
+            };
+            ResponseTemplate::new(429).insert_header("Retry-After", wait)
+        }
+    }
+
+    let server = MockServer::start().await;
+    let a_hits = Arc::new(Mutex::new(Vec::new()));
+    let b_hits = Arc::new(Mutex::new(Vec::new()));
+    Mock::given(method("GET"))
+        .and(path("/api/v2/a"))
+        .respond_with(Exhausting(Arc::clone(&a_hits)))
+        .mount(&server)
+        .await;
+    let ok = ResponseTemplate::new(200).set_body_json(json!({}));
+    Mock::given(method("GET"))
+        .and(path("/api/v2/b"))
+        .respond_with(Arrivals {
+            at: Arc::clone(&b_hits),
+            first: ok.clone(),
+            rest: ok,
+        })
+        .mount(&server)
+        .await;
+
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let client = NinjaApiClient::new(http, auth);
+    client
+        .get_json::<Value>("/a", &[])
+        .await
+        .expect_err("A runs out of retries");
+    let a_hits = a_hits.lock().expect("arrivals").clone();
+    assert_eq!(a_hits.len(), MAX_RETRIES as usize + 1);
+    assert!(
+        client.pause_left().is_some(),
+        "the last 429 left the client paused"
+    );
+
+    client
+        .get_json::<Value>("/b", &[])
+        .await
+        .expect("B goes through once the pause is over");
+    let last_a = *a_hits.last().expect("A's last attempt");
+    let b_first = b_hits.lock().expect("arrivals")[0];
+    assert!(
+        b_first.duration_since(last_a) >= Duration::from_secs(1),
+        "B reached the server {:?} after A's final 429, inside the 1 s it asked for",
+        b_first.duration_since(last_a)
+    );
+}
+
 /// A tenant switch during a 429 wait used to send the retry to the old host with
 /// the new tenant's freshly refreshed token, and the old host's 401 then
 /// invalidated it. The retry is abandoned instead: the old host sees nothing more,
@@ -1224,6 +1294,7 @@ async fn a_connect_timeout_on_an_acting_post_is_a_plain_failure_and_not_replayed
         "an action is never re-sent on a connect failure"
     );
 }
+
 #[tokio::test]
 async fn get_timeout_is_replayed() {
     use wiremock::matchers::{method, path};
