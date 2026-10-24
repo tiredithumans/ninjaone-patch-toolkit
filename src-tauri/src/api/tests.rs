@@ -922,6 +922,193 @@ fn retry_after_is_capped() {
     );
 }
 
+/// The HTTP-date form of `Retry-After` used to fall back to the 5 s default, so a
+/// server asking for 30 s was hit again after 5. Both forms are read now, and the
+/// date form is held to the same cap.
+#[test]
+fn retry_after_reads_the_http_date_form_too() {
+    let now = chrono::DateTime::parse_from_rfc2822("Fri, 23 Oct 2026 12:00:00 GMT")
+        .expect("fixed now")
+        .with_timezone(&chrono::Utc);
+    assert_eq!(parse_retry_after("30", now), Some(30));
+    assert_eq!(parse_retry_after(" 7 ", now), Some(7));
+    assert_eq!(
+        parse_retry_after("Fri, 23 Oct 2026 12:00:30 GMT", now),
+        Some(30)
+    );
+    assert_eq!(
+        parse_retry_after(
+            "Fri, 23 Oct 2026 12:00:30 GMT",
+            now + chrono::Duration::milliseconds(500)
+        ),
+        Some(30),
+        "a part second rounds up, so the retry never lands early"
+    );
+    assert_eq!(
+        parse_retry_after("Fri, 23 Oct 2026 11:59:00 GMT", now),
+        Some(0),
+        "a date already past means now"
+    );
+    assert_eq!(
+        parse_retry_after("Sat, 24 Oct 2026 12:00:00 GMT", now),
+        Some(MAX_RETRY_AFTER_SECS),
+        "a server-controlled date is capped like the seconds form"
+    );
+    assert_eq!(parse_retry_after("soon", now), None);
+}
+
+#[test]
+fn the_shared_pause_counts_down_to_none() {
+    let now = Instant::now();
+    assert_eq!(pause_remaining(None, now), None);
+    assert_eq!(
+        pause_remaining(Some(now + Duration::from_secs(2)), now),
+        Some(Duration::from_secs(2))
+    );
+    assert_eq!(pause_remaining(Some(now), now), None);
+    assert_eq!(
+        pause_remaining(Some(now), now + Duration::from_secs(1)),
+        None
+    );
+}
+
+/// A second 429 with a shorter `Retry-After` must not lift the wait the first one
+/// asked for, and the guarded clone a dispatch uses must see the same pause.
+#[test]
+fn a_later_429_never_shortens_the_pause_and_clones_share_it() {
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), "http://unused.invalid".into(), "t");
+    let client = NinjaApiClient::new(http, auth);
+    client.pause_until(Instant::now() + Duration::from_secs(60));
+    client.pause_until(Instant::now() + Duration::from_secs(1));
+    assert!(client.pause_left().expect("paused") > Duration::from_secs(50));
+
+    let guarded = client.with_send_guard(Arc::new(|| true));
+    assert!(
+        guarded
+            .pause_left()
+            .expect("the guarded clone is paused too")
+            > Duration::from_secs(50)
+    );
+}
+
+/// Fixed 2/4/8 s delays put every leg that failed together back on the wire
+/// together. The jitter only ever lengthens a delay, by at most a quarter.
+#[test]
+fn backoff_is_jittered_by_at_most_a_quarter() {
+    assert_eq!(jittered_backoff(1, 0.0), Duration::from_secs(2));
+    assert_eq!(
+        jittered_backoff(3, MAX_BACKOFF_JITTER),
+        Duration::from_secs(10)
+    );
+    for attempt in 1..=MAX_RETRIES {
+        let base = Duration::from_secs(2u64.pow(attempt as u32));
+        let samples: Vec<Duration> = (0..200).map(|_| backoff(attempt)).collect();
+        for d in &samples {
+            assert!(
+                *d >= base && *d <= base.mul_f64(1.0 + MAX_BACKOFF_JITTER),
+                "attempt {attempt}: {d:?}"
+            );
+        }
+        assert!(
+            samples.iter().any(|d| *d != samples[0]),
+            "attempt {attempt}: 200 identical delays are not jitter"
+        );
+    }
+    for _ in 0..200 {
+        assert!(rate_limit_jitter() <= Duration::from_millis(MAX_RATE_LIMIT_JITTER_MS));
+    }
+}
+
+/// Answers `first` to the first request and `rest` to every later one, noting
+/// when each arrived.
+struct Arrivals {
+    at: Arc<Mutex<Vec<Instant>>>,
+    first: wiremock::ResponseTemplate,
+    rest: wiremock::ResponseTemplate,
+}
+
+impl wiremock::Respond for Arrivals {
+    fn respond(&self, _: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let mut at = self.at.lock().expect("arrivals");
+        at.push(Instant::now());
+        if at.len() == 1 {
+            self.first.clone()
+        } else {
+            self.rest.clone()
+        }
+    }
+}
+
+/// Waits until a 429 on `client` (or any clone) has set the shared pause.
+async fn until_paused(client: &NinjaApiClient) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.pause_left().is_none() {
+        assert!(Instant::now() < deadline, "no 429 ever paused the client");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A 429 is the tenant's rate limit, but only the request that drew it used to
+/// wait while every other leg kept sending. A request started on a clone during
+/// the pause — here the guarded clone a dispatch uses — must not reach the server
+/// until the pause is over.
+#[tokio::test]
+async fn a_429_pauses_every_request_the_client_sends() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let a_hits = Arc::new(Mutex::new(Vec::new()));
+    let b_hits = Arc::new(Mutex::new(Vec::new()));
+    let ok = ResponseTemplate::new(200).set_body_json(json!({}));
+    Mock::given(method("GET"))
+        .and(path("/api/v2/a"))
+        .respond_with(Arrivals {
+            at: Arc::clone(&a_hits),
+            first: ResponseTemplate::new(429).insert_header("Retry-After", "1"),
+            rest: ok.clone(),
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/b"))
+        .respond_with(Arrivals {
+            at: Arc::clone(&b_hits),
+            first: ok.clone(),
+            rest: ok,
+        })
+        .mount(&server)
+        .await;
+
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let client = NinjaApiClient::new(http, auth);
+    let a = {
+        let client = client.clone();
+        tokio::spawn(async move { client.get_json::<Value>("/a", &[]).await })
+    };
+    until_paused(&client).await;
+    client
+        .with_send_guard(Arc::new(|| true))
+        .get_json::<Value>("/b", &[])
+        .await
+        .expect("B goes through once the pause is over");
+    a.await
+        .expect("join")
+        .expect("A is retried through to success");
+
+    let a_hits = a_hits.lock().expect("arrivals").clone();
+    let b_first = b_hits.lock().expect("arrivals")[0];
+    assert_eq!(a_hits.len(), 2, "A: the 429, then the retry");
+    assert!(
+        b_first.duration_since(a_hits[0]) >= Duration::from_secs(1),
+        "B reached the server {:?} after A's 429, inside the 1 s it asked for",
+        b_first.duration_since(a_hits[0])
+    );
+    assert!(a_hits[1].duration_since(a_hits[0]) >= Duration::from_secs(1));
+}
+
 /// A resolver that never answers, so the connect budget runs out without any
 /// network: an unroutable address can fail fast with "network unreachable" on a
 /// CI runner instead of timing out, which would test nothing.
