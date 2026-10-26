@@ -9,7 +9,10 @@ use serde_json::value::RawValue;
 use std::collections::HashSet;
 use tracing::{info, warn};
 
-use super::{CursorReplayUnsafe, NinjaApiClient, ReplaySafety, is_cursor_replay_unsafe};
+use super::{
+    CursorReplayUnsafe, NinjaApiClient, ReplaySafety, cursor_page_may_be_unserved,
+    is_cursor_replay_unsafe,
+};
 use crate::error::truncate_body;
 use crate::model::{Device, DeviceHealth, Location, Organization, Patch, Role};
 
@@ -55,19 +58,36 @@ const MAX_PAGES: u32 = 10_000;
 /// with `400 Invalid cursor.`, failing the query, and a third-party feed's re-read
 /// carried on but ended 6,959 rows short of its count.
 ///
-/// **A cursor page whose response was lost** — a timeout, a 5xx, a 2xx whose body
-/// could not be read ([`CursorReplayUnsafe`]). The request may have reached the
-/// backend, which keeps the scan's position keyed by the cursor's stable name, so
-/// re-sending that name is answered with the page *after* the lost one: up to
-/// `pageSize` rows gone per retry, with nothing but the end-of-scan shortfall
-/// warning to show for it.
+/// **A cursor page whose response was lost**, when re-reading it cannot help or did
+/// not: a 2xx whose body could not be read (NinjaOne served that page, so a re-read
+/// gets the next one), a re-read that failed, a re-read scan that ended off its
+/// count, or one lost page more than [`PAGE_REREADS`] allows.
 ///
 /// Either way the rows already paged are dropped — nothing says which of them the
 /// new cursor would serve again — and a scan that spends the budget fails like the
 /// other stalls. The delay is fixed rather than exponential: the empty page has so
 /// far only ever been the second one, so a restart costs one page plus this pause.
+/// A re-read waits it out too.
 pub(super) const SCAN_RESTARTS: u8 = 2;
 const SCAN_RESTART_DELAY: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// How many lost cursor pages one fetch asks for again in place before a lost page
+/// starts the scan over instead.
+///
+/// A timeout or a 5xx may have been lost before NinjaOne served the page, or after.
+/// The backend keeps the scan's position under the cursor's stable name, so in the
+/// second case the re-read is answered with the *next* page, and the forward-progress
+/// guards cannot tell. The cursor's `count` can: every complete scan in the field has
+/// ended at exactly its count, so a scan that re-read a page must too, or it starts
+/// over. Without an announced count there is nothing to check against, and the page
+/// restarts the scan as before.
+///
+/// Restarting on every lost page made large fetches fail. On 2026-10-26 the
+/// 563,255-row software feed (113 pages) lost a page to the 45 s timeout every 19–85
+/// pages for half an hour, and each loss threw away everything paged so far, so the
+/// third loss in one fetch failed the query. At that rate a scan meets one to three
+/// losses; four leaves headroom and still bounds a server that loses every page.
+pub(super) const PAGE_REREADS: u8 = 4;
 
 /// The envelope branch's place in one scan: everything a restart throws away.
 #[derive(Default)]
@@ -82,6 +102,12 @@ struct CursorScan {
     /// endpoint announces one. It is what lets an empty page be told apart from
     /// the end of the feed — see [`SCAN_RESTARTS`].
     announced_total: Option<usize>,
+    /// The request in flight re-sends a cursor whose page was lost, so losing it
+    /// again starts the scan over rather than re-reading it once more.
+    rereading: bool,
+    /// This scan re-read a lost page, so it stands only if it ends at exactly
+    /// `announced_total` — see [`PAGE_REREADS`].
+    reread: bool,
 }
 
 /// Throws away a broken cursor scan so the loop can open a fresh one, after
@@ -147,12 +173,37 @@ impl NinjaApiClient {
             .send_with_retry(Method::GET, path, query, None, replay)
             .await?;
         match decode_page(resp).await {
-            Err(err) if replay == ReplaySafety::CursorPage => Err(err.context(CursorReplayUnsafe(
-                "NinjaOne answered the cursor page but it could not be read".into(),
-            ))),
+            Err(err) if replay == ReplaySafety::CursorPage => {
+                Err(err.context(CursorReplayUnsafe {
+                    why: "NinjaOne answered the cursor page but it could not be read".into(),
+                    served: true,
+                }))
+            }
             other => other,
         }
     }
+    /// How many rows a `/queries/*` feed holds for `base_query`, read off a one-row
+    /// page: the cursor's announced `count`, or the rows on that page when it is the
+    /// only one. `None` when the answer carries neither.
+    pub(super) async fn feed_size(
+        &self,
+        path: &str,
+        base_query: &[(&str, String)],
+    ) -> Result<Option<usize>> {
+        let mut query = base_query.to_vec();
+        query.push(("pageSize", "1".to_string()));
+        let body = self
+            .request_page::<serde::de::IgnoredAny>(path, &query, ReplaySafety::Idempotent)
+            .await?;
+        Ok(match body {
+            PageBody::Envelope { results, cursor } => cursor_count(cursor.as_ref()).or_else(|| {
+                matches!(next_cursor(cursor.as_ref()), Ok(None)).then_some(results.len())
+            }),
+            PageBody::Empty => Some(0),
+            PageBody::Array(_) => None,
+        })
+    }
+
     /// Cursor-paginated GET covering NinjaOne's two pagination styles. The
     /// `/queries/*` endpoints return a `{ results, cursor }` envelope (cursor is a
     /// bare string or a `{ name, offset, ... }` object, fed back as `cursor`); the
@@ -198,6 +249,7 @@ impl NinjaApiClient {
         let started = std::time::Instant::now();
         // Counted across the whole fetch, not per scan, like `pages`.
         let mut restarts: u8 = 0;
+        let mut rereads: u8 = 0;
 
         loop {
             let mut query: Vec<(&str, String)> = base_query.to_vec();
@@ -227,10 +279,40 @@ impl NinjaApiClient {
             } else {
                 ReplaySafety::Idempotent
             };
+            // Taken as the request goes out, so a re-read is tried once.
+            let rereading = std::mem::take(&mut scan.rereading);
             let body = match self.request_page::<T>(path, &query, replay).await {
                 Ok(body) => body,
-                Err(err) if is_cursor_replay_unsafe(&err) => {
-                    let reason = format!("cursor page lost: {err:#}");
+                // A page that may never have been served is asked for again, once,
+                // where the count can later show whether it was the page we lost.
+                Err(err)
+                    if !rereading
+                        && rereads < PAGE_REREADS
+                        && scan.announced_total.is_some()
+                        && cursor_page_may_be_unserved(&err) =>
+                {
+                    rereads += 1;
+                    let reason = format!("{err:#}");
+                    warn!(
+                        path,
+                        rows = all.len(),
+                        reread = rereads,
+                        reason = reason.as_str(),
+                        "re-reading a lost cursor page"
+                    );
+                    scan.rereading = true;
+                    scan.reread = true;
+                    tokio::time::sleep(SCAN_RESTART_DELAY).await;
+                    continue;
+                }
+                // Any failure of a re-read restarts the scan, a refusal included:
+                // the field has answered a re-sent cursor with `400 Invalid cursor.`
+                Err(err) if rereading || is_cursor_replay_unsafe(&err) => {
+                    let reason = if rereading {
+                        format!("re-reading the lost cursor page failed: {err:#}")
+                    } else {
+                        format!("cursor page lost: {err:#}")
+                    };
                     if restart_scan(
                         path,
                         &reason,
@@ -252,7 +334,7 @@ impl NinjaApiClient {
                 }
                 Err(err) => return Err(err),
             };
-            match body {
+            let exit = match body {
                 PageBody::Array(items) => {
                     let len = items.len();
                     let mut max_id = after;
@@ -277,29 +359,26 @@ impl NinjaApiClient {
                     // the largest id seen; stop if it can't move forward (no id, or
                     // no new rows) so a misbehaving endpoint can't loop forever.
                     if len < page_size as usize {
-                        info!(
-                            path,
-                            rows = all.len(),
-                            pages,
-                            elapsed_s = started.elapsed().as_secs(),
-                            exit = "short page",
-                            "paged"
-                        );
-                        return Ok(all);
-                    }
-                    match max_id {
-                        Some(id) if Some(id) != after => after = Some(id),
-                        // A *full* page that cannot move the `after` cursor — no ids
-                        // on the rows, or none newer than the ones already seen — is
-                        // a stalled scan, not the end of one. Reported rather than
-                        // returned: `all` holds a partial fleet here, and handing it
-                        // back as `Ok` is what makes an undercount invisible.
-                        _ => bail!(
-                            "{path} returned a full page of {len} rows that did not advance the \
-                             `after` cursor; stopping at {} rows rather than reporting a partial \
-                             fleet as complete",
-                            all.len()
-                        ),
+                        "short page"
+                    } else {
+                        match max_id {
+                            Some(id) if Some(id) != after => {
+                                after = Some(id);
+                                continue;
+                            }
+                            // A *full* page that cannot move the `after` cursor — no
+                            // ids on the rows, or none newer than the ones already
+                            // seen — is a stalled scan, not the end of one. Reported
+                            // rather than returned: `all` holds a partial fleet here,
+                            // and handing it back as `Ok` is what makes an undercount
+                            // invisible.
+                            _ => bail!(
+                                "{path} returned a full page of {len} rows that did not advance \
+                                 the `after` cursor; stopping at {} rows rather than reporting a \
+                                 partial fleet as complete",
+                                all.len()
+                            ),
+                        }
                     }
                 }
                 PageBody::Envelope {
@@ -315,6 +394,18 @@ impl NinjaApiClient {
                     if scan.announced_total.is_none() {
                         scan.announced_total = cursor_count(next.as_ref());
                         log_cursor_opened(path, page_len, next.as_ref());
+                    }
+                    if rereading {
+                        // Whether NinjaOne answered with the lost page or the one after
+                        // it shows in the offsets; the count check below acts on it.
+                        info!(
+                            path,
+                            rows = all.len(),
+                            page_rows = page_len,
+                            sent_offset = ?scan.cursor.as_ref().and_then(|c| c.offset),
+                            next_offset = ?next.as_ref().and_then(|c| c.get("offset")),
+                            "re-read a lost cursor page"
+                        );
                     }
                     // No rows on this page means the cursor is exhausted even if the
                     // server echoes a stale token — stop to avoid a loop. Checked
@@ -349,88 +440,105 @@ impl NinjaApiClient {
                                 all.len()
                             );
                         }
-                        info!(
-                            path,
-                            rows = all.len(),
-                            pages,
-                            elapsed_s = started.elapsed().as_secs(),
-                            exit = "empty page",
-                            "paged"
-                        );
-                        return Ok(all);
-                    }
-                    match next_cursor(next.as_ref())? {
-                        // Forward progress is required here for the same reason the
-                        // `after` branch above requires it: an endpoint that echoes
-                        // the cursor it was handed alongside a *full* page would
-                        // otherwise loop forever, re-fetching the same rows and
-                        // growing `all` without bound. The array branch was hardened
-                        // against exactly this; the envelope branch stopped only on
-                        // an empty page.
-                        //
-                        // Compared as a whole rather than by `name`: NinjaOne's cursor
-                        // is a stable handle plus an advancing `offset`, so matching on
-                        // the name alone read an advancing scan as a stalled one and
-                        // cut every feed off after its second page. See [`PageCursor`].
-                        Some(c) if Some(&c) == scan.cursor.as_ref() => bail!(
-                            "{path} returned a full page of {page_len} rows alongside the very \
-                             cursor it was handed ({c:?}); stopping at {} rows rather than \
-                             reporting a partial fleet as complete",
-                            all.len()
-                        ),
-                        // The same stall one step removed: a cursor this scan already
-                        // visited re-fetches rows already in `all`, and then cycles.
-                        Some(c) if scan.seen.contains(&c) => bail!(
-                            "{path} returned a cursor it had already handed out on an earlier \
-                             page ({c:?}); stopping at {} rows rather than reporting a partial \
-                             fleet as complete",
-                            all.len()
-                        ),
-                        Some(c) => {
-                            scan.seen.insert(c.clone());
-                            scan.cursor = Some(c);
-                        }
-                        None => {
-                            // A warning, not an error: the count was taken when the
-                            // scan opened, and on a live tenant a patch installed
-                            // mid-scan leaves the feed one row shorter than announced.
-                            // The server ending the scan under a terminal cursor is
-                            // its own statement that this is the end; the shortfall
-                            // is recorded so a real undercount is visible in the log.
-                            if let Some(total) = scan.announced_total
-                                && all.len() < total
-                            {
-                                warn!(
-                                    path,
-                                    rows = all.len(),
-                                    total,
-                                    "cursor exhausted short of the announced count"
-                                );
+                        "empty page"
+                    } else {
+                        match next_cursor(next.as_ref())? {
+                            // Forward progress is required here for the same reason the
+                            // `after` branch above requires it: an endpoint that echoes
+                            // the cursor it was handed alongside a *full* page would
+                            // otherwise loop forever, re-fetching the same rows and
+                            // growing `all` without bound. The array branch was hardened
+                            // against exactly this; the envelope branch stopped only on
+                            // an empty page.
+                            //
+                            // Compared as a whole rather than by `name`: NinjaOne's cursor
+                            // is a stable handle plus an advancing `offset`, so matching on
+                            // the name alone read an advancing scan as a stalled one and
+                            // cut every feed off after its second page. See [`PageCursor`].
+                            Some(c) if Some(&c) == scan.cursor.as_ref() => bail!(
+                                "{path} returned a full page of {page_len} rows alongside the very \
+                                 cursor it was handed ({c:?}); stopping at {} rows rather than \
+                                 reporting a partial fleet as complete",
+                                all.len()
+                            ),
+                            // The same stall one step removed: a cursor this scan already
+                            // visited re-fetches rows already in `all`, and then cycles.
+                            Some(c) if scan.seen.contains(&c) => bail!(
+                                "{path} returned a cursor it had already handed out on an earlier \
+                                 page ({c:?}); stopping at {} rows rather than reporting a partial \
+                                 fleet as complete",
+                                all.len()
+                            ),
+                            Some(c) => {
+                                scan.seen.insert(c.clone());
+                                scan.cursor = Some(c);
+                                continue;
                             }
-                            info!(
-                                path,
-                                rows = all.len(),
-                                pages,
-                                elapsed_s = started.elapsed().as_secs(),
-                                exit = "cursor exhausted",
-                                "paged"
-                            );
-                            return Ok(all);
+                            None => {
+                                // A warning, not an error: the count was taken when the
+                                // scan opened, and on a live tenant a patch installed
+                                // mid-scan leaves the feed one row shorter than announced.
+                                // The server ending the scan under a terminal cursor is
+                                // its own statement that this is the end; the shortfall
+                                // is recorded so a real undercount is visible in the log.
+                                // A re-read scan is held to its count below instead.
+                                if let Some(total) = scan.announced_total
+                                    && all.len() < total
+                                    && !scan.reread
+                                {
+                                    warn!(
+                                        path,
+                                        rows = all.len(),
+                                        total,
+                                        "cursor exhausted short of the announced count"
+                                    );
+                                }
+                                "cursor exhausted"
+                            }
                         }
                     }
                 }
-                PageBody::Empty => {
-                    info!(
-                        path,
-                        rows = all.len(),
-                        pages,
-                        elapsed_s = started.elapsed().as_secs(),
-                        exit = "empty body",
-                        "paged"
-                    );
-                    return Ok(all);
+                PageBody::Empty => "empty body",
+            };
+            // Every end of a scan passes here, so a re-read scan cannot slip out short
+            // (or long) of its count through any of them. Off by any amount is a
+            // restart: the page a re-read skips is a whole page of rows.
+            if scan.reread
+                && let Some(total) = scan.announced_total
+                && all.len() != total
+            {
+                let reason = format!(
+                    "the scan re-read a lost page and ended at {} of its {total} rows",
+                    all.len()
+                );
+                if restart_scan(
+                    path,
+                    &reason,
+                    &mut all,
+                    &mut scan,
+                    &mut restarts,
+                    on_progress,
+                )
+                .await
+                {
+                    continue;
                 }
+                bail!(
+                    "{path} re-read a lost page and ended at {} of the {total} rows its cursor \
+                     announced, after starting the scan over {SCAN_RESTARTS} times; stopping \
+                     rather than reporting a partial fleet as complete",
+                    all.len()
+                );
             }
+            info!(
+                path,
+                rows = all.len(),
+                pages,
+                elapsed_s = started.elapsed().as_secs(),
+                exit,
+                "paged"
+            );
+            return Ok(all);
         }
     }
 }

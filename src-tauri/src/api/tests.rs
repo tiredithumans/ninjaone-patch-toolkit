@@ -65,17 +65,31 @@ fn a_cursor_page_is_not_retried_on_a_5xx_but_is_on_a_rejection() {
     );
 }
 
-/// The pagination loop restarts a scan on the typed marker, so it has to survive
-/// the context `request_page` and its callers layer on top.
+/// The pagination loop re-reads or restarts a scan on the typed marker, so it has
+/// to survive the context `request_page` and its callers layer on top — and so does
+/// whether the page was served, which decides between the two.
 #[test]
 fn the_cursor_replay_marker_survives_added_context() {
-    let wrapped = anyhow::Error::new(std::io::Error::other("timed out"))
-        .context(CursorReplayUnsafe("the cursor page timed out".into()))
-        .context("software patches");
-    assert!(is_cursor_replay_unsafe(&wrapped), "{wrapped:#}");
-    assert!(!is_cursor_replay_unsafe(&anyhow::anyhow!(
-        "400 Invalid cursor."
-    )));
+    let lost = |served| {
+        anyhow::Error::new(std::io::Error::other("timed out"))
+            .context(CursorReplayUnsafe {
+                why: "the cursor page timed out".into(),
+                served,
+            })
+            .context("software patches")
+    };
+    let unserved = lost(false);
+    assert!(is_cursor_replay_unsafe(&unserved), "{unserved:#}");
+    assert!(cursor_page_may_be_unserved(&unserved), "{unserved:#}");
+    let served = lost(true);
+    assert!(is_cursor_replay_unsafe(&served), "{served:#}");
+    assert!(
+        !cursor_page_may_be_unserved(&served),
+        "a served page is never re-read"
+    );
+    let refused = anyhow::anyhow!("400 Invalid cursor.");
+    assert!(!is_cursor_replay_unsafe(&refused));
+    assert!(!cursor_page_may_be_unserved(&refused));
 }
 
 #[test]
@@ -1317,66 +1331,6 @@ async fn get_timeout_is_replayed() {
     );
 }
 
-/// A gateway 502 partway through a long reporting pull must not fail the whole
-/// fetch — but it must not re-send the cursor either. NinjaOne keeps the scan's
-/// position server-side under the cursor's stable name, so a gateway that failed
-/// after the backend advanced it would answer the replay with the next page. This
-/// test used to pass with a replay only because its cursor changed name per page,
-/// which the real one never does; the scan now starts over instead.
-#[tokio::test]
-async fn a_5xx_on_a_cursor_page_restarts_the_scan_instead_of_replaying_the_cursor() {
-    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    let server = MockServer::start().await;
-
-    // Every scan opens with one row and a live cursor.
-    Mock::given(method("GET"))
-        .and(path("/api/v2/queries/os-patches"))
-        .and(query_param_is_missing("cursor"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "results": [{ "id": 1, "kbNumber": "KB1" }],
-            "cursor": { "name": "scan", "offset": 1, "count": 2 }
-        })))
-        .mount(&server)
-        .await;
-
-    // The first scan's cursor page fails once with a 502.
-    Mock::given(method("GET"))
-        .and(path("/api/v2/queries/os-patches"))
-        .and(query_param("cursor", "scan"))
-        .respond_with(ResponseTemplate::new(502))
-        .up_to_n_times(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/queries/os-patches"))
-        .and(query_param("cursor", "scan"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "results": [{ "id": 2, "kbNumber": "KB2" }],
-            "cursor": { "name": "", "offset": 2, "count": 2 }
-        })))
-        .mount(&server)
-        .await;
-
-    let http = reqwest::Client::new();
-    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
-    let patches = NinjaApiClient::new(http, auth)
-        .fleet_os_patches(None, None, None)
-        .await
-        .expect("a transient 502 must not fail the whole fetch");
-    assert_eq!(
-        patches.len(),
-        2,
-        "the restarted scan's rows only, each once"
-    );
-    assert_eq!(
-        request_cursors(&server).await,
-        [None, Some("scan".into()), None, Some("scan".into())],
-        "the 502 is followed by a fresh scan, not a replay of the cursor"
-    );
-}
-
 /// The request that opens a scan carries no cursor, so there is no server-side
 /// position for a replay to skip past: a 5xx there is retried in place as before.
 #[tokio::test]
@@ -1632,7 +1586,8 @@ fn assert_redirect_named(err: &str, origin: &str) {
 
 /// A scripted `/queries/*` server: one response per request, in order, so a test
 /// can state exactly which pages a scan was handed. The row is a software patch
-/// built from the vendor's keys; only its count per page matters here.
+/// built from the vendor's keys; only its count per page matters here. A bare
+/// number in the script is answered as that status with no body.
 struct ScriptedPages {
     pages: Vec<serde_json::Value>,
     served: std::sync::atomic::AtomicUsize,
@@ -1653,6 +1608,9 @@ impl wiremock::Respond for ScriptedPages {
             .served
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.pages.get(n) {
+            Some(serde_json::Value::Number(status)) => {
+                wiremock::ResponseTemplate::new(status.as_u64().expect("a status") as u16)
+            }
             Some(body) => wiremock::ResponseTemplate::new(200).set_body_json(body),
             // Past the script: a loop that keeps asking fails loudly here rather
             // than hanging the test.
@@ -1774,6 +1732,95 @@ async fn an_exhausted_cursor_short_of_the_count_is_a_warning_not_an_error() {
     assert_eq!(result.expect("the server ended the scan").len(), 2);
 }
 
+/// A gateway 502 partway through a long reporting pull must not fail the whole
+/// fetch, nor throw away the pages already in hand: the backend may never have
+/// served the page, so it is asked for again. The scan ending at exactly its
+/// announced count is what proves the re-read returned the lost page rather than
+/// the one after it.
+#[tokio::test]
+async fn a_lost_cursor_page_is_re_read_and_kept_when_the_scan_ends_at_its_count() {
+    let (result, cursors) = scan_software(vec![
+        json!({ "results": rows(2), "cursor": { "name": "scan", "offset": 2, "count": 3 } }),
+        json!(502),
+        json!({ "results": rows(1), "cursor": { "name": "", "offset": 3, "count": 3 } }),
+    ])
+    .await;
+    assert_eq!(result.expect("the re-read completes the scan").len(), 3);
+    assert_eq!(
+        cursors,
+        [None, Some("scan".into()), Some("scan".into())],
+        "the lost page is asked for again under the same cursor, not by a fresh scan"
+    );
+}
+
+/// With no announced count nothing could show a skipped page, so a lost page
+/// starts the scan over as it always did.
+#[tokio::test]
+async fn a_lost_cursor_page_without_an_announced_count_restarts_the_scan() {
+    let (result, cursors) = scan_software(vec![
+        json!({ "results": rows(2), "cursor": "scan" }),
+        json!(502),
+        json!({ "results": rows(3), "cursor": null }),
+    ])
+    .await;
+    assert_eq!(result.expect("the restarted scan completes").len(), 3);
+    assert_eq!(cursors, [None, Some("scan".into()), None]);
+}
+
+/// A re-read is tried once. The field has refused a re-sent cursor with
+/// `400 Invalid cursor.`, which would otherwise fail the query; it starts the scan
+/// over instead, as does losing the re-read itself.
+#[tokio::test]
+async fn a_re_read_that_fails_restarts_the_scan() {
+    for refusal in [400, 502] {
+        let (result, cursors) = scan_software(vec![
+            json!({ "results": rows(2), "cursor": { "name": "scan", "offset": 2, "count": 3 } }),
+            json!(502),
+            json!(refusal),
+            json!({ "results": rows(3), "cursor": { "name": "", "offset": 3, "count": 3 } }),
+        ])
+        .await;
+        assert_eq!(
+            result.expect("the restarted scan completes").len(),
+            3,
+            "re-read answered {refusal}"
+        );
+        assert_eq!(
+            cursors,
+            [None, Some("scan".into()), Some("scan".into()), None],
+            "re-read answered {refusal}"
+        );
+    }
+}
+
+/// Re-reads are counted across the whole fetch: past [`PAGE_REREADS`] a lost page
+/// starts the scan over, so a server that loses page after page still ends.
+#[tokio::test]
+async fn re_reads_are_capped_per_fetch() {
+    let rereads = usize::from(PAGE_REREADS);
+    let count = rereads + 2;
+    let cursor = |offset: usize| json!({ "name": "scan", "offset": offset, "count": count });
+    let mut pages = vec![json!({ "results": rows(1), "cursor": cursor(1) })];
+    for n in 0..rereads {
+        pages.push(json!(502));
+        pages.push(json!({ "results": rows(1), "cursor": cursor(n + 2) }));
+    }
+    pages.push(json!(502));
+    pages.push(json!({
+        "results": rows(count),
+        "cursor": { "name": "", "offset": count, "count": count },
+    }));
+    let (result, cursors) = scan_software(pages).await;
+    assert_eq!(result.expect("the restarted scan completes").len(), count);
+    let mut expected = vec![None];
+    expected.extend(std::iter::repeat_n(
+        Some("scan".to_string()),
+        2 * rereads + 1,
+    ));
+    expected.push(None);
+    assert_eq!(cursors, expected);
+}
+
 #[test]
 fn cursor_count_reads_only_a_non_negative_integer() {
     assert_eq!(cursor_count(Some(&json!({ "count": 6721 }))), Some(6721));
@@ -1800,15 +1847,17 @@ const LIVE_COUNT: i64 = 6;
 /// stable cursor name, the way NinjaOne does. A request with no `cursor` opens scan
 /// N (`scan-N`, `count` 6) and serves its first two rows; every cursor request
 /// serves the next two and advances the offset *before* answering. The first cursor
-/// request of a scan advances like any other, but its response is lost — on the
-/// first scan only, or on every scan — so re-sending that cursor is answered with
-/// the page after the lost one.
+/// request of a scan has its response lost — on the first scan only, or on every
+/// scan. When `lost_page_served`, that request advanced the scan like any other, so
+/// re-sending its cursor is answered with the page after the lost one; otherwise
+/// it never reached the backend, and a re-send gets the lost page.
 ///
 /// [`ScriptedPages`] cannot show the bug: it answers by request count, not by
 /// where the scan stands, so a replay there gets the very page that was lost.
 struct LiveScan {
     lost: LostPage,
     every_scan: bool,
+    lost_page_served: bool,
     state: std::sync::Mutex<LiveScanState>,
 }
 
@@ -1855,6 +1904,9 @@ impl wiremock::Respond for LiveScan {
         if s.cursor_pages != 1 || !(self.every_scan || s.scans == 1) {
             return page;
         }
+        if !self.lost_page_served {
+            s.offset = start;
+        }
         match self.lost {
             LostPage::TimedOut => page.set_delay(Duration::from_secs(5)),
             LostPage::Status(code) => wiremock::ResponseTemplate::new(code),
@@ -1884,6 +1936,7 @@ async fn request_cursors(server: &wiremock::MockServer) -> Vec<Option<String>> {
 async fn scan_live(
     lost: LostPage,
     every_scan: bool,
+    lost_page_served: bool,
 ) -> (Result<Vec<Option<i64>>>, Vec<Option<String>>) {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer};
@@ -1894,6 +1947,7 @@ async fn scan_live(
         .respond_with(LiveScan {
             lost,
             every_scan,
+            lost_page_served,
             state: Default::default(),
         })
         .mount(&server)
@@ -1905,39 +1959,13 @@ async fn scan_live(
     (result, request_cursors(&server).await)
 }
 
-/// The cursor page's request reached NinjaOne, which advanced the scan, and then
-/// the response was lost to the client's timeout. Re-sending the stable cursor name
-/// is answered with the *next* page, so the lost page's rows — up to a whole
-/// `pageSize` of them per retry — vanish without an error, and the shortfall only
-/// shows as a warning at the end. The scan starts over instead.
+/// The field case: a cursor page timed out before NinjaOne served it. Re-sending
+/// the cursor is answered with the lost page, and the scan keeps every page it had.
 #[tokio::test]
-async fn a_lost_cursor_response_restarts_the_scan_instead_of_skipping_a_page() {
-    let (result, cursors) = scan_live(LostPage::TimedOut, false).await;
+async fn a_timed_out_cursor_page_the_server_never_served_is_re_read_in_place() {
+    let (result, cursors) = scan_live(LostPage::TimedOut, false, false).await;
     assert_eq!(
-        result.expect("the restarted scan completes"),
-        (0..LIVE_COUNT).map(Some).collect::<Vec<_>>(),
-        "every row exactly once; a replayed cursor skips the lost page"
-    );
-    assert_eq!(
-        cursors,
-        [
-            None,
-            Some("scan-1".into()),
-            None,
-            Some("scan-2".into()),
-            Some("scan-2".into())
-        ],
-        "the request after the lost page opens a new scan instead of re-sending the cursor"
-    );
-}
-
-/// The same loss through a gateway: the backend advanced the scan and the 502 came
-/// from in front of it.
-#[tokio::test]
-async fn a_5xx_cursor_response_restarts_the_scan_instead_of_skipping_a_page() {
-    let (result, cursors) = scan_live(LostPage::Status(502), false).await;
-    assert_eq!(
-        result.expect("the restarted scan completes"),
+        result.expect("the re-read completes the scan"),
         (0..LIVE_COUNT).map(Some).collect::<Vec<_>>()
     );
     assert_eq!(
@@ -1945,11 +1973,39 @@ async fn a_5xx_cursor_response_restarts_the_scan_instead_of_skipping_a_page() {
         [
             None,
             Some("scan-1".into()),
-            None,
-            Some("scan-2".into()),
-            Some("scan-2".into())
-        ]
+            Some("scan-1".into()),
+            Some("scan-1".into())
+        ],
+        "no fresh scan: the re-read returned the lost page"
     );
+}
+
+/// The cursor page's request reached NinjaOne, which advanced the scan, and then
+/// the response was lost to the client's timeout. Re-sending the stable cursor name
+/// is answered with the *next* page, which the forward-progress guards cannot see;
+/// the scan ending short of its announced count does, and it starts over.
+#[tokio::test]
+async fn a_re_read_that_skipped_the_lost_page_restarts_the_scan() {
+    for lost in [LostPage::TimedOut, LostPage::Status(502)] {
+        let (result, cursors) = scan_live(lost, false, true).await;
+        assert_eq!(
+            result.expect("the restarted scan completes"),
+            (0..LIVE_COUNT).map(Some).collect::<Vec<_>>(),
+            "every row exactly once; the skipped page's scan is dropped"
+        );
+        assert_eq!(
+            cursors,
+            [
+                None,
+                Some("scan-1".into()),
+                Some("scan-1".into()),
+                None,
+                Some("scan-2".into()),
+                Some("scan-2".into())
+            ],
+            "the re-read scan ends short of its count, so a fresh scan replaces it"
+        );
+    }
 }
 
 /// A 2xx whose body cannot be read has still moved the scan on server-side, so it
@@ -1970,11 +2026,12 @@ async fn an_unreadable_cursor_page_restarts_the_scan() {
     );
 }
 
-/// A scan that loses a cursor page every time it is opened spends the shared
-/// restart budget and is reported like the other stalls, not returned short.
+/// A scan that loses a cursor page every time it is opened — and whose re-read
+/// skips past it — spends the shared restart budget and is reported like the other
+/// stalls, not returned short.
 #[tokio::test]
 async fn a_cursor_page_lost_on_every_scan_is_an_error_after_the_restart_budget() {
-    let (result, cursors) = scan_live(LostPage::TimedOut, true).await;
+    let (result, cursors) = scan_live(LostPage::TimedOut, true, true).await;
     let err = result.expect_err("a scan that never completes must be reported");
     assert!(
         err.to_string().contains(&format!(
@@ -1986,8 +2043,258 @@ async fn a_cursor_page_lost_on_every_scan_is_an_error_after_the_restart_budget()
     assert_eq!(
         cursors,
         (1..=scans)
-            .flat_map(|n| [None, Some(format!("scan-{n}"))])
+            .flat_map(|n| [None, Some(format!("scan-{n}")), Some(format!("scan-{n}"))])
             .collect::<Vec<_>>(),
-        "each lost page is followed by a fresh scan, never a replay"
+        "each scan re-reads its lost page once, ends short, and starts over"
     );
+}
+
+/// A `/queries/software-patches` server over a fixed fleet of `(device, location)`
+/// rows. It honors `loc` in `df` — or, unless `honors_df`, drops it silently, the way
+/// NinjaOne drops a clause it does not honor — pages by `pageSize`, and announces
+/// each scan's `count`. With `drifts`, a filtered page loses its first row, as a
+/// device moving between locations mid-fetch would.
+struct LocationFeed {
+    rows: Vec<(i64, i64)>,
+    honors_df: bool,
+    drifts: bool,
+}
+
+impl wiremock::Respond for LocationFeed {
+    fn respond(&self, req: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let param = |key: &str| {
+            req.url
+                .query_pairs()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.into_owned())
+        };
+        let df = param("df");
+        let page_size: usize = param("pageSize")
+            .expect("pageSize")
+            .parse()
+            .expect("a size");
+        let locations: Option<Vec<i64>> = df.as_deref().filter(|_| self.honors_df).map(|df| {
+            df.trim_start_matches("loc")
+                .trim_start_matches('=')
+                .trim_start_matches(" in (")
+                .trim_end_matches(')')
+                .split(',')
+                .map(|id| id.trim().parse().expect("a location id"))
+                .collect()
+        });
+        let mut rows: Vec<i64> = self
+            .rows
+            .iter()
+            .filter(|(_, loc)| locations.as_ref().is_none_or(|l| l.contains(loc)))
+            .map(|&(device, _)| device)
+            .collect();
+        if self.drifts && df.is_some() && page_size > 1 && !rows.is_empty() {
+            rows.remove(0);
+        }
+        let start: usize = param("cursor").map_or(0, |c| c.parse().expect("an offset"));
+        let end = (start + page_size).min(rows.len());
+        let results: Vec<_> = rows[start..end]
+            .iter()
+            .map(|&device| {
+                crate::model::software_patch_json(
+                    device,
+                    "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                    "7-Zip 24.09",
+                    "RECOMMENDED",
+                    "APPROVED",
+                )
+            })
+            .collect();
+        let name = if end < rows.len() {
+            end.to_string()
+        } else {
+            String::new()
+        };
+        wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "results": results,
+            "cursor": { "name": name, "offset": end, "count": rows.len() },
+        }))
+    }
+}
+
+/// What one request to a [`LocationFeed`] asked for.
+#[derive(Debug, PartialEq)]
+struct FeedRequest {
+    df: Option<String>,
+    page_size: String,
+}
+
+/// Fetches the third-party feed in slices of `inventory` from a [`LocationFeed`]
+/// over `feed`, and returns the device id of every row kept (sorted), the progress
+/// last reported, and every request the server saw.
+async fn scan_sliced(
+    inventory: &[(i64, i64)],
+    feed: LocationFeed,
+) -> (Vec<Option<i64>>, usize, Vec<FeedRequest>) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .respond_with(feed)
+        .mount(&server)
+        .await;
+    let devices: Vec<crate::model::Device> = inventory
+        .iter()
+        .map(|&(id, loc)| {
+            serde_json::from_value(json!({ "id": id, "locationId": loc })).expect("device")
+        })
+        .collect();
+    let last = std::sync::atomic::AtomicUsize::new(0);
+    let progress = |n: usize| last.store(n, std::sync::atomic::Ordering::SeqCst);
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let mut rows: Vec<_> = NinjaApiClient::new(http, auth)
+        .fleet_software_patches_sliced(&devices, Some(&progress))
+        .await
+        .expect("the fetch completes")
+        .iter()
+        .map(|p| p.device_id)
+        .collect();
+    rows.sort_unstable();
+    let requests = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|r| {
+            let param = |key: &str| {
+                r.url
+                    .query_pairs()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.into_owned())
+            };
+            FeedRequest {
+                df: param("df"),
+                page_size: param("pageSize").unwrap_or_default(),
+            }
+        })
+        .collect();
+    (rows, last.into_inner(), requests)
+}
+
+/// Six `(device, location)` pairs over three locations.
+const THREE_LOCATIONS: [(i64, i64); 6] = [(1, 10), (2, 10), (3, 20), (4, 20), (5, 30), (6, 30)];
+
+/// Two feed rows per device of [`THREE_LOCATIONS`].
+fn two_rows_each() -> Vec<(i64, i64)> {
+    THREE_LOCATIONS.iter().flat_map(|&d| [d, d]).collect()
+}
+
+fn requests_for(requests: &[FeedRequest], page_size: &str) -> Vec<Option<String>> {
+    let mut dfs: Vec<_> = requests
+        .iter()
+        .filter(|r| r.page_size == page_size)
+        .map(|r| r.df.clone())
+        .collect();
+    dfs.sort();
+    dfs
+}
+
+/// The slices are sized against the whole feed with one-row pages, then paged, and
+/// together they are the whole feed: every row once, the progress summed across
+/// them, and no whole-feed scan at all.
+#[tokio::test]
+async fn the_third_party_feed_is_paged_in_location_slices_that_add_up_to_it() {
+    let (kept, progress, requests) = scan_sliced(
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows: two_rows_each(),
+            honors_df: true,
+            drifts: false,
+        },
+    )
+    .await;
+    assert_eq!(kept, [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6].map(Some));
+    assert_eq!(
+        progress, 12,
+        "the slices' progress is reported as one total"
+    );
+    let slices = ["loc=10", "loc=20", "loc=30"].map(|df| Some(df.to_string()));
+    let sized: Vec<_> = std::iter::once(None).chain(slices.clone()).collect();
+    assert_eq!(
+        requests_for(&requests, "1"),
+        sized,
+        "each slice and the whole are sized"
+    );
+    assert_eq!(
+        requests_for(&requests, &REPORTING_PAGE_SIZE.to_string()),
+        slices,
+        "only the slices are paged"
+    );
+}
+
+/// NinjaOne drops a `df` clause it does not honor, so every slice would be the
+/// whole feed. The sizes give that away before any slice is paged, and the feed is
+/// paged whole instead — each row once, not once per slice.
+#[tokio::test]
+async fn slices_the_server_does_not_filter_are_never_paged() {
+    let (kept, progress, requests) = scan_sliced(
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows: two_rows_each(),
+            honors_df: false,
+            drifts: false,
+        },
+    )
+    .await;
+    assert_eq!(kept.len(), 12);
+    assert_eq!(progress, 12);
+    assert_eq!(
+        requests_for(&requests, &REPORTING_PAGE_SIZE.to_string()),
+        [None],
+        "one whole-feed scan, no slice scans"
+    );
+}
+
+/// Rows on a device the inventory does not list sit in no slice. The whole feed
+/// counts them and the slices do not, so the feed is paged whole and keeps them.
+#[tokio::test]
+async fn rows_no_slice_covers_page_the_feed_whole() {
+    let mut rows = two_rows_each();
+    rows.push((99, 40));
+    let (kept, _, requests) = scan_sliced(
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows,
+            honors_df: true,
+            drifts: false,
+        },
+    )
+    .await;
+    assert_eq!(kept.len(), 13);
+    assert!(
+        kept.contains(&Some(99)),
+        "the uncovered device's row is kept"
+    );
+    assert_eq!(
+        requests_for(&requests, &REPORTING_PAGE_SIZE.to_string()),
+        [None]
+    );
+}
+
+/// The slices sized up but paged short — a device moved between them mid-fetch. A
+/// total that no longer matches the whole feed's is not trusted; the feed is paged
+/// whole.
+#[tokio::test]
+async fn slices_that_page_a_different_total_page_the_feed_whole() {
+    let (kept, _, requests) = scan_sliced(
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows: two_rows_each(),
+            honors_df: true,
+            drifts: true,
+        },
+    )
+    .await;
+    assert_eq!(kept.len(), 12, "the whole feed, not the slices' 9 rows");
+    let mut paged = requests_for(&requests, &REPORTING_PAGE_SIZE.to_string());
+    paged.retain(Option::is_none);
+    assert_eq!(paged, [None], "the slices were paged, then the feed whole");
 }

@@ -11,6 +11,16 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Large patch queries are far less likely to fail when NinjaOne is slow to answer a page of the
+  third-party patch feed.
+
+### Changed
+
+- Queries that download the third-party patch feed fetch it in parallel parts, so they finish
+  faster on large fleets.
+
 ## [0.21.0] - 2026-10-23
 
 Fewer and safer NinjaOne requests: lost patch-feed pages are re-read instead of skipped, rate

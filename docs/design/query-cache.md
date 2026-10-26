@@ -248,7 +248,9 @@ compact — see [compliance.md](./compliance.md#changes-since-the-previous-compa
 
 ## Whole-fleet prefetch + client-side scoping
 
-The device inventory and current patches (OS + 3rd-party) are fetched **whole-fleet** (no `df`)
+The device inventory and current patches (OS + 3rd-party) are fetched **whole-fleet** (no `df`;
+the third-party feed as location slices that must add up to it, see
+[api-client.md](./api-client.md#the-whole-fleet-third-party-feed-is-paged-in-location-slices-that-must-add-up-to-it))
 and cached in `AppState` (`fleet_devices_cache`, `DEVICE_TTL` ~15 min since devices change rarely;
 the current patches in `fleet_current_os` / `fleet_current_sw`, refreshed on `force_refresh` or
 past `CURRENT_PATCHES_TTL`). `run_query` then scopes them to the selected identity facets

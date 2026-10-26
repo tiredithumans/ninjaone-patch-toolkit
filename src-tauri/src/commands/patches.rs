@@ -227,7 +227,13 @@ pub async fn query_patches(
         &progress,
     )
     .await
-    .map_err(UiError::from)?;
+    // Logged as well as shown: the log is what gets pasted when the app runs on
+    // someone else's machine, and a fetch that failed used to leave no line at all.
+    .map_err(|err| {
+        let err = UiError::from(err);
+        tracing::warn!(qid, error = err.message.as_str(), "query failed");
+        err
+    })?;
 
     // Timed with the fetch and the assembly (logged in `run_query`): on a six-figure
     // feed the fetch takes tens of seconds, and without these three numbers side by

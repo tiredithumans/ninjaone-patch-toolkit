@@ -259,7 +259,7 @@ impl FilterParams {
 /// A single id keeps the `field = id` form rather than a one-element `in (…)`: it is
 /// the form that has always been sent, and the list form is only needed once there
 /// is more than one id to send.
-fn id_clause(field: &str, ids: &[i64]) -> Option<String> {
+pub(crate) fn id_clause(field: &str, ids: &[i64]) -> Option<String> {
     match ids {
         [] => None,
         [one] => Some(format!("{field}={one}")),

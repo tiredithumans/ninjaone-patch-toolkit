@@ -27,7 +27,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── paging.rs                # get_paginated, parse_page/PagedRow, cursor forward-progress
 │   ├── tests.rs                 # retry / pagination / replay tests (wiremock)
 │   ├── devices.rs               # device inventory
-│   ├── patches.rs               # current patches + install-history endpoints
+│   ├── patches.rs               # current patches (third-party feed in location slices) + install-history endpoints
 │   ├── actions.rs               # WRITE path: patch scan/apply, reboot, script/run, automation-script library
 │   ├── activities.rs            # /activities feed used to resolve dispatched jobs
 │   ├── jobs.rs                  # /jobs: what NinjaOne reports running, for display only
