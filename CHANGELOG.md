@@ -11,6 +11,8 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-10-26
+
 ### Fixed
 
 - Large patch queries are far less likely to fail when NinjaOne is slow to answer a page of the
