@@ -19,8 +19,8 @@ dispatch for as long as it asked — plus up to 1 s of jitter, and pauses **ever
 client, see [below](#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant))
 / 401 (forces a token refresh). Each attempt's token is bound to the tenant the URL was built for;
 a tenant switch mid-request aborts it with `TenantMoved`. A cursor
-page whose response was lost is not retried in place: the scan starts over (see
-[below](#a-broken-or-lost-cursor-page-restarts-the-scan-then-an-error)). `get_paginated` handles **both** a bare JSON array **and** the
+page whose response was lost is never retried blindly: it is re-read under a count check, or
+the scan starts over (see [below](#a-lost-cursor-page-is-re-read-against-the-count-or-the-scan-restarts)). `get_paginated` handles **both** a bare JSON array **and** the
 `{ results, cursor }` envelope, where `cursor` may be a string or a `{ name, offset, … }` object;
 it stops when a page returns 0 rows even if the server echoes a stale token. Don't hand-roll a
 second reqwest/cursor loop.
@@ -112,7 +112,7 @@ Note also that `REPORTING_PAGE_SIZE = 5000` rests on the envelope branch tolerat
 cap, **not** on a documented ceiling: the four patch endpoints declare `pageSize` with no maximum
 (the `maximum: 10000` in the spec is on `/queries/logged-on-users`, which this app never calls).
 
-## A broken or lost cursor page restarts the scan, then an error
+## A lost cursor page is re-read against the count, or the scan restarts
 
 NinjaOne's cursor object carries `count` beside `name` and `offset`. The spec says nothing about
 what it measures; the field logs did: a 6,721-row OS feed and a 559,210-row software feed both
@@ -137,13 +137,31 @@ empty page while `all.len() < count`, **starts the scan over** after a short fix
 already paged dropped (nothing says which of them the new cursor would serve again), and the count
 re-read from the new cursor. A scan that keeps breaking is reported like the other stalls.
 
-A **lost cursor page** takes the same path and spends the same budget: a request carrying a cursor
-that timed out, drew a 5xx, or came back as a 2xx whose body could not be read fails with the
-`CursorReplayUnsafe` type (see [below](#the-timeout-and-5xx-arms-are-idempotent-only)) rather than
-being retried in place. The restart is logged at `warn` with its reason, and `pages` is not reset,
-so `MAX_PAGES` still bounds the whole fetch. The cost is deliberate: a fetch tolerates two lost
-pages, each paid for with a full re-page from the start, so a gateway flaky enough to lose a third
-now fails a query it used to "complete" with rows silently missing. An empty page at or
+A **lost cursor page** — a request carrying a cursor that timed out, drew a 5xx, or came back as
+a 2xx whose body could not be read — fails with the `CursorReplayUnsafe` type (see
+[below](#the-timeout-and-5xx-arms-are-idempotent-only)) rather than being retried in place by the
+retry loop. What the pagination loop does next depends on whether NinjaOne can have served it.
+
+A timeout or a 5xx may have been lost before the backend served the page, so the loop **re-reads
+it once**: the same cursor, after `SCAN_RESTART_DELAY`. If the backend had in fact served it, the
+re-read is answered with the page after it and the forward-progress guards cannot tell — but the
+count can. Every complete scan in the field has ended at exactly its announced `count`, so a scan
+that re-read a page (`CursorScan::reread`) stands only if it ends at exactly that count, through
+any of its exits; off by any amount, it starts over under `SCAN_RESTARTS`. A re-read is tried
+once: if it fails in any way, a `400 Invalid cursor.` included, the scan starts over.
+`PAGE_REREADS` (4) caps re-reads per fetch, and with no announced count there is nothing to check
+against, so the page restarts the scan. An unreadable 2xx was served by definition, so it restarts
+at once. Each re-read is logged at `warn` before it is sent and at `info` once answered, with the
+offset sent and the offset returned, so the log shows whether NinjaOne answered with the lost page.
+
+This replaced restarting on every lost page, which made large fetches fail. On 2026-10-26 the
+563,255-row software feed (113 pages of 5000) lost a page to the client's 45 s timeout every 19–85
+pages for about half an hour. Each loss threw away everything paged so far, so the third loss in
+one fetch failed the query; one fetch got through only after two restarts. Re-paging also
+multiplied the pages each fetch needed, and every page was another chance to lose one.
+
+A restart is logged at `warn` with its reason, and `pages` is not reset, so `MAX_PAGES` still
+bounds the whole fetch. An empty page at or
 past the count, or from an endpoint that announces none, ends the scan exactly as before
 (`an_empty_page_at_or_without_an_announced_count_ends_the_scan`).
 
@@ -191,14 +209,16 @@ loses a page the server considers delivered, and re-sending the name is answered
 page. That retry used to be the 5xx arm's whole purpose — keeping the accumulated pages of a long
 pull — and it skipped up to `pageSize` (5000) rows per attempt, 15,000 at `MAX_RETRIES`, with no
 error: the forward-progress guards saw the cursor advance, and the end-of-scan shortfall is only a
-warning. The suite could not see it because its 5xx fixture changed the cursor name per page. The
-field has never shown a re-sent cursor recover a scan (the empty-page re-read above was refused or
-ran short), so restarting the scan is the only known-safe recovery: the timeout, in-flight, 5xx
-and unreadable-2xx arms fail a `CursorPage` with `CursorReplayUnsafe` (`is_cursor_replay_unsafe`
-sees through `.context()`), and the pagination loop restarts under the shared budget. A connect
-failure, 429 and 401 never reached the handler and are retried in place.
-`a_lost_cursor_response_restarts_the_scan_instead_of_skipping_a_page` pins it against a server
-that keeps the position the way NinjaOne does.
+warning. The suite could not see it because its 5xx fixture changed the cursor name per page. So
+the timeout, in-flight, 5xx and unreadable-2xx arms fail a `CursorPage` with `CursorReplayUnsafe`
+(`is_cursor_replay_unsafe` sees through `.context()`; its `served` flag marks the 2xx), and the
+pagination loop either re-reads the page under the end-of-scan count check or restarts the scan
+(see [above](#a-lost-cursor-page-is-re-read-against-the-count-or-the-scan-restarts)). A re-read
+without that check is the silent skip this section describes. A connect failure, 429 and 401
+never reached the handler and are retried in place.
+`a_re_read_that_skipped_the_lost_page_restarts_the_scan` pins it against a server that keeps the
+position the way NinjaOne does, and
+`a_timed_out_cursor_page_the_server_never_served_is_re_read_in_place` pins the recovery.
 
 ## An ambiguous write fails with the `OutcomeUnknown` type, never a phrase
 

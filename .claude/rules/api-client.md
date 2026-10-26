@@ -14,11 +14,14 @@ paths:
   read; an unreadable cursor is an error, not end-of-pages; timeout/5xx retries are
   `Idempotent`-only (a cursor page is `CursorPage`); connect retries are never `ActOnce`.**
   → `docs/design/api-client.md#both-pagination-branches-require-forward-progress--and-neither-may-stop-quietly`
-- **An empty page short of the cursor's announced `count`, or a cursor page whose response was
-  lost (timeout, 5xx, unreadable 2xx), restarts the scan without a cursor under the shared
-  `SCAN_RESTARTS` budget, then an error — never re-send that cursor; a terminal cursor short of
-  the count is a warning.** NinjaOne's normal end is a non-empty last page.
-  → `docs/design/api-client.md#a-broken-or-lost-cursor-page-restarts-the-scan-then-an-error`
+- **A cursor page lost to a timeout or 5xx under an announced `count` is re-read once (at most
+  `PAGE_REREADS` per fetch), and a scan that re-read stands only if it ends at exactly its
+  count. Otherwise — an empty page short of the count, an unreadable 2xx, a failed re-read, a
+  re-read scan off its count, no count to check — the scan restarts without a cursor under the
+  shared `SCAN_RESTARTS` budget, then an error. Never re-send a cursor without that count check;
+  a terminal cursor short of the count is otherwise a warning.** NinjaOne's normal end is a
+  non-empty last page.
+  → `docs/design/api-client.md#a-lost-cursor-page-is-re-read-against-the-count-or-the-scan-restarts`
 - **A 429 extends the client-wide `paused_until` (shared by every clone, never shortened) and
   every attempt waits it out first; `backoff` and the 429 wait are jittered; `Retry-After` is
   read as seconds or an HTTP-date, capped at `MAX_RETRY_AFTER_SECS`.**
