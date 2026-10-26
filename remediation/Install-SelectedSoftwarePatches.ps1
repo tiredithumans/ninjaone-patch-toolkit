@@ -284,6 +284,9 @@ function Get-ProductPackageMap {
         'edgex86'                    = 'Microsoft.Edge'
         'microsoftedge'              = 'Microsoft.Edge'
         'notepad++'                  = 'Notepad++.Notepad++'
+        'notepadplusplusx64'         = 'Notepad++.Notepad++'
+        'gitx64'                     = 'Git.Git'
+        'visualstudiocodex64'        = 'Microsoft.VisualStudioCode'
         'awscommandlineinterfacex64' = 'Amazon.AWSCLI'
         'awscommandlineinterface'    = 'Amazon.AWSCLI'
     }
