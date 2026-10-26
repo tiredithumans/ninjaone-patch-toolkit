@@ -203,6 +203,14 @@ Describe 'ConvertTo-ProductKey' {
         }
     }
 
+    It 'maps <Title> to <Id>' -ForEach @(
+        @{ Title = 'Git (X64)'; Id = 'Git.Git' }
+        @{ Title = 'VisualStudioCode (X64)'; Id = 'Microsoft.VisualStudioCode' }
+        @{ Title = 'NotepadPlusPlus (X64)'; Id = 'Notepad++.Notepad++' }
+    ) {
+        (Get-ProductPackageMap)[(ConvertTo-ProductKey -Title $Title)] | Should -BeExactly $Id
+    }
+
     It 'gives every mapped key a non-empty package id' {
         $map = Get-ProductPackageMap
         foreach ($key in $map.Keys) {
