@@ -22,6 +22,11 @@ paths:
   a terminal cursor short of the count is otherwise a warning.** NinjaOne's normal end is a
   non-empty last page.
   → `docs/design/api-client.md#a-lost-cursor-page-is-re-read-against-the-count-or-the-scan-restarts`
+- **The whole-fleet third-party feed is paged as location slices of the device inventory
+  (`fleet_software_patches_sliced`, `plan_location_slices`) only if the slices' one-row
+  `feed_size`s, and then their paged rows, sum to exactly the whole feed's; any mismatch pages it
+  whole.** Never trust a `df` slice unverified — NinjaOne drops an unhonored clause silently.
+  → `docs/design/api-client.md#the-whole-fleet-third-party-feed-is-paged-in-location-slices-that-must-add-up-to-it`
 - **A 429 extends the client-wide `paused_until` (shared by every clone, never shortened) and
   every attempt waits it out first; `backoff` and the 429 wait are jittered; `Retry-After` is
   read as seconds or an HTTP-date, capped at `MAX_RETRY_AFTER_SECS`.**

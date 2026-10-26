@@ -316,6 +316,59 @@ async fn a_software_only_query_never_fetches_the_os_feed() {
     assert!(patch.kb_number.is_none());
 }
 
+/// The third-party leg reads the device inventory to slice the feed by location.
+/// This mock answers every slice with the whole feed, as NinjaOne would a `df` it
+/// ignored, so the slices are sized, found not to add up, and the feed is paged
+/// whole: the one row arrives once.
+#[tokio::test]
+async fn the_third_party_feed_is_sliced_by_the_inventorys_locations() {
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let server = patch_feed_server().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 1, "locationId": 10 },
+            { "id": 2, "locationId": 20 },
+        ])))
+        .mount(&server)
+        .await;
+    let state = AppState::seeded(server.uri());
+
+    let current = state
+        .fleet_current_patches(false, false, true, None, None)
+        .await
+        .expect("software-only fetch");
+
+    assert_eq!(
+        current.sw.len(),
+        1,
+        "the row arrives once, not once per slice"
+    );
+    let mut sliced: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/api/v2/queries/software-patches")
+        .filter_map(|r| {
+            r.url
+                .query_pairs()
+                .find(|(k, _)| k == "df")
+                .map(|(_, v)| v.into_owned())
+        })
+        .collect();
+    // Sent concurrently, so they may land in either order.
+    sliced.sort();
+    assert_eq!(
+        sliced,
+        ["loc=10", "loc=20"],
+        "one size probe per location slice"
+    );
+}
+
 #[tokio::test]
 async fn widening_to_both_families_reuses_the_already_warm_one() {
     let server = patch_feed_server().await;

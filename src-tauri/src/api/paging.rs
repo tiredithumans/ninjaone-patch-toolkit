@@ -182,6 +182,28 @@ impl NinjaApiClient {
             other => other,
         }
     }
+    /// How many rows a `/queries/*` feed holds for `base_query`, read off a one-row
+    /// page: the cursor's announced `count`, or the rows on that page when it is the
+    /// only one. `None` when the answer carries neither.
+    pub(super) async fn feed_size(
+        &self,
+        path: &str,
+        base_query: &[(&str, String)],
+    ) -> Result<Option<usize>> {
+        let mut query = base_query.to_vec();
+        query.push(("pageSize", "1".to_string()));
+        let body = self
+            .request_page::<serde::de::IgnoredAny>(path, &query, ReplaySafety::Idempotent)
+            .await?;
+        Ok(match body {
+            PageBody::Envelope { results, cursor } => cursor_count(cursor.as_ref()).or_else(|| {
+                matches!(next_cursor(cursor.as_ref()), Ok(None)).then_some(results.len())
+            }),
+            PageBody::Empty => Some(0),
+            PageBody::Array(_) => None,
+        })
+    }
+
     /// Cursor-paginated GET covering NinjaOne's two pagination styles. The
     /// `/queries/*` endpoints return a `{ results, cursor }` envelope (cursor is a
     /// bare string or a `{ name, offset, ... }` object, fed back as `cursor`); the

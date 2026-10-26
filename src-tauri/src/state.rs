@@ -612,10 +612,21 @@ impl AppState {
                             current_patches_ttl(force),
                             "current software patches",
                             || async {
-                                self.api
-                                    .fleet_software_patches(None, None, on_sw)
-                                    .await
-                                    .map(Fetched::complete)
+                                // The inventory says how to slice the feed. It is
+                                // usually warm, and on a cold start the query is
+                                // fetching it anyway, behind the same gate.
+                                let rows = match self.fleet_devices(None).await {
+                                    Ok(devices) => {
+                                        self.api
+                                            .fleet_software_patches_sliced(&devices, on_sw)
+                                            .await
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "device inventory unavailable; paging the third-party feed whole");
+                                        self.api.fleet_software_patches(None, None, on_sw).await
+                                    }
+                                };
+                                rows.map(Fetched::complete)
                             },
                         )
                         .await

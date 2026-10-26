@@ -175,6 +175,36 @@ The first page also logs the cursor raw (`cursor opened`: `count`, `expires`, an
 actual length next to the size requested). `expires` is epoch seconds and has sat 120 s after the
 open on every cursor seen, which bounds how slow a scan may run before the server forgets it.
 
+## The whole-fleet third-party feed is paged in location slices that must add up to it
+
+A whole-fleet third-party feed runs to six figures — 563,255 rows, 113 pages of 5000, on the tenant
+whose logs drove this — and one cursor scan pages it strictly in sequence. Every page is a chance to
+lose one, and a lost page can cost the scan everything before it (see
+[above](#a-lost-cursor-page-is-re-read-against-the-count-or-the-scan-restarts)), so the longer the
+scan, the likelier the query fails, and the wait is the whole sequence.
+`fleet_software_patches_sliced` pages it instead as up to `SOFTWARE_SLICES` (4) concurrent scans,
+each scoped by a `loc` clause in `df`. `plan_location_slices` builds them from the cached device
+inventory, largest location first onto the lightest slice by device count. Location rather than
+organization because it is the finer of the two facets the `/queries/*` endpoints honor, so a
+single-organization fleet still splits. A fleet with fewer than two locations, a device with no
+location, or a slice that would name more than `MAX_SLICE_LOCATIONS` (200, to keep the URL well under
+a proxy's request-line limit) is paged whole.
+
+**The slices replace the feed only if they provably add up to it.** NinjaOne drops a `df` clause
+it does not honor without saying so, so a slice could silently be the whole feed. Rows on devices
+the inventory does not list sit in no slice at all. So before any paging, `feed_size` reads a
+one-row page (`pageSize=1`) of each slice and of the whole feed, and the slices' sizes must sum to
+exactly the whole's: the cursor's `count`, or the rows on the page when it is the only one. The
+paged rows must then sum to the same total, which catches a device that moved between slices
+mid-fetch. Any mismatch, or a size that cannot be read, is logged at `warn` and the feed is paged
+whole as before: a few one-row requests and a wasted slice download, never a duplicated or missing
+row. Each slice keeps its own re-read and restart budgets, its log lines carry a `slice{n, of}`
+span, progress is reported as the slices' sum, and the first slice to fail fails the fetch
+(`try_join_all` drops the rest). The OS feed is a single page and is not sliced. The device
+inventory is usually warm; on a cold start the third-party leg waits behind the query's own
+inventory fetch (the same single-flight gate), and an inventory that cannot be read pages the feed
+whole.
+
 ## An unreadable `cursor` is an error, not end-of-pages
 
 `next_cursor` returns `Result<Option<String>>` and bails on a shape it cannot interpret (an object

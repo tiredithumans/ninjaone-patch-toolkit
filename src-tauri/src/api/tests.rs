@@ -2048,3 +2048,253 @@ async fn a_cursor_page_lost_on_every_scan_is_an_error_after_the_restart_budget()
         "each scan re-reads its lost page once, ends short, and starts over"
     );
 }
+
+/// A `/queries/software-patches` server over a fixed fleet of `(device, location)`
+/// rows. It honors `loc` in `df` — or, unless `honors_df`, drops it silently, the way
+/// NinjaOne drops a clause it does not honor — pages by `pageSize`, and announces
+/// each scan's `count`. With `drifts`, a filtered page loses its first row, as a
+/// device moving between locations mid-fetch would.
+struct LocationFeed {
+    rows: Vec<(i64, i64)>,
+    honors_df: bool,
+    drifts: bool,
+}
+
+impl wiremock::Respond for LocationFeed {
+    fn respond(&self, req: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let param = |key: &str| {
+            req.url
+                .query_pairs()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.into_owned())
+        };
+        let df = param("df");
+        let page_size: usize = param("pageSize")
+            .expect("pageSize")
+            .parse()
+            .expect("a size");
+        let locations: Option<Vec<i64>> = df.as_deref().filter(|_| self.honors_df).map(|df| {
+            df.trim_start_matches("loc")
+                .trim_start_matches('=')
+                .trim_start_matches(" in (")
+                .trim_end_matches(')')
+                .split(',')
+                .map(|id| id.trim().parse().expect("a location id"))
+                .collect()
+        });
+        let mut rows: Vec<i64> = self
+            .rows
+            .iter()
+            .filter(|(_, loc)| locations.as_ref().is_none_or(|l| l.contains(loc)))
+            .map(|&(device, _)| device)
+            .collect();
+        if self.drifts && df.is_some() && page_size > 1 && !rows.is_empty() {
+            rows.remove(0);
+        }
+        let start: usize = param("cursor").map_or(0, |c| c.parse().expect("an offset"));
+        let end = (start + page_size).min(rows.len());
+        let results: Vec<_> = rows[start..end]
+            .iter()
+            .map(|&device| {
+                crate::model::software_patch_json(
+                    device,
+                    "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                    "7-Zip 24.09",
+                    "RECOMMENDED",
+                    "APPROVED",
+                )
+            })
+            .collect();
+        let name = if end < rows.len() {
+            end.to_string()
+        } else {
+            String::new()
+        };
+        wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "results": results,
+            "cursor": { "name": name, "offset": end, "count": rows.len() },
+        }))
+    }
+}
+
+/// What one request to a [`LocationFeed`] asked for.
+#[derive(Debug, PartialEq)]
+struct FeedRequest {
+    df: Option<String>,
+    page_size: String,
+}
+
+/// Fetches the third-party feed in slices of `inventory` from a [`LocationFeed`]
+/// over `feed`, and returns the device id of every row kept (sorted), the progress
+/// last reported, and every request the server saw.
+async fn scan_sliced(
+    inventory: &[(i64, i64)],
+    feed: LocationFeed,
+) -> (Vec<Option<i64>>, usize, Vec<FeedRequest>) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .respond_with(feed)
+        .mount(&server)
+        .await;
+    let devices: Vec<crate::model::Device> = inventory
+        .iter()
+        .map(|&(id, loc)| {
+            serde_json::from_value(json!({ "id": id, "locationId": loc })).expect("device")
+        })
+        .collect();
+    let last = std::sync::atomic::AtomicUsize::new(0);
+    let progress = |n: usize| last.store(n, std::sync::atomic::Ordering::SeqCst);
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let mut rows: Vec<_> = NinjaApiClient::new(http, auth)
+        .fleet_software_patches_sliced(&devices, Some(&progress))
+        .await
+        .expect("the fetch completes")
+        .iter()
+        .map(|p| p.device_id)
+        .collect();
+    rows.sort_unstable();
+    let requests = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|r| {
+            let param = |key: &str| {
+                r.url
+                    .query_pairs()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.into_owned())
+            };
+            FeedRequest {
+                df: param("df"),
+                page_size: param("pageSize").unwrap_or_default(),
+            }
+        })
+        .collect();
+    (rows, last.into_inner(), requests)
+}
+
+/// Six `(device, location)` pairs over three locations.
+const THREE_LOCATIONS: [(i64, i64); 6] = [(1, 10), (2, 10), (3, 20), (4, 20), (5, 30), (6, 30)];
+
+/// Two feed rows per device of [`THREE_LOCATIONS`].
+fn two_rows_each() -> Vec<(i64, i64)> {
+    THREE_LOCATIONS.iter().flat_map(|&d| [d, d]).collect()
+}
+
+fn requests_for(requests: &[FeedRequest], page_size: &str) -> Vec<Option<String>> {
+    let mut dfs: Vec<_> = requests
+        .iter()
+        .filter(|r| r.page_size == page_size)
+        .map(|r| r.df.clone())
+        .collect();
+    dfs.sort();
+    dfs
+}
+
+/// The slices are sized against the whole feed with one-row pages, then paged, and
+/// together they are the whole feed: every row once, the progress summed across
+/// them, and no whole-feed scan at all.
+#[tokio::test]
+async fn the_third_party_feed_is_paged_in_location_slices_that_add_up_to_it() {
+    let (kept, progress, requests) = scan_sliced(
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows: two_rows_each(),
+            honors_df: true,
+            drifts: false,
+        },
+    )
+    .await;
+    assert_eq!(kept, [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6].map(Some));
+    assert_eq!(
+        progress, 12,
+        "the slices' progress is reported as one total"
+    );
+    let slices = ["loc=10", "loc=20", "loc=30"].map(|df| Some(df.to_string()));
+    let sized: Vec<_> = std::iter::once(None).chain(slices.clone()).collect();
+    assert_eq!(
+        requests_for(&requests, "1"),
+        sized,
+        "each slice and the whole are sized"
+    );
+    assert_eq!(
+        requests_for(&requests, &REPORTING_PAGE_SIZE.to_string()),
+        slices,
+        "only the slices are paged"
+    );
+}
+
+/// NinjaOne drops a `df` clause it does not honor, so every slice would be the
+/// whole feed. The sizes give that away before any slice is paged, and the feed is
+/// paged whole instead — each row once, not once per slice.
+#[tokio::test]
+async fn slices_the_server_does_not_filter_are_never_paged() {
+    let (kept, progress, requests) = scan_sliced(
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows: two_rows_each(),
+            honors_df: false,
+            drifts: false,
+        },
+    )
+    .await;
+    assert_eq!(kept.len(), 12);
+    assert_eq!(progress, 12);
+    assert_eq!(
+        requests_for(&requests, &REPORTING_PAGE_SIZE.to_string()),
+        [None],
+        "one whole-feed scan, no slice scans"
+    );
+}
+
+/// Rows on a device the inventory does not list sit in no slice. The whole feed
+/// counts them and the slices do not, so the feed is paged whole and keeps them.
+#[tokio::test]
+async fn rows_no_slice_covers_page_the_feed_whole() {
+    let mut rows = two_rows_each();
+    rows.push((99, 40));
+    let (kept, _, requests) = scan_sliced(
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows,
+            honors_df: true,
+            drifts: false,
+        },
+    )
+    .await;
+    assert_eq!(kept.len(), 13);
+    assert!(
+        kept.contains(&Some(99)),
+        "the uncovered device's row is kept"
+    );
+    assert_eq!(
+        requests_for(&requests, &REPORTING_PAGE_SIZE.to_string()),
+        [None]
+    );
+}
+
+/// The slices sized up but paged short — a device moved between them mid-fetch. A
+/// total that no longer matches the whole feed's is not trusted; the feed is paged
+/// whole.
+#[tokio::test]
+async fn slices_that_page_a_different_total_page_the_feed_whole() {
+    let (kept, _, requests) = scan_sliced(
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows: two_rows_each(),
+            honors_df: true,
+            drifts: true,
+        },
+    )
+    .await;
+    assert_eq!(kept.len(), 12, "the whole feed, not the slices' 9 rows");
+    let mut paged = requests_for(&requests, &REPORTING_PAGE_SIZE.to_string());
+    paged.retain(Option::is_none);
+    assert_eq!(paged, [None], "the slices were paged, then the feed whole");
+}
