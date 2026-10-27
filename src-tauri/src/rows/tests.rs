@@ -85,6 +85,7 @@ fn device_band_headers_follow_the_bands() {
         failed_installs: None,
         last_contact: None,
         last_contact_ts: None,
+        vulnerabilities: None,
     };
     let read: Vec<usize> = DeviceSummary::DEVICE_COLUMNS
         .iter()
@@ -200,6 +201,7 @@ fn device(id: i64, org: i64, os: &str) -> Device {
         }),
         last_contact: None,
         pending_reboot_reason: None,
+        vulnerabilities: None,
     }
 }
 
@@ -386,6 +388,71 @@ fn a_pending_kernel_update_is_reboot_likely_on_a_device_with_no_reboot_pending()
     );
 }
 
+/// NinjaOne's vulnerability counts reach the summary under the vendor's keys, read
+/// leniently; and a fleet where no device has any reads as no scan data, not as a
+/// clean fleet.
+#[test]
+fn vulnerability_counts_merge_onto_the_inventory_unless_the_fleet_has_none() {
+    let health = |id: i64, critical: serde_json::Value| -> crate::model::DeviceHealth {
+        serde_json::from_value(serde_json::json!({
+            "deviceId": id,
+            "criticalVulnerabilityCount": critical,
+            "highVulnerabilityCount": 2,
+            "mediumVulnerabilityCount": null,
+            "lowVulnerabilityCount": 0,
+            "threatsCount": 0,
+        }))
+        .expect("a DeviceHealthSummary record decodes")
+    };
+    let mut devices = vec![
+        device(1, 10, "Windows Server 2022"),
+        device(2, 10, "Windows Server 2022"),
+        device(3, 10, "Windows Server 2022"),
+    ];
+    crate::model::apply_health(
+        &mut devices,
+        vec![
+            health(1, serde_json::json!(4)),
+            // Not an integer: the count is absent, the record still reads.
+            health(2, serde_json::json!("many")),
+        ],
+    );
+    let counts: Vec<_> = devices.iter().map(|d| d.vulnerabilities).collect();
+    assert_eq!(
+        counts,
+        [
+            Some(crate::model::VulnCounts {
+                critical: 4,
+                high: 2,
+                medium: 0,
+                low: 0
+            }),
+            Some(crate::model::VulnCounts {
+                critical: 0,
+                high: 2,
+                medium: 0,
+                low: 0
+            }),
+            None,
+        ]
+    );
+    let refs: Vec<&Device> = devices.iter().collect();
+    let summaries = build_device_summaries(&refs, &[], None, &sla30(), &maps());
+    assert_eq!(summaries[0].vulnerabilities.map(|v| v.critical), Some(4));
+
+    let zero = |id: i64| crate::model::DeviceHealth {
+        device_id: Some(id),
+        critical_vulnerability_count: Some(0),
+        high_vulnerability_count: Some(0),
+        ..Default::default()
+    };
+    crate::model::apply_health(&mut devices, vec![zero(1), zero(2)]);
+    assert!(
+        devices.iter().all(|d| d.vulnerabilities.is_none()),
+        "all zero is no scan data"
+    );
+}
+
 /// NinjaOne's reboot reason reaches the device summary verbatim; a blank reason or
 /// one for a device outside the inventory does not.
 #[test]
@@ -394,20 +461,23 @@ fn reboot_reasons_merge_onto_the_inventory() {
         device(1, 10, "Windows Server 2022"),
         device(2, 10, "Windows Server 2022"),
     ];
-    crate::model::apply_reboot_reasons(
+    crate::model::apply_health(
         &mut devices,
         vec![
             crate::model::DeviceHealth {
                 device_id: Some(2),
                 pending_reboot_reason: Some(" Windows Update ".into()),
+                ..Default::default()
             },
             crate::model::DeviceHealth {
                 device_id: Some(1),
                 pending_reboot_reason: Some("  ".into()),
+                ..Default::default()
             },
             crate::model::DeviceHealth {
                 device_id: Some(99),
                 pending_reboot_reason: Some("Orphan".into()),
+                ..Default::default()
             },
         ],
     );

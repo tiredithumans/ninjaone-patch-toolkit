@@ -45,6 +45,17 @@ pub(crate) fn device_facts(d: &DeviceSummary) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// "1 critical, 3 high, 7 medium, 2 low" from NinjaOne's Vulnerability Management,
+/// or `None` when it holds no counts for the device.
+pub(crate) fn vulnerability_label(d: &DeviceSummary) -> Option<String> {
+    d.vulnerabilities.map(|v| {
+        format!(
+            "{} critical, {} high, {} medium, {} low",
+            v.critical, v.high, v.medium, v.low
+        )
+    })
+}
+
 /// "Yes — <NinjaOne's reason>" when the device reports why, so the drill-down says
 /// what is waiting on the reboot rather than only that something is.
 fn needs_reboot_label(d: &DeviceSummary) -> String {

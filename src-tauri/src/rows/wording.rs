@@ -244,6 +244,14 @@ pub const CVE_COLUMN_NOTES: [(&str, &str); 2] = [
     ),
 ];
 
+/// What the Devices sheet's and the drill-down's vulnerability counts are.
+pub const VULNERABILITY_COUNTS_NOTE: (&str, &str) = (
+    "Vulnerabilities",
+    "Open vulnerabilities NinjaOne's Vulnerability Management holds for the device, by \
+     severity, from scanner data imported into NinjaOne. Blank for every device when no \
+     device has any: a tenant that imports no scan data would otherwise read as a clean fleet.",
+);
+
 /// How many organizations [`uncounted_orgs_note`] names before "and N more".
 pub const UNCOUNTED_ORGS_LIMIT: usize = 10;
 

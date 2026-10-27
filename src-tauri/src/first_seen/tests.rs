@@ -40,6 +40,7 @@ fn device(id: i64, offline: bool) -> Device {
         }),
         last_contact: None,
         pending_reboot_reason: None,
+        vulnerabilities: None,
     }
 }
 

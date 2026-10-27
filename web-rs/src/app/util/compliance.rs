@@ -103,6 +103,15 @@ pub(crate) const CVE_COLUMN_NOTES: [(&str, &str); 2] = [
     ),
 ];
 
+/// What the drill-down's vulnerability counts are. Mirrors
+/// `rows::VULNERABILITY_COUNTS_NOTE`, which defines the Devices sheet's columns.
+pub(crate) const VULNERABILITY_COUNTS_NOTE: (&str, &str) = (
+    "Vulnerabilities",
+    "Open vulnerabilities NinjaOne's Vulnerability Management holds for the device, by \
+     severity, from scanner data imported into NinjaOne. Blank for every device when no \
+     device has any: a tenant that imports no scan data would otherwise read as a clean fleet.",
+);
+
 /// The CVEs header's tooltip.
 pub(crate) const CVES_HELP: &str = CVE_COLUMN_NOTES[0].1;
 

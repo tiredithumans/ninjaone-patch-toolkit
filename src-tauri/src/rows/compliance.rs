@@ -63,6 +63,8 @@ pub struct DeviceSummary {
     /// row dates, plus the instant for the workbook's date cell.
     pub last_contact: Option<String>,
     pub last_contact_ts: Option<i64>,
+    /// NinjaOne Vulnerability Management's counts ([`Device::vulnerabilities`]).
+    pub vulnerabilities: Option<crate::model::VulnCounts>,
 }
 
 /// Whether a device counts toward the fleet-health rollups — [`rollup_device`]'s
@@ -141,6 +143,7 @@ pub fn build_device_summaries(
                 failed_installs: None,
                 last_contact: super::join::fmt_dt(last_contact),
                 last_contact_ts: last_contact.map(|t| t.timestamp()),
+                vulnerabilities: d.vulnerabilities,
             }
         })
         .collect();
@@ -610,7 +613,7 @@ impl DeviceSummary {
     /// current patch records, so a 0 there would read as "clean" when it means
     /// "unknown", which is the exact misreading the exclusion exists to prevent.
     /// The band columns are one per [`SeverityCounts::BANDS`] entry, in its order.
-    pub const DEVICE_COLUMNS: [TableColumn<DeviceSummary>; 22] = [
+    pub const DEVICE_COLUMNS: [TableColumn<DeviceSummary>; 26] = [
         ("Organization", |d| TableCell::text(&d.organization)),
         ("Location", |d| TableCell::opt_text(d.location.as_deref())),
         ("Device Role", |d| {
@@ -649,7 +652,19 @@ impl DeviceSummary {
             TableCell::opt_text(d.reboot_reason.as_deref())
         }),
         ("Last Contact", |d| TableCell::DateTime(d.last_contact_ts)),
+        // Blank, not 0, when NinjaOne holds no scan data (see `model::apply_health`).
+        ("Critical Vulnerabilities", |d| vuln_cell(d, |v| v.critical)),
+        ("High Vulnerabilities", |d| vuln_cell(d, |v| v.high)),
+        ("Medium Vulnerabilities", |d| vuln_cell(d, |v| v.medium)),
+        ("Low Vulnerabilities", |d| vuln_cell(d, |v| v.low)),
     ];
+}
+
+fn vuln_cell(d: &DeviceSummary, read: fn(&crate::model::VulnCounts) -> u32) -> TableCell {
+    d.vulnerabilities.as_ref().map_or_else(
+        || TableCell::Text(String::new()),
+        |v| TableCell::Count(read(v) as usize),
+    )
 }
 
 /// Headers of the Devices sheet's per-band columns, index-aligned with

@@ -255,6 +255,19 @@ pub struct DeviceSummary {
     pub failed_installs: Option<usize>,
     #[serde(default)]
     pub last_contact: Option<String>,
+    /// NinjaOne Vulnerability Management's counts; `None` when it holds none.
+    #[serde(default)]
+    pub vulnerabilities: Option<VulnCounts>,
+}
+
+/// Mirrors `model::VulnCounts`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub struct VulnCounts {
+    pub critical: u32,
+    pub high: u32,
+    pub medium: u32,
+    pub low: u32,
 }
 
 /// Whether a device is in the population the fleet-health rollups describe, and
