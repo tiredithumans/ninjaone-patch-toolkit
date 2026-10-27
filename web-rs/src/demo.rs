@@ -1312,8 +1312,8 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
         }),
         GroupBy::Patch | GroupBy::Product => out.sort_by_key(|g| {
             (
-                std::cmp::Reverse(g.devices),
                 std::cmp::Reverse(g.severity_rank),
+                std::cmp::Reverse(g.devices),
             )
         }),
     }
@@ -1832,12 +1832,16 @@ mod tests {
             "device groups lead with the worst severity"
         );
 
-        // Patch groups: blast radius first, and every row is accounted for.
+        // Patch groups: worst severity first, blast radius within a severity, and
+        // every row is accounted for.
         let by_patch = group_rows(&rows, GroupBy::Patch);
         assert_eq!(by_patch.iter().map(|g| g.rows).sum::<usize>(), rows.len());
         assert!(
-            by_patch.windows(2).all(|w| w[0].devices >= w[1].devices),
-            "patch groups lead with blast radius"
+            by_patch.windows(2).all(|w| {
+                w[0].severity_rank > w[1].severity_rank
+                    || (w[0].severity_rank == w[1].severity_rank && w[0].devices >= w[1].devices)
+            }),
+            "patch groups lead with severity, then blast radius"
         );
     }
 

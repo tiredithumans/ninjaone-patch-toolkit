@@ -198,9 +198,9 @@ pub struct PatchGroup {
 /// Builds every group over the cached rows, ordered most-urgent-first.
 ///
 /// Device groups keep the canonical severity → org → device order the flat view
-/// uses; patch groups lead with blast radius (affected devices) then severity,
-/// matching [`build_failures`], because "this update is missing on 212 machines"
-/// is the thing worth seeing first.
+/// uses; patch and product groups lead with their worst severity, then blast radius
+/// (affected devices), so a Critical update missing on one server is not buried
+/// under a Moderate one missing on fifty.
 pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
     struct Acc {
         /// Insertion order, which the stable display sorts fall back to on a tie.
@@ -332,7 +332,7 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
             )
         }),
         GroupBy::Patch | GroupBy::Product => {
-            out.sort_by_cached_key(|g| (Reverse(g.devices), Reverse(g.severity_rank)))
+            out.sort_by_cached_key(|g| (Reverse(g.severity_rank), Reverse(g.devices)))
         }
     }
     out

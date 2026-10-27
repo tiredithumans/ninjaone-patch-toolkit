@@ -16,6 +16,11 @@ version and start a fresh `[Unreleased]`.
 - The reference software remediation script now patches 64-bit Git, Visual Studio Code and
   Notepad++.
 
+### Changed
+
+- The By patch and By product views list the most severe patches first, then the ones missing on
+  the most devices.
+
 ## [0.21.1] - 2026-10-26
 
 ### Fixed

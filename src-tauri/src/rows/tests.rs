@@ -1234,8 +1234,10 @@ fn build_groups_by_product_folds_versions_and_falls_back_to_the_patch_key() {
         "chrome, 7-Zip, the id-less tool and the KB"
     );
 
-    let chrome = &groups[0];
-    assert_eq!(&*chrome.label, "Google Chrome");
+    let chrome = groups
+        .iter()
+        .find(|g| &*g.label == "Google Chrome")
+        .expect("a group named for the product, not a version");
     assert_eq!(chrome.sublabel.as_deref(), Some("2 versions"));
     assert_eq!((chrome.rows, chrome.devices), (3, 3));
     assert_eq!(chrome.severity_rank, 5, "the worst member's severity");
@@ -1409,7 +1411,7 @@ fn build_groups_by_device_rolls_up_rows_and_worst_severity() {
 }
 
 #[test]
-fn build_groups_by_patch_leads_with_blast_radius() {
+fn build_groups_by_patch_leads_with_severity() {
     let rows = vec![
         // A critical patch on one device...
         group_row(1, "web-01", Some("KB9"), "Rare Critical", 7),
@@ -1420,17 +1422,62 @@ fn build_groups_by_patch_leads_with_blast_radius() {
     ];
     let groups = build_groups(&rows, GroupBy::Patch);
     assert_eq!(groups.len(), 2);
-    // Blast radius leads: "missing on 3 machines" outranks "critical on 1".
-    assert_eq!(&*groups[0].label, "Google Chrome 138");
-    assert_eq!(groups[0].devices, 3);
-    assert_eq!(groups[0].rows, 3);
+    // Severity leads: "critical on 1" outranks "missing on 3 machines".
+    assert_eq!(&*groups[0].label, "Rare Critical");
+    assert_eq!(groups[0].sublabel.as_deref(), Some("KB9"));
+    assert_eq!(groups[0].device_id, None, "a patch group spans devices");
+    assert_eq!(&*groups[1].label, "Google Chrome 138");
+    assert_eq!(groups[1].devices, 3);
+    assert_eq!(groups[1].rows, 3);
     assert_eq!(
-        groups[0].sublabel, None,
+        groups[1].sublabel, None,
         "third-party patches carry no KB, so the sublabel stays empty"
     );
-    assert_eq!(&*groups[1].label, "Rare Critical");
-    assert_eq!(groups[1].sublabel.as_deref(), Some("KB9"));
-    assert_eq!(groups[1].device_id, None, "a patch group spans devices");
+}
+
+/// Within one severity the wider group comes first, under either patch grouping.
+#[test]
+fn build_groups_by_patch_breaks_a_severity_tie_on_blast_radius() {
+    let rows = vec![
+        group_row(1, "web-01", Some("KB1"), "Narrow Update", 5),
+        group_row(1, "web-01", Some("KB2"), "Wide Update", 5),
+        group_row(2, "web-02", Some("KB2"), "Wide Update", 5),
+    ];
+    let groups = build_groups(&rows, GroupBy::Patch);
+    let labels: Vec<&str> = groups.iter().map(|g| &*g.label).collect();
+    assert_eq!(labels, ["Wide Update", "Narrow Update"]);
+}
+
+/// A product group is ordered by its worst version's severity, not its width.
+#[test]
+fn build_groups_by_product_leads_with_severity() {
+    let rows = vec![
+        product_row(1, "web-01", "Notepad++ 8.8.1", Some("npp"), 3),
+        product_row(2, "web-02", "Notepad++ 8.8.1", Some("npp"), 3),
+        product_row(3, "web-03", "Notepad++ 8.8.2", Some("npp"), 3),
+        product_row(
+            1,
+            "web-01",
+            "Google Chrome 141.0.7390.55",
+            Some("chrome"),
+            3,
+        ),
+        product_row(
+            2,
+            "web-02",
+            "Google Chrome 141.0.7390.66",
+            Some("chrome"),
+            6,
+        ),
+    ];
+    let groups = build_groups(&rows, GroupBy::Product);
+    let labels: Vec<&str> = groups.iter().map(|g| &*g.label).collect();
+    assert_eq!(labels, ["Google Chrome", "Notepad++"]);
+    assert_eq!(
+        groups[0].severity_rank, 6,
+        "the worst version ranks the group"
+    );
+    assert_eq!(groups[1].devices, 3);
 }
 
 /// The matcher reimplements `group_key`'s encoding, so the two must agree for
