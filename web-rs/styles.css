@@ -2734,3 +2734,11 @@ kbd {
   gap: 6px;
   margin: 0 0 12px;
 }
+
+/* A KB that fixes a vulnerability exploited in the wild (`exploited_chip`):
+   the danger palette, so it reads above the neutral reboot notes beside it. */
+.chip-exploited {
+  color: var(--danger-fg);
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}

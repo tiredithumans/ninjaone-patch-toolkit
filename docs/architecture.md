@@ -50,6 +50,8 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/history.rs               # append-only run-history.jsonl (one rollup + per-org line per query) + RunRecord
 ├── src/changes.rs               # per-scope run-snapshots/ → RunChanges (changes since the previous comparable run)
 ├── src/first_seen.rs            # per-tenant first-seen/ ledger: when this app first saw each pending patch
+├── src/exploits.rs              # public CVE/exploit index (Microsoft CVRF + CISA KEV) and the row stamp
+├── src/exploits/                # feeds.rs wire shapes → compact months · store.rs exploit-data/ disk copy + background refresh
 ├── src/export.rs                # rust_xlsxwriter workbook: detail, rollup, Devices, device-list, Stuck Approvals, Changes, About; UTC date cells
 ├── src/csv_export.rs            # detail-row CSV: BOM, CRLF, RFC 4180 quoting, formula-injection guard
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult

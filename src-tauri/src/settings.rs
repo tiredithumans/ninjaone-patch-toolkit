@@ -331,6 +331,11 @@ pub struct Settings {
     /// settings files without the field are treated as enabled.
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    /// Whether to download Microsoft's and CISA's public exploit data and mark the
+    /// Windows updates that fix exploited vulnerabilities. Defaults on; older
+    /// settings files without the field are treated as enabled.
+    #[serde(default = "default_true")]
+    pub exploit_data: bool,
     /// Write-path configuration. Absent from every settings file written before the
     /// actions feature existed, so it defaults to fully disabled.
     #[serde(default)]
@@ -349,6 +354,7 @@ impl Default for Settings {
             sla_exempt: SlaExempt::default(),
             presets: Vec::new(),
             auto_check_updates: true,
+            exploit_data: true,
             actions: ActionSettings::default(),
         }
     }
@@ -588,6 +594,7 @@ mod tests {
                 max_devices_per_action: 10,
                 ..ActionSettings::default()
             },
+            exploit_data: true,
         };
 
         original.save_to(&path).expect("save");
@@ -660,6 +667,10 @@ mod tests {
         assert!(
             loaded.auto_check_updates,
             "a missing autoCheckUpdates defaults to enabled"
+        );
+        assert!(
+            loaded.exploit_data,
+            "a missing exploitData defaults to enabled"
         );
         // A file from before per-severity SLAs has no overrides: every band ages
         // against the single window it was configured with.

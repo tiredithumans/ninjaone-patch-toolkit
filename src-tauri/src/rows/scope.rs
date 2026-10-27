@@ -145,6 +145,9 @@ pub fn build_query_scope(
                 None => when,
             });
     let detected_before = filter.detected_before.and_then(stamp);
+    let exploited = filter.exploited_only.then(|| {
+        "Yes \u{2014} only updates fixing a vulnerability exploited in the wild".to_string()
+    });
 
     // Stated rather than left to inference: on a printed artifact the absence of
     // narrowing lines is indistinguishable from a renderer that dropped them.
@@ -155,9 +158,15 @@ pub fn build_query_scope(
     // export still covers the whole fleet, and used to lose the sentence saying so.
     let device_scoped = filter.has_identity_scope();
     if !device_scoped {
-        let patch_narrowed = [&severities, &detected_after, &detected_before, &search]
-            .iter()
-            .any(|f| f.is_some());
+        let patch_narrowed = [
+            &severities,
+            &detected_after,
+            &detected_before,
+            &search,
+            &exploited,
+        ]
+        .iter()
+        .any(|f| f.is_some());
         let line = if patch_narrowed {
             "Whole fleet \u{2014} no device filters applied"
         } else {
@@ -192,6 +201,7 @@ pub fn build_query_scope(
     for (label, value) in [
         ("Severity", severities),
         ("Search", search.clone()),
+        ("Known exploited only", exploited),
         ("First seen after", detected_after),
         ("First seen before", detected_before),
         (
@@ -290,6 +300,11 @@ fn fingerprint(
     // every trend line recorded without it.
     if !filter.device_group_ids.is_empty() {
         parts.push(("group", ids(&filter.device_group_ids)));
+    }
+    // A different question too: an exploited-only run listing fewer rows is not a
+    // fleet that resolved the rest.
+    if filter.exploited_only {
+        parts.push(("exploited", "1".to_string()));
     }
     // JSON rather than a hand-joined string: the needles are free text, and an
     // escaped encoding cannot let one facet's value forge another's boundary.

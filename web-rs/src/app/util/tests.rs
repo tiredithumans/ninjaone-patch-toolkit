@@ -4,10 +4,10 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, ActionRequest, ActionSettings, AuthStatus, DeviceSummary, FilterParams, GroupBy,
-    JobReport, JobRequest, JobState, Location, Organization, PatchFamilies, PatchGroup,
-    PatchQueryArgs, PatchRow, PlannedTarget, RebootChoice, RebootMode, RowSort, RowSortKey,
-    RunRecord,
+    ActionKind, ActionRequest, ActionSettings, AuthStatus, DeviceSummary, ExploitDataStatus,
+    FilterParams, GroupBy, JobReport, JobRequest, JobState, Location, Organization, PatchFamilies,
+    PatchGroup, PatchQueryArgs, PatchRow, PlannedTarget, RebootChoice, RebootMode, RowSort,
+    RowSortKey, RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -281,6 +281,8 @@ fn sortable(device: &str, sev: &str, installed: Option<&str>) -> PatchRow {
         first_seen_date: None,
         installed_date: installed.map(Into::into),
         product_identifier: None,
+        cve_count: None,
+        exploited_cves: None,
     }
 }
 
@@ -303,6 +305,8 @@ fn sel_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, ty: &str)
         first_seen_date: None,
         installed_date: None,
         product_identifier: None,
+        cve_count: None,
+        exploited_cves: None,
     }
 }
 
@@ -523,6 +527,7 @@ fn only_groups_still_listed_are_reopened() {
         offline: false,
         needs_reboot: false,
         reboot_likely: false,
+        exploited: false,
     };
     let groups = [group("b"), group("a"), group("c")];
     let open: BTreeSet<String> = ["a", "c", "gone"].into_iter().map(String::from).collect();
@@ -1910,6 +1915,7 @@ fn filter_chips_emits_only_non_default_facets() {
         statuses: vec!["INSTALLED".to_string()],
         severities: vec!["Critical".to_string()],
         search: Some("KB5040434".to_string()),
+        exploited_only: true,
         detected_window: "7".to_string(),
         detected_after: String::new(),
         detected_before: String::new(),
@@ -1931,6 +1937,7 @@ fn filter_chips_emits_only_non_default_facets() {
             "Status: Installed",
             "Severity: Critical",
             "Search: KB5040434",
+            "Known exploited only",
             "First seen: last 7 days",
             "Install history: last 30d",
         ]
@@ -1939,6 +1946,74 @@ fn filter_chips_emits_only_non_default_facets() {
     // fetched are in the fleet rollups); the rest narrow the rows only.
     assert!(chips.iter().take(7).all(|c| !c.patch));
     assert!(chips.iter().skip(7).all(|c| c.patch));
+}
+
+/// The note above the Patches table speaks only when the marks are missing for a
+/// reason the operator did not choose, or when the filter they did choose can
+/// match nothing.
+#[test]
+fn the_exploit_note_explains_missing_marks_and_nothing_else() {
+    let status = |state: &str| ExploitDataStatus {
+        state: state.into(),
+        sentence: format!("{state} sentence"),
+    };
+    assert_eq!(exploit_note(&status("ready"), true), None);
+    assert_eq!(
+        exploit_note(&status("off"), false),
+        None,
+        "a deliberate choice"
+    );
+    assert_eq!(exploit_note(&status("off"), true), Some("off sentence"));
+    assert_eq!(
+        exploit_note(&status("loading"), false),
+        Some("loading sentence")
+    );
+    assert_eq!(
+        exploit_note(&status("unavailable"), false),
+        Some("unavailable sentence")
+    );
+    assert_eq!(
+        exploit_note(&ExploitDataStatus::default(), true),
+        None,
+        "an older backend sends no state"
+    );
+    assert!(exploited_title(Some("CVE-2026-21002")).starts_with("CVE-2026-21002\n\n"));
+    assert_eq!(exploited_title(None), EXPLOITED_HELP);
+}
+
+#[test]
+fn the_exploited_filter_reaches_the_query() {
+    let on = filter_params(FilterInputs {
+        exploited_only: true,
+        ..Default::default()
+    });
+    assert!(on.exploited_only);
+    assert!(!filter_params(FilterInputs::default()).exploited_only);
+}
+
+/// Mirrors the backend's `Cves` sort: exploited first, then the most CVEs, then
+/// rows the data does not cover.
+#[test]
+fn the_cves_sort_puts_exploited_and_larger_counts_first() {
+    let mut rows = vec![
+        sortable("none", "Critical", None),
+        sortable("few", "Critical", None),
+        sortable("exploited", "Critical", None),
+        sortable("many", "Critical", None),
+    ];
+    rows[1].cve_count = Some(2);
+    rows[2].cve_count = Some(1);
+    rows[2].exploited_cves = Some("CVE-2026-21002".into());
+    rows[3].cve_count = Some(40);
+    sort_patch_rows(
+        &mut rows,
+        RowSort {
+            key: RowSortKey::Cves,
+            desc: false,
+        },
+    );
+    let order: Vec<&str> = rows.iter().map(|r| r.device_name.as_str()).collect();
+    assert_eq!(order, ["exploited", "many", "few", "none"]);
 }
 
 /// Builds an `AuthStatus` in the state the named step leaves it in.
@@ -3958,13 +4033,16 @@ fn the_wording_matches_the_backend() {
         assert_eq!(k.definition, b["definition"], "{} definition", k.label);
     }
 
-    let backend = wording["rebootColumnNotes"]
-        .as_array()
-        .expect("reboot notes");
-    assert_eq!(REBOOT_COLUMN_NOTES.len(), backend.len());
-    for ((term, meaning), b) in REBOOT_COLUMN_NOTES.iter().zip(backend) {
-        assert_eq!(*term, b[0], "term");
-        assert_eq!(*meaning, b[1], "{term}");
+    for (key, mirror) in [
+        ("rebootColumnNotes", &REBOOT_COLUMN_NOTES),
+        ("cveColumnNotes", &CVE_COLUMN_NOTES),
+    ] {
+        let backend = wording[key].as_array().expect(key);
+        assert_eq!(mirror.len(), backend.len(), "{key}");
+        for ((term, meaning), b) in mirror.iter().zip(backend) {
+            assert_eq!(*term, b[0], "term");
+            assert_eq!(*meaning, b[1], "{term}");
+        }
     }
 
     let notes = calculation_notes(&r.sla_policy, r.patch_families, &r.first_seen);

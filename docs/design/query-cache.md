@@ -190,8 +190,9 @@ The Patches tab's *By device* / *By patch* / *By product* modes go through `get_
 `rows::build_groups` memoized, then `rows::slice_groups`) and `get_patch_group_members` (one group's rows, `rows::group_member_page`).
 The frontend only ever holds one page, so it cannot group a fleet it has never seen — never
 regroup `page_rows` client-side. Device groups order by severity → org → device, as the flat view
-does; patch and product groups by their worst severity, then affected devices, so a Critical
-update on one server is not buried under a Moderate one on fifty. Group headers carry **no**
+does; patch and product groups by whether they fix an exploited vulnerability, then their worst
+severity, then affected devices, so a Critical update on one server is not buried under a
+Moderate one on fifty ([exploits.md](./exploits.md#exploited-sorts-first-where-triage-happens)). Group headers carry **no**
 members: a by-patch group can span the whole fleet, so members load on expand, capped at
 `GROUP_MEMBER_LIMIT`. `rows::group_key` is the
 identity the frontend echoes back, so no per-request state is kept backend-side and a stale key

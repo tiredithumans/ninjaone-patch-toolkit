@@ -48,6 +48,10 @@ pub struct FilterParams {
     pub installed_after: Option<i64>,
     #[serde(default)]
     pub installed_before: Option<i64>,
+    /// Keep only rows whose KB fixes an exploited vulnerability. Defaulted so a view
+    /// link or preset made before the facet existed still decodes.
+    #[serde(default)]
+    pub exploited_only: bool,
 }
 
 /// Mirror of the backend's `rows::PatchFamilies` — the honest scope of every
@@ -198,6 +202,13 @@ pub struct PatchRow {
     /// third-party product; `None` on OS rows. Read by the demo's product grouping.
     #[serde(default)]
     pub product_identifier: Option<String>,
+    /// How many CVEs Microsoft lists this row's KB as fixing; `None` when the KB is
+    /// not in the exploit data (backend `exploits::stamp_rows`).
+    #[serde(default)]
+    pub cve_count: Option<u32>,
+    /// The ones being exploited in the wild, comma-joined; `None` when none are.
+    #[serde(default)]
+    pub exploited_cves: Option<String>,
 }
 
 /// A device's facts and per-device rollup: the Needs-Reboot view's rows (the
@@ -621,6 +632,9 @@ pub struct PatchGroup {
     /// Whether any member's patch is likely to need a reboot.
     #[serde(default)]
     pub reboot_likely: bool,
+    /// Whether any member's KB fixes a vulnerability exploited in the wild.
+    #[serde(default)]
+    pub exploited: bool,
 }
 
 /// One page of group headers plus the total. Mirrors `rows::GroupPage`.
@@ -720,6 +734,20 @@ pub struct QueryResult {
     /// When the underlying whole-fleet patch data was last fetched (vs. when this
     /// re-filter was computed). Drives the "patch data as of …" label.
     pub data_fetched_at: String,
+    /// Where the rows' CVE figures came from, or why there are none.
+    #[serde(default)]
+    pub exploit_data: ExploitDataStatus,
+}
+
+/// Mirror of the backend `exploits::ExploitDataStatus`. The sentence is built
+/// backend-side so the app and the workbook print the same words.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(rename_all = "camelCase")]
+pub struct ExploitDataStatus {
+    /// `ready`, `loading`, `off` or `unavailable`.
+    pub state: String,
+    pub sentence: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -757,6 +785,10 @@ pub struct SettingsView {
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
+    /// Download Microsoft's and CISA's public exploit data. A backend that predates
+    /// it reads as on, which is what it defaults to.
+    #[serde(default = "enabled")]
+    pub exploit_data: bool,
     #[serde(default)]
     pub actions: ActionSettings,
     /// Set by `save_settings` when the save switched instance or client id. The
@@ -870,6 +902,7 @@ pub enum RowSortKey {
     Kb,
     Name,
     Severity,
+    Cves,
     Status,
     FirstSeenDate,
     InstalledDate,
@@ -899,7 +932,12 @@ pub struct SaveSettingsArgs {
     pub client_secret: Option<String>,
     pub clear_secret: bool,
     pub auto_check_updates: bool,
+    pub exploit_data: bool,
     pub actions: ActionSettings,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 // --- Device actions ----------------------------------------------------------

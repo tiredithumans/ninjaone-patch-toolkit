@@ -36,15 +36,15 @@ use crate::model::{
     RunningJob,
 };
 use crate::rows::{
-    ComplianceBucket, DeviceBacklog, DeviceSummary, FirstSeenTracking, GroupBy, InstallLatency,
-    InstallWindow, LookupMaps, OFFLINE_BACKLOG_NOTE, OsCompliance, PCT_BANDS, PatchFamilies,
-    PatchRecord, PatchSource, QueryResult, QuerySummary, REBOOT_COLUMN_NOTES, SlaCutoffs,
-    StuckDevice, TableColumn, WORST_DEVICES_NOTE, build_age_buckets, build_approval_backlog,
-    build_compliance, build_compliance_by_os, build_device_backlogs, build_device_summaries,
-    build_failures, build_groups, build_query_scope, build_rows, build_severity_by_org,
-    build_time_to_install, calculation_notes, compliance_scope_note, device_detail,
-    headline_figures, page_rows, rows_by_device, slice_groups, sort_device_summaries,
-    uncounted_orgs, uncounted_orgs_note,
+    CVE_COLUMN_NOTES, ComplianceBucket, DeviceBacklog, DeviceSummary, FirstSeenTracking, GroupBy,
+    InstallLatency, InstallWindow, LookupMaps, OFFLINE_BACKLOG_NOTE, OsCompliance, PCT_BANDS,
+    PatchFamilies, PatchRecord, PatchSource, QueryResult, QuerySummary, REBOOT_COLUMN_NOTES,
+    SlaCutoffs, StuckDevice, TableColumn, WORST_DEVICES_NOTE, build_age_buckets,
+    build_approval_backlog, build_compliance, build_compliance_by_os, build_device_backlogs,
+    build_device_summaries, build_failures, build_groups, build_query_scope, build_rows,
+    build_severity_by_org, build_time_to_install, calculation_notes, compliance_scope_note,
+    device_detail, headline_figures, page_rows, rows_by_device, slice_groups,
+    sort_device_summaries, uncounted_orgs, uncounted_orgs_note,
 };
 use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaExempt, SlaPolicy};
 
@@ -367,7 +367,7 @@ fn ipc_fixture_is_current() {
     }
     let filter = FilterParams::default();
     let prepared = filter.prepare();
-    let rows = build_rows(
+    let mut rows = build_rows(
         &by_id,
         &maps,
         &[
@@ -377,6 +377,7 @@ fn ipc_fixture_is_current() {
         ],
         &prepared,
     );
+    crate::exploits::stamp_rows(&mut rows, &crate::exploits::sample_index());
 
     let sla_policy = SlaPolicy {
         default_days: 30,
@@ -496,6 +497,7 @@ fn ipc_fixture_is_current() {
         scope,
         generated_at,
         data_fetched_at: fmt_ts(FIXTURE_NOW - Duration::minutes(10)),
+        exploit_data: crate::exploits::sample_status(),
     };
 
     // Shapes that come from commands rather than the query result.
@@ -605,6 +607,7 @@ fn ipc_fixture_is_current() {
                 detected_before: Some(days_ago(1) as i64),
                 installed_after: Some(days_ago(30) as i64),
                 installed_before: Some(days_ago(1) as i64),
+                exploited_only: true,
             },
             patch_type: Some("OS".into()),
             statuses: Some(vec!["PENDING".into(), "FAILED".into()]),
@@ -618,6 +621,7 @@ fn ipc_fixture_is_current() {
             ..ActionSettings::default()
         },
         tenant_changed: false,
+        exploit_data: true,
     };
 
     let fixture = json!({
@@ -755,6 +759,7 @@ fn ipc_fixture_is_current() {
             "worstDevicesNote": WORST_DEVICES_NOTE,
             "offlineBacklogNote": OFFLINE_BACKLOG_NOTE,
             "rebootColumnNotes": REBOOT_COLUMN_NOTES,
+            "cveColumnNotes": CVE_COLUMN_NOTES,
             "pctBands": PCT_BANDS.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
             "columns": {
                 "compliance": headers(&ComplianceBucket::COLUMNS),

@@ -258,6 +258,14 @@ pub(crate) fn PatchFilterBar() -> impl IntoView {
                 prop:value=move || state.filters.search.get()
                 on:input=move |ev| state.filters.search.set(event_target_value(&ev))
             />
+            <label class="inline" title=util::EXPLOITED_HELP>
+                <input
+                    type="checkbox"
+                    prop:checked=move || state.filters.exploited_only.get()
+                    on:change=move |ev| state.filters.exploited_only.set(event_target_checked(&ev))
+                />
+                "Known exploited only"
+            </label>
             <label class="inline">
                 "First seen"
                 <select on:change=move |ev| state.filters.detected_window.set(event_target_value(&ev))>

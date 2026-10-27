@@ -2,7 +2,9 @@
 //! out. Each mirrors a backend `rows::` function, so the in-app wording and the
 //! exports' read the same.
 
-use crate::types::{ComplianceBucket, FirstSeenTracking, PatchFamilies, SlaExempt, SlaPolicy};
+use crate::types::{
+    ComplianceBucket, ExploitDataStatus, FirstSeenTracking, PatchFamilies, SlaExempt, SlaPolicy,
+};
 
 use super::{format_pct, group_thousands, sla_policy_summary};
 
@@ -83,6 +85,50 @@ pub(crate) const REBOOT_PENDING_HELP: &str = REBOOT_COLUMN_NOTES[0].1;
 
 /// The "reboot likely" chip's tooltip.
 pub(crate) const REBOOT_LIKELY_HELP: &str = REBOOT_COLUMN_NOTES[1].1;
+
+/// What the CVEs column and the "exploited" chip mean. Mirrors
+/// `rows::CVE_COLUMN_NOTES`, which defines the export's columns of the same names.
+pub(crate) const CVE_COLUMN_NOTES: [(&str, &str); 2] = [
+    (
+        "CVEs",
+        "How many CVEs Microsoft's Security Update Guide lists this Windows update's KB as \
+         fixing. The updates it supersedes are not counted, since a device missing this one \
+         usually has those. Blank when the KB is not in the exploit data: a third-party, macOS \
+         or Linux patch, a non-security update, one older than the data, or exploit data off.",
+    ),
+    (
+        "Exploited CVEs",
+        "Those of its CVEs being exploited in the wild, per Microsoft's own exploited flag or \
+         CISA's Known Exploited Vulnerabilities catalog. Blank when none are.",
+    ),
+];
+
+/// The CVEs header's tooltip.
+pub(crate) const CVES_HELP: &str = CVE_COLUMN_NOTES[0].1;
+
+/// The "exploited" chip's and the "Known exploited only" filter's tooltip.
+pub(crate) const EXPLOITED_HELP: &str = CVE_COLUMN_NOTES[1].1;
+
+/// The note above the Patches table about the exploit data, or `None` when there is
+/// nothing to add: shown while it downloads or cannot be had, and when it is off only
+/// if the run asked for "Known exploited only" — which then lists nothing, and must
+/// say why. A backend that predates the data sends no state at all.
+pub(crate) fn exploit_note(status: &ExploitDataStatus, exploited_only: bool) -> Option<&str> {
+    match status.state.as_str() {
+        "ready" | "" => None,
+        "off" if !exploited_only => None,
+        _ => Some(&status.sentence),
+    }
+}
+
+/// The "exploited" chip's tooltip: which CVEs, when the row knows, then what the
+/// mark means.
+pub(crate) fn exploited_title(cves: Option<&str>) -> String {
+    match cves {
+        Some(cves) => format!("{cves}\n\n{EXPLOITED_HELP}"),
+        None => EXPLOITED_HELP.to_string(),
+    }
+}
 
 /// One headline figure. Mirrors `rows::HeadlineFigure`.
 #[derive(Debug, Clone, PartialEq)]

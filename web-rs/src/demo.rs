@@ -23,7 +23,6 @@ use crate::app::util::{
     date_to_epoch, is_past_sla, is_urgent, median, nearest_rank, product_display_name,
     severity_rank, strip_version_token,
 };
-use crate::types::QueryResult;
 use crate::types::{
     AgeBucket, ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceDetail,
     DeviceGroup, DeviceSummary, FailureGroup, FilterParams, FirstSeenTracking, GroupBy,
@@ -32,6 +31,7 @@ use crate::types::{
     SlaBySeverity, SlaExempt, SlaPolicy, StuckDevice, TimeToInstall,
 };
 use crate::types::{ChangeItem, RunChanges};
+use crate::types::{ExploitDataStatus, QueryResult};
 
 /// Wall-clock label shown in the results summary. Fixed (not "now") so the build
 /// stays deterministic and host-testable — it reads as a representative snapshot.
@@ -207,7 +207,22 @@ fn row(
                         .replace(' ', "-")
                 )
             }),
+            cve_count: demo_cves(kb).map(|(n, _)| n),
+            exploited_cves: demo_cves(kb).and_then(|(_, e)| e.map(str::to_string)),
         },
+    }
+}
+
+/// Sample exploit data for the demo's Windows KBs: how many CVEs each fixes and the
+/// exploited ones, as the backend's `exploits::stamp_rows` would fill them. The CVE
+/// ids are placeholders, not Microsoft's.
+fn demo_cves(kb: &str) -> Option<(u32, Option<&'static str>)> {
+    match kb {
+        "KB5062553" => Some((38, Some("CVE-2026-21002"))),
+        "KB5062554" => Some((31, None)),
+        "KB5062560" => Some((12, None)),
+        "KB5062561" => Some((29, Some("CVE-2026-21002, CVE-2026-21019"))),
+        _ => None,
     }
 }
 
@@ -1091,6 +1106,12 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64], statuses: &[String]) -> Que
         changes: RunChanges::default(),
         generated_at: GENERATED_AT.to_string(),
         data_fetched_at: GENERATED_AT.to_string(),
+        exploit_data: ExploitDataStatus {
+            state: "ready".into(),
+            sentence: "CVEs and exploited marks for Windows updates come from sample data \
+                       in this demo."
+                .into(),
+        },
     }
 }
 
@@ -1128,6 +1149,7 @@ fn patch_matches(
                 .iter()
                 .any(|s| s.eq_ignore_ascii_case(&row.severity)))
         && f.search.as_deref().is_none_or(|q| search_matches(row, q))
+        && (!f.exploited_only || row.exploited_cves.is_some())
         && first_seen_in_window(row, f)
         && install_in_window(row, f, install_after_days)
 }
@@ -1276,11 +1298,13 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 offline: matches!(group_by, GroupBy::Device) && r.offline,
                 needs_reboot: matches!(group_by, GroupBy::Device) && r.needs_reboot,
                 reboot_likely: false,
+                exploited: false,
             }
         });
         entry.rows += 1;
         // A property of the patches, so every grouping takes any member's.
         entry.reboot_likely |= r.reboot_likely;
+        entry.exploited |= r.exploited_cves.is_some();
         if rank > entry.severity_rank {
             entry.severity_rank = rank;
             entry.severity = r.severity.clone();
@@ -1312,6 +1336,7 @@ pub fn group_rows(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
         }),
         GroupBy::Patch | GroupBy::Product => out.sort_by_key(|g| {
             (
+                std::cmp::Reverse(g.exploited),
                 std::cmp::Reverse(g.severity_rank),
                 std::cmp::Reverse(g.devices),
             )
@@ -1832,16 +1857,16 @@ mod tests {
             "device groups lead with the worst severity"
         );
 
-        // Patch groups: worst severity first, blast radius within a severity, and
-        // every row is accounted for.
+        // Patch groups: exploited first, then worst severity, then blast radius,
+        // and every row is accounted for.
         let by_patch = group_rows(&rows, GroupBy::Patch);
         assert_eq!(by_patch.iter().map(|g| g.rows).sum::<usize>(), rows.len());
         assert!(
             by_patch.windows(2).all(|w| {
-                w[0].severity_rank > w[1].severity_rank
-                    || (w[0].severity_rank == w[1].severity_rank && w[0].devices >= w[1].devices)
+                let key = |g: &PatchGroup| (g.exploited, g.severity_rank, g.devices);
+                key(&w[0]) >= key(&w[1])
             }),
-            "patch groups lead with severity, then blast radius"
+            "patch groups lead with exploited, then severity, then blast radius"
         );
     }
 

@@ -50,6 +50,7 @@ pub(crate) struct AppliedFilters {
     pub statuses: Vec<String>,
     pub severities: Vec<String>,
     pub search: Option<String>,
+    pub exploited_only: bool,
     pub detected_window: String,
     pub detected_after: String,
     pub detected_before: String,
@@ -221,6 +222,7 @@ pub(crate) struct FilterState {
     pub(super) selected_severities: RwSignal<Vec<String>>,
     pub(super) os_name: RwSignal<String>,
     pub(super) search: RwSignal<String>,
+    pub(super) exploited_only: RwSignal<bool>,
     /// Release-date filter: "" (any), "1"/"7"/"30"/"90" (last N days), or "custom".
     pub(super) detected_window: RwSignal<String>,
     pub(super) detected_after_date: RwSignal<String>,
@@ -246,6 +248,7 @@ impl FilterState {
             selected_severities: RwSignal::new(Vec::new()),
             os_name: RwSignal::new(String::new()),
             search: RwSignal::new(String::new()),
+            exploited_only: RwSignal::new(false),
             detected_window: RwSignal::new(String::new()),
             detected_after_date: RwSignal::new(String::new()),
             detected_before_date: RwSignal::new(String::new()),
@@ -304,6 +307,7 @@ impl FilterState {
         self.selected_severities.track();
         self.os_name.track();
         self.search.track();
+        self.exploited_only.track();
         self.detected_window.track();
         self.detected_after_date.track();
         self.detected_before_date.track();
@@ -328,6 +332,7 @@ impl FilterState {
             severities: self.selected_severities.get_untracked(),
             os_name: self.os_name.get_untracked(),
             search: self.search.get_untracked(),
+            exploited_only: self.exploited_only.get_untracked(),
             detected_window: self.detected_window.get_untracked(),
             detected_after: self.detected_after_date.get_untracked(),
             detected_before: self.detected_before_date.get_untracked(),
@@ -553,6 +558,7 @@ pub(crate) struct SettingsState {
     pub(super) f_sla_exempt: RwSignal<SlaExempt>,
     pub(super) has_secret: RwSignal<bool>,
     pub(super) f_auto_update: RwSignal<bool>,
+    pub(super) f_exploit_data: RwSignal<bool>,
     /// Whole write-path block, held as one value so a field the panel doesn't
     /// expose round-trips unchanged instead of resetting to its default on save.
     pub(super) f_actions: RwSignal<ActionSettings>,
@@ -579,6 +585,7 @@ impl SettingsState {
             f_sla_exempt: RwSignal::new(SlaExempt::default()),
             has_secret: RwSignal::new(false),
             f_auto_update: RwSignal::new(true),
+            f_exploit_data: RwSignal::new(true),
             f_actions: RwSignal::new(ActionSettings::default()),
             presets: RwSignal::new(Vec::new()),
             preset_name: RwSignal::new(String::new()),

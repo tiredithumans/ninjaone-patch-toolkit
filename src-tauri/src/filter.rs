@@ -71,6 +71,11 @@ pub struct FilterParams {
     /// Inclusive upper bound of the absolute range; `None` = open-ended (up to now).
     #[serde(default)]
     pub installed_before: Option<i64>,
+    /// Keep only rows whose KB fixes a vulnerability being exploited in the wild
+    /// (`PatchRow::exploited_cves`). Matched after the exploit stamp, so with exploit
+    /// data off or not yet downloaded it keeps nothing — the status line says why.
+    #[serde(default)]
+    pub exploited_only: bool,
 }
 
 /// A validated absolute install-history range, as Unix seconds. See
@@ -249,6 +254,7 @@ impl FilterParams {
                 .collect(),
             detected_after: self.detected_after,
             detected_before: self.detected_before,
+            exploited_only: self.exploited_only,
         }
     }
 }
@@ -319,6 +325,7 @@ pub struct PreparedFilter<'a> {
     severities: Vec<Severity>,
     detected_after: Option<i64>,
     detected_before: Option<i64>,
+    exploited_only: bool,
 }
 
 impl<'a> PreparedFilter<'a> {
@@ -427,6 +434,12 @@ impl<'a> PreparedFilter<'a> {
     /// matches every severity.
     pub fn severity_allowed(&self, severity: Severity) -> bool {
         self.severities.is_empty() || self.severities.contains(&severity)
+    }
+
+    /// True unless "Known exploited only" is on and the row's KB fixes nothing
+    /// exploited.
+    pub fn exploited_allowed(&self, exploited_cves: Option<&str>) -> bool {
+        !self.exploited_only || exploited_cves.is_some()
     }
 
     /// True when the patch's first-seen timestamp (Unix seconds) falls within the

@@ -5,6 +5,7 @@ mod changes;
 mod commands;
 mod csv_export;
 mod error;
+mod exploits;
 mod export;
 mod filter;
 mod first_seen;
@@ -101,6 +102,12 @@ pub fn run() {
         // jumping there. `show` runs whatever `restore` managed — a window that
         // stays hidden would be a far worse failure than one at the default size.
         .setup(|app| {
+            // Off the critical path: reads the disk copy, then refreshes in the
+            // background if it is due, so the first query rarely waits on nothing.
+            let state = app.state::<AppState>();
+            state
+                .exploits
+                .ensure_fresh(state.settings_snapshot().exploit_data);
             if let Some(window) = app.get_webview_window(window_state::MAIN_WINDOW) {
                 window_state::restore(&window);
                 window.show()?;
