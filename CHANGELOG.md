@@ -20,6 +20,8 @@ version and start a fresh `[Unreleased]`.
 - The Excel and CSV exports add **CVEs** and **Exploited CVEs** columns.
 - **Find CVE** on the Patches tab shows which devices are still missing the Windows update that
   fixes a CVE, with CISA's due date when it is known to be exploited.
+- Device details and the Devices sheet show NinjaOne Vulnerability Management's critical, high,
+  medium and low counts when your tenant imports scanner data.
 - The reference software remediation script now patches 64-bit Git, Visual Studio Code and
   Notepad++.
 

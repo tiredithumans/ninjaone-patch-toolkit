@@ -31,7 +31,7 @@ use crate::types::{
     SlaBySeverity, SlaExempt, SlaPolicy, StuckDevice, TimeToInstall,
 };
 use crate::types::{ChangeItem, RunChanges};
-use crate::types::{ExploitDataStatus, QueryResult};
+use crate::types::{ExploitDataStatus, QueryResult, VulnCounts};
 
 /// Wall-clock label shown in the results summary. Fixed (not "now") so the build
 /// stays deterministic and host-testable — it reads as a representative snapshot.
@@ -640,6 +640,14 @@ fn sample_device_summary(device_id: i64, failed_queried: bool) -> Option<DeviceS
         urgent_past_sla: aged,
         failed_installs: failed_queried.then_some(failed),
         last_contact: Some(SAMPLE_LAST_CONTACT.to_string()),
+        // As a tenant importing scanner data would see it; derived from the id so the
+        // sample is stable.
+        vulnerabilities: Some(VulnCounts {
+            critical: (device_id % 3) as u32,
+            high: (device_id % 5) as u32 + 1,
+            medium: (device_id % 7) as u32 + 4,
+            low: (device_id % 4) as u32,
+        }),
     })
 }
 

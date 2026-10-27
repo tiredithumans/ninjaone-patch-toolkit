@@ -43,7 +43,13 @@
         "pendingCount": 3,
         "rebootReason": "Windows Update",
         "rollupScope": "included",
-        "urgentPastSla": 2
+        "urgentPastSla": 2,
+        "vulnerabilities": {
+          "critical": 1,
+          "high": 3,
+          "low": 2,
+          "medium": 7
+        }
       },
       "rows": [
         {
@@ -980,7 +986,8 @@
           "pendingCount": 0,
           "rebootReason": null,
           "rollupScope": "nonPatchable",
-          "urgentPastSla": 0
+          "urgentPastSla": 0,
+          "vulnerabilities": null
         },
         {
           "deviceId": 1,
@@ -1009,7 +1016,13 @@
           "pendingCount": 3,
           "rebootReason": "Windows Update",
           "rollupScope": "included",
-          "urgentPastSla": 2
+          "urgentPastSla": 2,
+          "vulnerabilities": {
+            "critical": 1,
+            "high": 3,
+            "low": 2,
+            "medium": 7
+          }
         },
         {
           "deviceId": 2,
@@ -1038,7 +1051,8 @@
           "pendingCount": 1,
           "rebootReason": null,
           "rollupScope": "offline",
-          "urgentPastSla": 0
+          "urgentPastSla": 0,
+          "vulnerabilities": null
         },
         {
           "deviceId": 4,
@@ -1067,7 +1081,8 @@
           "pendingCount": 0,
           "rebootReason": null,
           "rollupScope": "offline",
-          "urgentPastSla": 0
+          "urgentPastSla": 0,
+          "vulnerabilities": null
         }
       ],
       "rows": [
@@ -1683,6 +1698,12 @@
     "scopeNote": "Compliance covers online Windows, macOS and Linux devices only (2 offline and 1 non-patchable devices excluded).",
     "slaPolicy": "30 days (default); Critical 14 days, Important 30 days, Security 30 days, Moderate 60 days, Recommended 60 days, Low 90 days; no SLA: Optional",
     "uncountedOrgsNote": "Fabrikam has no online, patchable device in scope, so it is not in the table.",
+    "vulnerabilityCountsNote": [
+      [
+        "Vulnerabilities",
+        "Open vulnerabilities NinjaOne's Vulnerability Management holds for the device, by severity, from scanner data imported into NinjaOne. Blank for every device when no device has any: a tenant that imports no scan data would otherwise read as a clean fleet."
+      ]
+    ],
     "worstDevicesNote": "Online Windows, macOS and Linux devices in scope, ranked by pending patches past their severity's SLA (every severity that has one), then by the most urgent backlog."
   }
 }

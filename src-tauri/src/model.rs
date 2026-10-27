@@ -77,6 +77,11 @@ pub struct Device {
     /// reports none or the health feed could not be read.
     #[serde(skip)]
     pub pending_reboot_reason: Option<String>,
+    /// NinjaOne Vulnerability Management's counts for this device, merged in from
+    /// `/queries/device-health` ([`apply_health`]). `None` when it reports none, or
+    /// when no device in the fleet has any.
+    #[serde(skip)]
+    pub vulnerabilities: Option<VulnCounts>,
 }
 
 /// One `GET /jobs` record: a job NinjaOne reports as running. Read for display only —
@@ -117,30 +122,94 @@ impl RunningJob {
     }
 }
 
-/// One `/queries/device-health` record, reduced to the field this app reads. The
-/// schema (`DeviceHealthSummary`) carries threat, alert and vulnerability counts as
-/// well; none of them is decoded, so a vendor change to one cannot fail the page.
-#[derive(Debug, Clone, Deserialize)]
+/// One `/queries/device-health` record, reduced to the fields this app reads. The
+/// schema (`DeviceHealthSummary`) carries threat and alert counts as well; those are
+/// not decoded, and the vulnerability counts are read leniently, so a vendor change
+/// to any of them cannot fail the page.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceHealth {
     #[serde(default)]
     pub device_id: Option<i64>,
     #[serde(default)]
     pub pending_reboot_reason: Option<String>,
+    #[serde(default, deserialize_with = "lenient_count")]
+    pub critical_vulnerability_count: Option<u32>,
+    #[serde(default, deserialize_with = "lenient_count")]
+    pub high_vulnerability_count: Option<u32>,
+    #[serde(default, deserialize_with = "lenient_count")]
+    pub medium_vulnerability_count: Option<u32>,
+    #[serde(default, deserialize_with = "lenient_count")]
+    pub low_vulnerability_count: Option<u32>,
 }
 
-/// Copies each device's [`DeviceHealth::pending_reboot_reason`] onto the inventory,
-/// skipping blank reasons and records for devices the inventory does not hold.
-pub fn apply_reboot_reasons(devices: &mut [Device], health: Vec<DeviceHealth>) {
-    let reasons: std::collections::HashMap<i64, String> = health
-        .into_iter()
-        .filter_map(|h| {
-            let reason = h.pending_reboot_reason?.trim().to_string();
-            Some((h.device_id?, reason)).filter(|(_, r)| !r.is_empty())
+/// A count that is anything but a non-negative integer reads as absent rather than
+/// failing the record.
+fn lenient_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok()))
+}
+
+/// Open vulnerabilities NinjaOne's Vulnerability Management holds for a device, by
+/// severity — scanner data imported into NinjaOne, not anything this app computes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VulnCounts {
+    pub critical: u32,
+    pub high: u32,
+    pub medium: u32,
+    pub low: u32,
+}
+
+impl VulnCounts {
+    fn of(h: &DeviceHealth) -> Option<Self> {
+        let counts = [
+            h.critical_vulnerability_count,
+            h.high_vulnerability_count,
+            h.medium_vulnerability_count,
+            h.low_vulnerability_count,
+        ];
+        counts.iter().any(Option::is_some).then(|| Self {
+            critical: counts[0].unwrap_or(0),
+            high: counts[1].unwrap_or(0),
+            medium: counts[2].unwrap_or(0),
+            low: counts[3].unwrap_or(0),
         })
-        .collect();
+    }
+
+    fn is_zero(self) -> bool {
+        self == Self::default()
+    }
+}
+
+/// Copies each device's health onto the inventory: its reboot reason (blank ones
+/// skipped) and its vulnerability counts. Records for devices the inventory does not
+/// hold are ignored.
+///
+/// The counts are dropped for every device when no device has any. A tenant that
+/// imports no scanner data into NinjaOne would otherwise read as a fleet with zero
+/// vulnerabilities, which is the one answer such a tenant cannot give.
+pub fn apply_health(devices: &mut [Device], health: Vec<DeviceHealth>) {
+    let mut reasons: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    let mut vulns: std::collections::HashMap<i64, VulnCounts> = std::collections::HashMap::new();
+    for h in health {
+        let Some(id) = h.device_id else { continue };
+        if let Some(counts) = VulnCounts::of(&h) {
+            vulns.insert(id, counts);
+        }
+        if let Some(reason) = h.pending_reboot_reason.map(|r| r.trim().to_string())
+            && !reason.is_empty()
+        {
+            reasons.insert(id, reason);
+        }
+    }
+    let scanned = devices
+        .iter()
+        .any(|d| vulns.get(&d.id).is_some_and(|v| !v.is_zero()));
     for d in devices {
         d.pending_reboot_reason = reasons.get(&d.id).cloned();
+        d.vulnerabilities = vulns.get(&d.id).copied().filter(|_| scanned);
     }
 }
 
@@ -1002,6 +1071,7 @@ mod tests {
             os: None,
             last_contact: None,
             pending_reboot_reason: None,
+            vulnerabilities: None,
         }
     }
 

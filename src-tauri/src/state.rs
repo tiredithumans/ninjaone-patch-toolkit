@@ -12,9 +12,7 @@ use crate::api::{NinjaApiClient, ProgressFn};
 use crate::auth::AuthState;
 #[cfg(test)]
 use crate::model::PatchRow;
-use crate::model::{
-    Device, DeviceGroup, Location, Organization, Patch, Role, apply_reboot_reasons,
-};
+use crate::model::{Device, DeviceGroup, Location, Organization, Patch, Role, apply_health};
 #[cfg(test)]
 use crate::rows::sort_order;
 use crate::rows::{GroupBy, PatchGroup, QueryResult, RowSort};
@@ -541,7 +539,7 @@ impl AppState {
                 let mut devices = devices?;
                 let degraded = match health {
                     Ok(health) => {
-                        apply_reboot_reasons(&mut devices, health);
+                        apply_health(&mut devices, health);
                         false
                     }
                     Err(e) => {

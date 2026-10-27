@@ -56,7 +56,9 @@ lists individual patches per server, and exports to Excel.
   updates first, **Known exploited only** narrows the Patches and Failures tabs to them, and the
   export carries **CVEs** and **Exploited CVEs** columns. **Find CVE** on the Patches tab lists
   the devices in the current results still missing the update that fixes a given CVE (or a newer
-  update that includes it). The data downloads in the background
+  update that includes it). If you import scanner data into NinjaOne Vulnerability Management,
+  each device's critical/high/medium/low counts appear in its details and on the Devices sheet.
+  The data downloads in the background
   (about 250 MB the first time) and can be switched off in Settings.
 - **Patch actions** *(opt‑in — see [Patch actions](#patch-actions))* — select patch rows and
   scan, apply, reboot, or run any script from the tenant's automation library, then watch

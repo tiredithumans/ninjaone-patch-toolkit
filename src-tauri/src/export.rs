@@ -11,8 +11,9 @@ use crate::rows::{
     ApprovalBacklog, CVE_COLUMN_NOTES, ComplianceBucket, DeviceBacklog, DeviceBacklogList,
     DeviceSummary, FailureGroup, FirstSeenTracking, InstallLatency, OFFLINE_BACKLOG_NOTE,
     OsCompliance, PatchFamilies, QueryScope, REBOOT_COLUMN_NOTES, StuckDevice,
-    TIME_TO_INSTALL_NOTE, TableCell, TableColumn, TimeToInstall, WORST_DEVICES_NOTE,
-    calculation_notes, clamp_cell, headline_figures, uncounted_orgs_note, utc_text,
+    TIME_TO_INSTALL_NOTE, TableCell, TableColumn, TimeToInstall, VULNERABILITY_COUNTS_NOTE,
+    WORST_DEVICES_NOTE, calculation_notes, clamp_cell, headline_figures, uncounted_orgs_note,
+    utc_text,
 };
 use crate::settings::SlaPolicy;
 
@@ -95,7 +96,7 @@ const OFFLINE_WIDTHS: [f64; DeviceBacklog::OFFLINE_COLUMNS.len()] =
 const INSTALL_TIME_WIDTHS: [f64; InstallLatency::COLUMNS.len()] = [14.0, 28.0, 17.0, 34.0, 20.0];
 const DEVICE_WIDTHS: [f64; DeviceSummary::DEVICE_COLUMNS.len()] = [
     24.0, 18.0, 18.0, 22.0, 26.0, 8.0, 24.0, 11.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0,
-    10.0, 16.0, 13.0, 13.0, 30.0, 18.0,
+    10.0, 16.0, 13.0, 13.0, 30.0, 18.0, 12.0, 12.0, 12.0, 12.0,
 ];
 
 /// The one number format every date-time cell is written with. The values are UTC
@@ -600,7 +601,11 @@ fn write_about_sheet(
     }
     // The Patches sheet streams, so it has no footnotes of its own; its two reboot
     // columns are defined here with the rest.
-    for &(term, meaning) in REBOOT_COLUMN_NOTES.iter().chain(&CVE_COLUMN_NOTES) {
+    for &(term, meaning) in REBOOT_COLUMN_NOTES
+        .iter()
+        .chain(&CVE_COLUMN_NOTES)
+        .chain([&VULNERABILITY_COUNTS_NOTE])
+    {
         row += 1;
         sheet.write_string(row, 0, term)?;
         sheet.write_string(row, 1, meaning)?;
@@ -945,6 +950,7 @@ mod tests {
             failed_installs: None,
             last_contact: Some("2026-04-24 03:06 UTC".into()),
             last_contact_ts: Some(1_777_000_000),
+            vulnerabilities: None,
         }
     }
 

@@ -132,6 +132,7 @@ fn device(id: i64, name: &str, class: &str, os: &str, offline: bool) -> Device {
         }),
         last_contact: Some(days_ago(1)),
         pending_reboot_reason: None,
+        vulnerabilities: None,
     }
 }
 
@@ -260,6 +261,12 @@ fn ipc_fixture_is_current() {
     let devices = [
         Device {
             pending_reboot_reason: Some("Windows Update".into()),
+            vulnerabilities: Some(crate::model::VulnCounts {
+                critical: 1,
+                high: 3,
+                medium: 7,
+                low: 2,
+            }),
             ..device(1, "web-01", "WINDOWS_SERVER", "Windows Server 2022", false)
         },
         device(2, "web-02", "WINDOWS_SERVER", "Windows Server 2022", true),
@@ -767,6 +774,7 @@ fn ipc_fixture_is_current() {
             "offlineBacklogNote": OFFLINE_BACKLOG_NOTE,
             "rebootColumnNotes": REBOOT_COLUMN_NOTES,
             "cveColumnNotes": CVE_COLUMN_NOTES,
+            "vulnerabilityCountsNote": [crate::rows::VULNERABILITY_COUNTS_NOTE],
             "pctBands": PCT_BANDS.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
             "columns": {
                 "compliance": headers(&ComplianceBucket::COLUMNS),

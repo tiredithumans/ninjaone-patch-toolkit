@@ -3276,6 +3276,7 @@ fn reboot_device(id: i64, name: &str, offline: bool) -> DeviceSummary {
         urgent_past_sla: 0,
         failed_installs: None,
         last_contact: None,
+        vulnerabilities: None,
     }
 }
 
@@ -3809,7 +3810,26 @@ fn drill_device() -> crate::types::DeviceSummary {
         urgent_past_sla: 0,
         failed_installs: None,
         last_contact: Some("2026-06-26 14:31 UTC".into()),
+        vulnerabilities: None,
     }
+}
+
+#[test]
+fn the_vulnerability_line_reads_the_counts_or_nothing() {
+    assert_eq!(vulnerability_label(&drill_device()), None);
+    let scanned = crate::types::DeviceSummary {
+        vulnerabilities: Some(crate::types::VulnCounts {
+            critical: 1,
+            high: 3,
+            medium: 7,
+            low: 0,
+        }),
+        ..drill_device()
+    };
+    assert_eq!(
+        vulnerability_label(&scanned).as_deref(),
+        Some("1 critical, 3 high, 7 medium, 0 low")
+    );
 }
 
 /// The drill-down's fact list keeps its shape: an absent value is a dash, not a
@@ -4087,8 +4107,9 @@ fn the_wording_matches_the_backend() {
     }
 
     for (key, mirror) in [
-        ("rebootColumnNotes", &REBOOT_COLUMN_NOTES),
-        ("cveColumnNotes", &CVE_COLUMN_NOTES),
+        ("rebootColumnNotes", &REBOOT_COLUMN_NOTES[..]),
+        ("cveColumnNotes", &CVE_COLUMN_NOTES[..]),
+        ("vulnerabilityCountsNote", &[VULNERABILITY_COUNTS_NOTE][..]),
     ] {
         let backend = wording[key].as_array().expect(key);
         assert_eq!(mirror.len(), backend.len(), "{key}");

@@ -456,6 +456,7 @@ fn dev(id: i64, org: i64) -> Device {
         os: None,
         last_contact: None,
         pending_reboot_reason: None,
+        vulnerabilities: None,
     }
 }
 

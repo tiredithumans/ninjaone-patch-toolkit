@@ -1073,6 +1073,7 @@ mod tests {
                 failed_installs: None,
                 last_contact: None,
                 last_contact_ts: None,
+                vulnerabilities: None,
             }],
             compliance: vec![ComplianceBucket {
                 // A hostile org name must be escaped, not rendered as markup.

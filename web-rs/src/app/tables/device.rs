@@ -231,8 +231,16 @@ fn DeviceHealth(device: DeviceSummary) -> impl IntoView {
     let (aged_class, aged_label, aged_title) = aged_badge(device.urgent_past_sla);
     let failed = util::failed_installs_label(device.failed_installs);
     let within_sla = util::within_sla_label(&device).unwrap_or_default();
+    let vulnerabilities = util::vulnerability_label(&device).map(|v| {
+        view! {
+            <dl class="device-facts">
+                <HealthFact col=util::VULNERABILITY_COUNTS_NOTE>{v}</HealthFact>
+            </dl>
+        }
+    });
     view! {
         <dl class="device-facts">{facts}</dl>
+        {vulnerabilities}
         {match excluded {
             Some(reason) => view! { <p class="scope-note">{reason}</p> }.into_any(),
             None => {

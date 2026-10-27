@@ -551,6 +551,7 @@ mod tests {
             os: None,
             last_contact: None,
             pending_reboot_reason: None,
+            vulnerabilities: None,
         }
     }
 
