@@ -139,6 +139,7 @@ pub fn run() {
             commands::export::export_patches_xlsx,
             commands::export::export_report_html,
             commands::export::export_csv,
+            commands::exploits::find_cve,
             commands::diagnostics::read_action_audit,
             commands::diagnostics::read_run_history,
             commands::diagnostics::open_diagnostics_folder,

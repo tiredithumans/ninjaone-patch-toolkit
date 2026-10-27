@@ -74,6 +74,45 @@
       ],
       "rowsTotal": 5
     },
+    "find_cve": {
+      "covering": [
+        "KB5039212",
+        "KB5040434"
+      ],
+      "cve": "CVE-2026-20001",
+      "devices": [
+        {
+          "deviceId": 1,
+          "deviceName": "web-01",
+          "direct": true,
+          "kb": "KB5039212",
+          "offline": false,
+          "organization": "Contoso",
+          "status": "APPROVED"
+        },
+        {
+          "deviceId": 2,
+          "deviceName": "web-02",
+          "direct": false,
+          "kb": "KB5040434",
+          "offline": true,
+          "organization": "Contoso",
+          "status": "PENDING"
+        }
+      ],
+      "devicesTotal": 2,
+      "exploited": true,
+      "fixedBy": [
+        "KB5039212"
+      ],
+      "kev": {
+        "dateAdded": "2026-10-14",
+        "dueDate": "2026-11-04",
+        "ransomware": true
+      },
+      "sentence": "2 devices in the current result are missing KB5039212 or a newer update that includes it. A device missing only a newer update may already have the fix: NinjaOne lists just the newest update a device needs. Only the devices and statuses in the current result are checked.",
+      "title": "CVE-2026-20001 Remote Code Execution Vulnerability"
+    },
     "get_device_rows": [
       {
         "deviceId": 1,
@@ -167,11 +206,11 @@
         "status": "PENDING"
       },
       {
-        "cveCount": null,
+        "cveCount": 1,
         "deviceId": 1,
         "deviceName": "web-01",
         "deviceRole": "Domain Controller",
-        "exploitedCves": null,
+        "exploitedCves": "CVE-2026-20001",
         "firstSeenDate": "2026-04-02 12:00 UTC",
         "firstSeenTs": 1775131200,
         "installedDate": null,
@@ -855,7 +894,7 @@
       "devicesTotal": 4,
       "devicesUnpatchable": 1,
       "exploitData": {
-        "sentence": "CVEs and exploited marks for Windows updates come from Microsoft security releases 2026-Oct to 2026-Oct and no CISA catalog, checked 2026-10-27 00:00 UTC.",
+        "sentence": "CVEs and exploited marks for Windows updates come from Microsoft security releases 2026-Sep to 2026-Oct and CISA's Known Exploited Vulnerabilities catalog 2026.10.26, checked 2026-10-27 00:00 UTC.",
         "state": "ready"
       },
       "failures": [
@@ -1058,11 +1097,11 @@
           "status": "PENDING"
         },
         {
-          "cveCount": null,
+          "cveCount": 1,
           "deviceId": 1,
           "deviceName": "web-01",
           "deviceRole": "Domain Controller",
-          "exploitedCves": null,
+          "exploitedCves": "CVE-2026-20001",
           "firstSeenDate": "2026-04-02 12:00 UTC",
           "firstSeenTs": 1775131200,
           "installedDate": null,

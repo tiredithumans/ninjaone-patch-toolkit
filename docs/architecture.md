@@ -51,7 +51,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/changes.rs               # per-scope run-snapshots/ → RunChanges (changes since the previous comparable run)
 ├── src/first_seen.rs            # per-tenant first-seen/ ledger: when this app first saw each pending patch
 ├── src/exploits.rs              # public CVE/exploit index (Microsoft CVRF + CISA KEV) and the row stamp
-├── src/exploits/                # feeds.rs wire shapes → compact months · store.rs exploit-data/ disk copy + background refresh
+├── src/exploits/                # feeds.rs wire shapes → compact months · store.rs exploit-data/ disk copy + background refresh · exposure.rs the CVE search
 ├── src/export.rs                # rust_xlsxwriter workbook: detail, rollup, Devices, device-list, Stuck Approvals, Changes, About; UTC date cells
 ├── src/csv_export.rs            # detail-row CSV: BOM, CRLF, RFC 4180 quoting, formula-injection guard
 ├── src/report.rs                # standalone HTML executive report from the cached QueryResult
@@ -59,7 +59,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/settings.rs              # persisted Settings (instance, client id, ports, windows, SLA policy, presets); atomic save, corrupt file quarantined
 ├── src/error.rs                 # UiError { message } — the IPC error shape
 ├── src/fixtures.rs              # test-only: generates web-rs/tests/*.json (assert_fixture_current) + the IPC fixture
-├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, export, live_jobs, lookups, patches, settings, update)
+├── src/commands/                # #[tauri::command] handlers (actions, auth, diagnostics, exploits, export, live_jobs, lookups, patches, settings, update)
 ├── src/commands/live_jobs.rs    # read-only: NinjaOne's running patch-ops jobs on the current result's devices
 ├── src/commands/actions/        # mod.rs handlers · confirm.rs request_hash · plan.rs build_plan · dispatch.rs send_action · poller.rs poll_tick · tests.rs
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl

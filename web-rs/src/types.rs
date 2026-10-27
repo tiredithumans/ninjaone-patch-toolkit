@@ -270,6 +270,52 @@ pub enum RollupScope {
 }
 
 /// One device's drill-down, served from the backend's cached result by
+/// `find_cve`: which devices in the current result may still be exposed to one
+/// CVE. Mirrors `exploits::CveExposure`.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(rename_all = "camelCase")]
+pub struct CveExposure {
+    pub cve: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub exploited: bool,
+    #[serde(default)]
+    pub kev: Option<KevEntry>,
+    /// The KBs Microsoft lists as fixing it.
+    pub fixed_by: Vec<String>,
+    /// Those and every later KB that includes one of them.
+    pub covering: Vec<String>,
+    pub devices: Vec<ExposedDevice>,
+    pub devices_total: usize,
+    pub sentence: String,
+}
+
+/// Mirrors `exploits::KevEntry`: the CVE's entry in CISA's catalog.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(rename_all = "camelCase")]
+pub struct KevEntry {
+    pub date_added: String,
+    pub due_date: String,
+    pub ransomware: bool,
+}
+
+/// Mirrors `exploits::ExposedDevice`.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(rename_all = "camelCase")]
+pub struct ExposedDevice {
+    pub device_id: i64,
+    pub device_name: String,
+    pub organization: String,
+    pub kb: String,
+    /// The KB is a fix itself; otherwise a later update that includes one.
+    pub direct: bool,
+    pub status: String,
+    pub offline: bool,
+}
+
 /// `device_detail`. Mirrors `rows::DeviceDetail`.
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]

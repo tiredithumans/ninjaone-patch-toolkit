@@ -665,6 +665,13 @@ fn ipc_fixture_is_current() {
             "get_patch_groups": slice_groups(&build_groups(&result.rows, GroupBy::Device), 0, 2),
             "get_device_rows": rows_by_device(&result.rows, &[1], 1),
             "device_detail": device_detail(&result, 1, 1),
+            // September's fix, which October's pending update supersedes: one device
+            // missing the fix itself and one missing only the newer update.
+            "find_cve": crate::exploits::cve_exposure(
+                &crate::exploits::sample_index(),
+                &result.rows,
+                "CVE-2026-20001",
+            ),
             "plan_action": plan,
             "run_action": ActionBatch {
                 batch_id: BATCH_ID,

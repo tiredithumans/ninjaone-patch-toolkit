@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod auth;
 pub mod diagnostics;
+pub mod exploits;
 pub mod export;
 pub mod live_jobs;
 pub mod lookups;

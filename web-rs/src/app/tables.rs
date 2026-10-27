@@ -9,6 +9,7 @@ use super::*;
 mod backlog;
 mod changes;
 mod compliance;
+mod cve;
 mod device;
 mod failures;
 mod live_jobs;
@@ -18,6 +19,7 @@ mod trend;
 
 use changes::ChangesPanel;
 use compliance::ComplianceTab;
+use cve::CveSearch;
 pub(crate) use device::DeviceDetailModal;
 use device::DeviceLink;
 use failures::FailuresTable;
