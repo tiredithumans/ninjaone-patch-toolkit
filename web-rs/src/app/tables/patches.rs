@@ -121,6 +121,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
                     <Show when=move || state.query.group_by.get().is_none()>
                         <ColumnMenu/>
                     </Show>
+                    <CveSearch/>
                 </div>
                 <Show when=move || state.query.group_by.get().is_some()>
                     <GroupedPatches/>

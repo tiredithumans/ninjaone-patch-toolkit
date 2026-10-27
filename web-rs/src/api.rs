@@ -394,6 +394,13 @@ ipc!(
     device_detail(device_id: i64) -> Option<DeviceDetail>
 );
 
+ipc!(
+    /// Which devices in the backend's cached result may still be exposed to a CVE,
+    /// from the public exploit data. An error when the id is malformed or the data
+    /// is off or not downloaded yet.
+    find_cve(cve: String) -> CveExposure
+);
+
 ipc!(export_patches as "export_patches_xlsx", () -> Option<String>);
 
 ipc!(

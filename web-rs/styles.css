@@ -2742,3 +2742,9 @@ kbd {
   border-color: var(--danger);
   background: var(--danger-soft);
 }
+
+/* The CVE search's id field and button share a line. */
+.cve-search__form {
+  gap: 8px;
+  margin-bottom: 12px;
+}

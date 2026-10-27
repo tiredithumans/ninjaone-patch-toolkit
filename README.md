@@ -54,7 +54,9 @@ lists individual patches per server, and exports to Excel.
   when one of those is being exploited in the wild, per Microsoft's Security Update Guide and
   CISA's Known Exploited Vulnerabilities catalog. *By patch* and *By product* list exploited
   updates first, **Known exploited only** narrows the Patches and Failures tabs to them, and the
-  export carries **CVEs** and **Exploited CVEs** columns. The data downloads in the background
+  export carries **CVEs** and **Exploited CVEs** columns. **Find CVE** on the Patches tab lists
+  the devices in the current results still missing the update that fixes a given CVE (or a newer
+  update that includes it). The data downloads in the background
   (about 250 MB the first time) and can be switched off in Settings.
 - **Patch actions** *(opt‑in — see [Patch actions](#patch-actions))* — select patch rows and
   scan, apply, reboot, or run any script from the tenant's automation library, then watch

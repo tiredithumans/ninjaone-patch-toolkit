@@ -4,10 +4,10 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, ActionRequest, ActionSettings, AuthStatus, DeviceSummary, ExploitDataStatus,
-    FilterParams, GroupBy, JobReport, JobRequest, JobState, Location, Organization, PatchFamilies,
-    PatchGroup, PatchQueryArgs, PatchRow, PlannedTarget, RebootChoice, RebootMode, RowSort,
-    RowSortKey, RunRecord,
+    ActionKind, ActionRequest, ActionSettings, AuthStatus, CveExposure, DeviceSummary,
+    ExploitDataStatus, FilterParams, GroupBy, JobReport, JobRequest, JobState, KevEntry, Location,
+    Organization, PatchFamilies, PatchGroup, PatchQueryArgs, PatchRow, PlannedTarget, RebootChoice,
+    RebootMode, RowSort, RowSortKey, RunRecord,
 };
 
 /// A group header counts the axis it is NOT grouped by. Inverting these still
@@ -2014,6 +2014,59 @@ fn the_cves_sort_puts_exploited_and_larger_counts_first() {
     );
     let order: Vec<&str> = rows.iter().map(|r| r.device_name.as_str()).collect();
     assert_eq!(order, ["exploited", "many", "few", "none"]);
+}
+
+fn exposure(fixed_by: &[&str], covering: &[&str]) -> CveExposure {
+    CveExposure {
+        cve: "CVE-2026-20001".into(),
+        title: None,
+        exploited: true,
+        kev: None,
+        fixed_by: fixed_by.iter().map(|s| s.to_string()).collect(),
+        covering: covering.iter().map(|s| s.to_string()).collect(),
+        devices: Vec::new(),
+        devices_total: 0,
+        sentence: String::new(),
+    }
+}
+
+/// The CVE search names the later updates apart from the fixes, says CISA's dates
+/// and ransomware use, and says when its device list is only a prefix.
+#[test]
+fn the_cve_search_lines_say_what_the_answer_covers() {
+    assert_eq!(
+        newer_updates(&exposure(&["KB2"], &["KB1", "KB2", "KB3"])),
+        ["KB1", "KB3"]
+    );
+    assert!(newer_updates(&exposure(&["KB2"], &["KB2"])).is_empty());
+
+    let kev = KevEntry {
+        date_added: "2026-10-14".into(),
+        due_date: "2026-11-04".into(),
+        ransomware: true,
+    };
+    let line = kev_line(&kev);
+    assert!(
+        line.contains("since 2026-10-14") && line.contains("by 2026-11-04"),
+        "{line}"
+    );
+    assert!(
+        line.ends_with("Known to be used in ransomware campaigns."),
+        "{line}"
+    );
+    assert!(
+        !kev_line(&KevEntry {
+            ransomware: false,
+            ..kev
+        })
+        .contains("ransomware")
+    );
+
+    assert_eq!(exposure_cap_note(10, 10), None);
+    assert_eq!(
+        exposure_cap_note(1_000, 1_234).as_deref(),
+        Some("Showing the first 1,000 of 1,234 devices.")
+    );
 }
 
 /// Builds an `AuthStatus` in the state the named step leaves it in.
