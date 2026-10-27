@@ -678,6 +678,14 @@ pub struct PatchRow {
     /// [`Patch::product_identifier`], shared across the row set like the other
     /// repeated strings. `None` on every OS row.
     pub product_identifier: Option<Arc<str>>,
+    /// How many CVEs Microsoft lists this row's KB as fixing
+    /// ([`crate::exploits::stamp_rows`]). `None` when the KB is not in the exploit
+    /// data: a third-party or non-Windows patch, a non-security update, one older
+    /// than the data window, or exploit data off or not yet downloaded.
+    pub cve_count: Option<u32>,
+    /// Those CVEs that are being exploited in the wild, per Microsoft or CISA's
+    /// catalog, comma-joined and shared by every row of the KB. `None` when none are.
+    pub exploited_cves: Option<Arc<str>>,
 }
 
 /// How `POST /v2/device/{id}/reboot/{mode}` is addressed. `Forced` skips the

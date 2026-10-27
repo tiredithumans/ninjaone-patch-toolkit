@@ -123,6 +123,8 @@ pub struct QueryResult {
     /// distinct from `generated_at` because a re-filter recomputes over the cached
     /// fetch without a new round trip. Drives the UI's "patch data as of …" label.
     pub data_fetched_at: String,
+    /// Whether the rows' CVE figures were filled, and from which exploit data.
+    pub exploit_data: crate::exploits::ExploitDataStatus,
 }
 
 /// The lightweight view of a query returned to the frontend over IPC: the first
@@ -203,6 +205,7 @@ pub struct QuerySummary {
     /// When the underlying whole-fleet patch data was last fetched (see
     /// [`QueryResult::data_fetched_at`]).
     pub data_fetched_at: String,
+    pub exploit_data: crate::exploits::ExploitDataStatus,
 }
 
 impl QuerySummary {
@@ -238,6 +241,7 @@ impl QuerySummary {
             changes: result.changes.clone(),
             generated_at: result.generated_at.clone(),
             data_fetched_at: result.data_fetched_at.clone(),
+            exploit_data: result.exploit_data.clone(),
         }
     }
 }

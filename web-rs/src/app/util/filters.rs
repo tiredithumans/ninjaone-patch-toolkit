@@ -107,6 +107,7 @@ pub(crate) struct FilterInputs {
     pub severities: Vec<String>,
     pub os_name: String,
     pub search: String,
+    pub exploited_only: bool,
     /// "" (any), "1"/"7"/"30"/"90" (last N days), or "custom".
     pub detected_window: String,
     pub detected_after: String,
@@ -164,6 +165,7 @@ pub(crate) fn filter_params(i: FilterInputs) -> FilterParams {
         detected_before,
         installed_after,
         installed_before,
+        exploited_only: i.exploited_only,
     }
 }
 
@@ -670,6 +672,12 @@ pub(crate) fn filter_chips(f: &AppliedFilters) -> Vec<FilterChip> {
     if let Some(s) = &f.search {
         out.push(FilterChip {
             label: format!("Search: {s}"),
+            patch: true,
+        });
+    }
+    if f.exploited_only {
+        out.push(FilterChip {
+            label: "Known exploited only".to_string(),
             patch: true,
         });
     }

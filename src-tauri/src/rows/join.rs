@@ -348,6 +348,9 @@ pub fn build_rows(
                 first_seen_ts: first_seen.map(|d| d.timestamp()),
                 installed_ts: installed.map(|d| d.timestamp()),
                 product_identifier: pool.intern_opt(patch.product_identifier.as_deref()),
+                // Filled by `exploits::stamp_rows` once the join is done.
+                cve_count: None,
+                exploited_cves: None,
             });
         }
     }

@@ -13,13 +13,18 @@ version and start a fresh `[Unreleased]`.
 
 ### Added
 
+- Windows updates show how many CVEs they fix and are marked **exploited** when Microsoft or
+  CISA reports one of them being exploited in the wild; switch it off in Settings.
+- **Known exploited only** on the Patches and Failures tabs lists just the updates that fix an
+  exploited vulnerability.
+- The Excel and CSV exports add **CVEs** and **Exploited CVEs** columns.
 - The reference software remediation script now patches 64-bit Git, Visual Studio Code and
   Notepad++.
 
 ### Changed
 
-- The By patch and By product views list the most severe patches first, then the ones missing on
-  the most devices.
+- The By patch and By product views list updates that fix an exploited vulnerability first, then
+  the most severe, then the ones missing on the most devices.
 
 ## [0.21.1] - 2026-10-26
 

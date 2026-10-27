@@ -21,6 +21,7 @@ pub struct SettingsView {
     pub has_client_secret: bool,
     pub presets: Vec<Preset>,
     pub auto_check_updates: bool,
+    pub exploit_data: bool,
     pub actions: ActionSettings,
     /// Whether this save switched tenant (instance or client id), so the frontend
     /// knows to drop the results still on screen.
@@ -46,6 +47,7 @@ fn view(state: &AppState) -> SettingsView {
         has_client_secret: state.auth.has_client_secret(),
         presets: s.presets,
         auto_check_updates: s.auto_check_updates,
+        exploit_data: s.exploit_data,
         actions: s.actions,
         tenant_changed: false,
     }
@@ -79,6 +81,9 @@ pub struct SaveSettingsArgs {
     pub clear_secret: bool,
     #[serde(default = "default_auto_check")]
     pub auto_check_updates: bool,
+    /// Omitted by a frontend that predates exploit data, which then keeps it on.
+    #[serde(default = "default_auto_check")]
+    pub exploit_data: bool,
     /// Omitted by a frontend that predates the actions panel, which then leaves the
     /// write path disabled rather than silently enabling it.
     #[serde(default)]
@@ -103,6 +108,7 @@ impl std::fmt::Debug for SaveSettingsArgs {
             )
             .field("clear_secret", &self.clear_secret)
             .field("auto_check_updates", &self.auto_check_updates)
+            .field("exploit_data", &self.exploit_data)
             .field("actions", &self.actions)
             .finish()
     }
@@ -248,6 +254,7 @@ fn merge_settings(
     next.sla_by_severity = args.sla_by_severity;
     next.sla_exempt = args.sla_exempt;
     next.auto_check_updates = args.auto_check_updates;
+    next.exploit_data = args.exploit_data;
     next.actions = args.actions;
     next.actions.run_as = next.actions.run_as.trim().to_string();
     normalize_window_days(&mut next.actions.window_days);
@@ -337,6 +344,8 @@ pub async fn save_settings(
     // query is assembled, and the port, the secret, the actions block and the
     // update check never reach a fetch. Clearing on every save meant toggling the
     // update check threw away a whole-fleet fetch that can take minutes to redo.
+    // Switching it on starts the first download now rather than at the next query.
+    state.exploits.ensure_fresh(next.exploit_data);
     if effects.tenant_changed {
         state.clear_lookups_cache();
         state.clear_last_result();
@@ -443,6 +452,7 @@ mod tests {
             clear_secret: false,
             auto_check_updates: true,
             actions: ActionSettings::default(),
+            exploit_data: true,
         }
     }
 

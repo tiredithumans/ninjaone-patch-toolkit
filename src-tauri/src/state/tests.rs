@@ -33,6 +33,7 @@ fn sample_result() -> QueryResult {
         changes: Default::default(),
         generated_at: "2026-01-01 00:00:00 UTC".into(),
         data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
+        exploit_data: Default::default(),
     }
 }
 
@@ -78,6 +79,8 @@ fn result_with_devices(names: &[&str]) -> QueryResult {
                 first_seen_ts: None,
                 installed_ts: None,
                 product_identifier: None,
+                cve_count: None,
+                exploited_cves: None,
             })
             .collect(),
         ..sample_result()

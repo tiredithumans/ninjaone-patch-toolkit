@@ -31,6 +31,8 @@ fn row(device_id: i64, kb: Option<&str>, name: &str, status: &str) -> PatchRow {
         installed_date: None,
         first_seen_ts: None,
         installed_ts: None,
+        cve_count: None,
+        exploited_cves: None,
     }
 }
 

@@ -8,11 +8,11 @@ use rust_xlsxwriter::{Color, ExcelDateTime, Format, Workbook, Worksheet};
 
 use crate::model::PatchRow;
 use crate::rows::{
-    ApprovalBacklog, ComplianceBucket, DeviceBacklog, DeviceBacklogList, DeviceSummary,
-    FailureGroup, FirstSeenTracking, InstallLatency, OFFLINE_BACKLOG_NOTE, OsCompliance,
-    PatchFamilies, QueryScope, REBOOT_COLUMN_NOTES, StuckDevice, TIME_TO_INSTALL_NOTE, TableCell,
-    TableColumn, TimeToInstall, WORST_DEVICES_NOTE, calculation_notes, clamp_cell,
-    headline_figures, uncounted_orgs_note, utc_text,
+    ApprovalBacklog, CVE_COLUMN_NOTES, ComplianceBucket, DeviceBacklog, DeviceBacklogList,
+    DeviceSummary, FailureGroup, FirstSeenTracking, InstallLatency, OFFLINE_BACKLOG_NOTE,
+    OsCompliance, PatchFamilies, QueryScope, REBOOT_COLUMN_NOTES, StuckDevice,
+    TIME_TO_INSTALL_NOTE, TableCell, TableColumn, TimeToInstall, WORST_DEVICES_NOTE,
+    calculation_notes, clamp_cell, headline_figures, uncounted_orgs_note, utc_text,
 };
 use crate::settings::SlaPolicy;
 
@@ -22,7 +22,7 @@ const MAX_SHEET_DATA_ROWS: usize = 1_048_575;
 /// The Patches detail-sheet columns. Only the workbook renders this table, so it
 /// lives here rather than on `PatchRow` — but it is declared the same way as the
 /// shared ones so header and value stay a single declaration.
-pub(crate) const DETAIL_COLUMNS: [TableColumn<PatchRow>; 16] = [
+pub(crate) const DETAIL_COLUMNS: [TableColumn<PatchRow>; 18] = [
     ("Organization", |r| TableCell::text(&r.organization)),
     ("Location", |r| TableCell::opt_text(r.location.as_deref())),
     ("Device Role", |r| {
@@ -37,6 +37,15 @@ pub(crate) const DETAIL_COLUMNS: [TableColumn<PatchRow>; 16] = [
     ("KB", |r| TableCell::opt_text(r.kb.as_deref())),
     ("Patch", |r| TableCell::text(&r.name)),
     ("Severity", |r| TableCell::text(r.severity)),
+    // Blank, not 0, when the KB is not in the exploit data: "no CVEs listed" and
+    // "not looked up" are different answers (see the About sheet's Exploit data).
+    ("CVEs", |r| {
+        r.cve_count
+            .map_or_else(|| TableCell::text(""), |n| TableCell::Count(n as usize))
+    }),
+    ("Exploited CVEs", |r| {
+        TableCell::opt_text(r.exploited_cves.as_deref())
+    }),
     ("Status", |r| TableCell::text(&r.status)),
     // The device's flag, not the patch's: a pending kernel update on a device with
     // nothing installed yet reads "No" here. Headed so it cannot be read as "this
@@ -67,7 +76,8 @@ pub(crate) const DETAIL_COLUMNS: [TableColumn<PatchRow>; 16] = [
 // error — previously the widths were an unchecked `&[f64]` literal passed inline,
 // so a column added at one site and not the other silently misaligned the sheet.
 const DETAIL_WIDTHS: [f64; DETAIL_COLUMNS.len()] = [
-    24.0, 18.0, 18.0, 22.0, 26.0, 18.0, 11.0, 12.0, 40.0, 11.0, 11.0, 13.0, 13.0, 9.0, 20.0, 20.0,
+    24.0, 18.0, 18.0, 22.0, 26.0, 18.0, 11.0, 12.0, 40.0, 11.0, 7.0, 30.0, 11.0, 13.0, 13.0, 9.0,
+    20.0, 20.0,
 ];
 const SUMMARY_WIDTHS: [f64; ComplianceBucket::COLUMNS.len()] =
     [28.0, 10.0, 12.0, 14.0, 14.0, 16.0, 16.0, 17.0, 18.0, 22.0];
@@ -136,6 +146,9 @@ pub struct WorkbookMeta<'a> {
     pub first_seen: &'a FirstSeenTracking,
     /// The patch families the rollups cover, for the Definitions block.
     pub patch_families: PatchFamilies,
+    /// Where the CVE columns came from, or why they are blank
+    /// (`ExploitDataStatus::sentence`).
+    pub exploit_data: &'a str,
 }
 
 /// The per-device and install-time aggregates, each written to its own sheet.
@@ -500,6 +513,7 @@ fn write_about_sheet(
         ("NinjaOne instance", meta.instance),
         ("App version", APP_VERSION),
         ("SLA policy", sla_policy.as_str()),
+        ("Exploit data", meta.exploit_data),
     ] {
         row += 1;
         sheet.write_string(row, 0, label)?;
@@ -586,7 +600,7 @@ fn write_about_sheet(
     }
     // The Patches sheet streams, so it has no footnotes of its own; its two reboot
     // columns are defined here with the rest.
-    for (term, meaning) in REBOOT_COLUMN_NOTES {
+    for &(term, meaning) in REBOOT_COLUMN_NOTES.iter().chain(&CVE_COLUMN_NOTES) {
         row += 1;
         sheet.write_string(row, 0, term)?;
         sheet.write_string(row, 1, meaning)?;
@@ -835,6 +849,7 @@ mod tests {
                 os: true,
                 software: true,
             },
+            exploit_data: "CVEs and exploited marks for Windows updates come from test data.",
         }
     }
 
@@ -901,6 +916,8 @@ mod tests {
             first_seen_ts: Some(1_777_000_000),
             installed_ts: None,
             product_identifier: None,
+            cve_count: None,
+            exploited_cves: None,
         }
     }
 
@@ -1408,7 +1425,7 @@ mod tests {
         // Both are defined on the About sheet, since the streamed Patches sheet
         // carries no notes of its own.
         let about = wb.worksheet_range("About").unwrap();
-        for (term, _) in REBOOT_COLUMN_NOTES {
+        for &(term, _) in REBOOT_COLUMN_NOTES.iter().chain(&CVE_COLUMN_NOTES) {
             assert!(
                 about.rows().any(|r| r.first().is_some_and(|c| *c == term)),
                 "About defines {term:?}"

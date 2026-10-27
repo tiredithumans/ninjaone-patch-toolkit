@@ -22,6 +22,7 @@ impl AppState {
         self.settings.f_sla_exempt.set(v.sla_exempt);
         self.settings.has_secret.set(v.has_client_secret);
         self.settings.f_auto_update.set(v.auto_check_updates);
+        self.settings.f_exploit_data.set(v.exploit_data);
         self.settings.f_actions.set(v.actions);
         self.filters.install_days.set(v.install_window_days);
         self.settings.presets.set(v.presets);
@@ -70,6 +71,7 @@ impl AppState {
             .os_name
             .set(f.os_name_contains.unwrap_or_default());
         self.filters.search.set(f.search.unwrap_or_default());
+        self.filters.exploited_only.set(f.exploited_only);
         // Restore the release-date filter UI from the stored bounds.
         let (window, after, before) = util::detected_window_fields(
             f.detected_within_days,

@@ -11,6 +11,7 @@ use tokio::task::JoinSet;
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::changes::{self, RunSnapshot};
 use crate::error::UiError;
+use crate::exploits::ExploitSnapshot;
 use crate::filter::FilterParams;
 use crate::first_seen::{self, Family, Observation, Resolver, TenantLedger};
 use crate::model::{Device, DeviceGroup, Patch, PatchRow, PatchStatus, PatchType};
@@ -187,6 +188,11 @@ pub async fn query_patches(
     // blocking thread (the first query of a session reads a file) concurrently with
     // the fetch; later queries take the copy this process holds.
     let ledger_tenant = tenant.clone();
+    // Public exploit data: whatever copy is loaded now, and a background refresh if
+    // one is due. Never awaited — a query does not wait for a download.
+    state.exploits.ensure_fresh(settings.exploit_data);
+    let exploits = state.exploits.snapshot(settings.exploit_data);
+
     let ledger_fut = async move {
         tauri::async_runtime::spawn_blocking(move || first_seen::base(&ledger_tenant))
             .await
@@ -214,6 +220,7 @@ pub async fn query_patches(
         devices_fut,
         current_fut,
         ledger_fut,
+        exploits,
         settings.install_window_days,
         // Clamped (inside `sla_policy`) for the same panic-guard reason as the
         // install window: every SLA window reaches `Duration::days` in the rollups,
@@ -641,6 +648,7 @@ async fn run_query<L, D, C, G>(
     devices_fut: D,
     current_fut: C,
     ledger_fut: G,
+    exploits: ExploitSnapshot,
     install_window_days: i64,
     sla: SlaPolicy,
     instance: String,
@@ -790,7 +798,7 @@ where
     // it needs is owned and `Send`, so moving it is just a `spawn_blocking`.
     let assemble_started = std::time::Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        assemble_result(&plan, src, sla, instance, now)
+        assemble_result(&plan, src, &exploits, sla, instance, now)
     })
     .await
     .context("join/rollup task failed")?;
@@ -825,6 +833,7 @@ fn dated<'p>(p: &'p Patch, ledger: &mut Resolver<'_>) -> PatchRecord<'p> {
 fn assemble_result(
     plan: &QueryPlan,
     src: FetchedSources,
+    exploits: &ExploitSnapshot,
     sla: SlaPolicy,
     instance: String,
     now: DateTime<Utc>,
@@ -974,6 +983,13 @@ fn assemble_result(
         }
         build_rows(&devices_by_id, &maps, &sources, &prepared)
     };
+    // Before anything reads the rows, so every rollup and export sees the same marks.
+    if let Some(index) = &exploits.index {
+        crate::exploits::stamp_rows(&mut rows, index);
+    }
+    // A patch facet like the rest, but it can only be judged once the rows are
+    // stamped, so it is applied here rather than in the join.
+    rows.retain(|r| prepared.exploited_allowed(r.exploited_cves.as_deref()));
     // Highest severity first, then organization, then device — case-insensitive.
     //
     // `cmp_ci` rather than `sort_by_cached_key`: the cached key allocated two owned
@@ -1102,6 +1118,7 @@ fn assemble_result(
             .fetched_at
             .format("%Y-%m-%d %H:%M:%S UTC")
             .to_string(),
+        exploit_data: exploits.status.clone(),
     }
 }
 

@@ -64,6 +64,7 @@ impl AppState {
             statuses,
             severities,
             search: non_empty(self.filters.search.get_untracked()),
+            exploited_only: self.filters.exploited_only.get_untracked(),
             detected_window: self.filters.detected_window.get_untracked(),
             detected_after: self.filters.detected_after_date.get_untracked(),
             detected_before: self.filters.detected_before_date.get_untracked(),

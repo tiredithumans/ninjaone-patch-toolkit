@@ -223,6 +223,7 @@ fn validate(w: Wire) -> SharedView {
         detected_before: f.detected_before.filter(|t| (0..=MAX_EPOCH).contains(t)),
         installed_after: f.installed_after.filter(|t| (0..=MAX_EPOCH).contains(t)),
         installed_before: f.installed_before.filter(|t| (0..=MAX_EPOCH).contains(t)),
+        exploited_only: f.exploited_only,
     };
     let mut statuses = clean_list(w.s, |s| STATUS_OPTIONS.contains(&s));
     if statuses.is_empty() {
@@ -359,6 +360,7 @@ mod tests {
                 // A custom install-history range travels with the view.
                 installed_after: Some(1_772_323_200),
                 installed_before: Some(1_774_915_200),
+                exploited_only: true,
             },
             patch_type: "OS".to_string(),
             statuses: vec!["PENDING".to_string(), "FAILED".to_string()],

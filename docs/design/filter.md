@@ -86,3 +86,11 @@ fetch** (pushed down as `installedAfter`/`installedBefore` and re-applied in `as
 replacing the relative lookback. They sit in the export's patch tier like the lookback, validated by
 `FilterParams::install_range` only when an install status is selected. See
 [compliance.md](./compliance.md#an-absolute-install-range-replaces-the-lookback).
+
+## "Known exploited only" is a row facet matched after the join
+
+`exploited_only` is a `PreparedFilter` row predicate (`exploited_allowed`) like Search, but the
+row's exploit mark does not exist until `exploits::stamp_rows` runs on the joined rows, so
+`assemble_result` applies it right after the stamp instead of inside `build_rows`. With exploit
+data off or not yet downloaded it keeps nothing, and the Patches tab says why. See
+[exploits.md](./exploits.md#known-exploited-only-is-applied-after-the-stamp).

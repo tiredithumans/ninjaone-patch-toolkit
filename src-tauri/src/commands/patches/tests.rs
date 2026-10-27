@@ -35,6 +35,7 @@ fn empty_summary() -> QuerySummary {
             changes: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
+            exploit_data: Default::default(),
         },
         FIRST_PAGE_ROWS,
     )
@@ -518,6 +519,7 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -555,6 +557,104 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
     assert_eq!(alpha.fully_patched_pct, 0.0);
     assert_eq!(alpha.urgent_pending, 1);
     assert_eq!(alpha.urgent_past_sla, 1);
+}
+
+/// The snapshot a query is handed stamps its OS rows before any rollup reads them,
+/// and its status rides on the result, so the marks and the sentence about them
+/// come from one copy of the data.
+#[tokio::test]
+async fn a_query_stamps_its_rows_from_the_exploit_snapshot_it_was_given() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false,
+              "os": { "name": "Windows Server 2022" } }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "deviceId": 10, "kbNumber": "KB5040434", "status": "MANUAL",
+                  "severity": "CRITICAL", "timestamp": fixed_now().timestamp() },
+                { "deviceId": 10, "kbNumber": "KB1", "status": "MANUAL",
+                  "severity": "CRITICAL", "timestamp": fixed_now().timestamp() }
+            ],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+
+    let progress = |_: &'static str, _: usize| {};
+    let result = run_query(
+        &client(&server),
+        async { Ok::<_, anyhow::Error>(lookups()) },
+        fleet_devices_via(&client(&server)),
+        fleet_current_via(&client(&server)),
+        no_ledger(),
+        ExploitSnapshot {
+            index: Some(Arc::new(crate::exploits::sample_index())),
+            status: crate::exploits::sample_status(),
+        },
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        args(PatchType::Os, vec![PatchStatus::Pending]),
+        fixed_now(),
+        &progress,
+    )
+    .await
+    .expect("query")
+    .result;
+
+    let by_kb = |kb: &str| {
+        result
+            .rows
+            .iter()
+            .find(|r| r.kb.as_deref() == Some(kb))
+            .expect(kb)
+    };
+    assert_eq!(by_kb("KB5040434").cve_count, Some(2));
+    assert_eq!(
+        by_kb("KB5040434").exploited_cves.as_deref(),
+        Some("CVE-2026-21002")
+    );
+    assert_eq!(by_kb("KB1").cve_count, None, "not in the data");
+    assert_eq!(result.exploit_data.state, "ready");
+    assert_eq!(
+        QuerySummary::from_result(&result, FIRST_PAGE_ROWS)
+            .exploit_data
+            .sentence,
+        result.exploit_data.sentence
+    );
+
+    // "Known exploited only" keeps the stamped exploited row and nothing else.
+    let mut exploited_only = args(PatchType::Os, vec![PatchStatus::Pending]);
+    exploited_only.filter.exploited_only = true;
+    let narrowed = run_query(
+        &client(&server),
+        async { Ok::<_, anyhow::Error>(lookups()) },
+        fleet_devices_via(&client(&server)),
+        fleet_current_via(&client(&server)),
+        no_ledger(),
+        ExploitSnapshot {
+            index: Some(Arc::new(crate::exploits::sample_index())),
+            status: crate::exploits::sample_status(),
+        },
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        exploited_only,
+        fixed_now(),
+        &progress,
+    )
+    .await
+    .expect("query")
+    .result;
+    let kbs: Vec<_> = narrowed.rows.iter().map(|r| r.kb.as_deref()).collect();
+    assert_eq!(kbs, [Some("KB5040434")]);
 }
 
 #[tokio::test]
@@ -606,6 +706,7 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -691,6 +792,7 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -779,6 +881,7 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -865,6 +968,7 @@ async fn a_custom_install_range_is_pushed_down_and_reapplied_client_side() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -948,6 +1052,7 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1028,6 +1133,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
                 fleet_devices_via(&client(server)),
                 fleet_current_via(&client(server)),
                 no_ledger(),
+                ExploitSnapshot::default(),
                 30,
                 SlaPolicy::default(),
                 "https://app.ninjarmm.com".into(),
@@ -1139,6 +1245,7 @@ async fn a_query_records_the_facets_it_ran_under() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1224,6 +1331,7 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1283,6 +1391,7 @@ async fn installed_and_failed_query_omits_the_server_side_status_filter() {
         fleet_devices_via(&client(&server)),
         fleet_current_via(&client(&server)),
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1354,6 +1463,7 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
             })
         },
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1439,6 +1549,7 @@ async fn a_device_group_scope_narrows_to_its_members_and_fails_closed() {
                     })
                 },
                 no_ledger(),
+                ExploitSnapshot::default(),
                 30,
                 SlaPolicy::default(),
                 "https://app.ninjarmm.com".into(),
@@ -1504,6 +1615,7 @@ async fn group_scoped_query(
             })
         },
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1675,6 +1787,7 @@ async fn a_failed_fleet_leg_abandons_the_install_history_pull() {
             })
         },
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1731,6 +1844,7 @@ async fn a_failed_lookups_leg_abandons_the_install_history_pull() {
             })
         },
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1829,6 +1943,7 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
             })
         },
         async { Ok(Arc::new(ledger)) },
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -1905,6 +2020,7 @@ async fn a_scoped_query_observes_the_whole_fleets_feed() {
             })
         },
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),
@@ -2060,6 +2176,7 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
         fleet_devices_via(&client(&server)),
         fleet_current_both_via(&client(&server)),
         no_ledger(),
+        ExploitSnapshot::default(),
         30,
         SlaPolicy::default(),
         "https://app.ninjarmm.com".into(),

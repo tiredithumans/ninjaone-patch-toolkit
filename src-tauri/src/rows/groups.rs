@@ -27,6 +27,8 @@ pub enum RowSortKey {
     Kb,
     Name,
     Severity,
+    /// Exploited first, then by how many CVEs the KB fixes.
+    Cves,
     Status,
     FirstSeenDate,
     InstalledDate,
@@ -193,14 +195,18 @@ pub struct PatchGroup {
     /// answer for a patch group too: it is a property of the patches, not of one
     /// device.
     pub reboot_likely: bool,
+    /// Whether any member's KB fixes a vulnerability exploited in the wild
+    /// ([`PatchRow::exploited_cves`]).
+    pub exploited: bool,
 }
 
 /// Builds every group over the cached rows, ordered most-urgent-first.
 ///
 /// Device groups keep the canonical severity → org → device order the flat view
-/// uses; patch and product groups lead with their worst severity, then blast radius
-/// (affected devices), so a Critical update missing on one server is not buried
-/// under a Moderate one missing on fifty.
+/// uses. Patch and product groups lead with the ones fixing a vulnerability
+/// exploited in the wild, then their worst severity, then blast radius (affected
+/// devices), so a Critical update missing on one server is not buried under a
+/// Moderate one missing on fifty, and an exploited one under neither.
 pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
     struct Acc {
         /// Insertion order, which the stable display sorts fall back to on a tie.
@@ -215,6 +221,7 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
         offline: bool,
         needs_reboot: bool,
         reboot_likely: bool,
+        exploited: bool,
         /// Product groups only: each member title and how many rows carry it, for
         /// [`product_display_name`]. Keyed by the rows' shared `Arc`s, so this is
         /// one entry per distinct version, not per row.
@@ -250,6 +257,7 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                         offline: r.offline,
                         needs_reboot: r.needs_reboot,
                         reboot_likely: false,
+                        exploited: false,
                         titles: HashMap::new(),
                     },
                     // A product group's label and sublabel are settled once every
@@ -267,12 +275,14 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                         offline: false,
                         needs_reboot: false,
                         reboot_likely: false,
+                        exploited: false,
                         titles: HashMap::new(),
                     },
                 }),
         };
         acc.rows += 1;
         acc.reboot_likely |= r.reboot_likely;
+        acc.exploited |= r.exploited_cves.is_some();
         if group_by == GroupBy::Product && product_of(r).is_some() {
             *acc.titles.entry(Arc::clone(&r.name)).or_default() += 1;
         }
@@ -319,6 +329,7 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 offline: a.offline,
                 needs_reboot: a.needs_reboot,
                 reboot_likely: a.reboot_likely,
+                exploited: a.exploited,
             }
         })
         .collect();
@@ -331,9 +342,13 @@ pub fn build_groups(rows: &[PatchRow], group_by: GroupBy) -> Vec<PatchGroup> {
                 g.label.to_lowercase(),
             )
         }),
-        GroupBy::Patch | GroupBy::Product => {
-            out.sort_by_cached_key(|g| (Reverse(g.severity_rank), Reverse(g.devices)))
-        }
+        GroupBy::Patch | GroupBy::Product => out.sort_by_cached_key(|g| {
+            (
+                Reverse(g.exploited),
+                Reverse(g.severity_rank),
+                Reverse(g.devices),
+            )
+        }),
     }
     out
 }
@@ -628,10 +643,17 @@ pub(super) fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Orderin
         // The severity ordinal is presentation order (Critical → Unknown), so an
         // ascending sort surfaces the most urgent first, like the default view.
         Severity => dir(b.severity_rank.cmp(&a.severity_rank)),
+        // Most urgent first on ascending too: exploited, then the most CVEs. A KB not
+        // in the exploit data (`None`) sorts after one that lists none.
+        Cves => dir(cve_key(b).cmp(&cve_key(a))),
         Status => dir(a.status.cmp(&b.status)),
         FirstSeenDate => cmp_opt_last(a.first_seen_ts, b.first_seen_ts, sort.desc, |x, y| x.cmp(y)),
         InstalledDate => cmp_opt_last(a.installed_ts, b.installed_ts, sort.desc, |x, y| x.cmp(y)),
     }
+}
+
+fn cve_key(r: &PatchRow) -> (bool, Option<u32>) {
+    (r.exploited_cves.is_some(), r.cve_count)
 }
 
 /// Case-insensitive (ASCII) ordering without a per-comparison allocation.

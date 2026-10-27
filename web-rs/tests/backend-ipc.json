@@ -47,9 +47,11 @@
       },
       "rows": [
         {
+          "cveCount": 2,
           "deviceId": 1,
           "deviceName": "web-01",
           "deviceRole": "Domain Controller",
+          "exploitedCves": "CVE-2026-21002",
           "firstSeenDate": "2026-05-17 12:00 UTC",
           "firstSeenTs": 1779019200,
           "installedDate": null,
@@ -77,9 +79,11 @@
         "deviceId": 1,
         "rows": [
           {
+            "cveCount": 2,
             "deviceId": 1,
             "deviceName": "web-01",
             "deviceRole": "Domain Controller",
+            "exploitedCves": "CVE-2026-21002",
             "firstSeenDate": "2026-05-17 12:00 UTC",
             "firstSeenTs": 1779019200,
             "installedDate": null,
@@ -108,6 +112,7 @@
         {
           "deviceId": 1,
           "devices": 1,
+          "exploited": true,
           "key": "1",
           "label": "web-01",
           "needsReboot": true,
@@ -121,6 +126,7 @@
         {
           "deviceId": 2,
           "devices": 1,
+          "exploited": true,
           "key": "2",
           "label": "web-02",
           "needsReboot": true,
@@ -136,9 +142,11 @@
     },
     "get_patch_rows": [
       {
+        "cveCount": 2,
         "deviceId": 1,
         "deviceName": "web-01",
         "deviceRole": "Domain Controller",
+        "exploitedCves": "CVE-2026-21002",
         "firstSeenDate": "2026-05-17 12:00 UTC",
         "firstSeenTs": 1779019200,
         "installedDate": null,
@@ -159,9 +167,11 @@
         "status": "PENDING"
       },
       {
+        "cveCount": null,
         "deviceId": 1,
         "deviceName": "web-01",
         "deviceRole": "Domain Controller",
+        "exploitedCves": null,
         "firstSeenDate": "2026-04-02 12:00 UTC",
         "firstSeenTs": 1775131200,
         "installedDate": null,
@@ -207,6 +217,7 @@
       "autoCheckUpdates": true,
       "callbackPort": 8765,
       "clientId": "fixture-client-id",
+      "exploitData": true,
       "hasClientSecret": true,
       "installWindowDays": 30,
       "instanceBaseUrl": "https://app.ninjarmm.com",
@@ -219,6 +230,7 @@
             "deviceGroupIds": [
               7
             ],
+            "exploitedOnly": true,
             "installedAfter": 1780315200,
             "installedBefore": 1782820800,
             "locationIds": [
@@ -842,6 +854,10 @@
       "devicesOffline": 2,
       "devicesTotal": 4,
       "devicesUnpatchable": 1,
+      "exploitData": {
+        "sentence": "CVEs and exploited marks for Windows updates come from Microsoft security releases 2026-Oct to 2026-Oct and no CISA catalog, checked 2026-10-27 00:00 UTC.",
+        "state": "ready"
+      },
       "failures": [
         {
           "affectedDevices": 1,
@@ -1017,9 +1033,11 @@
       ],
       "rows": [
         {
+          "cveCount": 2,
           "deviceId": 1,
           "deviceName": "web-01",
           "deviceRole": "Domain Controller",
+          "exploitedCves": "CVE-2026-21002",
           "firstSeenDate": "2026-05-17 12:00 UTC",
           "firstSeenTs": 1779019200,
           "installedDate": null,
@@ -1040,9 +1058,11 @@
           "status": "PENDING"
         },
         {
+          "cveCount": null,
           "deviceId": 1,
           "deviceName": "web-01",
           "deviceRole": "Domain Controller",
+          "exploitedCves": null,
           "firstSeenDate": "2026-04-02 12:00 UTC",
           "firstSeenTs": 1775131200,
           "installedDate": null,
@@ -1063,9 +1083,11 @@
           "status": "APPROVED"
         },
         {
+          "cveCount": 2,
           "deviceId": 2,
           "deviceName": "web-02",
           "deviceRole": "Domain Controller",
+          "exploitedCves": "CVE-2026-21002",
           "firstSeenDate": "2026-06-21 12:00 UTC",
           "firstSeenTs": 1782043200,
           "installedDate": null,
@@ -1086,9 +1108,11 @@
           "status": "PENDING"
         },
         {
+          "cveCount": null,
           "deviceId": 1,
           "deviceName": "web-01",
           "deviceRole": "Domain Controller",
+          "exploitedCves": null,
           "firstSeenDate": "2026-06-26 12:00 UTC",
           "firstSeenTs": 1782475200,
           "installedDate": null,
@@ -1109,9 +1133,11 @@
           "status": "PENDING"
         },
         {
+          "cveCount": null,
           "deviceId": 1,
           "deviceName": "web-01",
           "deviceRole": "Domain Controller",
+          "exploitedCves": null,
           "firstSeenDate": "2026-06-11 12:00 UTC",
           "firstSeenTs": 1781179200,
           "installedDate": "2026-06-29 12:00 UTC",
@@ -1132,9 +1158,11 @@
           "status": "INSTALLED"
         },
         {
+          "cveCount": null,
           "deviceId": 1,
           "deviceName": "web-01",
           "deviceRole": "Domain Controller",
+          "exploitedCves": null,
           "firstSeenDate": "2026-06-16 12:00 UTC",
           "firstSeenTs": 1781611200,
           "installedDate": "2026-06-30 12:00 UTC",
@@ -1560,6 +1588,16 @@
         "Pending by Severity"
       ]
     },
+    "cveColumnNotes": [
+      [
+        "CVEs",
+        "How many CVEs Microsoft's Security Update Guide lists this Windows update's KB as fixing. The updates it supersedes are not counted, since a device missing this one usually has those. Blank when the KB is not in the exploit data: a third-party, macOS or Linux patch, a non-security update, one older than the data, or exploit data off."
+      ],
+      [
+        "Exploited CVEs",
+        "Those of its CVEs being exploited in the wild, per Microsoft's own exploited flag or CISA's Known Exploited Vulnerabilities catalog. Blank when none are."
+      ]
+    ],
     "firstSeenNote": "The earlier of NinjaOne's record time and when this app first saw the patch pending (this app's record began 2026-04-02 12:00 UTC); every pending record here is dated by NinjaOne's time.",
     "headline": [
       {

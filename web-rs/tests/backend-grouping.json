@@ -4,6 +4,7 @@
     {
       "deviceId": 1,
       "devices": 1,
+      "exploited": true,
       "key": "1",
       "label": "web-01",
       "needsReboot": false,
@@ -17,6 +18,7 @@
     {
       "deviceId": 2,
       "devices": 1,
+      "exploited": false,
       "key": "2",
       "label": "web-02",
       "needsReboot": true,
@@ -30,6 +32,7 @@
     {
       "deviceId": 3,
       "devices": 1,
+      "exploited": false,
       "key": "3",
       "label": "db-01",
       "needsReboot": false,
@@ -45,6 +48,7 @@
     {
       "deviceId": null,
       "devices": 2,
+      "exploited": true,
       "key": "OS\u001fKB5040434\u001fCumulative Update",
       "label": "Cumulative Update",
       "needsReboot": false,
@@ -58,6 +62,7 @@
     {
       "deviceId": null,
       "devices": 1,
+      "exploited": false,
       "key": "OS\u001fKB5031234\u001fSecurity Update",
       "label": "Security Update",
       "needsReboot": false,
@@ -71,6 +76,7 @@
     {
       "deviceId": null,
       "devices": 1,
+      "exploited": false,
       "key": "SOFTWARE\u001f\u001fGoogle Chrome 138",
       "label": "Google Chrome 138",
       "needsReboot": false,
@@ -84,6 +90,7 @@
     {
       "deviceId": null,
       "devices": 1,
+      "exploited": false,
       "key": "SOFTWARE\u001f\u001fGoogle Chrome 138.0.7204.50",
       "label": "Google Chrome 138.0.7204.50",
       "needsReboot": false,
@@ -97,6 +104,7 @@
     {
       "deviceId": null,
       "devices": 1,
+      "exploited": false,
       "key": "SOFTWARE\u001f\u001fGoogle Chrome 137.0.7151.69",
       "label": "Google Chrome 137.0.7151.69",
       "needsReboot": false,
@@ -110,6 +118,7 @@
     {
       "deviceId": null,
       "devices": 1,
+      "exploited": false,
       "key": "SOFTWARE\u001f\u001f7-Zip 24.09",
       "label": "7-Zip 24.09",
       "needsReboot": false,
@@ -123,6 +132,7 @@
     {
       "deviceId": null,
       "devices": 1,
+      "exploited": false,
       "key": "SOFTWARE\u001f\u001fLegacy Tool 1.0",
       "label": "Legacy Tool 1.0",
       "needsReboot": false,
@@ -138,6 +148,7 @@
     {
       "deviceId": null,
       "devices": 2,
+      "exploited": true,
       "key": "OS\u001fKB5040434\u001fCumulative Update",
       "label": "Cumulative Update",
       "needsReboot": false,
@@ -151,6 +162,7 @@
     {
       "deviceId": null,
       "devices": 1,
+      "exploited": false,
       "key": "OS\u001fKB5031234\u001fSecurity Update",
       "label": "Security Update",
       "needsReboot": false,
@@ -164,6 +176,7 @@
     {
       "deviceId": null,
       "devices": 3,
+      "exploited": false,
       "key": "SOFTWARE\u001fchrome-uuid",
       "label": "Google Chrome",
       "needsReboot": false,
@@ -177,6 +190,7 @@
     {
       "deviceId": null,
       "devices": 1,
+      "exploited": false,
       "key": "SOFTWARE\u001f7zip-uuid",
       "label": "7-Zip",
       "needsReboot": false,
@@ -190,6 +204,7 @@
     {
       "deviceId": null,
       "devices": 1,
+      "exploited": false,
       "key": "SOFTWARE\u001f\u001fLegacy Tool 1.0",
       "label": "Legacy Tool 1.0",
       "needsReboot": false,
@@ -233,9 +248,11 @@
   ],
   "rows": [
     {
+      "cveCount": 2,
       "deviceId": 1,
       "deviceName": "web-01",
       "deviceRole": null,
+      "exploitedCves": "CVE-2026-21002",
       "firstSeenDate": null,
       "firstSeenTs": null,
       "installedDate": null,
@@ -256,9 +273,11 @@
       "status": "FAILED"
     },
     {
+      "cveCount": null,
       "deviceId": 1,
       "deviceName": "web-01",
       "deviceRole": null,
+      "exploitedCves": null,
       "firstSeenDate": null,
       "firstSeenTs": null,
       "installedDate": null,
@@ -279,9 +298,11 @@
       "status": "FAILED"
     },
     {
+      "cveCount": null,
       "deviceId": 2,
       "deviceName": "web-02",
       "deviceRole": null,
+      "exploitedCves": null,
       "firstSeenDate": null,
       "firstSeenTs": null,
       "installedDate": null,
@@ -302,9 +323,11 @@
       "status": "FAILED"
     },
     {
+      "cveCount": null,
       "deviceId": 3,
       "deviceName": "db-01",
       "deviceRole": null,
+      "exploitedCves": null,
       "firstSeenDate": null,
       "firstSeenTs": null,
       "installedDate": null,
@@ -325,9 +348,11 @@
       "status": "FAILED"
     },
     {
+      "cveCount": null,
       "deviceId": 3,
       "deviceName": "db-01",
       "deviceRole": null,
+      "exploitedCves": null,
       "firstSeenDate": null,
       "firstSeenTs": null,
       "installedDate": null,
@@ -348,9 +373,11 @@
       "status": "FAILED"
     },
     {
+      "cveCount": null,
       "deviceId": 2,
       "deviceName": "web-02",
       "deviceRole": null,
+      "exploitedCves": null,
       "firstSeenDate": null,
       "firstSeenTs": null,
       "installedDate": null,
@@ -371,9 +398,11 @@
       "status": "FAILED"
     },
     {
+      "cveCount": null,
       "deviceId": 3,
       "deviceName": "db-01",
       "deviceRole": null,
+      "exploitedCves": null,
       "firstSeenDate": null,
       "firstSeenTs": null,
       "installedDate": null,
@@ -394,9 +423,11 @@
       "status": "FAILED"
     },
     {
+      "cveCount": null,
       "deviceId": 2,
       "deviceName": "web-02",
       "deviceRole": null,
+      "exploitedCves": null,
       "firstSeenDate": null,
       "firstSeenTs": null,
       "installedDate": null,

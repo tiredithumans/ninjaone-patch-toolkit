@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::*;
 
 /// Patches-table columns as (header label, sort key), in display order.
-const PATCH_COLUMNS: [(&str, RowSortKey); 12] = [
+const PATCH_COLUMNS: [(&str, RowSortKey); 13] = [
     ("Organization", RowSortKey::Organization),
     ("Location", RowSortKey::Location),
     ("Role", RowSortKey::Role),
@@ -16,6 +16,7 @@ const PATCH_COLUMNS: [(&str, RowSortKey); 12] = [
     ("KB", RowSortKey::Kb),
     ("Patch", RowSortKey::Name),
     ("Severity", RowSortKey::Severity),
+    ("CVEs", RowSortKey::Cves),
     ("Status", RowSortKey::Status),
     ("First seen", RowSortKey::FirstSeenDate),
     ("Installed", RowSortKey::InstalledDate),
@@ -83,6 +84,17 @@ pub(super) fn PatchesTable() -> impl IntoView {
             fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
         >
             <ChangesPanel/>
+            {move || {
+                state.query.result.with(|r| {
+                    let r = r.as_ref()?;
+                    let exploited_only = state
+                        .query
+                        .applied_filters
+                        .with(|a| a.as_ref().is_some_and(|a| a.exploited_only));
+                    util::exploit_note(&r.exploit_data, exploited_only)
+                        .map(|note| view! { <p class="scope-note">{note.to_string()}</p> })
+                })
+            }}
             <Show
                 when=move || { rows_total() > 0 }
                 fallback=|| {
@@ -152,6 +164,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                     view! {
                                         <th
                                             scope="col"
+                                            title=(key == RowSortKey::Cves).then_some(util::CVES_HELP)
                                             aria-sort=move || {
                                                 aria_sort(state.query.patches_sort.get(), key)
                                             }
@@ -206,6 +219,10 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                             </td>
                                             <td>
                                                 <span class=sev>{r.severity.clone()}</span>
+                                            </td>
+                                            <td>
+                                                {r.cve_count.map(|n| n.to_string()).unwrap_or_default()}
+                                                {exploited_chip(r.exploited_cves.clone())}
                                             </td>
                                             <td>
                                                 <span class=stat>{r.status.clone()}</span>
@@ -388,6 +405,7 @@ fn GroupedPatches() -> impl IntoView {
                                             <span class="group-label">{g.label}</span>
                                             <span class="group-sub">{sub}</span>
                                             <span class=sev>{g.severity}</span>
+                                            {g.exploited.then(|| exploited_chip_view(util::exploited_title(None)))}
                                             <span class="group-count">{count}</span>
                                             {reboot_pending_chip(g.needs_reboot)}
                                             {reboot_likely_chip(g.reboot_likely)}
@@ -544,9 +562,14 @@ fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
                                         // half the header does not already state.
                                         {
                                             let (pending, likely) = (r.needs_reboot, r.reboot_likely);
+                                            let exploited = r.exploited_cves.clone();
                                             move || {
                                                 if by_device() {
-                                                    reboot_likely_chip(likely).into_any()
+                                                    view! {
+                                                        {exploited_chip(exploited.clone())}
+                                                        {reboot_likely_chip(likely)}
+                                                    }
+                                                        .into_any()
                                                 } else {
                                                     reboot_pending_chip(pending).into_any()
                                                 }
@@ -563,6 +586,16 @@ fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
             </table>
         </div>
     }
+}
+
+/// "exploited": the row's KB fixes a vulnerability exploited in the wild
+/// ([`util::EXPLOITED_HELP`]); the tooltip names which.
+fn exploited_chip(cves: Option<String>) -> impl IntoView {
+    cves.map(|c| exploited_chip_view(util::exploited_title(Some(&c))))
+}
+
+fn exploited_chip_view(title: String) -> impl IntoView {
+    view! { <span class="chip-note chip-exploited" title=title>"exploited"</span> }
 }
 
 /// "reboot pending": the device's own flag ([`util::REBOOT_PENDING_HELP`]).

@@ -297,6 +297,10 @@ pub struct AppState {
     job_poller_running: Arc<AtomicBool>,
     /// Single-slot confirmation gate — one dialog is open at a time.
     pending_confirm: Mutex<Option<PendingConfirm>>,
+    /// Public exploit data (Microsoft's CVE mapping, CISA's catalog). Process-wide
+    /// rather than tenant-stamped: it is the same for every tenant and nothing in it
+    /// came from one. Behind an [`Arc`] so its background refresh can own a handle.
+    pub exploits: Arc<crate::exploits::ExploitData>,
 }
 
 /// The one HTTP client every NinjaOne call and token grant shares.
@@ -368,6 +372,7 @@ impl AppState {
             result_epoch: AtomicU64::new(0),
             job_poller_running: Arc::new(AtomicBool::new(false)),
             pending_confirm: Mutex::new(None),
+            exploits: Arc::default(),
         }
     }
 

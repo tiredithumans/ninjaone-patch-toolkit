@@ -227,6 +227,23 @@ pub const REBOOT_COLUMN_NOTES: [(&str, &str); 2] = [
     ),
 ];
 
+/// What the detail rows' two CVE columns mean, for the About sheet's Definitions
+/// block and the in-app tooltips (`crate::exploits`).
+pub const CVE_COLUMN_NOTES: [(&str, &str); 2] = [
+    (
+        "CVEs",
+        "How many CVEs Microsoft's Security Update Guide lists this Windows update's KB as \
+         fixing. The updates it supersedes are not counted, since a device missing this one \
+         usually has those. Blank when the KB is not in the exploit data: a third-party, macOS \
+         or Linux patch, a non-security update, one older than the data, or exploit data off.",
+    ),
+    (
+        "Exploited CVEs",
+        "Those of its CVEs being exploited in the wild, per Microsoft's own exploited flag or \
+         CISA's Known Exploited Vulnerabilities catalog. Blank when none are.",
+    ),
+];
+
 /// How many organizations [`uncounted_orgs_note`] names before "and N more".
 pub const UNCOUNTED_ORGS_LIMIT: usize = 10;
 

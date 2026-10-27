@@ -638,6 +638,7 @@ mod tests {
             changes: Default::default(),
             generated_at: "2026-09-01 10:00:00 UTC".into(),
             data_fetched_at: "2026-09-01 10:00:00 UTC".into(),
+            exploit_data: Default::default(),
         };
         let record = RunRecord::from_result(&result, "https://app.ninjarmm.com");
         assert_eq!(record.orgs_total, MAX_ORGS + 5);
@@ -692,6 +693,7 @@ mod tests {
                 changes: Default::default(),
                 generated_at: "2026-09-01 10:00:00 UTC".into(),
                 data_fetched_at: "2026-09-01 10:00:00 UTC".into(),
+                exploit_data: Default::default(),
             };
             RunRecord::from_result(&result, "https://app.ninjarmm.com")
         };

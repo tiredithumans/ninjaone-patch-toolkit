@@ -219,6 +219,19 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                     />
                     "Automatically check for updates on launch"
                 </label>
+                <label class="inline">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || state.settings.f_exploit_data.get()
+                        on:change=move |ev| state.settings.f_exploit_data.set(event_target_checked(&ev))
+                    />
+                    "Mark Windows updates that fix exploited vulnerabilities"
+                </label>
+                <p class="settings-hint">
+                    "Downloads public data from Microsoft (about 250 MB the first time, then "
+                    "only revisions) and CISA's Known Exploited Vulnerabilities catalog. "
+                    "Nothing about your fleet is sent."
+                </p>
             </div>
             <SlaSettingsFields/>
             <ActionSettingsFields/>
@@ -343,6 +356,7 @@ fn save_args(
         client_secret,
         clear_secret,
         auto_check_updates: state.settings.f_auto_update.get_untracked(),
+        exploit_data: state.settings.f_exploit_data.get_untracked(),
         actions: state.settings.f_actions.get_untracked(),
     }
 }

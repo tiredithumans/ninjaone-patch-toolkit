@@ -69,6 +69,7 @@ fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
         Name => dir(cmp_ci(&a.name, &b.name)),
         // Most urgent first on ascending, like the backend's presentation ordinal.
         Severity => dir(sev_ordinal(&a.severity).cmp(&sev_ordinal(&b.severity))),
+        Cves => dir(cve_key(b).cmp(&cve_key(a))),
         Status => dir(a.status.cmp(&b.status)),
         // The mirror carries dates as ISO `yyyy-mm-dd` strings — lexicographic
         // order is chronological.
@@ -83,6 +84,11 @@ fn compare_rows(a: &PatchRow, b: &PatchRow, sort: RowSort) -> Ordering {
             sort.desc,
         ),
     }
+}
+
+/// Exploited first, then the most CVEs — the backend's `rows::cve_key`.
+fn cve_key(r: &PatchRow) -> (bool, Option<u32>) {
+    (r.exploited_cves.is_some(), r.cve_count)
 }
 
 /// Maps a severity's display label ("Critical") back to the raw API value the

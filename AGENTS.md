@@ -41,6 +41,7 @@ from `.claude/rules/` plus the design note for the domain you touch.
 | Filter | `.claude/rules/filter.md` | `filter.md` |
 | Compliance & rollups | `.claude/rules/compliance.md` | `compliance.md` |
 | Severity | `.claude/rules/severity.md` | `severity.md` |
+| Exploit data (CVEs, KEV) | `.claude/rules/exploits.md` | `exploits.md` |
 | Frontend (Leptos/WASM) | `.claude/rules/frontend.md` | `frontend.md` |
 
 Cross-cutting flows span several domains — every leg gets its rule file loaded, but read the

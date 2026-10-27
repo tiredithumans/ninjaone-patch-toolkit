@@ -175,6 +175,7 @@ pub async fn export_patches_xlsx(
                 uncounted_orgs: &result.uncounted_orgs,
                 first_seen: &result.first_seen,
                 patch_families: result.patch_families,
+                exploit_data: &result.exploit_data.sentence,
             },
         )
     })
@@ -485,6 +486,7 @@ mod tests {
             changes: Default::default(),
             generated_at: "2026-01-01 00:00:00 UTC".into(),
             data_fetched_at: "2026-01-01 00:00:00 UTC".into(),
+            exploit_data: Default::default(),
         }
     }
 }

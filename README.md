@@ -50,6 +50,12 @@ lists individual patches per server, and exports to Excel.
   colleague the same filters, tab, grouping and sort (never the selection or any credential — a
   link from another instance warns before applying; the web demo keeps it in the URL); Light /
   Dark / System theme, also in ⋯; reduced motion honoured; the window reopens where you left it.
+- **Exploit data** — Windows updates show how many CVEs they fix and are marked **exploited**
+  when one of those is being exploited in the wild, per Microsoft's Security Update Guide and
+  CISA's Known Exploited Vulnerabilities catalog. *By patch* and *By product* list exploited
+  updates first, **Known exploited only** narrows the Patches and Failures tabs to them, and the
+  export carries **CVEs** and **Exploited CVEs** columns. The data downloads in the background
+  (about 250 MB the first time) and can be switched off in Settings.
 - **Patch actions** *(opt‑in — see [Patch actions](#patch-actions))* — select patch rows and
   scan, apply, reboot, or run any script from the tenant's automation library, then watch
   each dispatch to a terminal state in the **Jobs** tab.
@@ -274,6 +280,10 @@ code and links you to the activity/job ID to look the run up in the NinjaOne con
   credential‑shaped script parameters redacted. Tokens are never written there. The
   **Jobs** tab renders it under *Audit trail*; unlike the per-session job list it survives a
   restart and **Clear finished** does not touch it.
+- Besides NinjaOne, the app downloads public data from `api.msrc.microsoft.com` and
+  `www.cisa.gov` for the exploit marks (Settings can switch this off). Those requests carry no
+  credentials and nothing about your tenant; the copy is kept in `exploit-data/` beside
+  `settings.json`.
 - Rolling daily logs are written to `logs/` in the same directory (seven days kept).
   **Settings → Open diagnostics folder** reveals them — that is what to attach to a bug report,
   since a bundled app launched from Finder or the Start menu has nowhere for stdout to go.
