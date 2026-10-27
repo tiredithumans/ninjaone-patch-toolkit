@@ -189,8 +189,11 @@ scans every row for its key, so it too runs on a handle in `spawn_blocking`; so 
 The Patches tab's *By device* / *By patch* / *By product* modes go through `get_patch_groups` (headers + total,
 `rows::build_groups` memoized, then `rows::slice_groups`) and `get_patch_group_members` (one group's rows, `rows::group_member_page`).
 The frontend only ever holds one page, so it cannot group a fleet it has never seen — never
-regroup `page_rows` client-side. Group headers carry **no** members: a by-patch group can span the
-whole fleet, so members load on expand, capped at `GROUP_MEMBER_LIMIT`. `rows::group_key` is the
+regroup `page_rows` client-side. Device groups order by severity → org → device, as the flat view
+does; patch and product groups by their worst severity, then affected devices, so a Critical
+update on one server is not buried under a Moderate one on fifty. Group headers carry **no**
+members: a by-patch group can span the whole fleet, so members load on expand, capped at
+`GROUP_MEMBER_LIMIT`. `rows::group_key` is the
 identity the frontend echoes back, so no per-request state is kept backend-side and a stale key
 matches nothing. `demo.rs` mirrors `group_key`/`build_groups` by hand for the browser demo — keep
 the two in step.

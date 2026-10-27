@@ -137,19 +137,6 @@
   "byProduct": [
     {
       "deviceId": null,
-      "devices": 3,
-      "key": "SOFTWARE\u001fchrome-uuid",
-      "label": "Google Chrome",
-      "needsReboot": false,
-      "offline": false,
-      "rebootLikely": false,
-      "rows": 3,
-      "severity": "Recommended",
-      "severityRank": 3,
-      "sublabel": "3 versions"
-    },
-    {
-      "deviceId": null,
       "devices": 2,
       "key": "OS\u001fKB5040434\u001fCumulative Update",
       "label": "Cumulative Update",
@@ -173,6 +160,19 @@
       "severity": "Security",
       "severityRank": 5,
       "sublabel": "KB5031234"
+    },
+    {
+      "deviceId": null,
+      "devices": 3,
+      "key": "SOFTWARE\u001fchrome-uuid",
+      "label": "Google Chrome",
+      "needsReboot": false,
+      "offline": false,
+      "rebootLikely": false,
+      "rows": 3,
+      "severity": "Recommended",
+      "severityRank": 3,
+      "sublabel": "3 versions"
     },
     {
       "deviceId": null,
