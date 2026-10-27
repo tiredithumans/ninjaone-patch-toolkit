@@ -11,24 +11,30 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-27
+
+Exploit-aware patching: see which Windows updates close vulnerabilities attackers are using now,
+and which devices are still exposed to a given CVE.
+
 ### Added
 
 - Windows updates show how many CVEs they fix and are marked **exploited** when Microsoft or
-  CISA reports one of them being exploited in the wild; switch it off in Settings.
-- **Known exploited only** on the Patches and Failures tabs lists just the updates that fix an
-  exploited vulnerability.
-- The Excel and CSV exports add **CVEs** and **Exploited CVEs** columns.
+  CISA reports one being exploited in the wild. The data downloads in the background from
+  Microsoft and CISA (about 250 MB the first time) and can be switched off in Settings.
+- **Known exploited only** on the Patches and Failures tabs lists just those updates, and the
+  Excel and CSV exports add **CVEs** and **Exploited CVEs** columns.
 - **Find CVE** on the Patches tab shows which devices are still missing the Windows update that
   fixes a CVE, with CISA's due date when it is known to be exploited.
 - Device details and the Devices sheet show NinjaOne Vulnerability Management's critical, high,
   medium and low counts when your tenant imports scanner data.
 - The reference software remediation script now patches 64-bit Git, Visual Studio Code and
-  Notepad++.
+  Notepad++. Re-import `remediation/Install-SelectedSoftwarePatches.ps1` into the NinjaOne
+  library to pick it up.
 
 ### Changed
 
-- The By patch and By product views list updates that fix an exploited vulnerability first, then
-  the most severe, then the ones missing on the most devices.
+- By patch and By product list updates that fix an exploited vulnerability first, then the most
+  severe, then the ones missing on the most devices.
 
 ## [0.21.1] - 2026-10-26
 
