@@ -133,27 +133,35 @@ impl AppState {
     }
 
     /// After a silent refresh, drops the ticked devices that no longer need a
-    /// reboot. The fresh list arrives whole in the summary, so this needs no fetch.
-    pub(in crate::app) fn prune_device_selection_after_refresh(self) {
-        if self
+    /// reboot. Asks the backend: the summary carries only the first page of the
+    /// reboot list. Abandoned if another run lands meanwhile, like the row prune.
+    pub(in crate::app) fn prune_device_selection_after_refresh(self, seq: u64) {
+        let probes = self
             .actions
             .device_selected
-            .with_untracked(|s| s.is_empty())
-        {
+            .with_untracked(util::selection_probes);
+        if probes.is_empty() {
             return;
         }
-        let mut removed = 0;
-        self.query.result.with_untracked(|r| {
-            let fresh = r.as_ref().map_or(&[][..], |r| r.reboot_devices.as_slice());
+        spawn_local(async move {
+            // A failed read keeps the selection as it was; the backend re-plans
+            // against the device inventory before any dispatch.
+            let Ok(status) = api::selection_status(probes).await else {
+                return;
+            };
+            if util::is_superseded(self.run.query_seq.get_untracked(), seq) {
+                return;
+            }
+            let mut removed = 0;
             self.actions
                 .device_selected
-                .update(|sel| removed = util::prune_device_level_selection(sel, fresh));
+                .update(|sel| removed = util::prune_device_level_from_status(sel, &status));
+            if removed > 0 {
+                self.notify(Toast::ok(format!(
+                    "Auto-refresh: {removed} selected device(s) no longer need a reboot and were deselected"
+                )));
+            }
         });
-        if removed > 0 {
-            self.notify(Toast::ok(format!(
-                "Auto-refresh: {removed} selected device(s) no longer need a reboot and were deselected"
-            )));
-        }
     }
 
     /// Per-device targets for a remediation kind, and the devices that have any.

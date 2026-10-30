@@ -104,6 +104,15 @@ to the backend over IPC. **All** NinjaOne HTTP happens in the Rust backend (reqw
 new NinjaOne region/host needs **no** CSP change. Don't add `connect-src` entries for backend
 calls.
 
+The directives `default-src` does not cover are spelled out: `object-src 'none'`, `base-uri
+'self'`, `form-action 'none'`, `frame-src 'none'` (not `frame-ancestors`, which a CSP in a `<meta>`
+ignores with a console warning, and nothing can frame the app's window). Nothing in the UI
+renders HTML from data (no `inner_html`; every API string reaches a text node or an attribute), and
+`script-src` without `'unsafe-inline'` keeps an injected `<script>` from running and reaching
+`window.__TAURI__` — but an injected `<form>` or `<base>` could still navigate the window to a page
+that only *looks* like this app. The one form (the CVE search) prevents its default submit, so
+`form-action 'none'` costs nothing.
+
 ## Auto-update
 
 `commands::update::{check_for_update, install_update}` wrap `tauri-plugin-updater`; the

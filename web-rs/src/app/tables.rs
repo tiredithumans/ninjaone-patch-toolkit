@@ -233,10 +233,10 @@ fn summary_counts(r: &QueryResult) -> SummaryCounts {
         rows_total: r.rows_total,
         devices_total: r.devices_total,
         failures: r.failures.len(),
-        failing_devices: util::failing_device_count(&r.failures),
+        failing_devices: r.failing_devices,
         orgs: r.compliance.len(),
         devices_counted: r.compliance_total.devices_total,
-        reboot: r.reboot_devices.len(),
+        reboot: r.reboot_devices_total,
     }
 }
 

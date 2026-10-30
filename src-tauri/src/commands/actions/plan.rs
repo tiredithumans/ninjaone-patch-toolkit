@@ -8,7 +8,8 @@ use chrono::Local;
 use super::ActionRequest;
 use super::confirm::{canonical_parameters, request_hash};
 use crate::actions::{
-    ActionKind, ActionPlan, CachedFamily, DryRunSupport, PlanInput, PlannedTarget, plan,
+    ActionKind, ActionPlan, CachedFamily, ConfirmBinding, DryRunSupport, PlanInput, PlannedTarget,
+    plan,
 };
 use crate::api::actions::ScriptRef;
 use crate::error::UiError;
@@ -265,14 +266,24 @@ pub(super) struct PlannedAction {
 }
 
 impl PlannedAction {
-    /// The confirmation fingerprint of `req` as planned here.
+    /// The confirmation fingerprint of `req` as planned here, eligible devices
+    /// included.
     pub(super) fn hash(&self, req: &ActionRequest) -> String {
         request_hash(
             req,
             &canonical_parameters(&self.parameters),
             self.script.as_ref(),
             self.run_as.as_deref(),
+            &self.plan.eligible_ids(),
         )
+    }
+
+    /// What a token issued for this plan is bound to.
+    pub(super) fn binding(&self, req: &ActionRequest) -> ConfirmBinding {
+        ConfirmBinding {
+            hash: self.hash(req),
+            targets: self.plan.eligible_ids(),
+        }
     }
 }
 

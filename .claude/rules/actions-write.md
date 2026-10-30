@@ -35,15 +35,23 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   its own device selection (`util::device_selection_allows`).
   → `docs/design/actions.md#selection-is-per-patch-row-dispatch-is-per-device-with-per-device-targets`
 - **`build_parameters` encodes by kind:** `kbAllowList=` for OS, `productAllowListB64=` for
-  software (NinjaOne splits on spaces). OS targets must pass `kb_number` or `plan()` blocks.
+  software (NinjaOne splits on spaces). OS targets must pass `kb_number`, and software titles
+  `is_sendable_title` (no `|`, not blank), or `plan()` blocks.
+  → `docs/design/actions.md#the-parameter-encoding-is-chosen-by-kind`
+- **The reference scripts never run a program by bare name** (as SYSTEM that is a machine-`PATH`
+  lookup): `Get-ShutdownPath`; `Find-Pwsh` only from Program Files with Microsoft's signature;
+  `Microsoft.WinGet.Client` loads only after `Get-ModuleSignatureProblem`, every run.
   → `docs/design/actions.md#the-parameter-encoding-is-chosen-by-kind`
 - **Confirm tokens are payload-bound and single-use.** `request_hash` destructures `ActionRequest`
-  exhaustively, hashes the *resolved* script and run-as and length-prefixed per-device
-  parameters; ids are not de-duplicated (a repeated id is a `plan()` blocker); `run_action`
-  re-plans and re-checks. The token carries the `JobSession` sampled before `build_plan`.
+  exhaustively, hashes the *resolved* script and run-as, length-prefixed per-device parameters
+  and the plan's **eligible** ids (`ConfirmBinding`); ids are not de-duplicated (a repeated id is
+  a `plan()` blocker); `run_action` re-plans and re-checks (`confirm_dispatch`), refusing a
+  re-plan that reaches other devices as `ConfirmCheck::TargetsChanged`. The token carries the
+  `JobSession` sampled before `build_plan`.
   → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
 - **Guardrails go in `actions::plan` (`blockers`/`warnings`), not in a dialog.** The `dry_run`
-  check is also asserted at the dispatch site. → `docs/design/actions.md#guardrails-live-in-actionsplan`
+  check is also asserted at the dispatch site. The org cap counts organization ids, never names;
+  a scan is held to `MAX_DEVICES_PER_ACTION_CEILING`. → `docs/design/actions.md#guardrails-live-in-actionsplan`
 - **Dry run requires a script declaring `dryRun`** (`DryRunSupport::Declared`); the window
   override is per dispatch and audited; the "Apply all" preview reads only cached patches (cold =
   "unknown"). → `docs/design/actions.md`
@@ -77,3 +85,7 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **Audit `parameters` are `audit::Redacted`**, constructible only through `Redacted::of`, which
   runs the redaction; never add a raw-string path into the log.
   → `docs/design/actions.md#the-audit-log-redacts-credentials-in-every-shape-a-script-takes-them`
+- **The audit log is never deleted from:** past `ROTATE_AT_BYTES` it moves aside as a dated
+  generation (no-clobber link), an append after a torn record starts a new line, and the reader
+  decodes per line and reads generations newest first only until it has the tail.
+  → `docs/design/actions.md#the-log-rotates-and-nothing-in-it-is-ever-deleted`

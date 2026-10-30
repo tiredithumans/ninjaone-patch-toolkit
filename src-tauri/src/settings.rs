@@ -38,6 +38,42 @@ pub fn is_cleartext_remote(url: &url::Url) -> bool {
     url.scheme() == "http" && !is_loopback_host(url.host_str().unwrap_or_default())
 }
 
+/// Why `instance` cannot be the NinjaOne instance, or `None` when it can: https (or
+/// http to loopback, for a mock server), and nothing but scheme, host and port.
+///
+/// - No user name or password: in `https://us2.ninjarmm.com@evil.example` the host
+///   is `evil.example`, whatever the operator read first.
+/// - No query or fragment: every endpoint is appended to the instance as written,
+///   so `{instance}/ws/oauth/token` would land inside one.
+/// - No path beyond `/`, for the same reason.
+///
+/// Shared by `save_settings`, which refuses such a value, and by `AuthState`, which
+/// will not sign in to or send anything to one that reached `settings.json` some
+/// other way — so the two cannot disagree.
+pub fn instance_url_problem(instance: &str) -> Option<&'static str> {
+    let Ok(url) = url::Url::parse(instance) else {
+        return Some("instance URL is not a valid URL");
+    };
+    match url.scheme() {
+        "https" => {}
+        "http" if !is_cleartext_remote(&url) => {}
+        _ => return Some("instance URL must use https:// (http is allowed only for localhost)"),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Some(
+            "instance URL must not contain a user name or password (…@); enter only the \
+             address you sign in to NinjaOne at, e.g. https://us2.ninjarmm.com",
+        );
+    }
+    if url.query().is_some() || url.fragment().is_some() || url.path() != "/" {
+        return Some(
+            "instance URL must be only the address, e.g. https://us2.ninjarmm.com — no \
+             path, ? or #",
+        );
+    }
+    None
+}
+
 /// A named, reusable filter combination. The device/OS/search/severity facets live
 /// in `filter`; the patch-query selectors (type/status/install window) are stored
 /// alongside so a preset restores the whole query. The selectors are optional for
@@ -450,9 +486,26 @@ impl Settings {
         Self::parse(&text)
     }
 
+    /// Parses `settings.json`, upgrading a plaintext instance (see
+    /// [`Self::enforce_https_instance`]).
+    ///
+    /// An instance `save_settings` would refuse for any other reason — a user name,
+    /// a query, a fragment, a path — loads exactly as written and reads as not
+    /// configured: `AuthState` will neither sign in to it nor send it anything (see
+    /// [`instance_url_problem`]). It is not repaired, because the instance string,
+    /// with the client id, keys the saved sign-ins, the first-seen ledger and the run
+    /// snapshots — a rewritten value would orphan them, and a repaired host is a
+    /// guess. Settings shows it unchanged so the operator can see what to correct.
     fn parse(text: &str) -> Result<Self> {
         let mut cfg: Settings = serde_json::from_str(text).context("parse settings")?;
         cfg.enforce_https_instance();
+        if let Some(problem) = instance_url_problem(&cfg.instance_base_url) {
+            // The problem, never the value: a user name may carry a password.
+            tracing::warn!(
+                problem,
+                "settings.json names an instance Settings would refuse; sign-in stays off until a valid one is saved"
+            );
+        }
         Ok(cfg)
     }
 
@@ -486,6 +539,12 @@ impl Settings {
             return;
         }
         let upgraded = parsed.as_str().trim_end_matches('/').to_string();
+        // Only into an instance that is otherwise valid. Anything else stays as
+        // written and unusable (see `parse`) — and its user name, which may carry a
+        // password, must not reach the log line below.
+        if instance_url_problem(&upgraded).is_some() {
+            return;
+        }
         tracing::warn!(
             from = %self.instance_base_url,
             to = %upgraded,
@@ -896,6 +955,79 @@ mod tests {
                 cfg.instance_base_url, "https://eu.ninjarmm.com",
                 "{url} must be upgraded"
             );
+        }
+    }
+
+    /// Only scheme, host and port: a user name moves the host
+    /// (`https://us2.ninjarmm.com@evil.example` is `evil.example`), and a query,
+    /// fragment or path would swallow or misdirect every endpoint appended to it.
+    #[test]
+    fn an_instance_is_only_an_origin() {
+        for valid in [
+            "https://us2.ninjarmm.com",
+            "https://us2.ninjarmm.com/",
+            "https://us2.ninjarmm.com:8443",
+            "HTTPS://US2.ninjarmm.com",
+            "http://127.0.0.1:8080",
+            "http://localhost",
+        ] {
+            assert_eq!(instance_url_problem(valid), None, "{valid}");
+        }
+        for invalid in [
+            "https://us2.ninjarmm.com@evil.example",
+            "https://user:secret@us2.ninjarmm.com",
+            "https://us2.ninjarmm.com?",
+            "https://us2.ninjarmm.com?region=eu",
+            "https://us2.ninjarmm.com#",
+            "https://us2.ninjarmm.com#frag",
+            "https://us2.ninjarmm.com/ws",
+            "https://evil.example\\@us2.ninjarmm.com",
+            "http://eu.ninjarmm.com",
+            "ftp://us2.ninjarmm.com",
+            "us2.ninjarmm.com",
+        ] {
+            assert!(instance_url_problem(invalid).is_some(), "{invalid}");
+        }
+    }
+
+    fn loaded(instance: &str) -> Settings {
+        let text = serde_json::to_string(&Settings {
+            instance_base_url: instance.into(),
+            client_id: Some("client-on-disk".into()),
+            ..Settings::default()
+        })
+        .unwrap();
+        Settings::parse(&text).expect("parses")
+    }
+
+    /// A stored instance Settings would refuse is not repaired: the instance and
+    /// client id key the saved sign-ins, the first-seen ledger and the snapshots, so
+    /// a rewrite would orphan them. It loads as written (and `AuthState` refuses to
+    /// use it), plaintext included — upgrading `http://user:pw@host` would log the
+    /// password and still leave a user name in front of the host.
+    #[test]
+    fn an_instance_settings_would_refuse_loads_as_written() {
+        for stored in [
+            "https://us2.ninjarmm.com@evil.example",
+            "http://user:secret@eu.ninjarmm.com",
+            "https://us2.ninjarmm.com/ws?x=1",
+        ] {
+            let cfg = loaded(stored);
+            assert_eq!(cfg.instance_base_url, stored);
+            assert_eq!(cfg.client_id.as_deref(), Some("client-on-disk"));
+        }
+    }
+
+    /// A valid stored instance is never rewritten, however it is spelled: the
+    /// spelling is part of the tenant label every saved artifact is keyed by.
+    #[test]
+    fn a_valid_instance_loads_unchanged() {
+        for stored in [
+            "HTTPS://US2.ninjarmm.com",
+            "https://us2.ninjarmm.com:443",
+            "https://app.ninjarmm.com",
+        ] {
+            assert_eq!(loaded(stored).instance_base_url, stored);
         }
     }
 

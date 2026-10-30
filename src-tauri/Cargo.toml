@@ -44,6 +44,11 @@ base64 = { version = "0.23", default-features = false, features = ["std"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 keyring = "4"
+# Already in the tree through `keyring`; named directly only for
+# `Entry::new_with_modifiers`, which keyring's v1 `Entry` does not expose and
+# which is how a Windows credential is asked for `Local` persistence (see
+# `auth::keyring_entry`).
+keyring-core = "1"
 open = "5.4"
 rand = "0.10"
 # `default-features = false` pins the TLS backend to rustls, but it also drops

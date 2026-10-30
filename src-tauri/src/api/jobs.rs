@@ -4,26 +4,31 @@
 //! (`api::activities`): `/jobs` lists what is in flight, and a job leaving it says
 //! nothing about how it ended.
 
-use anyhow::{Result, bail};
-use serde_json::Value;
+use anyhow::{Context, Result, bail};
+use serde_json::value::RawValue;
 
-use super::NinjaApiClient;
+use super::{NinjaApiClient, lenient_rows};
 use crate::model::RunningJob;
 
 impl NinjaApiClient {
     /// Every running job in the tenant. One request: the spec declares no paging,
-    /// only `df`, `jobType`, `lang` and `tz`. Decoded row by row so one malformed
-    /// job cannot hide the rest.
+    /// only `df`, `jobType`, `lang` and `tz`. Decoded off the runtime, job by job, so
+    /// one malformed job cannot hide the rest ([`parse_jobs`]).
     pub async fn running_jobs(&self) -> Result<Vec<RunningJob>> {
-        let raw: Value = self.get_json("/jobs", &[]).await?;
-        let Value::Array(items) = raw else {
-            bail!("the jobs response was not a list");
-        };
-        Ok(items
-            .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
-            .collect())
+        self.get_decoded("/jobs", &[], parse_jobs).await
     }
+}
+
+/// Reads a `/jobs` response: a bare array, each job decoded on its own straight into
+/// [`RunningJob`]. The node record and `data` each job carries are skipped as the
+/// array is scanned rather than built, which is most of every job's bytes.
+fn parse_jobs(body: &[u8]) -> Result<Vec<RunningJob>> {
+    let body = body.trim_ascii();
+    if body.first() != Some(&b'[') {
+        bail!("the jobs response was not a list");
+    }
+    let jobs: Vec<&RawValue> = serde_json::from_slice(body).context("decode the jobs list")?;
+    Ok(lenient_rows(jobs))
 }
 
 #[cfg(test)]
@@ -71,5 +76,24 @@ mod tests {
         assert_eq!(jobs[0].job_type.as_deref(), Some("PATCH_MANAGEMENT"));
         assert_eq!(jobs[0].job_status.as_deref(), Some("IN_PROCESS"));
         assert!(jobs[0].started_at().is_some());
+    }
+
+    /// Anything but a list fails the read without echoing the body — a proxy's
+    /// sign-in page included — and an entry that is not a job is dropped like a
+    /// malformed one.
+    #[test]
+    fn only_a_list_of_jobs_is_read() {
+        let page = "<html>sign in</html>".repeat(2_000);
+        let bodies: [&[u8]; 4] = [page.as_bytes(), b"{}", b"", b"null"];
+        for body in bodies {
+            let err = parse_jobs(body).expect_err("not a list");
+            assert_eq!(format!("{err:#}"), "the jobs response was not a list");
+        }
+        let jobs =
+            parse_jobs(br#" [null, 3, {"deviceId": 4, "jobType": "SCRIPTING"}] "#).expect("a list");
+        assert_eq!(
+            jobs.iter().map(|j| j.device_id).collect::<Vec<_>>(),
+            [Some(4)]
+        );
     }
 }

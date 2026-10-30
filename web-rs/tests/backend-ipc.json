@@ -119,39 +119,6 @@
       "sentence": "2 devices in the current result are missing KB5039212 or a newer update that includes it. A device missing only a newer update may already have the fix: NinjaOne lists just the newest update a device needs. Only the devices and statuses in the current result are checked.",
       "title": "CVE-2026-20001 Remote Code Execution Vulnerability"
     },
-    "get_device_rows": [
-      {
-        "deviceId": 1,
-        "rows": [
-          {
-            "cveCount": 2,
-            "deviceId": 1,
-            "deviceName": "web-01",
-            "deviceRole": "Domain Controller",
-            "exploitedCves": "CVE-2026-21002",
-            "firstSeenDate": "2026-05-17 12:00 UTC",
-            "firstSeenTs": 1779019200,
-            "installedDate": null,
-            "installedTs": null,
-            "kb": "KB5040434",
-            "location": "HQ",
-            "name": "KB5040434 · Cumulative Update",
-            "needsReboot": true,
-            "nodeClass": "WINDOWS_SERVER",
-            "offline": false,
-            "organization": "Contoso",
-            "osName": "Windows Server 2022",
-            "patchType": "OS",
-            "productIdentifier": null,
-            "rebootLikely": true,
-            "severity": "Critical",
-            "severityRank": 7,
-            "status": "PENDING"
-          }
-        ],
-        "truncated": true
-      }
-    ],
     "get_patch_groups": {
       "groups": [
         {
@@ -235,6 +202,38 @@
         "severity": "Important",
         "severityRank": 6,
         "status": "APPROVED"
+      }
+    ],
+    "get_reboot_devices": [
+      {
+        "deviceId": 3,
+        "deviceName": "core-sw-01",
+        "deviceRole": "Domain Controller",
+        "failedInstalls": 0,
+        "lastContact": "2026-06-30 12:00 UTC",
+        "lastContactTs": 1782820800,
+        "location": "HQ",
+        "needsReboot": true,
+        "nodeClass": "NMS_SWITCH",
+        "offline": false,
+        "organization": "Contoso",
+        "osName": "Cisco IOS XE",
+        "pastSla": 0,
+        "pendingBySeverity": {
+          "critical": 0,
+          "important": 0,
+          "low": 0,
+          "moderate": 0,
+          "optional": 0,
+          "recommended": 0,
+          "security": 0,
+          "unknown": 0
+        },
+        "pendingCount": 0,
+        "rebootReason": null,
+        "rollupScope": "nonPatchable",
+        "urgentPastSla": 0,
+        "vulnerabilities": null
       }
     ],
     "get_settings": {
@@ -903,6 +902,7 @@
         "sentence": "CVEs and exploited marks for Windows updates come from Microsoft security releases 2026-Sep to 2026-Oct and CISA's Known Exploited Vulnerabilities catalog 2026.10.26, checked 2026-10-27 00:00 UTC.",
         "state": "ready"
       },
+      "failingDevices": 1,
       "failures": [
         {
           "affectedDevices": 1,
@@ -1085,6 +1085,7 @@
           "vulnerabilities": null
         }
       ],
+      "rebootDevicesTotal": 4,
       "rows": [
         {
           "cveCount": 2,
@@ -1384,7 +1385,8 @@
         "rowsTotal": 6,
         "scopeKey": "[[\"org\",\"\"],[\"loc\",\"\"],[\"role\",\"\"],[\"class\",\"\"],[\"os\",\"\"],[\"status\",\"Approved,Failed,Installed,Pending\"],[\"sev\",\"\"],[\"q\",\"\"],[\"after\",\"\"],[\"before\",\"\"]]",
         "scoped": false,
-        "softwarePatches": true
+        "softwarePatches": true,
+        "tenant": "b98075742566c955"
       },
       {
         "agedCritical": 2,
@@ -1417,7 +1419,8 @@
         "rowsTotal": 6,
         "scopeKey": "[[\"org\",\"\"],[\"loc\",\"\"],[\"role\",\"\"],[\"class\",\"\"],[\"os\",\"\"],[\"status\",\"Approved,Failed,Installed,Pending\"],[\"sev\",\"\"],[\"q\",\"\"],[\"after\",\"\"],[\"before\",\"\"]]",
         "scoped": false,
-        "softwarePatches": true
+        "softwarePatches": true,
+        "tenant": "b98075742566c955"
       }
     ],
     "run_action": {
@@ -1460,7 +1463,25 @@
         }
       ],
       "skipped": 1
-    }
+    },
+    "selection_status": [
+      {
+        "deviceId": 1,
+        "inScope": true,
+        "needsReboot": true,
+        "offline": false,
+        "present": [
+          "OS\u001fKB5040434\u001fKB5040434 · Cumulative Update"
+        ]
+      },
+      {
+        "deviceId": 999,
+        "inScope": false,
+        "needsReboot": false,
+        "offline": false,
+        "present": []
+      }
+    ]
   },
   "enums": {
     "actionKind": [

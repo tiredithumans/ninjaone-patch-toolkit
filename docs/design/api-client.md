@@ -15,11 +15,13 @@ and **5xx** (`Idempotent` requests only, after a 2/4/8 s `backoff` stretched by 
 / connect failure (anything but `ActOnce`; connecting has its own 15 s budget inside the 45 s
 total, see `build_http_client`) / 429 (honors `Retry-After` in seconds or as an HTTP-date, capped
 at `MAX_RETRY_AFTER_SECS` = 60 s — the header is server-controlled, and an uncapped value parked a
-dispatch for as long as it asked — plus up to 1 s of jitter, and pauses **every** request on the
+dispatch for as long as it asked — plus up to 1 s of jitter on the shared deadline and up to 1 s
+more per request as it is released, and pauses **every** request on the
 client, see [below](#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant))
 / 401 (forces a token refresh). Each attempt's token is bound to the tenant the URL was built for;
-a tenant switch mid-request aborts it with `TenantMoved`. A cursor
-page whose response was lost is never retried blindly: it is re-read under a count check, or
+a tenant switch mid-request aborts it with `TenantMoved`. A cursor page gets 100 s rather than the
+client's 45 s (see [below](#a-cursor-page-waits-longer-than-any-other-request)), and one
+whose response was lost is never retried blindly: it is re-read under a count check, or
 the scan starts over (see [below](#a-lost-cursor-page-is-re-read-against-the-count-or-the-scan-restarts)). `get_paginated` handles **both** a bare JSON array **and** the
 `{ results, cursor }` envelope, where `cursor` may be a string or a `{ name, offset, … }` object;
 it stops when a page returns 0 rows even if the server echoes a stale token. Don't hand-roll a
@@ -30,7 +32,7 @@ none (see `docs/api/ninjaone-surface.md`), so it is one `get_json`: paged with `
 with a full page of roles got the same page back for the second request, which the forward-progress
 guard below rightly reports as a stall.
 
-## Paginated bodies are deserialized straight into `T`; everything else goes through `Value`
+## Paginated bodies and row lists are deserialized straight into `T`; everything else goes through `Value`
 
 `send_with_retry` owns the request/retry loop and returns the raw `reqwest::Response`;
 `request_raw` decodes it as a `Value` (single-shot GETs, acting POSTs — all small bodies) and
@@ -42,6 +44,23 @@ the `{ results, cursor }` wrapper via `serde_json`'s `RawValue` (hence the `raw_
 so the shape checks stay explicit and the rows are parsed once. The `after`-paginated branch needs
 each row's id, which is no longer reachable generically — `api::paging::PagedRow` supplies it, so a new
 paged type is a compile error rather than a silently non-advancing cursor.
+
+The two unpaged row lists, `/jobs` and `/activities`, go through `get_decoded`: the body is read
+as bytes and parsed on the blocking pool, its array borrowed as `RawValue`s and each entry decoded
+on its own into its final type (`lenient_rows`), so one malformed entry is dropped without hiding
+the rest. They used to come through `get_json` as one `Value` tree converted entry by entry, inline
+on a tokio worker — and `/jobs` is the whole tenant's running jobs, each carrying a full node record,
+re-read every 30 s and at its largest during a patch window.
+
+**A success body that is not JSON is an error.** `decode_response` used to keep any body that did
+not parse as a `Value::String`, whole; a proxy's sign-in page answering 200 then reached the toast
+and the log in full through serde's "invalid type: string …", past the `truncate_body` cap every
+other server text goes through, and on `script/run` it became the job's series uid. Now a blank
+body is `Null`, JSON is JSON, a short token without spaces or markup (`MAX_BARE_TOKEN`) is kept
+because some tenants answer `script/run` with the bare series uid, and anything else is an error
+quoting at most `truncate_body` of it (`a_body_not_labelled_json_is_json_a_token_or_an_error`,
+`a_2xx_page_that_is_not_json_is_a_capped_error_but_a_bare_uid_is_kept`). On an acting POST that
+error is an `OutcomeUnknown`, like any unreadable 2xx.
 
 ## The retry policy is a pure function
 
@@ -61,6 +80,12 @@ shortening it, and every attempt sits it out before it asks for a token or the s
 wait is not an attempt. The backoff and the 429 wait are both jittered so the legs a burst failed
 together do not come back together (`a_429_pauses_every_request_the_client_sends`,
 `the_429_that_ends_a_request_still_pauses_its_siblings`, `backoff_is_jittered_by_at_most_a_quarter`).
+
+**The 429 jitter is per request, not only on the deadline.** The deadline is one instant for every
+waiter, so jitter added to it alone moved the burst without spreading it: a query's legs, the
+poller's reads and the `/jobs` poll all re-sent in the same millisecond. Each request now sleeps
+its own `rate_limit_jitter()` once the pause releases it, and checks the pause again after, so a
+429 drawn meanwhile is still sat out (`requests_the_pause_releases_do_not_all_send_at_once`).
 
 `send_with_retry` builds the URL once but asked for a token on every attempt, and
 `apply_settings` swaps the host and clears the tokens under one write lock. A read waiting out a
@@ -175,6 +200,20 @@ The first page also logs the cursor raw (`cursor opened`: `count`, `expires`, an
 actual length next to the size requested). `expires` is epoch seconds and has sat 120 s after the
 open on every cursor seen, which bounds how slow a scan may run before the server forgets it.
 
+## A cursor page waits longer than any other request
+
+The re-read and the restart recover a lost page; a cursor page that is merely slow should not be
+lost in the first place. NinjaOne advances a scan's position when it *serves* a page, so a page the
+client stopped waiting for at its 45 s total timeout and the backend went on to serve was lost by
+construction: the re-read is answered with the next page, the scan ends short of its count and
+starts over. That timeout is what lost the 2026-10-26 pages, one every 19–85. So a request that
+carries a cursor gets `CURSOR_PAGE_TIMEOUT` (100 s) through reqwest's per-request timeout, which
+replaces the client's 45 s for that request alone; connecting keeps its own 15 s. 100 s stays under
+the 120 s `expires` above, past which the page would find its cursor gone anyway. The request that
+opens a scan is an ordinary read: a timeout there is retried in place and loses nothing
+(`a_cursor_page_outlasts_the_client_timeout`). Whether a lost page had been served shows in the
+`re-read a lost cursor page` log line: a `next_offset` one page past `sent_offset` means it had.
+
 ## The whole-fleet third-party feed is paged in location slices that must add up to it
 
 A whole-fleet third-party feed runs to six figures — 563,255 rows, 113 pages of 5000, on the tenant
@@ -196,7 +235,10 @@ the inventory does not list sit in no slice at all. So before any paging, `feed_
 one-row page (`pageSize=1`) of each slice and of the whole feed, and the slices' sizes must sum to
 exactly the whole's: the cursor's `count`, or the rows on the page when it is the only one. The
 paged rows must then sum to the same total, which catches a device that moved between slices
-mid-fetch. Any mismatch, or a size that cannot be read, is logged at `warn` and the feed is paged
+mid-fetch. They are counted before anything is allocated, and the joined vector is sized from the
+rows in hand: sizing it by the announced total let a bogus `count` that the slices summed to abort
+the app on one huge allocation (`an_absurd_announced_count_is_never_allocated`). A server's count
+never sizes an allocation. Any mismatch, or a size that cannot be read, is logged at `warn` and the feed is paged
 whole as before: a few one-row requests and a wasted slice download, never a duplicated or missing
 row. Each slice keeps its own re-read and restart budgets, its log lines carry a `slice{n, of}`
 span, progress is reported as the slices' sum, and the first slice to fail fails the fetch

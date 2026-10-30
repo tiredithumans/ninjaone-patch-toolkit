@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::PatchRow;
 
-use super::ORPHAN_DEVICE_ID;
+use super::{DeviceSummary, ORPHAN_DEVICE_ID};
 
 /// Sort key for the paged detail rows (`get_patch_rows`). Deserialized from the
 /// frontend's camelCase IPC args; mirrored in `web-rs/src/types.rs`.
@@ -448,52 +448,107 @@ pub fn group_member_page(
         .collect()
 }
 
-/// One device's rows from the cached result, for a read over several devices at
-/// once ([`rows_by_device`]).
-#[derive(Debug, Clone, serde::Serialize)]
+/// One selected device, as the post-refresh prune asks about it: the keys of the
+/// patches ticked on it ([`write_selection_key`]). Empty for a device-level
+/// selection (Needs Reboot), which ticks no patches.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeviceRows {
+pub struct SelectionProbe {
     pub device_id: i64,
-    pub rows: Vec<PatchRow>,
-    /// The device has more rows than the caller's limit, so `rows` is a prefix: a
-    /// caller deciding what a device no longer lists must not read it as complete.
-    pub truncated: bool,
+    #[serde(default)]
+    pub keys: Vec<String>,
 }
 
-/// Each requested device's rows in one pass over the cache, in the cache's order,
-/// at most `limit` per device, ordered by device id. A device with nothing listed
-/// still gets its entry (empty), so a caller can tell "left the scope" from "not
-/// asked".
+/// What the cached result says about one probed device — only what a prune needs.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionStatus {
+    pub device_id: i64,
+    /// Whether the device is in the result's scope at all; one that left it keeps
+    /// nothing of its selection.
+    pub in_scope: bool,
+    pub offline: bool,
+    pub needs_reboot: bool,
+    /// The probe's keys that still name one of the device's rows, in probe order.
+    pub present: Vec<String>,
+}
+
+/// A row's identity within a device's selection: `(patch type, KB, name)` joined by
+/// U+001F — exactly the frontend's `util::patch_key`, so a ticked row and the row
+/// the cache still holds compare equal. Into a buffer, which it clears first.
+pub fn write_selection_key(row: &PatchRow, buf: &mut String) {
+    buf.clear();
+    buf.push_str(row.patch_type);
+    buf.push('\u{1f}');
+    buf.push_str(row.kb.as_deref().unwrap_or(""));
+    buf.push('\u{1f}');
+    buf.push_str(&row.name);
+}
+
+/// Answers each probe from one pass over the cached rows and devices. A device the
+/// result does not hold answers `in_scope: false`; a repeated device answers once.
 ///
-/// One scan for the set: the selection prune after an auto-refresh used to call
-/// [`group_member_page`] once per selected device — an IPC round trip and a
-/// `spawn_blocking` walk of every cached row each, O(selected devices × rows) per
-/// refresh tick.
-pub fn rows_by_device(rows: &[PatchRow], device_ids: &[i64], limit: usize) -> Vec<DeviceRows> {
-    let mut by_device: std::collections::BTreeMap<i64, DeviceRows> = device_ids
+/// This replaced reading every selected device's rows back over IPC — up to a
+/// thousand full rows per device on every auto-refresh tick — when all the prune
+/// does with them is ask which ticked keys still exist and whether the device is
+/// offline.
+pub fn selection_status(
+    rows: &[PatchRow],
+    devices: &[DeviceSummary],
+    probes: &[SelectionProbe],
+) -> Vec<SelectionStatus> {
+    let mut index: HashMap<i64, usize> = HashMap::new();
+    // Per answered device: the probe it answers and the keys that probe asks about.
+    let mut asked: Vec<(&SelectionProbe, HashSet<&str>)> = Vec::new();
+    for probe in probes {
+        index.entry(probe.device_id).or_insert_with(|| {
+            asked.push((probe, probe.keys.iter().map(String::as_str).collect()));
+            asked.len() - 1
+        });
+    }
+    let mut out: Vec<SelectionStatus> = asked
         .iter()
-        .map(|&device_id| {
-            (
-                device_id,
-                DeviceRows {
-                    device_id,
-                    rows: Vec::new(),
-                    truncated: false,
-                },
-            )
+        .map(|(probe, _)| SelectionStatus {
+            device_id: probe.device_id,
+            in_scope: false,
+            offline: false,
+            needs_reboot: false,
+            present: Vec::new(),
         })
         .collect();
-    for row in rows {
-        let Some(entry) = by_device.get_mut(&row.device_id) else {
-            continue;
-        };
-        if entry.rows.len() < limit {
-            entry.rows.push(row.clone());
-        } else {
-            entry.truncated = true;
+    for device in devices {
+        if let Some(&i) = index.get(&device.device_id) {
+            out[i].in_scope = true;
+            out[i].offline = device.offline;
+            out[i].needs_reboot = device.needs_reboot;
         }
     }
-    by_device.into_values().collect()
+    let mut found: Vec<HashSet<&str>> = vec![HashSet::new(); out.len()];
+    let mut key = String::new();
+    for row in rows {
+        let Some(&i) = index.get(&row.device_id) else {
+            continue;
+        };
+        let wanted = &asked[i].1;
+        if wanted.is_empty() {
+            continue;
+        }
+        write_selection_key(row, &mut key);
+        if let Some(&k) = wanted.get(key.as_str()) {
+            found[i].insert(k);
+        }
+    }
+    for (i, status) in out.iter_mut().enumerate() {
+        let mut listed = HashSet::new();
+        status.present = asked[i]
+            .0
+            .keys
+            .iter()
+            .filter(|k| found[i].contains(k.as_str()) && listed.insert(k.as_str()))
+            .cloned()
+            .collect();
+    }
+    out
 }
 
 /// A parsed [`group_key`], so membership is an equality check rather than a fresh
@@ -581,6 +636,75 @@ pub fn sort_order(rows: &[PatchRow], sort: RowSort) -> Vec<u32> {
     // Stable sort: rows that tie keep the canonical cache order.
     order.sort_by(|a, b| compare_rows(&rows[*a as usize], &rows[*b as usize], sort));
     order
+}
+
+/// Puts freshly joined rows in the canonical cache order: highest severity first,
+/// then organization, then device — case-insensitive, ties in join order.
+///
+/// Sorts compact keys rather than the rows. A `PatchRow` is ~300 bytes, and a
+/// stable `sort_by` over a seven-figure result moved every row through a merge
+/// buffer half the size of the set (~150 MB) while comparing interned strings byte
+/// by byte on every comparison: 1.3–1.6 s at 1M rows, about 40% of the whole join.
+/// The rows name only a few thousand distinct organizations and devices, so each
+/// name is ranked once and the sort compares integers; the row's index breaks ties,
+/// which is what lets an unstable sort reproduce the stable order exactly. The
+/// order is then applied in place, so the rows are never copied.
+pub fn sort_canonical(rows: &mut [PatchRow]) {
+    let orgs = ci_ranks(rows.iter().map(|r| &*r.organization));
+    let devices = ci_ranks(rows.iter().map(|r| &*r.device_name));
+    let mut keys: Vec<(Reverse<u8>, u32, u32, usize)> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            (
+                Reverse(r.severity_rank),
+                orgs[&*r.organization],
+                devices[&*r.device_name],
+                i,
+            )
+        })
+        .collect();
+    keys.sort_unstable();
+    let order: Vec<usize> = keys.into_iter().map(|k| k.3).collect();
+    // The rank maps borrow names out of the rows, so they go before the rows move.
+    drop(orgs);
+    drop(devices);
+    permute_in_place(rows, order);
+}
+
+/// A dense rank per distinct name under [`cmp_ci`]: names that compare equal
+/// (`"Acme"`, `"ACME"`) share a rank, so they tie exactly as they do in `cmp_ci`.
+fn ci_ranks<'a>(names: impl Iterator<Item = &'a str>) -> HashMap<&'a str, u32> {
+    let mut ranks: HashMap<&str, u32> = HashMap::new();
+    for name in names {
+        ranks.entry(name).or_insert(0);
+    }
+    let mut distinct: Vec<&str> = ranks.keys().copied().collect();
+    distinct.sort_unstable_by(|a, b| cmp_ci(a, b));
+    let mut rank = 0u32;
+    for (i, name) in distinct.iter().enumerate() {
+        if i > 0 && cmp_ci(distinct[i - 1], name) != Ordering::Equal {
+            rank += 1;
+        }
+        ranks.insert(name, rank);
+    }
+    ranks
+}
+
+/// Reorders `items` so that position `i` ends up holding the element that was at
+/// `order[i]`, by walking each cycle of the permutation with swaps.
+fn permute_in_place<T>(items: &mut [T], mut order: Vec<usize>) {
+    debug_assert_eq!(items.len(), order.len());
+    for start in 0..order.len() {
+        let mut current = start;
+        while order[current] != start {
+            let next = order[current];
+            items.swap(current, next);
+            order[current] = current;
+            current = next;
+        }
+        order[current] = current;
+    }
 }
 
 /// Serves one page of the cached detail rows, in `order` when one is supplied.

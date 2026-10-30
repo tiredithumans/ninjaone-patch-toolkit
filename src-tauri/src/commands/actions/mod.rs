@@ -31,7 +31,7 @@ mod dispatch;
 mod plan;
 mod poller;
 
-use confirm::random_token;
+use confirm::{confirm_dispatch, random_token};
 use dispatch::{DispatchContext, action_detail, dispatch_batch, invalidate_after};
 use plan::{PlannedAction, build_plan, typed_parameters};
 use poller::spawn_job_poller;
@@ -182,14 +182,16 @@ pub async fn plan_action(
     // was built in, not whichever one is current when they return.
     let session = state.job_session();
     let planned = build_plan(&state, &request).await?;
-    let hash = planned.hash(&request);
+    // Bound to the devices this plan shows as eligible, not only to the request: the
+    // re-plan at Run must find the same ones (see `confirm::request_hash`).
+    let binding = planned.binding(&request);
     let mut plan = planned.plan;
 
     // A blocked plan has nothing to confirm, so it gets no token. Scans are not
     // mutating and skip confirmation entirely.
     if !plan.is_blocked() && request.kind.is_mutating() {
         let token = random_token();
-        if !state.store_pending_confirm(&session, token.clone(), hash) {
+        if !state.store_pending_confirm(&session, token.clone(), binding) {
             return Err(UiError::new(SESSION_CHANGED_WHILE_PLANNING));
         }
         plan.confirm_token = Some(token);
@@ -214,16 +216,11 @@ pub async fn run_action(
     if planned.plan.is_blocked() {
         return Err(UiError::new(planned.plan.blockers.join(" ")));
     }
+    // Dispatches to the re-plan's eligible devices, so the token must vouch for
+    // exactly those: a device skipped at review that has since come online is refused
+    // here, not sent an action the dialog said it would not get.
+    confirm_dispatch(&state, &request, &planned)?;
 
-    if request.kind.is_mutating() {
-        let token = request.confirm_token.as_deref().unwrap_or_default();
-        if !state.consume_confirm_token(token, &planned.hash(&request)) {
-            return Err(UiError::new(
-                "This action was not confirmed, or the confirmation expired or no longer matches \
-                 the selection. Review the plan and confirm again.",
-            ));
-        }
-    }
     let PlannedAction {
         plan: p,
         parameters,

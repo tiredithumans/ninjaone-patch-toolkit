@@ -4,15 +4,20 @@
 //! mid-batch still leaves evidence of what was attempted. Best-effort throughout:
 //! a failed audit write warns but never blocks the operator.
 //!
+//! Nothing is ever deleted. Past [`ROTATE_AT_BYTES`] the live file is moved aside as
+//! a dated generation ([`rotated_generations`]) and a fresh one started, so reading
+//! the newest records costs one bounded file rather than the whole history.
+//!
 //! Secrets discipline applies here as everywhere — a `parameters` string is
 //! operator-authored free text, so anything that looks like a credential is
 //! redacted before it reaches disk. Tokens are never written at all.
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
-use chrono::Utc;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Serialize;
 use tracing::warn;
 
@@ -360,31 +365,46 @@ fn quote_after(open: Option<char>, token: &str) -> Option<char> {
     }
 }
 
-/// `conn=a;Password= hunter2`: a sensitive segment with an empty value, whose value
-/// is the next token, as with `-Password hunter2`. Only a segment's *own* name
-/// counts — a name chained after an `=` is how base64 padding (`…Pw=`) looks.
+/// `conn=a;Password= hunter2` or `user:svc,password: hunter2`: a sensitive segment
+/// with an empty value, whose value is the next token, as with `-Password hunter2`.
+/// Only a segment's *own* name counts — a name chained after an `=` is how base64
+/// padding (`…Pw=`) looks.
 fn ends_with_empty_sensitive_segment(token: &str) -> bool {
-    let Some(at) = token.rfind([';', '&', '?']) else {
+    let Some(at) = token.rfind(SEGMENT_SEPARATORS) else {
         return false;
     };
     token[at + 1..]
-        .strip_suffix('=')
+        .strip_suffix(['=', ':'])
         .is_some_and(|name| !name.contains(['=', ':']) && is_sensitive(name))
 }
+
+/// Where [`redact_embedded`] cuts a token into segments, each judged on its own.
+///
+/// `;`, `&` and `?` separate connection-string and query-string segments. `,`, `{`
+/// and `[` separate the entries of a list or a JSON object written without spaces,
+/// whose names end at `:` (`user:svc,password:x`, `{"user":"svc","password":"x"}`).
+/// Only a segment's *first* name may end at `:` (see [`embedded_value_at`]), so
+/// without these cuts every entry after the first went to disk verbatim.
+const SEGMENT_SEPARATORS: [char; 6] = [';', '&', '?', ',', '{', '['];
+
+/// The separators after which a bare `sig` is an Azure SAS signature.
+const QUERY_SEPARATORS: [char; 3] = [';', '&', '?'];
 
 /// Redacts credentials carried *inside* a token whose own key is not sensitive.
 ///
 /// The key/value split stops at the first `=` or `:`, so `conn=Server=a;Password=x`
 /// is keyed on `conn`, `/p:Password=x` on `/p` and `https://user:pass@host` on
 /// `https`, and all of them went to disk verbatim. Two embedded shapes are common
-/// enough to scan for: URL userinfo, and `;`/`&`/`?`-separated segments
-/// (connection strings, query strings), each scanned by [`embedded_value_at`].
+/// enough to scan for: URL userinfo, and segments cut at [`SEGMENT_SEPARATORS`]
+/// (connection strings, query strings, compact lists and JSON), each scanned by
+/// [`embedded_value_at`].
 fn redact_embedded(token: &str) -> String {
     let token = redact_userinfo(token);
     let mut out = String::with_capacity(token.len());
-    for (i, piece) in token.split_inclusive([';', '&', '?']).enumerate() {
-        let body = piece.trim_end_matches([';', '&', '?']);
-        match embedded_value_at(body, i > 0) {
+    let mut after_query_separator = false;
+    for piece in token.split_inclusive(SEGMENT_SEPARATORS) {
+        let body = piece.trim_end_matches(SEGMENT_SEPARATORS);
+        match embedded_value_at(body, after_query_separator) {
             Some(at) => {
                 out.push_str(&body[..at]);
                 out.push_str("<redacted>");
@@ -392,6 +412,7 @@ fn redact_embedded(token: &str) -> String {
             }
             None => out.push_str(piece),
         }
+        after_query_separator = piece.ends_with(QUERY_SEPARATORS);
     }
     out
 }
@@ -489,12 +510,36 @@ fn encode_line(entry: &AuditEntry) -> serde_json::Result<Vec<u8>> {
     Ok(line)
 }
 
+/// Past this size the live log is moved aside as a dated generation and a fresh one
+/// started. Nothing is ever deleted: the cap bounds what reading the newest records
+/// costs (the Jobs tab does it on every visit), not how much history is kept.
+const ROTATE_AT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// How many names [`rotate_if_full`] tries for one second's generation before it
+/// gives up and lets the live file grow past the cap.
+const ROTATE_NAME_ATTEMPTS: u32 = 100;
+
+/// Serializes this process's appenders. Rotation moves the live file, so two writers
+/// deciding to rotate at once would race over it. Another process (a second app
+/// instance) is covered by the no-clobber link in [`rotate_if_full`].
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
 /// The half of [`record_all`] that does not depend on the OS config directory, so it
 /// can be tested against a temp path. `record_all` itself was untestable — it
 /// resolved its own destination — which left the directory creation, the 0600 mode
 /// and the append behaviour with no coverage at all; only the pure `redact_parameters`
 /// helper was asserted.
-fn write_records(path: &std::path::Path, entries: &[AuditEntry]) {
+fn write_records(path: &Path, entries: &[AuditEntry]) {
+    write_records_rotating_at(path, entries, ROTATE_AT_BYTES, Utc::now());
+}
+
+/// [`write_records`] with its rotation threshold and clock injected for the tests.
+fn write_records_rotating_at(
+    path: &Path,
+    entries: &[AuditEntry],
+    rotate_at: u64,
+    now: DateTime<Utc>,
+) {
     // The poller calls this on every tick, so an empty batch must not so much as
     // create the file.
     if entries.is_empty() {
@@ -506,6 +551,12 @@ fn write_records(path: &std::path::Path, entries: &[AuditEntry]) {
         warn!(?err, "could not create the audit directory");
         return;
     }
+    let _serialized = WRITE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    rotate_if_full(path, rotate_at, now);
+    // A record torn by a crash or a full disk has no newline, and the next append
+    // would run on from it: the reader then loses the torn record *and* the whole
+    // one after it. Starting on a fresh line costs only the torn one.
+    let mut torn = ends_mid_line(path);
     // Owner-only. The log names devices, organizations and the operator's own
     // parameters; on a shared or roaming-profile machine the default 0644 made all
     // of that world-readable. Applies at creation, so an existing log keeps whatever
@@ -525,18 +576,134 @@ fn write_records(path: &std::path::Path, entries: &[AuditEntry]) {
         }
     };
     for entry in entries {
-        let line = match encode_line(entry) {
+        let mut line = match encode_line(entry) {
             Ok(l) => l,
             Err(err) => {
                 warn!(?err, "could not serialize an audit record");
                 continue;
             }
         };
+        if torn {
+            line.insert(0, b'\n');
+            torn = false;
+        }
         if let Err(err) = file.write_all(&line) {
             warn!(?err, path = %path.display(), "could not append to the action audit log");
             return;
         }
     }
+}
+
+/// Whether the file's last byte is something other than a newline: a record was cut
+/// off mid-write. A missing or empty file is not.
+fn ends_mid_line(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::End(-1)).is_ok() && file.read_exact(&mut last).is_ok() && last[0] != b'\n'
+}
+
+/// Moves a live log of `rotate_at` bytes or more aside as a dated generation (see
+/// [`generation_path`]), so the next append starts a fresh file.
+///
+/// Linked under the new name and then unlinked, never renamed onto it. `hard_link`
+/// refuses a name that exists, so a generation another app instance made in the same
+/// second is never overwritten. A record appended through a handle opened before the
+/// move still lands in the generation, because both names are one file. A file system
+/// without hard links falls back to a rename, after checking the name is free.
+fn rotate_if_full(path: &Path, rotate_at: u64, now: DateTime<Utc>) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() < rotate_at {
+        return;
+    }
+    for n in 0..ROTATE_NAME_ATTEMPTS {
+        let target = generation_path(path, now, n);
+        match std::fs::hard_link(path, &target) {
+            Ok(()) => {
+                if let Err(err) = std::fs::remove_file(path) {
+                    // Both names still point at the live file. Drop the new one, or
+                    // the reader would read every record in it twice.
+                    warn!(
+                        ?err,
+                        "could not move the full audit log aside; it keeps growing"
+                    );
+                    let _ = std::fs::remove_file(&target);
+                }
+                return;
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            // Another writer moved it first; the append starts the fresh file.
+            Err(err) if err.kind() == ErrorKind::NotFound => return,
+            Err(_) => {
+                if target.exists() {
+                    continue;
+                }
+                if let Err(err) = std::fs::rename(path, &target) {
+                    warn!(
+                        ?err,
+                        "could not move the full audit log aside; it keeps growing"
+                    );
+                }
+                return;
+            }
+        }
+    }
+    warn!("no free name for the rotated audit log; it keeps growing past the cap");
+}
+
+/// The name the live log takes when it is rotated at `at`: `action-audit.jsonl`
+/// becomes `action-audit-20261030T150512.jsonl`, and the `n`-th name tried in the
+/// same second gets `-n` before the extension.
+pub(crate) fn generation_path(live: &Path, at: DateTime<Utc>, n: u32) -> PathBuf {
+    let stem = live
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("action-audit");
+    let ext = live.extension().and_then(|e| e.to_str()).unwrap_or("jsonl");
+    let stamp = at.format(GENERATION_STAMP);
+    let name = match n {
+        0 => format!("{stem}-{stamp}.{ext}"),
+        n => format!("{stem}-{stamp}-{n}.{ext}"),
+    };
+    live.with_file_name(name)
+}
+
+/// How a generation's name dates it, in UTC.
+const GENERATION_STAMP: &str = "%Y%m%dT%H%M%S";
+
+/// Every rotated generation of the live log at `live`, newest first. Names that do
+/// not parse as one are ignored.
+pub(crate) fn rotated_generations(live: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(stem), Some(ext)) = (
+        live.parent(),
+        live.file_stem().and_then(|s| s.to_str()),
+        live.extension().and_then(|e| e.to_str()),
+    ) else {
+        return Vec::new();
+    };
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let prefix = format!("{stem}-");
+    let suffix = format!(".{ext}");
+    let mut found: Vec<((NaiveDateTime, u32), PathBuf)> = listing
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let middle = name.strip_prefix(&prefix)?.strip_suffix(&suffix)?;
+            let (stamp, n) = match middle.split_once('-') {
+                Some((stamp, n)) => (stamp, n.parse::<u32>().ok()?),
+                None => (middle, 0),
+            };
+            let at = NaiveDateTime::parse_from_str(stamp, GENERATION_STAMP).ok()?;
+            Some(((at, n), entry.path()))
+        })
+        .collect();
+    found.sort_by_key(|(when, _)| std::cmp::Reverse(*when));
+    found.into_iter().map(|(_, path)| path).collect()
 }
 
 /// [`record_all`], moved off the async runtime.
@@ -1086,5 +1253,175 @@ mod tests {
         assert_eq!(entry.activity_id, Some(11));
         assert_eq!(entry.exit_code, Some(1));
         assert!(entry.parameters.is_none() && entry.confirm_token_prefix.is_none());
+    }
+
+    /// What the log stores for `raw`, through the one constructor it has.
+    fn logged(raw: &str) -> String {
+        serde_json::to_value(Redacted::of(raw).expect("non-empty"))
+            .expect("json")
+            .as_str()
+            .expect("a string")
+            .to_string()
+    }
+
+    /// Only a segment's first name may end at `:`, and segments were cut only at
+    /// `;`, `&` and `?`. A compact JSON object or `key:value` list whose first entry
+    /// was not a credential therefore reached disk with every later one verbatim.
+    #[test]
+    fn colon_separated_credentials_after_the_first_entry_are_redacted() {
+        for (input, expected) in [
+            (
+                r#"-Config {"user":"svc","password":"hunter2"}"#,
+                r#"-Config {"user":"svc","password":<redacted>"#,
+            ),
+            ("user:svc,password:hunter2", "user:svc,password:<redacted>"),
+            (
+                r#"-Body {"cfg":{"apiKey":"hunter2"}}"#,
+                r#"-Body {"cfg":{"apiKey":<redacted>"#,
+            ),
+            (
+                r#"-Items [{"name":"a","token":"hunter2"}]"#,
+                r#"-Items [{"name":"a","token":<redacted>"#,
+            ),
+            // The value sits in the next token, as `-Password hunter2` does.
+            (
+                "user:svc,password: hunter2",
+                "user:svc,password: <redacted>",
+            ),
+        ] {
+            let stored = logged(input);
+            assert_eq!(stored, expected, "{input}");
+            assert!(!stored.contains("hunter2"), "{stored}");
+        }
+    }
+
+    /// The shapes that were already redacted stay redacted, and what is not a
+    /// credential in a list or JSON keeps its evidence.
+    #[test]
+    fn redaction_of_the_shapes_already_handled_is_unchanged() {
+        for (input, expected) in [
+            ("password=hunter2", "password=<redacted>"),
+            ("-Password hunter2", "-Password <redacted>"),
+            (r#"{"password":"hunter2"}"#, r#"{"password":<redacted>"#),
+            ("apiKey:abc123 mode=fast", "apiKey:<redacted> mode=fast"),
+        ] {
+            assert_eq!(logged(input), expected, "{input}");
+        }
+        for evidence in [
+            "kbAllowList=5040434,5041580 rebootBehavior=Never dryRun=true",
+            r#"-Config {"user":"svc","mode":"fast"}"#,
+            "hosts:web01,db01:1433",
+        ] {
+            assert_eq!(logged(evidence), evidence);
+        }
+    }
+
+    fn temp_log(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("njp-audit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(AUDIT_FILE);
+        (dir, path)
+    }
+
+    fn job_ids(path: &Path) -> Vec<u64> {
+        std::fs::read_to_string(path)
+            .expect("readable")
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v["jobId"].as_u64())
+            .collect()
+    }
+
+    /// A record cut off mid-write has no newline, and the next append ran on from
+    /// it: the reader then lost the next, whole record as well. The next append
+    /// starts on a line of its own.
+    #[test]
+    fn an_append_after_a_torn_record_starts_a_new_line() {
+        let (dir, path) = temp_log("torn");
+        std::fs::write(&path, br#"{"jobId":1,"timestamp":"2026-01"#).expect("torn record");
+
+        write_records(&path, &[sample_entry(2)]);
+
+        assert_eq!(job_ids(&path), vec![2], "only the torn record is lost");
+        let body = std::fs::read_to_string(&path).expect("readable");
+        assert_eq!(body.lines().count(), 2);
+        // An intact log gets no extra blank line.
+        write_records(&path, &[sample_entry(3)]);
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .expect("readable")
+                .lines()
+                .count(),
+            3
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Past the cap the live log becomes a dated generation and a fresh one starts.
+    /// No record is dropped, and a generation already holding that second's name is
+    /// never overwritten.
+    #[test]
+    fn a_full_log_rotates_to_a_dated_generation_without_losing_a_record() {
+        use chrono::TimeZone as _;
+        let (dir, path) = temp_log("rotate");
+        let at = Utc
+            .with_ymd_and_hms(2026, 10, 30, 15, 5, 12)
+            .single()
+            .expect("valid instant");
+        let cap = 64; // any one record is longer
+
+        write_records_rotating_at(&path, &[sample_entry(1)], cap, at);
+        write_records_rotating_at(&path, &[sample_entry(2)], cap, at);
+
+        let first = generation_path(&path, at, 0);
+        assert!(first.ends_with("action-audit-20261030T150512.jsonl"));
+        assert_eq!(job_ids(&first), vec![1]);
+        assert_eq!(job_ids(&path), vec![2]);
+
+        // Same second again: the next free name, the first generation untouched.
+        write_records_rotating_at(&path, &[sample_entry(3)], cap, at);
+        assert_eq!(job_ids(&first), vec![1]);
+        assert_eq!(job_ids(&generation_path(&path, at, 1)), vec![2]);
+        assert_eq!(job_ids(&path), vec![3]);
+
+        // Below the cap nothing moves.
+        write_records_rotating_at(&path, &[sample_entry(4)], u64::MAX, at);
+        assert_eq!(job_ids(&path), vec![3, 4]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reader walks generations newest first, so their order must follow the
+    /// stamp and the same-second counter, and nothing else in the folder counts.
+    #[test]
+    fn rotated_generations_are_listed_newest_first() {
+        let (dir, path) = temp_log("generations");
+        for name in [
+            "action-audit-20260101T000000.jsonl",
+            "action-audit-20261030T150512.jsonl",
+            "action-audit-20261030T150512-1.jsonl",
+            "action-audit-20260615T120000.jsonl",
+            // Not generations.
+            "action-audit.jsonl",
+            "action-audit-notes.jsonl",
+            "action-audit-20261030T150512.txt",
+            "run-history.jsonl",
+        ] {
+            std::fs::write(dir.join(name), b"").expect("file");
+        }
+        let names: Vec<String> = rotated_generations(&path)
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "action-audit-20261030T150512-1.jsonl",
+                "action-audit-20261030T150512.jsonl",
+                "action-audit-20260615T120000.jsonl",
+                "action-audit-20260101T000000.jsonl",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

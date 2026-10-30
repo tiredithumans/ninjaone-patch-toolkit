@@ -194,7 +194,11 @@ dialog open too long) invalidates the approval. Re-open the action and confirm a
   leaving the app; deleting the file discards that history.
 - `logs/` holds the rolling daily log files (seven days kept), and **Settings → Open
   diagnostics folder** reveals it. Attach the relevant day to a bug report. `RUST_LOG` still
-  raises the level for anyone running the binary from a terminal.
+  raises the level for anyone running the binary from a terminal. It lives in the app's
+  *local* data directory, with the first-seen record, the run snapshots and `exploit-data/`
+  (Local AppData on Windows, `~/.local/share/…` on Linux; the same folder as `settings.json` on
+  macOS); an install that kept them beside `settings.json` moves them there on first launch, and
+  keeps using the old place if a folder cannot be moved.
 
 > **Upgrading from 0.13.5 or earlier?** `action-audit.jsonl` used to be written to a
 > *different* config directory than `settings.json` (`ninjaone-patch-toolkit` rather than

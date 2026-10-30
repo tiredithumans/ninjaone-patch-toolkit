@@ -37,7 +37,9 @@ pub struct AuthStatus {
 /// The silent attempt comes first because a saved refresh token for this tenant is
 /// a sign-in the operator already completed; sending them back through the browser
 /// for it was the "sign in on every launch" bug. It does not widen who can get in:
-/// a saved token exists only until someone signs out, which deletes it, and
+/// a saved token exists only until someone signs out — which deletes every
+/// tenant's, not just the configured one's, so switching Settings back to another
+/// instance cannot revive the previous operator's sign-in there — and
 /// `auth_status` already reports such a session as signed in. `reauthorize` is the
 /// path that must not reuse it, and does not.
 #[tauri::command]
@@ -54,7 +56,9 @@ pub async fn sign_in(state: State<'_, AppState>) -> Result<(), UiError> {
 /// The refresh grant never re-sends `scope`, so an install that signed in before
 /// patch actions were enabled keeps its read-only grant indefinitely. Dropping the
 /// stored refresh token first is what makes the browser flow issue a *new* grant
-/// rather than silently reusing the narrow one.
+/// rather than silently reusing the narrow one. That is a full sign-out, so every
+/// tenant's saved sign-in goes with it — the operator who completes the consent
+/// may not be the one whose sign-ins were saved.
 #[tauri::command]
 pub async fn reauthorize(state: State<'_, AppState>) -> Result<(), UiError> {
     // Same reason as `sign_in`: re-consent runs the full browser flow, so the

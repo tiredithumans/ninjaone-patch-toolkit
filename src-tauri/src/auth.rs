@@ -16,6 +16,7 @@ use tokio::{
 use tracing::{debug, warn};
 
 use crate::error::{redirect_hint, truncate_body};
+use crate::settings::instance_url_problem;
 
 /// Read-only scope, and the default. `offline_access` is required to receive a
 /// refresh token so the operator does not re-authenticate hourly.
@@ -37,6 +38,10 @@ const LEGACY_KEYRING_USER_REFRESH: &str = "refresh_token";
 /// Prefixes for the tenant-scoped entries — see [`tenant_entry`].
 const KEYRING_SECRET_PREFIX: &str = "client_secret";
 const KEYRING_REFRESH_PREFIX: &str = "refresh_token";
+/// The entry listing every tenant refresh-token entry this install has written, so
+/// [`AuthState::logout`] can delete them all — see [`index_refresh_entry`]. Not a
+/// [`tenant_entry`] name (no `.` + hex), so it can never be listed in itself.
+const KEYRING_REFRESH_INDEX: &str = "refresh_token_index";
 
 /// Bounds applied to a token response's `expires_in` before it becomes a deadline.
 ///
@@ -331,6 +336,25 @@ pub struct AuthState {
     /// after the sign-out deleted it. Taken only on blocking threads, and never
     /// while holding `inner`.
     persist_lock: Arc<Mutex<()>>,
+    /// The keyring entry naming every tenant's saved refresh token — see
+    /// [`index_refresh_entry`]. [`KEYRING_REFRESH_INDEX`] outside tests.
+    refresh_index: &'static str,
+}
+
+/// [`KEYRING_REFRESH_INDEX`], the one index an install keeps.
+#[cfg(not(test))]
+fn refresh_index_entry() -> &'static str {
+    KEYRING_REFRESH_INDEX
+}
+
+/// A fresh index per test `AuthState`. The tests share one in-process keyring and
+/// run in parallel, so with one index a test's sign-out deleted the refresh tokens
+/// every other test had just saved and was about to assert on.
+#[cfg(test)]
+fn refresh_index_entry() -> &'static str {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    Box::leak(format!("{KEYRING_REFRESH_INDEX}.test-{n}").into_boxed_str())
 }
 
 struct Inner {
@@ -372,13 +396,7 @@ impl AuthState {
         client_id: Option<String>,
         request_management: bool,
     ) -> Self {
-        let client_secret = load_tenant_keyring(
-            KEYRING_SECRET_PREFIX,
-            LEGACY_KEYRING_USER_SECRET,
-            &base_url,
-            client_id.as_deref(),
-        )
-        .unwrap_or_default();
+        let client_secret = load_tenant_secret(&base_url, client_id.as_deref()).unwrap_or_default();
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 base_url,
@@ -394,6 +412,7 @@ impl AuthState {
             refresh_failures: Arc::new(AtomicU64::new(0)),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
             persist_lock: Arc::new(Mutex::new(())),
+            refresh_index: refresh_index_entry(),
         }
     }
 
@@ -478,15 +497,8 @@ impl AuthState {
         // taken; nothing else can be mid-`apply_settings` (the caller holds the
         // settings write gate), so re-reading here cannot race a competing switch.
         // This is a synchronous keyring read: callers run it on a blocking thread.
-        let fresh_secret = tenant_changed.then(|| {
-            load_tenant_keyring(
-                KEYRING_SECRET_PREFIX,
-                LEGACY_KEYRING_USER_SECRET,
-                &base_url,
-                client_id.as_deref(),
-            )
-            .unwrap_or_default()
-        });
+        let fresh_secret = tenant_changed
+            .then(|| load_tenant_secret(&base_url, client_id.as_deref()).unwrap_or_default());
 
         let Ok(mut inner) = self.inner.write() else {
             return false;
@@ -642,7 +654,7 @@ impl AuthState {
         }
         let refresh_token = match grant.refresh_token.take() {
             Some(token) => token,
-            None => match self.load_saved_refresh(&grant.stamp.tenant).await {
+            None => match self.load_saved_refresh(&grant.stamp).await {
                 Ok(token) => token,
                 // Shared with the callers queued behind this one, exactly like a
                 // transient refresh failure below. Returning before the record was
@@ -691,6 +703,11 @@ impl AuthState {
             .client_id
             .clone()
             .ok_or_else(|| anyhow!("not authenticated: no client ID configured"))?;
+        // An instance `save_settings` would refuse can still arrive from
+        // `settings.json`; it reads as not configured rather than being contacted.
+        if let Some(problem) = instance_url_problem(&inner.base_url) {
+            bail!("not authenticated: {problem}; correct the instance in Settings");
+        }
         Ok(RefreshGrant {
             stamp: inner.grant_stamp(),
             client_id,
@@ -699,32 +716,64 @@ impl AuthState {
         })
     }
 
-    /// Reads `tenant`'s saved refresh token from the keyring on a blocking thread —
-    /// this runs under `refresh_lock`, when every other `access_token()` caller is
-    /// queued behind it.
+    /// Reads the saved refresh token of the tenant `stamp` names from the keyring on
+    /// a blocking thread — this runs under `refresh_lock`, when every other
+    /// `access_token()` caller is queued behind it.
     ///
     /// A keyring *fault* is not a signed-out install, and conflating them sent the
     /// operator to re-run a sign-in that could not have helped. `Ok(None)` is the
     /// genuinely-absent case; an error (locked keychain, no Secret Service running)
     /// says so, because the stored credential may well still be intact.
-    async fn load_saved_refresh(&self, tenant: &TenantStamp) -> Result<String> {
-        let tenant = tenant.clone();
-        let loaded = tauri::async_runtime::spawn_blocking(move || {
-            load_tenant_keyring(
-                KEYRING_REFRESH_PREFIX,
-                LEGACY_KEYRING_USER_REFRESH,
-                &tenant.base_url,
-                tenant.client_id.as_deref(),
-            )
-        })
-        .await
-        .context("keyring read task failed")?;
+    async fn load_saved_refresh(&self, stamp: &GrantStamp) -> Result<String> {
+        let this = self.clone();
+        let stamp = stamp.clone();
+        let loaded =
+            tauri::async_runtime::spawn_blocking(move || this.load_saved_refresh_blocking(&stamp))
+                .await
+                .context("keyring read task failed")?;
         match loaded {
             Ok(Some(refresh)) => Ok(refresh),
             Ok(None) => bail!("not authenticated"),
             Err(e) => Err(e)
                 .context("could not read the saved sign-in from the OS keyring; it may be locked"),
         }
+    }
+
+    /// [`Self::load_saved_refresh`]'s keyring half, under `persist_lock` like every
+    /// other change to the saved credential — because this read can be one.
+    ///
+    /// Adopting the pre-tenant-scoping entry *writes* the tenant's, and a sign-out
+    /// landing between that read and that write deleted the legacy entry only to
+    /// have its token written straight back under the tenant's name. And a session
+    /// that ended while this caller queued (a sign-out, or a new interactive sign-in)
+    /// reads nothing: otherwise the read found the *new* sign-in's refresh token and
+    /// POSTed it for a grant `store_tokens` then refused — under rotation, spending
+    /// the new session's credential.
+    fn load_saved_refresh_blocking(&self, stamp: &GrantStamp) -> Result<Option<String>> {
+        let _persist = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.grant_stamp().session != stamp.session {
+            return Ok(None);
+        }
+        let tenant = &stamp.tenant;
+        let index = self.refresh_index;
+        let token = load_tenant_keyring(
+            KEYRING_REFRESH_PREFIX,
+            LEGACY_KEYRING_USER_REFRESH,
+            &tenant.base_url,
+            tenant.client_id.as_deref(),
+            |entry, token| save_refresh_entry(index, entry, token),
+        )?;
+        // A token saved before the index existed is indexed once its tenant is
+        // visited, so from then on a sign-out from any tenant removes it too.
+        if token.is_some()
+            && let Err(e) = index_refresh_entry(index, &tenant.entry(KEYRING_REFRESH_PREFIX))
+        {
+            warn!(error = %e, "could not record a saved sign-in for sign-out to remove");
+        }
+        Ok(token)
     }
 
     /// The cached access token, if one is present and not within the staleness
@@ -970,7 +1019,9 @@ impl AuthState {
         let entry = started.tenant.entry(KEYRING_REFRESH_PREFIX);
         match parsed.refresh_token {
             Some(ref rt) => {
-                if let Err(e) = save_keyring(&entry, rt) {
+                // Indexed first, so `logout` finds it whichever tenant is current
+                // then. A token that cannot be indexed is not written at all.
+                if let Err(e) = save_refresh_entry(self.refresh_index, &entry, rt) {
                     warn!(
                         error = %e,
                         "could not persist the refresh token; this session stays signed in but a restart will require signing in again"
@@ -1031,10 +1082,17 @@ impl AuthState {
         }
     }
 
-    /// Signs out: ends the session, drops the in-memory tokens and deletes the
-    /// stored refresh token.
+    /// Signs out: ends the session, drops the in-memory tokens and deletes every
+    /// saved refresh token — every tenant's, not just the configured one's.
     ///
     /// **Blocking** (keyring I/O) — async callers use [`Self::logout_async`].
+    ///
+    /// A tenant switch deliberately leaves the previous tenant's saved sign-in on
+    /// disk so that switching back finds it. Deleting only the configured tenant's
+    /// therefore left the others behind a clean-looking sign-out, and the next
+    /// operator to point Settings at one of them was silently signed in as the
+    /// previous one — with their scope, and with every action attributed to them.
+    /// The index ([`index_refresh_entry`]) is what lets this find them all.
     ///
     /// Bumping the session generation is what makes the sign-out stick: a refresh
     /// or interactive grant already in flight carries the old generation, so
@@ -1067,12 +1125,15 @@ impl AuthState {
             inner.tokens = None;
             inner.tenant()
         };
+        // The configured tenant's by name as well as through the index: an entry
+        // saved before the index existed is in it only once its tenant was visited.
         let current = delete_keyring(&tenant.entry(KEYRING_REFRESH_PREFIX));
         // Signing out of an install that still holds a pre-tenant-scoping entry must
         // clear that too, or the next `access_token()` migrates it straight back in.
         let legacy = delete_keyring(LEGACY_KEYRING_USER_REFRESH);
-        current.and(legacy).context(
-            "signed out of this session, but the stored refresh token could not be deleted; \
+        let indexed = delete_indexed_refresh_entries(self.refresh_index);
+        current.and(legacy).and(indexed).context(
+            "signed out of this session, but a saved sign-in could not be deleted; \
              it may still be on this machine",
         )
     }
@@ -1122,6 +1183,11 @@ impl AuthState {
             )
         };
         let base_url = started.tenant.base_url.clone();
+        // Before the probe and the browser: both would send the operator — and the
+        // code, verifier and client secret after them — wherever this points.
+        if let Some(problem) = instance_url_problem(&base_url) {
+            bail!("{problem}; correct the instance in Settings, then sign in again");
+        }
         let scope = scope_for(request_management);
 
         let pkce = PkceChallenge::new();
@@ -1189,9 +1255,7 @@ impl AuthState {
         // stream could end or spoof an in-progress sign-in on the callback port.
         // Everything diagnostic about this line survives dropping the query.
         debug!(url = %url_without_query(&auth_url), "opening browser for PKCE login");
-        if let Err(err) = open::that(&auth_url) {
-            warn!(?err, "failed to open browser; user must navigate manually");
-        }
+        open_browser(auth_url).await;
 
         let callback = timeout(
             std::time::Duration::from_secs(180),
@@ -1286,6 +1350,7 @@ impl AuthState {
             refresh_failures: Arc::new(AtomicU64::new(0)),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
             persist_lock: Arc::new(Mutex::new(())),
+            refresh_index: refresh_index_entry(),
         }
     }
 
@@ -1319,6 +1384,7 @@ impl AuthState {
             refresh_failures: Arc::new(AtomicU64::new(0)),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
             persist_lock: Arc::new(Mutex::new(())),
+            refresh_index: refresh_index_entry(),
         }
     }
 }
@@ -1549,6 +1615,32 @@ fn url_without_query(url: &str) -> &str {
     &url[..end]
 }
 
+/// Opens the authorize URL in the default browser without holding a runtime worker.
+///
+/// `open::that` waits for its launcher to exit, and it ran on a tokio worker: on
+/// Windows that is a whole `powershell.exe` start-up, and a generic-desktop
+/// `xdg-open` runs a browser that was not already open in the foreground, pinning
+/// the worker until the browser closed — before the callback's three-minute clock
+/// had even started. `that_detached` watches each launcher only briefly (250 ms;
+/// macOS's `/usr/bin/open` returns at once), and runs on a blocking thread here.
+///
+/// A failure is logged by kind only. `open` builds its error from the launcher's
+/// whole command line — the authorize URL, `state` and `code_challenge` included —
+/// so the `?err` this used to log put them in the log file of a release build.
+async fn open_browser(auth_url: String) {
+    let logged = url_without_query(&auth_url).to_string();
+    match tauri::async_runtime::spawn_blocking(move || open::that_detached(&auth_url)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => warn!(
+            kind = ?err.kind(),
+            url = %logged,
+            "failed to open browser; user must navigate manually"
+        ),
+        // Not the join error's text: a panic payload is the launcher's to word.
+        Err(_) => warn!(url = %logged, "the browser launch task failed"),
+    }
+}
+
 // --- Keyring wrappers ---------------------------------------------------------
 
 /// Entry name holding `prefix`'s credential for one tenant.
@@ -1591,11 +1683,15 @@ fn tenant_entry(prefix: &str, base_url: &str, client_id: Option<&str>) -> String
 /// is adopted by the tenant configured now and the global entry removed. A
 /// multi-tenant install loses at most one stored sign-in, once — and only has to
 /// sign in again, since nothing else depends on it.
+///
+/// `save` writes the adopted value under the tenant's name: [`save_keyring`] for a
+/// client secret, [`save_refresh_entry`] for a refresh token, which must be indexed.
 fn load_tenant_keyring(
     prefix: &str,
     legacy: &str,
     base_url: &str,
     client_id: Option<&str>,
+    save: impl FnOnce(&str, &str) -> Result<()>,
 ) -> Result<Option<String>> {
     let name = tenant_entry(prefix, base_url, client_id);
     if let Some(value) = load_keyring(&name)? {
@@ -1604,7 +1700,7 @@ fn load_tenant_keyring(
     let Some(value) = load_keyring(legacy)? else {
         return Ok(None);
     };
-    match save_keyring(&name, &value) {
+    match save(&name, &value) {
         // Only drop the global entry once the scoped one is safely written.
         Ok(()) => {
             let _ = delete_keyring(legacy);
@@ -1616,9 +1712,118 @@ fn load_tenant_keyring(
     Ok(Some(value))
 }
 
+/// This tenant's client secret — [`load_tenant_keyring`] for the secret entries.
+fn load_tenant_secret(base_url: &str, client_id: Option<&str>) -> Result<Option<String>> {
+    load_tenant_keyring(
+        KEYRING_SECRET_PREFIX,
+        LEGACY_KEYRING_USER_SECRET,
+        base_url,
+        client_id,
+        save_keyring,
+    )
+}
+
+// --- The saved-sign-in index --------------------------------------------------
+//
+// A tenant switch keeps the previous tenant's refresh token so that switching back
+// finds it, so the keyring can hold one per instance/client id the operator has
+// used — and a keyring cannot be listed portably. The index names them so that
+// `logout` can delete them all. It is itself a keyring entry rather than a file:
+// it lives and dies with the tokens it names (same machine, same profile, same
+// "reset the keychain"), where a file in the config directory could be deleted,
+// roam, or be restored from a backup independently of them.
+
+/// Whether `name` is a tenant refresh-token entry as [`tenant_entry`] spells it.
+/// Every name read back from the index is held to this, so whatever the index holds
+/// can make `logout` delete only refresh tokens — never a client secret, never the
+/// index itself.
+fn is_refresh_entry_name(name: &str) -> bool {
+    name.strip_prefix(KEYRING_REFRESH_PREFIX)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_some_and(|hash| {
+            hash.len() == 16 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+/// The entry names in the index stored at `index`, one per line. A line that is not
+/// a refresh-token entry name is dropped rather than failing the read.
+fn read_refresh_index(index: &str) -> Result<Vec<String>> {
+    Ok(load_keyring(index)?
+        .map(|raw| {
+            raw.lines()
+                .map(str::trim)
+                .filter(|name| is_refresh_entry_name(name))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Adds `entry` to the index at `index`, if it is not there already. Callers hold
+/// `persist_lock`, which serializes this read-modify-write.
+fn index_refresh_entry(index: &str, entry: &str) -> Result<()> {
+    let mut names = read_refresh_index(index)?;
+    if names.iter().any(|name| name == entry) {
+        return Ok(());
+    }
+    names.push(entry.to_string());
+    save_keyring(index, &names.join("\n"))
+}
+
+/// Writes a tenant's refresh token, indexing its entry first: an indexed entry with
+/// nothing behind it costs `logout` one no-op delete, while a token the index does
+/// not name is exactly the one a sign-out could not find. So a token whose entry
+/// cannot be indexed is not written at all — the same "no persistence this session"
+/// a failed token write already degrades to.
+fn save_refresh_entry(index: &str, entry: &str, token: &str) -> Result<()> {
+    index_refresh_entry(index, entry).context("record the saved sign-in for sign-out")?;
+    save_keyring(entry, token)
+}
+
+/// Deletes every entry the index at `index` names, then the index itself — but only
+/// when every delete succeeded, so a sign-out that could not finish leaves the names
+/// for the next one to retry. The first failure is returned.
+fn delete_indexed_refresh_entries(index: &str) -> Result<()> {
+    let mut first_failure = None;
+    for name in read_refresh_index(index)? {
+        if let Err(e) = delete_keyring(&name) {
+            first_failure.get_or_insert(e);
+        }
+    }
+    match first_failure {
+        Some(e) => Err(e),
+        None => delete_keyring(index),
+    }
+}
+
+/// Opens `user`'s entry under this app's service.
+///
+/// On Windows it asks for `Local` persistence. The Credential Manager store
+/// defaults to `Enterprise`, which roams with the user's profile: the refresh token
+/// — a fleet-wide `management` grant once actions are on — and the client secret
+/// were copied to the profile server and to every machine the operator logs on to.
+/// Persistence applies when a secret is written, so an entry saved before this
+/// moves to `Local` at its next write (a rotation or a sign-in).
+///
+/// `cfg!`, not `#[cfg]`, so the Windows arm type-checks on every platform; the
+/// other stores take no modifiers, and an empty map is the same as none.
+#[cfg(not(test))]
+fn keyring_entry(user: &str) -> keyring::Result<keyring_core::Entry> {
+    // `keyring` installs the platform store as keyring-core's default on first
+    // use; `keyring_core::Entry` has no default store until it has.
+    if keyring::Entry::store_status().is_err() {
+        return Err(keyring::Error::NoDefaultStore);
+    }
+    let mut modifiers = std::collections::HashMap::new();
+    if cfg!(windows) {
+        modifiers.insert("persistence", "Local");
+    }
+    keyring_core::Entry::new_with_modifiers(KEYRING_SERVICE, user, &modifiers)
+}
+
 #[cfg(not(test))]
 fn save_keyring(user: &str, value: &str) -> Result<()> {
-    keyring::Entry::new(KEYRING_SERVICE, user)
+    keyring_entry(user)
         .context("open keyring entry")?
         .set_password(value)
         .context("keyring write")
@@ -1630,7 +1835,7 @@ fn save_keyring(user: &str, value: &str) -> Result<()> {
 /// re-run a sign-in that could not have helped.
 #[cfg(not(test))]
 fn load_keyring(user: &str) -> Result<Option<String>> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, user).context("open keyring entry")?;
+    let entry = keyring_entry(user).context("open keyring entry")?;
     match entry.get_password() {
         Ok(v) => Ok(Some(v)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -1640,7 +1845,7 @@ fn load_keyring(user: &str) -> Result<Option<String>> {
 
 #[cfg(not(test))]
 fn delete_keyring(user: &str) -> Result<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, user).context("open keyring entry")?;
+    let entry = keyring_entry(user).context("open keyring entry")?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
@@ -1678,6 +1883,17 @@ mod test_keyring {
 
     pub(super) fn refuse_writes_to(user: &str) {
         refusing().lock().unwrap().insert(user.to_string());
+    }
+
+    /// Entries whose deletes fail. Apart from [`refusing`], because a test of the
+    /// write path needs the delete that follows a refused write to land.
+    pub(super) fn undeletable() -> &'static Mutex<HashSet<String>> {
+        static UNDELETABLE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+        UNDELETABLE.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    pub(super) fn refuse_deletes_of(user: &str) {
+        undeletable().lock().unwrap().insert(user.to_string());
     }
 
     /// How many times each entry has been read, so a test can prove a read was
@@ -1746,6 +1962,13 @@ fn load_keyring(user: &str) -> Result<Option<String>> {
 
 #[cfg(test)]
 fn delete_keyring(user: &str) -> Result<()> {
+    if test_keyring::undeletable()
+        .lock()
+        .map_err(|_| anyhow!("test keyring poisoned"))?
+        .contains(user)
+    {
+        bail!("test keyring refuses to delete {user}");
+    }
     test_keyring::store()
         .lock()
         .map_err(|_| anyhow!("test keyring poisoned"))?
