@@ -68,7 +68,7 @@ productAllowListB64=R29vZ2xlIENocm9tZSAxNDEuMC43MzkwLjU1fDctWmlw rebootBehavior=
 | Key | Value |
 |---|---|
 | `kbAllowList` | Comma-separated KB numbers, digits only, with no `KB` prefix and no spaces. The scripts also accept an optional `KB`/`kb` prefix when you run them by hand. Any other character, an empty entry or an empty list makes the script exit `1`. |
-| `productAllowListB64` | Standard base64 (RFC 4648 alphabet `A–Z a–z 0–9 + /`, with `=` padding, not URL-safe) of the **UTF-8** bytes of the selected patches' NinjaOne titles joined by `\|`, e.g. `Google Chrome 141.0.7390.55\|7-Zip`. Titles are NinjaOne's own strings, including the version, and are passed through verbatim. The list is encoded because NinjaOne splits `parameters` on spaces. A title that itself contains `\|` can't be told apart from two titles. |
+| `productAllowListB64` | Standard base64 (RFC 4648 alphabet `A–Z a–z 0–9 + /`, with `=` padding, not URL-safe) of the **UTF-8** bytes of the selected patches' NinjaOne titles joined by `\|`, e.g. `Google Chrome 141.0.7390.55\|7-Zip`. Titles are NinjaOne's own strings, including the version, and are passed through verbatim. The list is encoded because NinjaOne splits `parameters` on spaces. A title that itself contains `\|` can't be told apart from two titles, so the toolkit refuses to send one (the plan is blocked and names it), and it never sends a blank title. |
 | `rebootBehavior` | `Never` or `Auto` (`RebootChoice::script_value`). `Auto` schedules a restart 60 seconds after the script finishes whenever a restart is pending at that point. For the OS script that includes a restart that was already pending before the run (it reads Windows Update's pending-restart flag first); the software script restarts only for its own installs. The delay lets the NinjaOne agent report the result first. `Never` never restarts the device. In the app this is **Restart afterwards if a restart is pending**. |
 | `dryRun` | `true` or `false`. With `true`, the script only reports what it would install. |
 
@@ -102,7 +102,7 @@ for that run.
 | `2` | Nothing matched: none of the listed patches is offered to this device or installed on it. |
 | `3` | Incomplete: at least one listed patch failed to download or install, is hidden on the device, or wasn't offered while others were. |
 | `4` | A restart is pending and `rebootBehavior=Never` held it back. For the OS script the restart may have been pending before this run, so the code can appear even when nothing new was installed. NinjaOne will probably show the run as failed so that the pending restart is visible. |
-| `5` | Environment error: the Windows Update Agent is unavailable, the search failed, another install is in progress, or the session isn't elevated. For the software script: `Microsoft.WinGet.Client` couldn't be installed, loaded or run (the log line says how to fix the device). |
+| `5` | Environment error: the Windows Update Agent is unavailable, the search failed, another install is in progress, or the session isn't elevated. For the software script: `Microsoft.WinGet.Client` couldn't be installed, loaded or run, or isn't signed by Microsoft (the log line says how to fix the device). |
 | `10` | Software script only: the install hook reported it has no install mechanism. The shipped hook never does; a replacement hook that returns `NotImplemented` would. |
 
 The OS script writes one line per KB, for example `WOULD INSTALL KB5040434 : '…'`,
@@ -148,7 +148,7 @@ PowerShell", [winget-cli#4820](https://github.com/microsoft/winget-cli/issues/48
 
 | Run as | Needs on each device | How it works |
 |---|---|---|
-| **System** (the default) | PowerShell 7 | The script re-runs itself in PowerShell 7 (`pwsh -MTA`). Deploy PowerShell 7 with NinjaOne's own software deployment first. Without it, every run exits `5` and says so. |
+| **System** (the default) | PowerShell 7 | The script re-runs itself in PowerShell 7 (`pwsh -MTA`). Deploy PowerShell 7 with NinjaOne's own software deployment first, to its default location (`Program Files\PowerShell\7`). The script runs `pwsh.exe` only from there, and only when its Authenticode signature is Microsoft's. It never looks `pwsh.exe` up on `PATH`, because a `PATH` folder that a local user can write would let that user run code as SYSTEM. Without a signed PowerShell 7 there, every run exits `5` and says why. |
 | **A Windows credential** (Preferred Windows local admin, Preferred Windows domain admin, or a specific credential) | Nothing extra | Under a real account the module works in Windows PowerShell 5.1, so the script stays there. The account must be an administrator, and NinjaOne must start the run elevated, or a real install exits `5`. WinGet (App Installer) must be registered for that account. If a run fails saying App Installer is missing, run `Repair-WinGetPackageManager -AllUsers -Latest` on the device once. If it fails with error `0x800706BA`, the account usually has no App Installer registration (common for a service account that has never signed in): run `Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe` once as that account. |
 
 The toolkit sends its **Run as** with every dispatch: **Settings → Patch actions** sets the
@@ -162,6 +162,16 @@ PowerShell Gallery (plus the NuGet package provider in Windows PowerShell). This
 dry run too. It is the one change a dry run makes, and the log shows it as a `SETUP` line. The
 device needs to reach `www.powershellgallery.com` for that first run.
 
+Before every load, whether it was installed just now or earlier, the script checks that
+Microsoft signed the module, using the rule PowerShellGet uses for its own publisher check. If
+the module ships a catalog (`Microsoft.WinGet.Client.cat`), the catalog must be signed by
+Microsoft and every file must still match it. Without a catalog, the manifest
+(`Microsoft.WinGet.Client.psd1`) must be signed by Microsoft. Every file that code can load from
+(`.psd1`, `.psm1`, `.ps1`, `.ps1xml`, `.cdxml`, `.dll`, `.exe`) must then carry a valid
+signature: Microsoft's for the `Microsoft.*` files, the publisher's own for a bundled third-party
+library. If any check fails, the run exits `5`, names the file and the problem, and doesn't load
+the module.
+
 ## Security
 
 - **These scripts run as SYSTEM (or the credential you choose) on every device you dispatch to.** Read them before importing
@@ -174,8 +184,13 @@ device needs to reach `www.powershellgallery.com` for that first run.
   ones already installed. It never installs a product the device doesn't have.
 - Neither script writes credentials anywhere or reads any input other than the four keys above.
   The OS script downloads nothing itself. The software script downloads `Microsoft.WinGet.Client`
-  from the PowerShell Gallery when it's missing, and WinGet downloads the installers it runs from
-  its configured sources (by default Microsoft's `winget` community repository).
+  from the PowerShell Gallery when it's missing, and loads it only once its signature checks out
+  as Microsoft's (above). WinGet downloads the installers it runs from its configured sources (by
+  default Microsoft's `winget` community repository).
+- Neither script runs a program by bare name. As SYSTEM, a bare name is looked up on the machine
+  `PATH`, which often lists a folder any local user can write (a folder created directly under
+  `C:\` is one). `shutdown.exe` is called as `%SystemRoot%\System32\shutdown.exe`, and PowerShell 7
+  is used only from `Program Files` with Microsoft's signature on it.
 
 ## Tests
 

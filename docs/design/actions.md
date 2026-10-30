@@ -77,7 +77,12 @@ target of a KB-encoded kind that is not digits after an optional, case-insensiti
 `commands::actions::plan::composed_targets` — exactly the targets that will be composed, so a
 hand-typed string (sent verbatim) and the native endpoints are not checked against targets they
 never send. `build_parameters` also drops a malformed KB, in case a caller skips the planner.
-Software targets are free-form product titles and need no such check: they travel base64-encoded.
+Software targets are free-form product titles, and base64 keeps their spaces out of the
+space-split string. Inside the base64, though, the titles are joined by `|`, and the script splits
+the decoded list on `|`. So `plan()` blocks a software target that contains `|` (it would reach the
+script as several products, none of which the dialog listed) or is blank (the script refuses the
+device's whole list), and `build_parameters` drops both (`actions::is_sendable_title`). The README
+used to admit the ambiguity, but nothing enforced it.
 
 The receiving end is [`remediation/`](../../remediation/README.md): reference scripts that parse
 exactly this string, strictly (an unknown key, a malformed KB or an empty list exits 1 rather
@@ -86,6 +91,21 @@ is read by both `build_parameters_matches_the_reference_script_fixture` and the 
 suites, so changing the encoding here fails a test until the scripts follow. A library script is
 only offered per-KB targeting or dry run when it **declares** the `kbAllowList` / `dryRun` script
 variable (`AutomationScript`), so the import instructions there name the variables to declare.
+
+The reference scripts run as SYSTEM on every device they are sent to, so a local user on one of
+those devices must not be able to steer them. They never run a program by bare name, because as
+SYSTEM a bare name is looked up on the machine `PATH`, and that often lists a folder any local
+user can write (a folder created under `C:\` inherits Modify for Authenticated Users).
+`shutdown.exe` is called by its full path (`Get-ShutdownPath`). The software script's switch to
+PowerShell 7 (`Find-Pwsh`) used to take the first `pwsh.exe` on `PATH`. Any software remediation
+to the device, a dry run included, then ran a planted `pwsh.exe` as SYSTEM, before the parameters
+were even read. It now accepts only `Program Files\PowerShell\7\pwsh.exe`, and only when its
+Authenticode signature is Microsoft's. It also loads `Microsoft.WinGet.Client`, which it installs
+from the PowerShell Gallery unpinned, only after `Get-ModuleSignatureProblem` finds it signed by
+Microsoft. The rule is PowerShellGet's own: a Microsoft-signed catalog the files still match,
+else a Microsoft-signed manifest plus a valid signature on every code file, and Microsoft's on
+the `Microsoft.*` ones. It checks before every load, so a copy installed by an earlier run is
+checked too.
 
 ## Selection is per patch row; dispatch is per device, with per-device targets
 
@@ -169,7 +189,20 @@ held only "dispatching" for a request NinjaOne rejected.
 `plan_action` hashes **everything that reaches NinjaOne or that the guardrails read** — kind ‖
 sorted device ids ‖ script ref ‖ **resolved** script ‖ per-device parameters ‖ **resolved**
 run_as ‖ reboot choice ‖ reboot mode ‖ reboot reason ‖ include_offline ‖ override_window ‖
-dry_run — into a 5-minute token; `run_action` re-plans from scratch and re-checks the hash.
+dry_run ‖ **the plan's eligible device ids** — into a 5-minute token; `run_action` re-plans from
+scratch and re-checks the hash (`confirm::confirm_dispatch`).
+
+- The eligible ids are what the dialog said the action would run on, and `run_action` dispatches
+  to whatever its *re-plan* finds eligible. Which requested devices are eligible depends on state
+  the request does not carry: online status, inventory membership, Settings' offline switch. The
+  token used to bind only the request. A device skipped as offline at review that came back online
+  before Run (the poller drops the device cache on every settle, so the re-plan usually refetches
+  it) was dispatched to, and with a forced reboot the operator had typed the smaller count to
+  confirm. It also got per-device parameters the dialog, which lists eligible devices only, never
+  showed. The binding (`actions::ConfirmBinding`) keeps the ids beside the hash, so
+  `AppState::take_confirmation` can tell this refusal apart (`ConfirmCheck::TargetsChanged`).
+  The message names the devices added and dropped and says to review again, and the token is
+  spent like any other attempt's.
 
 - The reboot reason is sent to NinjaOne and lands in its activity feed as the server-side record
   of why the machine went down, so it is bound too (length-prefixed, as dispatched: `None` is an
@@ -311,6 +344,19 @@ the dispatch site in `send_action` — defense in depth, so a new `ActionKind` w
 `supports_dry_run()` is wrong can't send a real mutating POST while the UI says "Dry run", and a
 script dispatch whose parameter string lacks the `dryRun=true` token
 (`dispatch::carries_dry_run_flag`) is refused rather than run for real.
+
+- **The organization cap counts organization ids**, not names (`OrgKey`). Counting names let two
+  organizations that share a display name pass a cap of 1 as one. Any number of organizations
+  missing from the lookup cache passed the same way, since they all read "(unknown
+  organization)". A device that reports no organization counts as one of its own. The blocker
+  and `ActionPlan.organizations` add the id to a name only where the name alone would read as one
+  organization (`Contoso (#1), Contoso (#2)`). Each device still shows the plain name.
+- **A scan is held to `MAX_DEVICES_PER_ACTION_CEILING`** (500), as a blocker. It is exempt from the
+  Settings cap, the confirmation and the window because it changes nothing on the device. But it
+  costs a POST per device and an activity read per device on every poll tick until it settles,
+  and its in-flight jobs are never evicted. Nothing else bounded it: ticking a few 500-row groups
+  and pressing Scan sent thousands. `AppState::apply_job_updates` also looks rows up through an
+  id index built once per tick instead of a linear search per update, under the jobs lock.
 
 ## A dry run is allowed only for a script that declares `dryRun`
 
@@ -579,14 +625,19 @@ The key/value split stops at the first `=` or `:`, so a credential can sit *insi
 whose own key is innocent: `conn=Server=a;Password=x`, `/p:Password=x`, `https://user:pass@host`
 (keyed on `https`). Every token that is not already redacted is also scanned for URL userinfo
 (the password after `user:` is redacted; userinfo with no `:` is a token standing in for the
-user name and is redacted whole) and for `;`/`&`/`?`-separated segments. Within a segment every
-name up to an `=` is judged (`conn=Pwd=x` is `conn` then `Pwd`); after a `?`/`&`/`;`, `sig` (a SAS
-signature) counts too. A value that is only `=` is base64 padding and is left alone. When such a
+user name and is redacted whole) and for segments cut at `;`/`&`/`?` and at `,`/`{`/`[`
+(`audit::SEGMENT_SEPARATORS`). A segment's first name may end at `=` or `:`, and every later name
+up to an `=` is judged too (`conn=Pwd=x` is `conn` then `Pwd`); after a `?`/`&`/`;`, `sig` (a SAS
+signature) counts too. The `,`/`{`/`[` cuts are what reach a compact list or JSON object whose
+entries are `name:value`: segments used to be cut only at `;`/`&`/`?`, and only a first name ends
+at `:`, so `-Config {"user":"svc","password":"x"}` and `user:svc,password:x` were written with
+everything after the first entry verbatim. A value that is only `=` is base64 padding and is
+left alone. When such a
 redaction lands inside a quoted run — opened by this token or by an earlier, unredacted one
 (`-Conn "Server=a; Password=a b"`), or sitting on the key itself (`"Pwd=a b;Server=x"`) — the
 rest of the run is swallowed through its closing quote. A segment with an empty value
-(`conn=a;Password= x`) owes the next token, as `-Password x` does, and a quoted flag name
-(`"-Password" x`) is still a flag.
+(`conn=a;Password= x`, `user:svc,password: x`) owes the next token, as `-Password x` does, and a
+quoted flag name (`"-Password" x`) is still a flag.
 
 Redaction is by name, so some shapes reach the log as typed:
 
@@ -598,3 +649,26 @@ Redaction is by name, so some shapes reach the log as typed:
   (`https://u:p/ss@h`); percent-encoded passwords are fine.
 
 Scripts that take a secret should take it as a named parameter.
+
+### The log rotates, and nothing in it is ever deleted
+
+The log used to grow without bound, and the Jobs tab's audit trail read every byte of it, and of
+the legacy file, on each visit, to keep 500 records. Past 8 MiB (`audit::ROTATE_AT_BYTES`) the live
+file is now moved aside as `action-audit-YYYYMMDDTHHMMSS.jsonl` and a fresh one started. The move
+is a hard link plus an unlink, never a rename onto a name. `hard_link` refuses an existing name,
+so a second app instance rotating in the same second takes the next name (`…-1.jsonl`) instead
+of overwriting the first, and a record appended through a handle opened before the move still
+lands in the generation. Appenders in one process are serialized by a lock, because rotation moves
+the file.
+
+`commands::diagnostics::read_audit_tail` reads the live file and then the generations, newest
+first, and stops as soon as it holds the tail. Rotation is by time, so an older generation can't
+hold a newer record. The legacy file is read last, and only while the tail is still short.
+
+A torn append (a crash, a full disk) used to cost more than its own record:
+
+- The reader read each file as one `String`, so one byte cut inside a multi-byte character (a
+  device named "Café") failed the read, and the tab showed no history at all. Lines are now split
+  as bytes and decoded one at a time, lossily.
+- The torn record had no newline, so the next append ran on from it and the reader lost that
+  whole record too. `write_records` now starts a fresh line when the file does not end with one.

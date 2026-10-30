@@ -165,6 +165,32 @@ fn plan_blocks_over_the_device_cap() {
     );
 }
 
+/// A scan skips the Settings cap, but every device it reaches is a POST and a poll
+/// read per tick until it settles, so it stops at the most any action may reach.
+#[test]
+fn a_scan_is_held_to_the_device_ceiling() {
+    let ceiling = crate::settings::MAX_DEVICES_PER_ACTION_CEILING;
+    let names = orgs();
+    let settings = ActionSettings::default();
+    let devices: Vec<Device> = (1..=ceiling as i64 + 1)
+        .map(|i| device(i, &format!("srv{i}"), 1, false))
+        .collect();
+    let all: Vec<i64> = devices.iter().map(|d| d.id).collect();
+
+    for kind in [ActionKind::OsPatchScan, ActionKind::SoftwarePatchScan] {
+        let p = plan(input(kind, &all, &devices, &names, &settings));
+        assert!(
+            p.blockers
+                .iter()
+                .any(|b| b.contains(&format!("{ceiling}-device limit for one scan"))),
+            "{kind:?}: {:?}",
+            p.blockers
+        );
+        let p = plan(input(kind, &all[..ceiling], &devices, &names, &settings));
+        assert!(!p.is_blocked(), "{kind:?}: {:?}", p.blockers);
+    }
+}
+
 #[test]
 fn plan_blocks_cross_org_beyond_the_org_cap() {
     let devices = vec![device(1, "srv-a", 1, false), device(2, "srv-b", 2, false)];
@@ -185,6 +211,85 @@ fn plan_blocks_cross_org_beyond_the_org_cap() {
         ..ActionSettings::default()
     };
     assert!(!plan(input(ActionKind::Reboot, &ids, &devices, &names, &wider)).is_blocked());
+}
+
+/// The cap counted organization *names*, so two organizations sharing a name passed
+/// as one. Counted by id, they are two, and the blocker tells them apart.
+#[test]
+fn two_organizations_sharing_a_name_count_as_two() {
+    let devices = vec![device(1, "srv-a", 1, false), device(2, "srv-b", 2, false)];
+    let ids = [1, 2];
+    let names = HashMap::from([(1, "Contoso".to_string()), (2, "Contoso".to_string())]);
+    let settings = ActionSettings::default(); // 1 org
+
+    let p = plan(input(ActionKind::Reboot, &ids, &devices, &names, &settings));
+    let b = p
+        .blockers
+        .iter()
+        .find(|b| b.contains("2 organizations"))
+        .unwrap_or_else(|| panic!("{:?}", p.blockers));
+    assert!(b.contains("Contoso (#1), Contoso (#2)"), "{b}");
+    assert_eq!(p.organizations, vec!["Contoso (#1)", "Contoso (#2)"]);
+    // Each device still shows the plain name.
+    assert!(p.eligible.iter().all(|t| t.organization == "Contoso"));
+
+    // One organization is one, however many of its devices are selected.
+    let same_org = vec![device(1, "srv-a", 1, false), device(2, "srv-b", 1, false)];
+    let p = plan(input(
+        ActionKind::Reboot,
+        &ids,
+        &same_org,
+        &names,
+        &settings,
+    ));
+    assert!(!p.is_blocked(), "{:?}", p.blockers);
+    assert_eq!(p.organizations, vec!["Contoso"]);
+}
+
+/// Organizations the lookup cannot name all read "(unknown organization)", and
+/// counted by name any number of them passed a cap of 1. A device that reports no
+/// organization counts as one of its own: nothing shows it shares one with the rest.
+#[test]
+fn unresolved_organizations_are_counted_one_by_one() {
+    let names = orgs(); // knows 1 and 2 only
+    let settings = ActionSettings::default(); // 1 org
+
+    let unresolved = vec![device(1, "srv-a", 7, false), device(2, "srv-b", 8, false)];
+    let p = plan(input(
+        ActionKind::Reboot,
+        &[1, 2],
+        &unresolved,
+        &names,
+        &settings,
+    ));
+    let b = p
+        .blockers
+        .iter()
+        .find(|b| b.contains("2 organizations"))
+        .unwrap_or_else(|| panic!("{:?}", p.blockers));
+    assert!(b.contains("(unknown organization) (#7)"), "{b}");
+    assert!(b.contains("(unknown organization) (#8)"), "{b}");
+
+    let unreported: Device = serde_json::from_value(json!({
+        "id": 3, "systemName": "srv-c", "offline": false,
+    }))
+    .expect("device");
+    let mixed = vec![device(1, "srv-a", 1, false), unreported];
+    let p = plan(input(
+        ActionKind::Reboot,
+        &[1, 3],
+        &mixed,
+        &names,
+        &settings,
+    ));
+    assert!(
+        p.blockers.iter().any(|b| b.contains("2 organizations")),
+        "{:?}",
+        p.blockers
+    );
+    // On its own, the device with no organization is within a cap of 1.
+    let alone: Vec<Device> = mixed[1..].to_vec();
+    assert!(!plan(input(ActionKind::Reboot, &[3], &alone, &names, &settings)).is_blocked());
 }
 
 #[test]
@@ -1037,6 +1142,76 @@ fn build_parameters_software_encodes_product_allow_list() {
     // The whole point: no spaces leak into what NinjaOne tokenizes.
     assert!(!encoded.contains(' '));
     assert!(params.ends_with(" rebootBehavior=Auto dryRun=false"));
+}
+
+/// Inside the base64 the titles are `|`-joined and the script splits on `|`, so a
+/// title containing one reaches it as several products the dialog never listed, and
+/// a blank title makes it refuse the device's whole list. `plan()` blocks both,
+/// like a malformed KB; titles with spaces, `+` or non-ASCII are fine.
+#[test]
+fn a_software_title_the_list_cannot_carry_blocks_the_dispatch() {
+    let devices = vec![device(1, "srv-a", 1, false)];
+    let ids = [1];
+    let names = orgs();
+    let settings = with_scripts();
+
+    let p = plan(PlanInput {
+        targets: &["Google Chrome", "Foo|Google Chrome", "  "],
+        ..input(
+            ActionKind::SoftwarePatchRemediate,
+            &ids,
+            &devices,
+            &names,
+            &settings,
+        )
+    });
+    let b = p
+        .blockers
+        .iter()
+        .find(|b| b.contains("Can't send these product titles"))
+        .unwrap_or_else(|| panic!("{:?}", p.blockers));
+    assert!(b.contains("\"Foo|Google Chrome\""), "{b}");
+    assert!(b.contains("\"  \""), "a blank title is named: {b}");
+    assert!(
+        !b.contains("\"Google Chrome\""),
+        "a sendable title is not named: {b}"
+    );
+
+    let p = plan(PlanInput {
+        targets: &["Notepad++ 8.6.9", "7-Zip 24.08 (x64)", "Café Tool 1.0"],
+        ..input(
+            ActionKind::SoftwarePatchRemediate,
+            &ids,
+            &devices,
+            &names,
+            &settings,
+        )
+    });
+    assert!(!p.is_blocked(), "{:?}", p.blockers);
+}
+
+/// `build_parameters` drops what `plan()` blocks, in case a new caller skips the
+/// planner: a `|` title must never split into extra products on the device.
+#[test]
+fn build_parameters_never_sends_a_title_the_list_cannot_carry() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let targets = vec![
+        "Foo|Google Chrome".to_string(),
+        "7-Zip".to_string(),
+        " ".to_string(),
+    ];
+    let params = build_parameters(
+        ActionKind::SoftwarePatchRemediate,
+        &targets,
+        RebootChoice::Never,
+        true,
+    );
+    let encoded = params
+        .strip_prefix("productAllowListB64=")
+        .and_then(|s| s.split(' ').next())
+        .expect("encoded token present");
+    let decoded = STANDARD.decode(encoded).expect("valid base64");
+    assert_eq!(String::from_utf8(decoded).unwrap(), "7-Zip");
 }
 
 /// The reference scripts in `remediation/` parse exactly these strings, and their

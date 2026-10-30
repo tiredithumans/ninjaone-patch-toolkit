@@ -39,12 +39,12 @@ use crate::rows::{
     CVE_COLUMN_NOTES, ComplianceBucket, DeviceBacklog, DeviceSummary, FirstSeenTracking, GroupBy,
     InstallLatency, InstallWindow, LookupMaps, OFFLINE_BACKLOG_NOTE, OsCompliance, PCT_BANDS,
     PatchFamilies, PatchRecord, PatchSource, QueryResult, QuerySummary, REBOOT_COLUMN_NOTES,
-    SlaCutoffs, StuckDevice, TableColumn, WORST_DEVICES_NOTE, build_age_buckets,
+    SelectionProbe, SlaCutoffs, StuckDevice, TableColumn, WORST_DEVICES_NOTE, build_age_buckets,
     build_approval_backlog, build_compliance, build_compliance_by_os, build_device_backlogs,
     build_device_summaries, build_failures, build_groups, build_query_scope, build_rows,
     build_severity_by_org, build_time_to_install, calculation_notes, compliance_scope_note,
-    device_detail, headline_figures, page_rows, rows_by_device, slice_groups,
-    sort_device_summaries, uncounted_orgs, uncounted_orgs_note,
+    device_detail, headline_figures, page_rows, selection_status, slice_groups,
+    sort_device_summaries, uncounted_orgs, uncounted_orgs_note, write_selection_key,
 };
 use crate::settings::{ActionSettings, Preset, SlaBySeverity, SlaExempt, SlaPolicy};
 
@@ -100,6 +100,8 @@ const FIXTURE_NOW: DateTime<Utc> =
     DateTime::from_timestamp(1_782_907_200, 0).expect("a valid fixture instant");
 
 const INSTANCE: &str = "https://app.ninjarmm.com";
+/// The tenant the fixture's run history is stamped with (`QueryToken::tenant_label`).
+const FIXTURE_TENANT: &str = "https://app.ninjarmm.com\nfixture-client-id";
 const ORG_ID: i64 = 10;
 const LOCATION_ID: i64 = 100;
 const ROLE_ID: i64 = 2;
@@ -670,7 +672,38 @@ fn ipc_fixture_is_current() {
             "query_patches": QuerySummary::from_result(&result, 100),
             "get_patch_rows": page_rows(&result.rows, None, 0, 2),
             "get_patch_groups": slice_groups(&build_groups(&result.rows, GroupBy::Device), 0, 2),
-            "get_device_rows": rows_by_device(&result.rows, &[1], 1),
+            // Device 1 still lists one ticked patch and not the other; device 999 is
+            // out of scope. The key is the row's own, so the frontend's
+            // `util::patch_key` is held to it by the decode test.
+            "selection_status": selection_status(
+                &result.rows,
+                &result.devices,
+                &[
+                    SelectionProbe {
+                        device_id: 1,
+                        keys: vec![
+                            {
+                                let mut key = String::new();
+                                let row = result.rows.iter().find(|r| r.device_id == 1);
+                                write_selection_key(row.expect("device 1 has a row"), &mut key);
+                                key
+                            },
+                            "OS\u{1f}KB0\u{1f}Installed since".into(),
+                        ],
+                    },
+                    SelectionProbe {
+                        device_id: 999,
+                        keys: Vec::new(),
+                    },
+                ],
+            ),
+            "get_reboot_devices": result
+                .devices
+                .iter()
+                .filter(|d| d.needs_reboot)
+                .take(1)
+                .cloned()
+                .collect::<Vec<DeviceSummary>>(),
             "device_detail": device_detail(&result, 1, 1),
             // September's fix, which October's pending update supersedes: one device
             // missing the fix itself and one missing only the newer update.
@@ -724,9 +757,9 @@ fn ipc_fixture_is_current() {
                     method: 0,
                     devices_within_sla: None,
                     pending_total: None,
-                    ..RunRecord::from_result(&result, INSTANCE)
+                    ..RunRecord::from_result(&result, INSTANCE, FIXTURE_TENANT)
                 },
-                RunRecord::from_result(&result, INSTANCE),
+                RunRecord::from_result(&result, INSTANCE, FIXTURE_TENANT),
             ],
             "check_for_update": Some(UpdateInfo {
                 version: "1.4.0".into(),

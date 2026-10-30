@@ -5,7 +5,7 @@ use serde_json::json;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::confirm::{canonical_parameters, request_hash};
+use super::confirm::{canonical_parameters, confirm_dispatch, request_hash, targets_changed};
 use super::dispatch::{action_detail, carries_dry_run_flag, invalidate_after, record_dispatch};
 use super::plan::{
     composed_targets, dry_run_support, parameters_preview, per_device_parameters, resolve_run_as,
@@ -17,9 +17,16 @@ use crate::api::actions::{ScriptDispatch, ScriptRef};
 use crate::settings::ActionSettings;
 
 /// `request_hash` with no resolved script, which is every case except the two
-/// remediation kinds, and the request's own run-as taken as resolved.
+/// remediation kinds, the request's own run-as taken as resolved, and every
+/// requested device eligible.
 fn hash(req: &ActionRequest, parameters: &str) -> String {
-    request_hash(req, parameters, None, req.run_as.as_deref())
+    request_hash(
+        req,
+        parameters,
+        None,
+        req.run_as.as_deref(),
+        &req.device_ids,
+    )
 }
 
 /// A blank Run-as resolves to the Settings default, and it is that resolved
@@ -57,7 +64,7 @@ fn the_confirmation_binds_the_resolved_run_as_default() {
     );
 
     let bound =
-        |s: &ActionSettings| request_hash(&req, "", None, resolve_run_as(&req, s).as_deref());
+        |s: &ActionSettings| request_hash(&req, "", None, resolve_run_as(&req, s).as_deref(), &[1]);
     assert_ne!(
         bound(&as_system),
         bound(&as_admin),
@@ -71,8 +78,8 @@ fn the_confirmation_binds_the_resolved_run_as_default() {
         None
     );
     assert_ne!(
-        request_hash(&req, "", None, None),
-        request_hash(&req, "", None, Some("")),
+        request_hash(&req, "", None, None, &[1]),
+        request_hash(&req, "", None, Some(""), &[1]),
     );
 }
 
@@ -548,10 +555,229 @@ fn the_confirmation_binds_every_devices_own_parameters() {
     // The resolved script is not in the request at all for these kinds, so it is
     // hashed separately — an id edited in Settings mid-dialog must invalidate.
     assert_ne!(
-        request_hash(&a, &canon(&a), Some(&ScriptRef::Script { id: 42 }), None),
-        request_hash(&a, &canon(&a), Some(&ScriptRef::Script { id: 43 }), None),
+        request_hash(
+            &a,
+            &canon(&a),
+            Some(&ScriptRef::Script { id: 42 }),
+            None,
+            &[1, 2]
+        ),
+        request_hash(
+            &a,
+            &canon(&a),
+            Some(&ScriptRef::Script { id: 43 }),
+            None,
+            &[1, 2]
+        ),
         "the resolved remediation script must bind"
     );
+}
+
+/// The same request can reach different devices depending on which of them are
+/// eligible when it is planned, so the fingerprint binds that set too — as a set.
+#[test]
+fn the_confirmation_binds_the_devices_the_plan_found_eligible() {
+    let req = request(ActionKind::Reboot, vec![1, 2]);
+    let both = request_hash(&req, "", None, None, &[1, 2]);
+    assert_ne!(
+        both,
+        request_hash(&req, "", None, None, &[1]),
+        "an approval with device 2 skipped must not vouch for dispatching to it"
+    );
+    assert_eq!(both, request_hash(&req, "", None, None, &[2, 1]));
+}
+
+/// A device in the inventory, online or not, in organization 1.
+fn inventory_device(id: i64, offline: bool) -> crate::model::Device {
+    serde_json::from_value(json!({
+        "id": id,
+        "systemName": format!("srv-{id}"),
+        "organizationId": 1,
+        "offline": offline,
+    }))
+    .expect("device")
+}
+
+/// What `build_plan` resolves `req` to against `devices`, without its fetches: the
+/// planner over one inventory, as `plan_action` sees it at review and `run_action`
+/// sees it again at Run.
+fn planned_against(req: &ActionRequest, devices: &[crate::model::Device]) -> PlannedAction {
+    let settings = ActionSettings::default();
+    let names = HashMap::from([(1, "Contoso".to_string())]);
+    let plan = crate::actions::plan(crate::actions::PlanInput {
+        kind: req.kind,
+        device_ids: &req.device_ids,
+        devices,
+        org_names: &names,
+        settings: &settings,
+        include_offline: req.include_offline,
+        override_window: req.override_window,
+        reboot_mode: req.reboot_mode,
+        reboot: req.reboot,
+        dry_run: req.dry_run,
+        targets: &[],
+        dry_run_support: crate::actions::DryRunSupport::NotChecked,
+        current_patches: None,
+        now: chrono::Local::now(),
+    });
+    PlannedAction {
+        plan,
+        parameters: per_device_parameters(req),
+        script: None,
+        run_as: resolve_run_as(req, &settings),
+    }
+}
+
+fn reboot_request() -> ActionRequest {
+    ActionRequest {
+        reboot_mode: Some(RebootMode::Forced),
+        reason: Some("Monthly patch window".into()),
+        ..request(ActionKind::Reboot, vec![1, 2])
+    }
+}
+
+/// The dialog listed srv-2 as skipped (offline) and the operator typed "1" to force
+/// a reboot of srv-1. Before Run, srv-2 came back online. `run_action` dispatches
+/// to whatever its re-plan finds eligible, so an approval bound to the request alone
+/// rebooted srv-2 as well. Now the re-plan is refused, the refusal says which device
+/// moved, and the token is spent: a second Run cannot pass with it either.
+#[test]
+fn a_device_that_came_online_after_review_refuses_the_dispatch_and_spends_the_token() {
+    let state = AppState::new().expect("build state");
+    let req = reboot_request();
+    let reviewed = planned_against(
+        &req,
+        &[inventory_device(1, false), inventory_device(2, true)],
+    );
+    assert_eq!(reviewed.plan.eligible_ids(), vec![1]);
+    assert_eq!(reviewed.plan.skipped[0].device_id, 2);
+    assert!(state.store_pending_confirm(
+        &state.job_session(),
+        "tok".into(),
+        reviewed.binding(&req)
+    ));
+
+    let run = ActionRequest {
+        confirm_token: Some("tok".into()),
+        ..req.clone()
+    };
+    let back_online = planned_against(
+        &req,
+        &[inventory_device(1, false), inventory_device(2, false)],
+    );
+    assert_eq!(back_online.plan.eligible_ids(), vec![1, 2]);
+    let err = confirm_dispatch(&state, &run, &back_online).expect_err("the devices moved");
+    assert!(
+        err.message.contains("changed since you reviewed it"),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("now also srv-2"), "{}", err.message);
+    assert!(
+        err.message.contains("Review the plan again"),
+        "{}",
+        err.message
+    );
+
+    let err = confirm_dispatch(&state, &run, &reviewed).expect_err("the token is spent");
+    assert!(err.message.contains("not confirmed"), "{}", err.message);
+}
+
+/// The control: a re-plan that finds the same devices is confirmed, once.
+#[test]
+fn an_unchanged_re_plan_is_confirmed_exactly_once() {
+    let state = AppState::new().expect("build state");
+    let req = reboot_request();
+    let devices = [inventory_device(1, false), inventory_device(2, true)];
+    let reviewed = planned_against(&req, &devices);
+    assert!(state.store_pending_confirm(
+        &state.job_session(),
+        "tok".into(),
+        reviewed.binding(&req)
+    ));
+
+    let run = ActionRequest {
+        confirm_token: Some("tok".into()),
+        ..req.clone()
+    };
+    confirm_dispatch(&state, &run, &planned_against(&req, &devices)).expect("same devices");
+    assert!(confirm_dispatch(&state, &run, &planned_against(&req, &devices)).is_err());
+}
+
+/// A device that dropped out since review (it went offline) is named too: the
+/// operator approved it, and it will not be sent anything from this plan.
+#[test]
+fn the_refusal_names_a_device_that_dropped_out_since_review() {
+    let req = reboot_request();
+    let reviewed = planned_against(
+        &req,
+        &[inventory_device(1, false), inventory_device(2, false)],
+    );
+    let gone_offline = planned_against(
+        &req,
+        &[inventory_device(1, false), inventory_device(2, true)],
+    );
+    let refusal = targets_changed(&reviewed.plan.eligible_ids(), &gone_offline.plan);
+    assert!(refusal.contains("no longer srv-2"), "{refusal}");
+    assert!(!refusal.contains("now also"), "{refusal}");
+}
+
+/// A token for another request is refused in the ordinary words even when the
+/// devices also differ: only a valid, live token learns which devices moved.
+#[test]
+fn a_wrong_token_is_refused_without_naming_devices() {
+    let state = AppState::new().expect("build state");
+    let req = reboot_request();
+    let reviewed = planned_against(
+        &req,
+        &[inventory_device(1, false), inventory_device(2, true)],
+    );
+    assert!(state.store_pending_confirm(
+        &state.job_session(),
+        "tok".into(),
+        reviewed.binding(&req)
+    ));
+    assert_eq!(
+        state.take_confirmation("wrong", &reviewed.hash(&req), &[1, 2]),
+        crate::actions::ConfirmCheck::Refused
+    );
+}
+
+/// The poller applies a settle tick's updates by id. They are looked up through an
+/// index now, rather than a search of the whole store per update, and must still
+/// land on their own rows in any order and report exactly what was applied.
+#[test]
+fn job_updates_land_on_their_own_rows_in_any_order() {
+    let state = AppState::new().expect("build state");
+    let session = state.job_session();
+    let rows: Vec<JobReport> = (0..40)
+        .map(|i| pending_job(i, i as i64, ActionKind::Reboot, 1_000))
+        .collect();
+    assert!(state.append_jobs(&session, rows));
+
+    let mut updates: Vec<JobReport> = [31, 2, 17]
+        .into_iter()
+        .map(|i| {
+            let mut job = pending_job(i, i as i64, ActionKind::Reboot, 1_000);
+            job.state = JobState::Completed;
+            job
+        })
+        .collect();
+    // Not in the store: never applied, never reported.
+    updates.push(pending_job(999, 999, ActionKind::Reboot, 1_000));
+
+    let applied = state.apply_job_updates(&session, updates);
+    assert_eq!(applied, HashSet::from([31, 2, 17]));
+    let jobs = state.jobs_snapshot();
+    assert_eq!(jobs.len(), 40, "an update never adds a row");
+    for job in &jobs {
+        let settled = [31, 2, 17].contains(&job.id);
+        assert_eq!(job.state == JobState::Completed, settled, "job {}", job.id);
+        assert_eq!(
+            job.device_id, job.id as i64,
+            "an update landed on another row"
+        );
+    }
 }
 
 /// The operator is shown every string that will be sent, which with per-device

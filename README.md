@@ -276,8 +276,10 @@ code and links you to the activity/job ID to look the run up in the NinjaOne con
 ## Security
 
 - Access tokens are kept in memory; the refresh token and optional client secret live in
-  the OS keyring (Keychain / Credential Manager / Secret Service). Nothing sensitive is
-  written to `settings.json`.
+  the OS keyring (Keychain / Credential Manager / Secret Service; on Windows as local, not
+  roaming, credentials). Nothing sensitive is written to `settings.json`. **Sign out** removes
+  the saved sign-in of every instance and client id this install has used, not only the
+  current one.
 - The app requests read‑only (`monitoring`) scope unless **Patch actions** is enabled, which
   adds `management`. Turning the feature off returns it to read‑only at the next sign‑in.
 - Every dispatched action is appended to `action-audit.jsonl` beside `settings.json`, with
@@ -286,9 +288,12 @@ code and links you to the activity/job ID to look the run up in the NinjaOne con
   restart and **Clear finished** does not touch it.
 - Besides NinjaOne, the app downloads public data from `api.msrc.microsoft.com` and
   `www.cisa.gov` for the exploit marks (Settings can switch this off). Those requests carry no
-  credentials and nothing about your tenant; the copy is kept in `exploit-data/` beside
-  `settings.json`.
-- Rolling daily logs are written to `logs/` in the same directory (seven days kept).
+  credentials and nothing about your tenant; the copy is kept in `exploit-data/` in the app's
+  local data directory (below).
+- Bulky, machine-local state — `logs/` (rolling daily logs, seven days kept), the first-seen
+  record, the run snapshots and `exploit-data/` — lives in the local data directory, not beside
+  `settings.json`: on Windows that is Local rather than Roaming AppData, so none of it rides a
+  roaming profile. An existing install moves these folders there on first launch.
   **Settings → Open diagnostics folder** reveals them — that is what to attach to a bug report,
   since a bundled app launched from Finder or the Start menu has nowhere for stdout to go.
 

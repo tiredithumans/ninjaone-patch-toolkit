@@ -748,51 +748,67 @@ fn an_empty_member_slot_still_needs_a_fetch() {
     assert!(!needs_member_fetch(Some(std::slice::from_ref(&row))));
 }
 
-/// After a refresh a device's ticks are pruned against its fresh rows — unless the
-/// read was truncated, which is a prefix and cannot say what is gone.
+/// The prune reads only what the backend answered: a device it does not mention
+/// (a cache miss answers nothing) keeps its ticks, and one out of scope loses them.
 #[test]
-fn a_truncated_read_leaves_the_device_selection_alone() {
-    use crate::types::DeviceRows;
+fn a_device_the_answer_does_not_mention_keeps_its_selection() {
+    use crate::types::SelectionStatus;
     let a = sel_row(1, "web-01", Some("KB1"), "Cumulative Update", "OS");
     let b = sel_row(1, "web-01", Some("KB2"), "Security Update", "OS");
     let c = sel_row(2, "web-02", None, "7-Zip", "SOFTWARE");
     let mut sel = BTreeMap::new();
-    apply_rows_selection(&mut sel, &[a.clone(), b, c], true);
+    apply_rows_selection(&mut sel, &[a, b, c], true);
 
-    let reads = vec![
-        DeviceRows {
-            device_id: 1,
-            rows: vec![a.clone()],
-            truncated: true,
-        },
-        DeviceRows {
-            device_id: 2,
-            rows: vec![],
-            truncated: false,
-        },
-    ];
     assert_eq!(
-        prune_selection_from_reads(&mut sel, &reads),
-        1,
-        "only the complete, empty read drops anything"
+        prune_selection_from_status(&mut sel, &[]),
+        0,
+        "a miss prunes nothing"
     );
-    assert_eq!(sel[&1].patches.len(), 2, "truncated: both ticks kept");
-    assert!(
-        !sel.contains_key(&2),
-        "a complete empty read drops the device"
-    );
+    assert_eq!(sel.len(), 2);
 
-    let reads = vec![DeviceRows {
-        device_id: 1,
-        rows: vec![a],
-        truncated: false,
-    }];
-    assert_eq!(prune_selection_from_reads(&mut sel, &reads), 1);
-    assert_eq!(
-        sel[&1].patches.len(),
-        1,
-        "a complete read prunes to what is listed"
-    );
+    let gone = SelectionStatus {
+        device_id: 2,
+        in_scope: false,
+        offline: false,
+        needs_reboot: false,
+        present: vec![],
+    };
+    assert_eq!(prune_selection_from_status(&mut sel, &[gone]), 1);
+    assert!(!sel.contains_key(&2), "out of scope drops the device");
+    assert_eq!(sel[&1].patches.len(), 2, "device 1 was not mentioned");
+}
+
+/// The probes carry each device's ticked keys, and none for a device-level pick.
+#[test]
+fn the_probes_name_every_selected_device_and_its_ticks() {
+    let a = sel_row(1, "web-01", Some("KB1"), "Cumulative Update", "OS");
+    let mut sel = BTreeMap::new();
+    apply_row_selection(&mut sel, &a, true);
+    apply_device_selection(&mut sel, &reboot_device(5, "db-01", false), true);
+    let probes = selection_probes(&sel);
+    assert_eq!(probes.len(), 2);
+    assert_eq!(probes[0].device_id, 1);
+    assert_eq!(probes[0].keys, vec![patch_key(&a)]);
+    assert_eq!(probes[1].device_id, 5);
+    assert!(probes[1].keys.is_empty());
+}
+
+/// The backend computes the same selection key the frontend ticks by: the fixture's
+/// `selection_status` answer names device 1's row by exactly `patch_key` of it.
+#[test]
+fn the_backend_selection_key_is_patch_key() {
+    use crate::types::SelectionStatus;
+    let fixture = backend_fixture();
+    let rows: Vec<PatchRow> =
+        serde_json::from_value(fixture["commands"]["query_patches"]["rows"].clone()).expect("rows");
+    let status: Vec<SelectionStatus> =
+        serde_json::from_value(fixture["commands"]["selection_status"].clone()).expect("status");
+    let row = rows
+        .iter()
+        .find(|r| r.device_id == 1)
+        .expect("device 1 row");
+    assert_eq!(status[0].device_id, 1);
+    assert_eq!(status[0].present, vec![patch_key(row)]);
 }
 
 /// An open group's body re-renders only when its own slot changes: same `Arc` is
@@ -2829,6 +2845,7 @@ fn update_waits_for_dispatch_and_for_jobs_in_flight() {
 /// An auto-refresh keeps the selection, minus the rows it no longer lists.
 #[test]
 fn prune_keeps_only_ticked_rows_the_fresh_result_still_lists() {
+    use crate::types::SelectionStatus;
     let kb1 = sel_row(10, "srv-a", Some("KB1"), "Patch 1", "OS");
     let kb2 = sel_row(10, "srv-a", Some("KB2"), "Patch 2", "OS");
     let other = sel_row(20, "srv-b", Some("KB1"), "Patch 1", "OS");
@@ -2836,28 +2853,35 @@ fn prune_keeps_only_ticked_rows_the_fresh_result_still_lists() {
     apply_row_selection(&mut sel, &kb1, true);
     apply_row_selection(&mut sel, &kb2, true);
     apply_row_selection(&mut sel, &other, true);
+    let status = |device_id: i64, offline: bool, present: Vec<String>| SelectionStatus {
+        device_id,
+        in_scope: true,
+        offline,
+        needs_reboot: false,
+        present,
+    };
 
     // KB2 was installed; KB1 is still pending and the device went offline.
-    let mut still = kb1.clone();
-    still.offline = true;
-    let removed = prune_device_selection(&mut sel, 10, &[still]);
+    let removed = prune_selection_from_status(&mut sel, &[status(10, true, vec![patch_key(&kb1)])]);
     assert_eq!(removed, 1);
     let device = &sel[&10];
     assert_eq!(device.patches.len(), 1);
     assert!(device.patches.contains_key(&patch_key(&kb1)));
-    assert!(device.offline, "the offline flag follows the fresh rows");
+    assert!(device.offline, "the offline flag follows the answer");
     assert!(sel.contains_key(&20), "other devices are untouched");
 
     // A device with nothing left leaves the selection entirely.
-    assert_eq!(prune_device_selection(&mut sel, 20, &[]), 1);
+    assert_eq!(
+        prune_selection_from_status(&mut sel, &[status(20, false, vec![])]),
+        1
+    );
     assert!(!sel.contains_key(&20));
 
-    // Rows for another device never keep this one's ticks alive.
-    assert_eq!(prune_device_selection(&mut sel, 10, &[other]), 1);
-    assert!(sel.is_empty());
-
     // An unselected device is a no-op.
-    assert_eq!(prune_device_selection(&mut sel, 99, &[kb1]), 0);
+    assert_eq!(
+        prune_selection_from_status(&mut sel, &[status(99, false, vec![patch_key(&kb1)])]),
+        0
+    );
 }
 
 #[test]
@@ -2904,19 +2928,48 @@ fn trend_verdict_follows_the_metric_direction_not_its_title() {
 }
 
 #[test]
-fn failing_devices_are_counted_once_across_overlapping_groups() {
-    let group = |names: &[&str]| crate::types::FailureGroup {
-        patch_type: "OS".into(),
-        kb: None,
-        name: "p".into(),
-        severity: "Critical".into(),
-        affected_devices: names.len(),
-        device_names: names.iter().map(|n| n.to_string()).collect(),
-        latest_failure: None,
-    };
-    let failures = [group(&["a", "b"]), group(&["b", "c"]), group(&[])];
-    assert_eq!(failing_device_count(&failures), 3);
-    assert_eq!(failing_device_count(&[]), 0);
+fn a_capped_failure_list_says_how_many_more() {
+    let names = vec!["a".to_string(), "b".to_string()];
+    assert_eq!(failure_device_list(&names, 2), "a, b");
+    assert_eq!(failure_device_list(&names, 1_502), "a, b … and 1,500 more");
+    assert_eq!(failure_device_list(&[], 0), "");
+}
+
+/// The summary seeds the Needs Reboot list's first page; a page inside it is sliced
+/// locally, the rest fetched — and a summary that carries the whole list (demo mode,
+/// a small fleet) never fetches.
+#[test]
+fn a_reboot_page_is_seeded_until_it_runs_past_the_summary() {
+    use RebootPage::*;
+    assert_eq!(
+        reboot_page_source(0, 100, 100, 450),
+        Seeded { start: 0, end: 100 }
+    );
+    assert_eq!(
+        reboot_page_source(1, 100, 100, 450),
+        Fetch {
+            offset: 100,
+            limit: 100
+        }
+    );
+    assert_eq!(
+        reboot_page_source(4, 100, 100, 450),
+        Fetch {
+            offset: 400,
+            limit: 50
+        }
+    );
+    assert_eq!(
+        reboot_page_source(3, 100, 450, 450),
+        Seeded {
+            start: 300,
+            end: 400
+        }
+    );
+    assert_eq!(
+        reboot_page_source(0, 100, 0, 0),
+        Seeded { start: 0, end: 0 }
+    );
 }
 
 #[test]
@@ -3390,12 +3443,33 @@ fn a_refresh_prunes_devices_that_no_longer_need_a_reboot() {
     ] {
         apply_device_selection(&mut sel, &d, true);
     }
-    let fresh = [reboot_device(1, "a", true), reboot_device(3, "c", false)];
-    assert_eq!(prune_device_level_selection(&mut sel, &fresh), 1);
+    let status =
+        |device_id: i64, offline: bool, needs_reboot: bool| crate::types::SelectionStatus {
+            device_id,
+            in_scope: true,
+            offline,
+            needs_reboot,
+            present: vec![],
+        };
+    let answer = [
+        status(1, true, true),
+        status(2, false, false),
+        status(3, false, true),
+    ];
+    assert_eq!(prune_device_level_from_status(&mut sel, &answer), 1);
     assert_eq!(sel.keys().copied().collect::<Vec<_>>(), vec![1, 3]);
     assert!(sel[&1].offline, "the fresh offline flag is taken");
-    assert_eq!(prune_device_level_selection(&mut sel, &[]), 2);
-    assert!(sel.is_empty());
+    assert_eq!(
+        prune_device_level_from_status(&mut sel, &[]),
+        0,
+        "a miss prunes nothing"
+    );
+    let gone = crate::types::SelectionStatus {
+        in_scope: false,
+        ..status(1, false, true)
+    };
+    assert_eq!(prune_device_level_from_status(&mut sel, &[gone]), 1);
+    assert_eq!(sel.keys().copied().collect::<Vec<_>>(), vec![3]);
 }
 
 #[test]
@@ -4515,4 +4589,79 @@ fn each_query_tab_states_its_scope() {
             .unwrap()
             .contains("First seen → installed")
     );
+}
+
+/// A window listener outlives the component that added it unless its handle is
+/// removed: `WindowListenerHandle` has no `Drop`. The CVE search dropped its handle,
+/// so after leaving the Patches tab every Escape ran the listener against disposed
+/// signals and panicked, once per earlier visit. Every listener is bound and removed
+/// in `on_cleanup`, except in a component mounted once for the app's lifetime.
+#[test]
+fn every_window_listener_is_removed_or_lives_as_long_as_the_app() {
+    // (file under src/app, bare listeners allowed, why)
+    const APP_LIFETIME: [(&str, usize, &str); 4] = [
+        (
+            "tables/device.rs",
+            1,
+            "DeviceDetailModal is mounted once in App",
+        ),
+        ("actions.rs", 1, "ConfirmActionModal is mounted once in App"),
+        (
+            "shortcuts.rs",
+            1,
+            "the shortcut handler is mounted once in App",
+        ),
+        ("update.rs", 1, "UpdateSplash is mounted once in App"),
+    ];
+    fn visit(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read src/app").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("tests.rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
+    let mut files = Vec::new();
+    visit(&root, &mut files);
+    let mut problems = Vec::new();
+    for path in files {
+        let body = std::fs::read_to_string(&path).expect("read source");
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let mut bare = 0;
+        for line in body
+            .lines()
+            .filter(|l| l.contains("window_event_listener("))
+        {
+            let before = line
+                .split("window_event_listener(")
+                .next()
+                .unwrap_or("")
+                .trim();
+            match before
+                .strip_prefix("let ")
+                .and_then(|b| b.strip_suffix('='))
+            {
+                Some(name) if body.contains(&format!("{}.remove()", name.trim())) => {}
+                Some(name) => problems.push(format!("{rel}: `{}` is never removed", name.trim())),
+                None => bare += 1,
+            }
+        }
+        let allowed = APP_LIFETIME
+            .iter()
+            .find(|(file, _, _)| *file == rel)
+            .map_or(0, |(_, n, _)| *n);
+        if bare > allowed {
+            problems.push(format!(
+                "{rel}: {bare} unbound window listener(s); bind the handle and remove it in on_cleanup"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
 }

@@ -55,7 +55,7 @@ Describe 'Install-SelectedSoftwarePatches.ps1 source' {
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
         $calls = @($ast.FindAll({
                     param($n)
-                    $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'shutdown.exe'
+                    $n -is [System.Management.Automation.Language.CommandAst] -and $n.CommandElements[0].Extent.Text -eq '(Get-ShutdownPath)'
                 }, $true))
         $calls.Count | Should -BeGreaterThan 0
         foreach ($call in $calls) {
@@ -63,6 +63,222 @@ Describe 'Install-SelectedSoftwarePatches.ps1 source' {
             $words -contains '/c' | Should -BeTrue
             $words[$words.IndexOf('/d') + 1] | Should -Match '^p:\d+:\d+$'
         }
+    }
+
+    # As SYSTEM, a bare `shutdown.exe` is looked up on the machine PATH, where a directory a
+    # local user can write, listed ahead of System32, would run that user's own copy.
+    It 'never runs shutdown.exe by name' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
+        $bare = @($ast.FindAll({
+                    param($n)
+                    $n -is [System.Management.Automation.Language.CommandAst] -and @('shutdown', 'shutdown.exe') -contains $n.GetCommandName()
+                }, $true))
+        $bare.Count | Should -Be 0
+    }
+}
+
+Describe 'Get-ShutdownPath' {
+    BeforeEach { $savedSystemRoot = $env:SystemRoot }
+    AfterEach { $env:SystemRoot = $savedSystemRoot }
+
+    It 'names shutdown.exe in the Windows directory itself' {
+        $env:SystemRoot = $TestDrive
+        $path = Get-ShutdownPath
+        $path.StartsWith($TestDrive) | Should -BeTrue
+        $path | Should -Match 'System32[\\/]shutdown\.exe$'
+    }
+}
+
+Describe 'Find-Pwsh' {
+    BeforeAll {
+        $script:microsoftSigner = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    }
+
+    BeforeEach {
+        $savedEnv = @{ ProgramW6432 = $env:ProgramW6432; ProgramFiles = $env:ProgramFiles; Path = $env:PATH }
+        $programFiles = Join-Path $TestDrive 'Program Files'
+        $env:ProgramW6432 = $programFiles
+        $env:ProgramFiles = $programFiles
+        $script:fakeSignature = [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = $script:microsoftSigner } }
+        Mock Get-FileSignature { $script:fakeSignature }
+    }
+
+    AfterEach {
+        $env:ProgramW6432 = $savedEnv.ProgramW6432
+        $env:ProgramFiles = $savedEnv.ProgramFiles
+        $env:PATH = $savedEnv.Path
+        Remove-Item -LiteralPath $programFiles -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # As SYSTEM the machine PATH routinely lists a directory any local user can write, so a
+    # pwsh.exe found there would have been run as SYSTEM on the next dispatch, dry runs included.
+    It 'never consults Get-Command or PATH' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
+        $find = $ast.Find({
+                param($n)
+                $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Find-Pwsh'
+            }, $true)
+        $find | Should -Not -BeNullOrEmpty
+        $commands = @($find.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+                ForEach-Object { $_.GetCommandName() })
+        @($commands | Where-Object { @('Get-Command', 'gcm', 'where', 'where.exe') -contains $_ }).Count | Should -Be 0
+        $find.Body.Extent.Text | Should -Not -Match '\$env:PATH'
+    }
+
+    It 'ignores a pwsh.exe that is only on PATH' {
+        $onPath = Join-Path $TestDrive 'user-writable'
+        New-Item -ItemType File -Force -Path (Join-Path $onPath 'pwsh.exe') | Out-Null
+        $env:PATH = $onPath + [IO.Path]::PathSeparator + $env:PATH
+        Find-Pwsh | Should -BeNullOrEmpty
+    }
+
+    It 'runs PowerShell 7 from Program Files when Microsoft signed it' {
+        $pwsh = Join-Path $programFiles 'PowerShell\7\pwsh.exe'
+        New-Item -ItemType File -Force -Path $pwsh | Out-Null
+        Find-Pwsh | Should -BeExactly $pwsh
+    }
+
+    It 'refuses a pwsh.exe in Program Files whose signature is <Why>' -ForEach @(
+        @{ Why = 'missing'; Status = 'NotSigned'; Subject = '' }
+        @{ Why = 'broken'; Status = 'HashMismatch'; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, C=US' }
+        @{ Why = 'another publisher''s'; Status = 'Valid'; Subject = 'CN=Contoso Tools, O=Contoso Ltd, C=US' }
+        @{ Why = 'a look-alike organization'; Status = 'Valid'; Subject = 'CN=Tools, O=Microsoft Corporation Fake Ltd, C=US' }
+    ) {
+        New-Item -ItemType File -Force -Path (Join-Path $programFiles 'PowerShell\7\pwsh.exe') | Out-Null
+        $script:fakeSignature = [pscustomobject]@{ Status = $Status; SignerCertificate = [pscustomobject]@{ Subject = $Subject } }
+        Find-Pwsh 6>$null | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Get-ModuleSignatureProblem' {
+    BeforeAll {
+        $script:moduleName = 'Microsoft.WinGet.Client'
+        $script:microsoftSigner = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+        $script:otherSigner = 'CN=Json.NET (.NET Foundation), O=Json.NET (.NET Foundation), C=US'
+        function New-FakeSignature([string]$Status, [string]$Subject) {
+            return [pscustomobject]@{ Status = $Status; SignerCertificate = [pscustomobject]@{ Subject = $Subject } }
+        }
+        # The installed layout, near enough: the manifest and format file at the root, the
+        # module's own binary and a bundled third-party library beside them, and the file
+        # PowerShellGet adds after installing.
+        function New-FakeModule([string[]]$Files = @(
+                'Microsoft.WinGet.Client.psd1', 'Format.ps1xml', 'net48/Microsoft.WinGet.Client.Cmdlets.dll',
+                'net48/Newtonsoft.Json.dll', 'PSGetModuleInfo.xml')) {
+            $base = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            foreach ($file in $Files) { New-Item -ItemType File -Force -Path (Join-Path $base $file) | Out-Null }
+            return $base
+        }
+    }
+
+    BeforeEach {
+        # File name -> the signature the mocked reader reports. An unlisted file is Microsoft's.
+        $script:signatures = @{}
+        Mock Get-FileSignature {
+            $name = Split-Path -Leaf $Path
+            if ($script:signatures.ContainsKey($name)) { return $script:signatures[$name] }
+            return [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = $script:microsoftSigner } }
+        }
+        Mock Test-ModuleCatalog { throw 'there is no catalog to check' }
+    }
+
+    It 'accepts a module whose manifest and Microsoft files Microsoft signed' {
+        Get-ModuleSignatureProblem -ModuleBase (New-FakeModule) -Name $script:moduleName | Should -BeNullOrEmpty
+    }
+
+    It 'accepts a bundled third-party library its own publisher signed' {
+        $script:signatures['Newtonsoft.Json.dll'] = New-FakeSignature 'Valid' $script:otherSigner
+        Get-ModuleSignatureProblem -ModuleBase (New-FakeModule) -Name $script:moduleName | Should -BeNullOrEmpty
+    }
+
+    It 'refuses the module when <Why>' -ForEach @(
+        @{ Why = 'a bundled library is unsigned'; File = 'Newtonsoft.Json.dll'; Status = 'NotSigned'; Other = $false }
+        @{ Why = 'a Microsoft binary is signed by someone else'; File = 'Microsoft.WinGet.Client.Cmdlets.dll'; Status = 'Valid'; Other = $true }
+        @{ Why = 'the manifest was altered after signing'; File = 'Microsoft.WinGet.Client.psd1'; Status = 'HashMismatch'; Other = $false }
+        @{ Why = 'the manifest is signed by someone else'; File = 'Microsoft.WinGet.Client.psd1'; Status = 'Valid'; Other = $true }
+        @{ Why = 'the format file is unsigned'; File = 'Format.ps1xml'; Status = 'NotSigned'; Other = $false }
+    ) {
+        $subject = if ($Other) { $script:otherSigner } else { $script:microsoftSigner }
+        $script:signatures[$File] = New-FakeSignature $Status $subject
+        $problem = Get-ModuleSignatureProblem -ModuleBase (New-FakeModule) -Name $script:moduleName
+        $problem | Should -Not -BeNullOrEmpty
+        $problem | Should -Match ([regex]::Escape($File))
+    }
+
+    It 'ignores files no code runs from' {
+        $script:signatures['PSGetModuleInfo.xml'] = New-FakeSignature 'NotSigned' ''
+        Get-ModuleSignatureProblem -ModuleBase (New-FakeModule) -Name $script:moduleName | Should -BeNullOrEmpty
+    }
+
+    It 'refuses a module with neither a manifest nor a catalog' {
+        $base = New-FakeModule -Files @('net48/Microsoft.WinGet.Client.Cmdlets.dll')
+        Get-ModuleSignatureProblem -ModuleBase $base -Name $script:moduleName | Should -Match 'Microsoft\.WinGet\.Client\.psd1'
+    }
+
+    Context 'with a catalog' {
+        BeforeEach {
+            $catalogBase = New-FakeModule -Files @(
+                'Microsoft.WinGet.Client.cat', 'Microsoft.WinGet.Client.psd1', 'net48/Newtonsoft.Json.dll')
+        }
+
+        It 'trusts a Microsoft catalog the files still match, whatever each file carries' {
+            Mock Test-ModuleCatalog { [pscustomobject]@{ Status = 'Valid' } }
+            $script:signatures['Newtonsoft.Json.dll'] = New-FakeSignature 'NotSigned' ''
+            Get-ModuleSignatureProblem -ModuleBase $catalogBase -Name $script:moduleName | Should -BeNullOrEmpty
+            Should -Invoke Test-ModuleCatalog -Times 1 -ParameterFilter { $ModuleBase -eq $catalogBase }
+        }
+
+        It 'refuses files that no longer match the catalog' {
+            Mock Test-ModuleCatalog { [pscustomobject]@{ Status = 'ValidationFailed' } }
+            Get-ModuleSignatureProblem -ModuleBase $catalogBase -Name $script:moduleName | Should -Match 'do not match'
+        }
+
+        It 'refuses a catalog someone else signed, without checking the files against it' {
+            $script:signatures['Microsoft.WinGet.Client.cat'] = New-FakeSignature 'Valid' $script:otherSigner
+            Get-ModuleSignatureProblem -ModuleBase $catalogBase -Name $script:moduleName | Should -Match 'Microsoft\.WinGet\.Client\.cat'
+            Should -Invoke Test-ModuleCatalog -Times 0
+        }
+    }
+}
+
+Describe 'Initialize-WinGetModule' {
+    BeforeEach {
+        $script:module = [pscustomobject]@{
+            Name       = 'Microsoft.WinGet.Client'
+            Version    = [version]'1.9.25200'
+            ModuleBase = 'C:\Program Files\PowerShell\Modules\Microsoft.WinGet.Client\1.9.25200'
+            Path       = 'C:\Program Files\PowerShell\Modules\Microsoft.WinGet.Client\1.9.25200\Microsoft.WinGet.Client.psd1'
+        }
+        Mock Get-AvailableWinGetModule { @($script:module) }
+        Mock Install-WinGetModule { throw 'must not be called' }
+        Mock Import-WinGetModuleManifest { }
+        Mock Test-IsElevated { $true }
+    }
+
+    It 'refuses to load a module Microsoft did not sign' {
+        Mock Get-ModuleSignatureProblem { 'Microsoft.WinGet.Client.psd1: its Authenticode signature is NotSigned' }
+        $why = Initialize-WinGetModule
+        $why | Should -Match 'not signed by Microsoft'
+        $why | Should -Match 'NotSigned'
+        Should -Invoke Import-WinGetModuleManifest -Times 0
+    }
+
+    It 'loads the copy it verified, by that copy''s manifest path' {
+        Mock Get-ModuleSignatureProblem { $null }
+        Initialize-WinGetModule | Should -BeNullOrEmpty
+        Should -Invoke Get-ModuleSignatureProblem -Times 1 -ParameterFilter {
+            $ModuleBase -eq $script:module.ModuleBase -and $Name -eq 'Microsoft.WinGet.Client'
+        }
+        Should -Invoke Import-WinGetModuleManifest -Times 1 -ParameterFilter { $Path -eq $script:module.Path }
+    }
+
+    It 'verifies a module it has just installed before loading it' {
+        $script:installed = $false
+        Mock Get-AvailableWinGetModule { if ($script:installed) { @($script:module) } else { @() } }
+        Mock Install-WinGetModule { $script:installed = $true }
+        Mock Get-ModuleSignatureProblem { 'Microsoft.WinGet.Client.psd1: it is signed by ''CN=Mallory'', not by Microsoft' }
+        Initialize-WinGetModule 6>$null | Should -Match 'not signed by Microsoft'
+        Should -Invoke Install-WinGetModule -Times 1
+        Should -Invoke Import-WinGetModuleManifest -Times 0
     }
 }
 

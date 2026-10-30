@@ -71,7 +71,9 @@ impl ActionKind {
 
     /// Whether this changes the device. Drives the confirmation gate, the
     /// blast-radius cap, and the maintenance-window check — a scan only refreshes
-    /// NinjaOne's view of what the device needs, so it is exempt from all three.
+    /// NinjaOne's view of what the device needs, so it is exempt from all three. It
+    /// is still held to the fixed `MAX_DEVICES_PER_ACTION_CEILING` (see `plan()`),
+    /// because every device it reaches is a POST and a poll read per tick.
     pub fn is_mutating(self) -> bool {
         !matches!(self, Self::OsPatchScan | Self::SoftwarePatchScan)
     }

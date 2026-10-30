@@ -6,10 +6,12 @@
 //! already tells us that, so it is never a resolution source. It is read for the
 //! live job status display alone; see `api::jobs`.)
 
-use anyhow::{Result, bail};
-use serde_json::Value;
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+use serde_json::value::RawValue;
 
-use super::NinjaApiClient;
+use super::{NinjaApiClient, lenient_rows};
+use crate::error::truncate_body;
 use crate::model::Activity;
 
 /// Rows requested per activity poll.
@@ -40,7 +42,8 @@ impl NinjaApiClient {
     /// practice. A device noisy enough to overflow it within a job's timeout would
     /// push the terminal activity out of reach, so that case is logged rather than
     /// left to look like a job that simply never finished — the job itself still
-    /// resolves via its timeout.
+    /// resolves via its timeout. Only a full page that may have cut the window short
+    /// is logged ([`window_may_be_cut_short`]).
     ///
     /// **The time bound is not sent to the API.** This used to pass the dispatch
     /// timestamp as `newerThan`, which the spec defines as *"activities … than
@@ -71,34 +74,30 @@ impl NinjaApiClient {
         }
         query.push(("pageSize", ACTIVITY_PAGE_SIZE.to_string()));
 
-        let raw: Value = self.get_json("/activities", &query).await?;
-        let items = match raw {
-            Value::Array(items) => items,
-            Value::Object(mut obj) => match obj.remove("activities") {
-                Some(Value::Array(items)) => items,
-                Some(other) => bail!("activities field must be an array, got: {other}"),
-                None => bail!("activities response missing an `activities` field"),
-            },
-            other => bail!("unexpected activities response shape: {other}"),
-        };
+        let page = self
+            .get_decoded("/activities", &query, parse_activities)
+            .await?;
 
-        if items.len() >= ACTIVITY_PAGE_SIZE as usize {
-            // A full page means the window may be truncated and a terminal activity
-            // could be out of view. Surfaced so a job that then times out has a
-            // logged cause instead of looking like the device never answered.
+        let floor = since_ts.map(|t| t as f64);
+        let oldest = page
+            .rows
+            .iter()
+            .filter_map(|a| a.activity_time)
+            .reduce(f64::min);
+        if window_may_be_cut_short(page.returned, oldest, floor) {
+            // A terminal activity could be out of view. Surfaced so a job that then
+            // times out has a logged cause instead of looking like the device never
+            // answered.
             tracing::warn!(
                 device_id,
-                returned = items.len(),
+                returned = page.returned,
                 "activity page came back full; a terminal activity may be beyond the window"
             );
         }
 
-        // A single malformed entry shouldn't blind the poller to every other job on
-        // the device, so unparseable rows are dropped rather than failing the call.
-        let floor = since_ts.map(|t| t as f64);
-        Ok(items
+        Ok(page
+            .rows
             .into_iter()
-            .filter_map(|v| serde_json::from_value::<Activity>(v).ok())
             // An activity with no timestamp is kept: it cannot be shown to predate
             // the dispatch, and dropping it would lose a terminal state.
             .filter(|a| match (floor, a.activity_time) {
@@ -107,6 +106,75 @@ impl NinjaApiClient {
             })
             .collect())
     }
+}
+
+/// One `/activities` response, decoded.
+#[derive(Debug)]
+struct ActivityPage {
+    /// Every entry the response held, malformed ones included, for the full-page
+    /// check.
+    returned: usize,
+    /// The entries that decoded, newest first as NinjaOne sent them.
+    rows: Vec<Activity>,
+}
+
+/// Reads one `/activities` response: a bare array on most tenants, an
+/// `{ "activities": [...] }` envelope on others.
+///
+/// Each entry is decoded on its own, straight into [`Activity`] ([`lenient_rows`]):
+/// a single malformed entry must not blind the poller to every other job on the
+/// device, so it is dropped rather than failing the read. This used to build the
+/// whole response as a `Value` tree and then convert it entry by entry. Shape errors
+/// quote at most [`truncate_body`] of what arrived.
+fn parse_activities(body: &[u8]) -> Result<ActivityPage> {
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        #[serde(borrow, default)]
+        activities: Option<&'a RawValue>,
+    }
+
+    let body = body.trim_ascii();
+    let entries: Vec<&RawValue> = match body.first() {
+        Some(b'[') => serde_json::from_slice(body).context("decode the activities list")?,
+        Some(b'{') => {
+            let envelope: Envelope =
+                serde_json::from_slice(body).context("decode the activities envelope")?;
+            let Some(list) = envelope.activities else {
+                bail!("activities response has no `activities` list");
+            };
+            if !list.get().trim_start().starts_with('[') {
+                bail!(
+                    "activities field must be an array, got: {}",
+                    truncate_body(list.get())
+                );
+            }
+            serde_json::from_str(list.get()).context("decode the activities list")?
+        }
+        _ => bail!(
+            "unexpected activities response shape: {}",
+            truncate_body(&String::from_utf8_lossy(body))
+        ),
+    };
+    Ok(ActivityPage {
+        returned: entries.len(),
+        rows: lenient_rows(entries),
+    })
+}
+
+/// Whether a page of `returned` entries may have cut the time window short: it is
+/// full, and its oldest activity is still at or after the time floor, so entries
+/// inside the window can lie past the page's end.
+///
+/// Any full page used to be logged, but on a busy device a full page usually reaches
+/// back well before the dispatch, and then it holds the whole window: everything it
+/// left out is older than the floor and would be filtered anyway. Without a floor, or
+/// without a timestamp to compare, a full page cannot be shown to cover the window.
+fn window_may_be_cut_short(returned: usize, oldest: Option<f64>, floor: Option<f64>) -> bool {
+    returned >= ACTIVITY_PAGE_SIZE as usize
+        && match (oldest, floor) {
+            (Some(oldest), Some(floor)) => oldest >= floor,
+            _ => true,
+        }
 }
 
 #[cfg(test)]
@@ -258,5 +326,91 @@ mod tests {
             .await
             .expect("list");
         assert_eq!(list[0].exit_code(), Some(2));
+    }
+
+    /// Entries are decoded one by one: an entry that is not an activity at all —
+    /// `null`, a number, a string — is dropped like a malformed one, in either
+    /// shape, and every entry still counts toward the full-page check.
+    #[test]
+    fn each_entry_is_decoded_on_its_own_in_either_shape() {
+        let entries = json!([
+            null,
+            5,
+            "x",
+            { "id": "not-a-number" },
+            { "id": 7, "statusCode": "COMPLETED", "activityTime": 10.0 },
+        ]);
+        for body in [
+            entries.clone(),
+            json!({ "activities": entries, "more": true }),
+        ] {
+            let page = parse_activities(&serde_json::to_vec(&body).unwrap()).expect("a page");
+            assert_eq!(page.returned, 5, "{body}");
+            assert_eq!(
+                page.rows.iter().map(|a| a.id).collect::<Vec<_>>(),
+                [Some(7)],
+                "{body}"
+            );
+        }
+    }
+
+    /// A body that is not the expected shape is an error naming a capped excerpt of
+    /// it, never the whole thing: a proxy's sign-in page reached the poller's log in
+    /// full through the old `{other}`.
+    #[test]
+    fn a_misshapen_body_is_an_error_quoting_a_capped_excerpt() {
+        let page = format!("<html>{}</html>", "sign in to continue ".repeat(5_000));
+        let not_a_list = serde_json::to_vec(&json!({ "activities": page.clone() })).unwrap();
+        let bodies: [&[u8]; 5] = [page.as_bytes(), &not_a_list, b"{}", b"", b"42"];
+        for body in bodies {
+            let err = format!(
+                "{:#}",
+                parse_activities(body).expect_err("not an activities list")
+            );
+            assert!(err.chars().count() < 700, "{} chars", err.chars().count());
+        }
+    }
+
+    /// A non-JSON 2xx — the proxy page again, served as `text/html` — fails the read
+    /// with a capped message rather than arriving as rows or as a whole-page string.
+    #[tokio::test]
+    async fn a_non_json_page_fails_the_read_with_a_capped_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/activities"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("<html>sign in</html>".repeat(2_000), "text/html"),
+            )
+            .mount(&server)
+            .await;
+        let err = client(&server)
+            .activities(Some(1), None, None)
+            .await
+            .expect_err("a sign-in page is not an activity list");
+        assert!(format!("{err:#}").chars().count() < 700, "{err:#}");
+    }
+
+    /// Only a full page whose oldest activity is still inside the window may have
+    /// cut it short; one that reaches back past the floor holds the whole window.
+    #[test]
+    fn only_a_full_page_still_inside_the_window_is_reported() {
+        let full = ACTIVITY_PAGE_SIZE as usize;
+        assert!(!window_may_be_cut_short(
+            full - 1,
+            Some(2_000.0),
+            Some(1_000.0)
+        ));
+        assert!(!window_may_be_cut_short(full, Some(999.0), Some(1_000.0)));
+        assert!(window_may_be_cut_short(full, Some(1_000.0), Some(1_000.0)));
+        assert!(window_may_be_cut_short(full, Some(2_000.0), Some(1_000.0)));
+        assert!(
+            window_may_be_cut_short(full, None, Some(1_000.0)),
+            "no timestamp to compare"
+        );
+        assert!(
+            window_may_be_cut_short(full, Some(2_000.0), None),
+            "no floor: any full page may be cut short"
+        );
     }
 }

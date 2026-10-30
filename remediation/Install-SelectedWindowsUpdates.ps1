@@ -225,6 +225,13 @@ function Test-IsElevated {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-ShutdownPath {
+    # By full path. A bare `shutdown.exe` is looked up on the machine PATH, and this runs as
+    # SYSTEM: a PATH directory that a local user can write, listed ahead of System32, would
+    # run that user's own shutdown.exe as SYSTEM.
+    return (Join-Path $env:SystemRoot 'System32\shutdown.exe')
+}
+
 function Get-UpdateKbNumbers {
     param($Update)
     $kbs = @()
@@ -409,7 +416,7 @@ function Invoke-OsRemediation {
         if ($request.RebootBehavior -eq 'Auto') {
             # A delayed restart lets this script exit and the NinjaOne agent report the result
             # before the machine goes down.
-            & shutdown.exe /r /t 60 /d p:2:17 /c 'NinjaOne Patch Toolkit: restarting to finish installing updates.' | Out-Host
+            & (Get-ShutdownPath) /r /t 60 /d p:2:17 /c 'NinjaOne Patch Toolkit: restarting to finish installing updates.' | Out-Host
             if ($LASTEXITCODE -eq 0) {
                 $rebootScheduled = $true
                 Write-Host 'REBOOT    : restart scheduled in 60 seconds (rebootBehavior=Auto).'

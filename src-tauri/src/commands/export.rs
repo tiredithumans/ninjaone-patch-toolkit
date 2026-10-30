@@ -1,3 +1,6 @@
+use std::fs::File;
+use std::io::Write as _;
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -36,35 +39,59 @@ fn cached_result(state: &AppState) -> Result<Arc<QueryResult>, UiError> {
         .ok_or_else(|| UiError::new("Run a query before exporting."))
 }
 
-/// Restricts an exported file to its owner, matching what the action audit log
-/// already does and for the same reason.
+/// Writes an export to `path` through `write`, on a file restricted to its owner
+/// before the first byte, and removes the file if the write fails.
 ///
-/// A workbook or report carries the same category of data the audit log's own
-/// comment calls out — device names, organizations, compliance posture for a whole
-/// fleet — but they were written at the default umask, so on a shared or
-/// roaming-profile machine they landed group/world-readable. Applied after the write
-/// rather than through `OpenOptions`, because `rust_xlsxwriter` owns its own file
-/// handle.
+/// A workbook or report carries the same category of data the action audit log's
+/// own comment calls out — device names, organizations, compliance posture for a
+/// whole fleet — and is restricted to its owner for the same reason. Exports used to
+/// be created at the default umask and narrowed only once written, so for the length
+/// of the write — seconds, for a six-figure workbook — the file sat group- and
+/// world-readable on a shared or roaming-profile machine; the workbook went through
+/// `rust_xlsxwriter`'s own file handle, which left nothing else to do. It is now
+/// written through `save_to_writer` into the handle opened here.
 ///
-/// Best-effort: a failure here means the export still succeeded, and refusing to
-/// hand the operator the file they asked for because its mode could not be narrowed
-/// would be the wrong trade. Non-unix targets have no equivalent, so this is a no-op
-/// there — Windows inherits the parent directory's ACL, which is already per-user
-/// under the profile.
-fn restrict_to_owner(path: &str) {
+/// A failed write leaves no half-written file to be mistaken for an export.
+fn write_export(
+    path: &Path,
+    write: impl FnOnce(&mut File) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let mut file = create_owner_only(path)?;
+    let written = write(&mut file);
+    if written.is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+    }
+    written
+}
+
+/// Opens `path` for writing, truncated, readable by its owner only.
+///
+/// `mode` applies only to a file this call creates. One the operator chose to
+/// overwrite keeps its old mode, so it is narrowed through the handle, still before
+/// anything is written — best-effort, like the narrowing this replaced: a file
+/// another user owns cannot be, and refusing the export over its mode would be the
+/// wrong trade. Non-unix targets have no equivalent; Windows inherits the parent
+/// directory's ACL, which is already per-user under the profile.
+fn create_owner_only(path: &Path) -> std::io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        if let Err(err) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        options.mode(0o600);
+        let file = options.open(path)?;
+        if let Err(err) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
             tracing::warn!(
                 ?err,
-                path,
+                path = %path.display(),
                 "could not restrict the exported file to its owner"
             );
         }
+        Ok(file)
     }
     #[cfg(not(unix))]
-    let _ = path;
+    options.open(path)
 }
 
 /// The default file name for an export, stamped so successive exports don't
@@ -145,44 +172,44 @@ pub async fn export_patches_xlsx(
 
     // Serializing a six-figure row set into a zipped workbook is seconds of pure CPU
     // plus the file write — both of which would hold a tokio worker for the duration.
-    let written = path_str.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        write_workbook(
-            &written,
-            &result.rows,
-            &result.compliance,
-            &result.compliance_by_os,
-            &result.devices,
-            &result.failures,
-            &BacklogSheets {
-                worst_devices: &result.worst_devices,
-                offline_backlog: &result.offline_backlog,
-                time_to_install: &result.time_to_install,
-            },
-            &result.approvals,
-            &WorkbookMeta {
-                generated_at: &result.generated_at,
-                data_fetched_at: &result.data_fetched_at,
-                devices_total: result.devices_total,
-                devices_offline: result.devices_offline,
-                devices_unpatchable: result.devices_unpatchable,
-                scope: &result.scope,
-                scope_note: &scope_note,
-                changes: &result.changes,
-                instance: &result.instance,
-                sla_policy: &result.sla_policy,
-                compliance_total: &result.compliance_total,
-                uncounted_orgs: &result.uncounted_orgs,
-                first_seen: &result.first_seen,
-                patch_families: result.patch_families,
-                exploit_data: &result.exploit_data.sentence,
-            },
-        )
+        write_export(&path, |file| {
+            write_workbook(
+                file,
+                &result.rows,
+                &result.compliance,
+                &result.compliance_by_os,
+                &result.devices,
+                &result.failures,
+                &BacklogSheets {
+                    worst_devices: &result.worst_devices,
+                    offline_backlog: &result.offline_backlog,
+                    time_to_install: &result.time_to_install,
+                },
+                &result.approvals,
+                &WorkbookMeta {
+                    generated_at: &result.generated_at,
+                    data_fetched_at: &result.data_fetched_at,
+                    devices_total: result.devices_total,
+                    devices_offline: result.devices_offline,
+                    devices_unpatchable: result.devices_unpatchable,
+                    scope: &result.scope,
+                    scope_note: &scope_note,
+                    changes: &result.changes,
+                    instance: &result.instance,
+                    sla_policy: &result.sla_policy,
+                    compliance_total: &result.compliance_total,
+                    uncounted_orgs: &result.uncounted_orgs,
+                    first_seen: &result.first_seen,
+                    patch_families: result.patch_families,
+                    exploit_data: &result.exploit_data.sentence,
+                },
+            )
+        })
     })
     .await
     .map_err(|e| UiError::new(format!("export task failed: {e}")))?
     .map_err(UiError::from)?;
-    restrict_to_owner(&path_str);
     Ok(Some(path_str))
 }
 
@@ -212,12 +239,14 @@ pub async fn export_report_html(
     // Same reason as the workbook: rendering the report walks every rollup and
     // builds one large string, then writes it — CPU and file I/O, not async work.
     tauri::async_runtime::spawn_blocking(move || {
-        std::fs::write(&path, crate::report::render_report(&result))
+        write_export(&path, |file| {
+            file.write_all(crate::report::render_report(&result).as_bytes())?;
+            Ok(())
+        })
     })
     .await
     .map_err(|e| UiError::new(format!("report task failed: {e}")))?
-    .map_err(|e| UiError::new(format!("write report: {e}")))?;
-    restrict_to_owner(&path_str);
+    .map_err(|e| UiError::new(format!("write report: {e:#}")))?;
     Ok(Some(path_str))
 }
 
@@ -249,15 +278,18 @@ pub async fn export_csv(
     let path_str = path.to_string_lossy().to_string();
 
     let result = cached_result(&state)?;
-    tauri::async_runtime::spawn_blocking(move || -> std::io::Result<()> {
-        let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        crate::csv_export::write_csv(&mut out, &DETAIL_COLUMNS, &result.rows)?;
-        std::io::Write::flush(&mut out)
+    tauri::async_runtime::spawn_blocking(move || {
+        write_export(&path, |file| {
+            let mut out = std::io::BufWriter::new(file);
+            crate::csv_export::write_csv(&mut out, &DETAIL_COLUMNS, &result.rows)?;
+            // Explicitly: a flush that fails on drop is silently lost.
+            out.flush()?;
+            Ok(())
+        })
     })
     .await
     .map_err(|e| UiError::new(format!("CSV export task failed: {e}")))?
-    .map_err(|e| UiError::new(format!("write CSV: {e}")))?;
-    restrict_to_owner(&path_str);
+    .map_err(|e| UiError::new(format!("write CSV: {e:#}")))?;
     Ok(Some(path_str))
 }
 
@@ -392,37 +424,118 @@ mod tests {
         assert_eq!(compact_clock("2026/05/02 08:40"), "202605020840");
     }
 
+    fn export_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("njp-export-{}-{tag}", std::process::id()))
+    }
+
+    /// The mode of the file behind `file`, as the write sees it.
+    #[cfg(unix)]
+    fn mode_of(file: &File) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.metadata().expect("metadata").permissions().mode() & 0o777
+    }
+
     /// An export carries a whole fleet's device names, organizations and compliance
     /// posture — the same category the audit log sets 0600 for, with a comment about
-    /// roaming profiles. These were written at the default umask.
+    /// roaming profiles. It used to be created at the default umask and narrowed only
+    /// once written; it is owner-only before its first byte now.
     #[cfg(unix)]
     #[test]
-    fn an_exported_file_is_restricted_to_its_owner() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let path = std::env::temp_dir().join(format!("njp-export-{}.xlsx", std::process::id()));
-        let path_str = path.to_string_lossy().to_string();
-        std::fs::write(&path, b"not really a workbook").expect("seed the file");
-
-        restrict_to_owner(&path_str);
-
-        let mode = std::fs::metadata(&path)
-            .expect("exists")
-            .permissions()
-            .mode();
-        assert_eq!(
-            mode & 0o777,
-            0o600,
-            "exports must not be group/world readable"
-        );
+    fn an_export_is_owner_only_before_its_first_byte() {
+        let path = export_path("new.csv");
+        let _ = std::fs::remove_file(&path);
+        write_export(&path, |file| {
+            assert_eq!(mode_of(file), 0o600, "narrowed before anything is written");
+            file.write_all(b"device,kb\r\n")?;
+            Ok(())
+        })
+        .expect("written");
+        assert_eq!(std::fs::read(&path).unwrap(), b"device,kb\r\n");
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Best-effort by design: an export that succeeded must not be reported as failed
-    /// because its mode could not be narrowed.
+    /// `mode` covers only a file the open creates. One the operator chose to
+    /// overwrite is narrowed through the handle before the write, and its old
+    /// contents are gone.
+    #[cfg(unix)]
     #[test]
-    fn restricting_a_missing_file_is_not_fatal() {
-        restrict_to_owner("/definitely/not/a/real/path/export.xlsx");
+    fn an_overwritten_export_is_narrowed_before_it_is_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = export_path("old.html");
+        std::fs::write(&path, b"last week's much longer report").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_export(&path, |file| {
+            assert_eq!(mode_of(file), 0o600, "narrowed before anything is written");
+            file.write_all(b"<html>")?;
+            Ok(())
+        })
+        .expect("written");
+        assert_eq!(std::fs::read(&path).unwrap(), b"<html>");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A write that fails leaves nothing behind to be mistaken for an export, and
+    /// the failure is what the operator is told.
+    #[test]
+    fn a_failed_export_leaves_no_partial_file() {
+        let path = export_path("partial.xlsx");
+        let err = write_export(&path, |file| {
+            file.write_all(b"PK half a zip")?;
+            anyhow::bail!("disk full")
+        })
+        .expect_err("the write failed");
+        assert_eq!(err.to_string(), "disk full");
+        assert!(!path.exists(), "the partial file is removed");
+    }
+
+    /// The workbook goes through the same handle as the CSV and the report, so it is
+    /// owner-only too, and still a workbook.
+    #[cfg(unix)]
+    #[test]
+    fn the_workbook_is_written_through_the_owner_only_handle() {
+        use calamine::{Reader, Xlsx, open_workbook};
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = export_path("book.xlsx");
+        let result = sample_result();
+        write_export(&path, |file| {
+            write_workbook(
+                file,
+                &result.rows,
+                &result.compliance,
+                &result.compliance_by_os,
+                &result.devices,
+                &result.failures,
+                &BacklogSheets {
+                    worst_devices: &result.worst_devices,
+                    offline_backlog: &result.offline_backlog,
+                    time_to_install: &result.time_to_install,
+                },
+                &result.approvals,
+                &WorkbookMeta {
+                    generated_at: &result.generated_at,
+                    data_fetched_at: &result.data_fetched_at,
+                    devices_total: result.devices_total,
+                    devices_offline: result.devices_offline,
+                    devices_unpatchable: result.devices_unpatchable,
+                    scope: &result.scope,
+                    scope_note: "scope",
+                    changes: &result.changes,
+                    instance: &result.instance,
+                    sla_policy: &result.sla_policy,
+                    compliance_total: &result.compliance_total,
+                    uncounted_orgs: &result.uncounted_orgs,
+                    first_seen: &result.first_seen,
+                    patch_families: result.patch_families,
+                    exploit_data: &result.exploit_data.sentence,
+                },
+            )
+        })
+        .expect("written");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let mut wb: Xlsx<_> = open_workbook(&path).expect("a workbook");
+        assert!(wb.worksheet_range("About").is_ok());
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Both exports read the same cache, and both must refuse rather than write an

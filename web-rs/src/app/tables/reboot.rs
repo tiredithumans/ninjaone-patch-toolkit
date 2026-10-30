@@ -1,18 +1,23 @@
-//! The Needs Reboot tab: the needs-reboot device subset, paged client-side, with a
-//! device-level selection the shared `ActionBar` can reboot or scan.
+//! The Needs Reboot tab: the needs-reboot device subset, paged, with a device-level
+//! selection the shared `ActionBar` can reboot or scan.
 
 use super::*;
 
 #[component]
 pub(super) fn RebootTable() -> impl IntoView {
     let state = expect_context::<AppState>();
-    // Paged client-side. The backend trims the list to the needs-reboot subset and
-    // ships it whole in the summary, but "subset" is not "small" — on a fleet mid
-    // patch cycle it can be thousands of devices, and this used to clone the entire
-    // vector and materialise a <tr> for every one of them on every reactive re-run,
-    // in a UI whose every other table is built around paging.
+    // Paged. "Subset" is not "small" — on a fleet mid patch cycle it can be thousands
+    // of devices — so the summary carries only the first page, and later pages are
+    // read from the backend's cached result (`util::reboot_page_source`). A summary
+    // that carries the whole list (demo mode, a small fleet) is paged locally.
     let page = RwSignal::new(0usize);
     let total = move || {
+        state
+            .query
+            .result
+            .with(|r| r.as_ref().map_or(0, |r| r.reboot_devices_total))
+    };
+    let seeded = move || {
         state
             .query
             .result
@@ -20,14 +25,43 @@ pub(super) fn RebootTable() -> impl IntoView {
     };
     let page_count = move || util::page_count(total(), PATCHES_PAGE_SIZE);
     let current = move || util::clamp_page(page.get(), page_count());
+    let source = move || util::reboot_page_source(current(), PATCHES_PAGE_SIZE, seeded(), total());
+    // The page last fetched, by index; `stamp` drops a reply that a newer page or a
+    // newer result overtook, as the Patches pager's view stamp does.
+    let fetched = RwSignal::new(None::<(usize, Vec<DeviceSummary>)>);
+    let stamp = RwSignal::new(0u64);
+    Effect::new(move |_| {
+        // Re-runs when the result or the page changes; either retires the last page.
+        let util::RebootPage::Fetch { offset, limit } = source() else {
+            return;
+        };
+        let at = current();
+        let mine = util::next_query_seq(stamp.get_untracked());
+        stamp.set(mine);
+        fetched.set(None);
+        spawn_local(async move {
+            let outcome = api::get_reboot_devices(offset, limit).await;
+            if util::is_superseded(stamp.get_untracked(), mine) {
+                return;
+            }
+            match outcome {
+                Ok(devices) => fetched.set(Some((at, devices))),
+                Err(e) => state.notify(Toast::err(e)),
+            }
+        });
+    });
     // Only the visible window is cloned, not the whole subset.
-    let devices = move || {
-        let (start, end) = util::page_bounds(current(), PATCHES_PAGE_SIZE, total());
-        state.query.result.with(|r| {
+    let devices = move || match source() {
+        util::RebootPage::Seeded { start, end } => state.query.result.with(|r| {
             r.as_ref()
-                .map(|r| r.reboot_devices[start..end].to_vec())
+                .and_then(|r| r.reboot_devices.get(start..end))
+                .map(<[DeviceSummary]>::to_vec)
                 .unwrap_or_default()
-        })
+        }),
+        util::RebootPage::Fetch { .. } => fetched.with(|f| match f {
+            Some((at, devices)) if *at == current() => devices.clone(),
+            _ => Vec::new(),
+        }),
     };
     let has_devices = move || total() > 0;
     let page_state = move || state.device_page_selection_state(&devices());

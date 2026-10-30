@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::io::Write;
 
 use anyhow::{Context, Result};
 
@@ -176,9 +177,12 @@ fn header_format() -> Format {
 /// provenance in [`WorkbookMeta`]. Data sheets with no rows are omitted; Patches and
 /// About are always written. Detail rows past one sheet's capacity continue on
 /// `Patches (2)`, `Patches (3)`, … Every date-time is a real Excel date-time in UTC.
+///
+/// Written to `out` rather than to a path, so the caller decides how the file is
+/// opened — the export command creates it owner-only before the first byte.
 #[allow(clippy::too_many_arguments)]
-pub fn write_workbook(
-    path: &str,
+pub fn write_workbook<W: Write + Send>(
+    out: W,
     rows: &[PatchRow],
     compliance: &[ComplianceBucket],
     compliance_by_os: &[OsCompliance],
@@ -189,7 +193,7 @@ pub fn write_workbook(
     meta: &WorkbookMeta<'_>,
 ) -> Result<()> {
     write_workbook_split(
-        path,
+        out,
         rows,
         compliance,
         compliance_by_os,
@@ -205,8 +209,8 @@ pub fn write_workbook(
 /// [`write_workbook`] with the per-sheet detail-row limit injected, so the split
 /// is testable without writing a million rows.
 #[allow(clippy::too_many_arguments)]
-fn write_workbook_split(
-    path: &str,
+fn write_workbook_split<W: Write + Send>(
+    out: W,
     rows: &[PatchRow],
     compliance: &[ComplianceBucket],
     compliance_by_os: &[OsCompliance],
@@ -228,13 +232,14 @@ fn write_workbook_split(
     // rather than failing the export: a whole-fleet third-party feed can run to
     // seven figures, and the rows past the limit are as real as the ones before it.
     //
-    // These are the only sheets that grow with the fleet, so they stream: a
-    // low-memory worksheet flushes each row to a temp file once the next one
-    // starts, instead of holding every cell until `save`. Low memory rather than
-    // constant: it keeps the shared string table, so a device name repeated on
-    // every one of its patch rows is stored once, not inlined each time. Its one
-    // rule is that rows are written in ascending order, which `fill_sheet` does
-    // and nothing else writes to these sheets (no footnotes).
+    // The sheets with a row per patch or per device — these, Devices and Needs
+    // Reboot — stream: a low-memory worksheet flushes each row to a temp file once
+    // the next one starts, instead of holding every cell until `save`. The others
+    // have a row per organization, OS or failing patch, or a capped list. Low memory
+    // rather than constant: it keeps the shared string table, so a device name
+    // repeated on every one of its patch rows is stored once, not inlined each time.
+    // Its one rule is that rows are written in ascending order, which `fill_sheet`
+    // does, and a footnote under the data (`write_footnotes`) keeps.
     let mut chunks = rows.chunks(rows_per_sheet.max(1));
     fill_sheet(
         workbook.add_worksheet_with_low_memory()?,
@@ -315,8 +320,8 @@ fn write_workbook_split(
         // note says "N offline and M non-patchable devices excluded", and this is
         // the sheet that lets a reader find them by name. Their count cells are
         // blank rather than zero (see `DeviceSummary::DEVICE_COLUMNS`).
-        write_sheet(
-            &mut workbook,
+        fill_sheet(
+            workbook.add_worksheet_with_low_memory()?,
             &header,
             "Devices",
             &DeviceSummary::DEVICE_COLUMNS,
@@ -332,8 +337,8 @@ fn write_workbook_split(
     }
     let reboot: Vec<&DeviceSummary> = devices.iter().filter(|d| d.needs_reboot).collect();
     if !reboot.is_empty() {
-        write_sheet(
-            &mut workbook,
+        fill_sheet(
+            workbook.add_worksheet_with_low_memory()?,
             &header,
             "Needs Reboot",
             &DeviceSummary::COLUMNS,
@@ -448,7 +453,7 @@ fn write_workbook_split(
     // data range rather than trailing a sheet someone will sort or filter.
     write_about_sheet(&mut workbook, &header, meta, backlogs, rows.len())?;
 
-    workbook.save(path).context("save workbook")?;
+    workbook.save_to_writer(out).context("save workbook")?;
     Ok(())
 }
 
@@ -495,21 +500,26 @@ fn write_about_sheet(
     // The two clocks as date cells like every other date in the workbook. They
     // arrive as the app's formatted UTC text, so they are parsed back; a value that
     // does not parse is written as the text it was rather than dropped.
+    // Every text cell below goes through `write_text`, which cuts it to Excel's cell
+    // limit: the exploit-data sentence quotes the feeds, the scope note names
+    // organizations, and one oversized string used to fail the whole workbook.
     let mut row = 0u32;
     for (label, clock) in [
         ("Generated", meta.generated_at),
         ("Patch data fetched", meta.data_fetched_at),
     ] {
         row += 1;
-        sheet.write_string(row, 0, label)?;
+        write_text(sheet, row, 0, label)?;
         match clock_timestamp(clock).and_then(excel_date_time) {
-            Some(when) => sheet.write_datetime_with_format(row, 1, &when, &date)?,
-            None => sheet.write_string(row, 1, clock)?,
-        };
+            Some(when) => {
+                sheet.write_datetime_with_format(row, 1, &when, &date)?;
+            }
+            None => write_text(sheet, row, 1, clock)?,
+        }
     }
     row += 1;
-    sheet.write_string(row, 0, "Time zone")?;
-    sheet.write_string(row, 1, TIME_ZONE_NOTE)?;
+    write_text(sheet, row, 0, "Time zone")?;
+    write_text(sheet, row, 1, TIME_ZONE_NOTE)?;
     for (label, value) in [
         ("NinjaOne instance", meta.instance),
         ("App version", APP_VERSION),
@@ -517,8 +527,8 @@ fn write_about_sheet(
         ("Exploit data", meta.exploit_data),
     ] {
         row += 1;
-        sheet.write_string(row, 0, label)?;
-        sheet.write_string(row, 1, value)?;
+        write_text(sheet, row, 0, label)?;
+        write_text(sheet, row, 1, value)?;
     }
     for (label, value) in [
         ("Devices in scope", meta.devices_total),
@@ -527,12 +537,12 @@ fn write_about_sheet(
         ("Detail rows", detail_rows),
     ] {
         row += 1;
-        sheet.write_string(row, 0, label)?;
+        write_text(sheet, row, 0, label)?;
         sheet.write_number(row, 1, value as f64)?;
     }
     row += 1;
-    sheet.write_string(row, 0, "First seen \u{2192} installed")?;
-    sheet.write_string(row, 1, time_to_install)?;
+    write_text(sheet, row, 0, "First seen \u{2192} installed")?;
+    write_text(sheet, row, 1, time_to_install)?;
 
     // The facets, under their own banded headings. Without them two workbooks off
     // the same fleet — one scoped to a single org and CRITICAL-only, one unfiltered —
@@ -557,8 +567,13 @@ fn write_about_sheet(
         meta.devices_unpatchable,
     ) {
         row += 1;
-        sheet.write_string(row, 0, figure.label)?;
-        sheet.write_string(row, 1, format!("{} ({})", figure.value, figure.detail))?;
+        write_text(sheet, row, 0, figure.label)?;
+        write_text(
+            sheet,
+            row,
+            1,
+            format!("{} ({})", figure.value, figure.detail),
+        )?;
     }
 
     for (heading, facets) in [
@@ -577,10 +592,10 @@ fn write_about_sheet(
             .context("write header")?;
         for (label, value) in facets {
             row += 1;
-            sheet.write_string(row, 0, *label)?;
+            write_text(sheet, row, 0, *label)?;
             // Operator-chosen names and free text (a long org list, a pasted
             // search) — clamped like every other free-text cell.
-            sheet.write_string(row, 1, clamp_cell(value.clone()))?;
+            write_text(sheet, row, 1, value.as_str())?;
         }
     }
 
@@ -596,23 +611,32 @@ fn write_about_sheet(
     for (term, meaning) in calculation_notes(meta.sla_policy, meta.patch_families, meta.first_seen)
     {
         row += 1;
-        sheet.write_string(row, 0, term)?;
-        sheet.write_string(row, 1, meaning)?;
+        write_text(sheet, row, 0, term)?;
+        write_text(sheet, row, 1, meaning)?;
     }
-    // The Patches sheet streams, so it has no footnotes of its own; its two reboot
-    // columns are defined here with the rest.
+    // The Patches sheet has no footnotes of its own; its reboot, CVE and
+    // vulnerability columns are defined here with the rest.
     for &(term, meaning) in REBOOT_COLUMN_NOTES
         .iter()
         .chain(&CVE_COLUMN_NOTES)
         .chain([&VULNERABILITY_COUNTS_NOTE])
     {
         row += 1;
-        sheet.write_string(row, 0, term)?;
-        sheet.write_string(row, 1, meaning)?;
+        write_text(sheet, row, 0, term)?;
+        write_text(sheet, row, 1, meaning)?;
     }
 
-    sheet.write_string(row + 2, 0, meta.scope_note)?;
+    write_text(sheet, row + 2, 0, meta.scope_note)?;
     apply_widths(sheet, &ABOUT_WIDTHS)?;
+    Ok(())
+}
+
+/// Writes `text` as a string cell cut to Excel's 32,767-character limit
+/// ([`clamp_cell`]). `write_string` refuses a longer string outright, and that one
+/// refusal failed the whole workbook: a note naming every uncounted organization, or
+/// an exploit-data sentence quoting a feed's text, was enough.
+fn write_text(sheet: &mut Worksheet, row: u32, col: u16, text: impl Into<String>) -> Result<()> {
+    sheet.write_string(row, col, clamp_cell(text.into()))?;
     Ok(())
 }
 
@@ -637,9 +661,7 @@ fn write_changes_sheet(
     let sheet = workbook.worksheet_from_index(last)?;
     let lines = std::iter::once(changes.headline()).chain(changes.notes());
     for (i, line) in lines.enumerate() {
-        sheet
-            .write_string((rows.len() + 2 + i) as u32, 0, line)
-            .context("write changes note")?;
+        write_text(sheet, (rows.len() + 2 + i) as u32, 0, line).context("write changes note")?;
     }
     Ok(())
 }
@@ -691,14 +713,13 @@ fn write_cell(
 
 /// Writes note lines one blank row under the last data row of the sheet just
 /// added. Takes the row count rather than the sheet so it can run after
-/// [`write_sheet`] has handed the worksheet back to the workbook.
+/// [`write_sheet`] has handed the worksheet back to the workbook. Below the data
+/// and in order, so a low-memory sheet takes them too.
 fn write_footnotes(workbook: &mut Workbook, data_rows: usize, notes: &[&str]) -> Result<()> {
     let last = workbook.worksheets().len() - 1;
     let sheet = workbook.worksheet_from_index(last)?;
     for (i, note) in notes.iter().enumerate() {
-        sheet
-            .write_string((data_rows + 2 + i) as u32, 0, *note)
-            .context("write sheet note")?;
+        write_text(sheet, (data_rows + 2 + i) as u32, 0, *note).context("write sheet note")?;
     }
     Ok(())
 }
@@ -803,6 +824,11 @@ mod tests {
     const NOTE: &str = "Compliance covers online devices only.";
     use super::*;
     use calamine::DataType as _;
+
+    /// The file a test workbook is written to; the export command opens its own.
+    fn create(path: &std::path::Path) -> std::fs::File {
+        std::fs::File::create(path).expect("create the workbook file")
+    }
 
     /// The provenance block the command fills from the cached `QueryResult`. The two
     /// clocks differ on purpose here — a re-filter recomputes over a warm cache, so
@@ -993,7 +1019,7 @@ mod tests {
             latest_failure_ts: Some(1_777_000_000),
         }];
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[sample_row()],
             &[],
             &[],
@@ -1079,7 +1105,7 @@ mod tests {
             },
         ];
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[],
             &[],
             &[],
@@ -1147,7 +1173,7 @@ mod tests {
             ..meta()
         };
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[sample_row()],
             &[bucket("Contoso"), bucket("Northwind")],
             &[],
@@ -1181,7 +1207,6 @@ mod tests {
     fn writes_readable_workbook_with_headers_and_rows() {
         let dir = std::env::temp_dir();
         let path = dir.join("npt-export-test.xlsx");
-        let path_str = path.to_string_lossy().to_string();
         let rows = vec![sample_row()];
         let compliance = vec![ComplianceBucket {
             organization: "Contoso".into(),
@@ -1208,7 +1233,7 @@ mod tests {
             approved_not_installed: 1,
         }];
         write_workbook(
-            &path_str,
+            create(&path),
             &rows,
             &compliance,
             &compliance_by_os,
@@ -1253,7 +1278,7 @@ mod tests {
         use calamine::{Reader, Xlsx, open_workbook};
         let path = std::env::temp_dir().join("npt-export-about.xlsx");
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[sample_row()],
             &[],
             &[],
@@ -1338,6 +1363,54 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// No one string can fail the workbook. An exploit-data sentence quoting a
+    /// feed's oversized catalog version, and a scope note naming more organizations
+    /// than a cell holds, used to make `write_string` refuse and the export fail
+    /// whole; now each is cut to Excel's limit on the About sheet and under the data.
+    #[test]
+    fn an_oversized_sentence_or_note_still_exports() {
+        use crate::rows::CELL_MAX_CHARS;
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = std::env::temp_dir().join("npt-export-oversized.xlsx");
+        let sentence = format!(
+            "CVEs and exploited marks come from CISA's catalog {}.",
+            "9".repeat(40_000)
+        );
+        let note = format!("Excluded: {}", "Contoso, ".repeat(5_000));
+        let meta = WorkbookMeta {
+            exploit_data: &sentence,
+            scope_note: &note,
+            ..meta()
+        };
+        write_workbook(
+            create(&path),
+            &[sample_row()],
+            &[],
+            &[],
+            &[device_summary(1, "srv01", false)],
+            &[],
+            &no_backlogs(),
+            &ApprovalBacklog::default(),
+            &meta,
+        )
+        .expect("an oversized sentence is cut, not fatal");
+
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let about = wb.worksheet_range("About").unwrap();
+        let exploit = about
+            .rows()
+            .find(|r| r.first().map(cell_text).as_deref() == Some("Exploit data"))
+            .map(|r| cell_text(&r[1]))
+            .expect("the exploit-data row");
+        assert_eq!(exploit.chars().count(), CELL_MAX_CHARS);
+        assert!(exploit.ends_with('…'));
+        let devices = wb.worksheet_range("Devices").unwrap();
+        let under = devices.get_value((3, 0)).map(cell_text).unwrap_or_default();
+        assert_eq!(under.chars().count(), CELL_MAX_CHARS, "the scope note");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The compliance sheets assert "N offline devices excluded"; the detail sheet
     /// has to let a reader act on that. `PatchRow` carried the flag all along and
     /// the in-app table draws an "offline" chip from it — only the workbook dropped
@@ -1356,7 +1429,7 @@ mod tests {
             },
         ];
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &rows,
             &[],
             &[],
@@ -1401,7 +1474,7 @@ mod tests {
             },
         ];
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &rows,
             &[],
             &[],
@@ -1450,7 +1523,7 @@ mod tests {
         // omitted while Needs Reboot is written.
         let reboot = vec![device_summary(7, "srv07", true)];
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[],
             &[],
             &[],
@@ -1538,7 +1611,7 @@ mod tests {
             }],
         };
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[],
             &compliance,
             &[],
@@ -1578,7 +1651,7 @@ mod tests {
         // No stuck device, no sheet.
         let path = std::env::temp_dir().join("npt-export-no-stuck.xlsx");
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[],
             &compliance,
             &[],
@@ -1623,7 +1696,7 @@ mod tests {
             ..meta()
         };
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[],
             &[],
             &[],
@@ -1659,7 +1732,7 @@ mod tests {
 
         // No baseline: no sheet, rather than an empty table reading "nothing changed".
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[],
             &[],
             &[],
@@ -1692,7 +1765,7 @@ mod tests {
             latest_failure_ts: Some(1_777_000_000),
         }];
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[],
             &[],
             &[],
@@ -1756,7 +1829,7 @@ mod tests {
             ..meta()
         };
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[],
             &[],
             &[],
@@ -1805,7 +1878,7 @@ mod tests {
             })
             .collect();
         write_workbook_split(
-            &path.to_string_lossy(),
+            create(&path),
             &rows,
             &[],
             &[],
@@ -1921,7 +1994,7 @@ mod tests {
             time_to_install: &installs,
         };
         write_workbook(
-            &path.to_string_lossy(),
+            create(&path),
             &[],
             &[],
             &[],

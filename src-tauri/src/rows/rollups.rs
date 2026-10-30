@@ -29,14 +29,36 @@ pub struct FailureGroup {
     pub severity_rank: u8,
     /// Distinct devices the patch failed on (the headline count).
     pub affected_devices: usize,
-    /// Every affected device name. The in-app table shows the complete list; the
-    /// Excel/HTML "Devices" cell ends in "… and N more" past Excel's cell limit.
+    /// The affected device names. Complete in the cached result, where the Excel/HTML
+    /// "Devices" cell ends in "… and N more" past Excel's cell limit; the IPC summary
+    /// carries at most [`FAILURE_NAMES_SUMMARY_CAP`] ([`Self::with_names_capped`]).
     pub device_names: Vec<Arc<str>>,
     pub latest_failure: Option<String>,
     pub latest_failure_ts: Option<i64>,
 }
 
+/// Device names each failure group carries in the IPC summary. The in-app table
+/// lists them and says how many more there are; a patch failing across a few
+/// thousand machines otherwise shipped every name on every refresh.
+pub const FAILURE_NAMES_SUMMARY_CAP: usize = 100;
+
 impl FailureGroup {
+    /// A copy naming at most `cap` devices, for the IPC summary;
+    /// `affected_devices` still counts every one.
+    pub fn with_names_capped(&self, cap: usize) -> Self {
+        Self {
+            patch_type: self.patch_type,
+            kb: self.kb.clone(),
+            name: self.name.clone(),
+            severity: self.severity,
+            severity_rank: self.severity_rank,
+            affected_devices: self.affected_devices,
+            device_names: self.device_names.iter().take(cap).cloned().collect(),
+            latest_failure: self.latest_failure.clone(),
+            latest_failure_ts: self.latest_failure_ts,
+        }
+    }
+
     /// The failure-table columns as (header, accessor), in display order. Shared by
     /// the Excel exporter and the HTML report.
     pub const COLUMNS: [TableColumn<FailureGroup>; 7] = [
@@ -210,6 +232,16 @@ pub(crate) fn is_pending(status: Option<&str>) -> bool {
         status.and_then(PatchStatus::from_api_value),
         Some(PatchStatus::Rejected | PatchStatus::Installed)
     )
+}
+
+/// Distinct devices with at least one FAILED row — the count the failure groups'
+/// capped name lists cannot give. A record with no device id is not a device.
+pub fn count_failing_devices(rows: &[PatchRow]) -> usize {
+    rows.iter()
+        .filter(|r| &*r.status == row_status::FAILED && r.device_id != ORPHAN_DEVICE_ID)
+        .map(|r| r.device_id)
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 /// Groups the FAILED detail rows by patch (`patch_type` + `kb` + `name`), counting
@@ -460,11 +492,17 @@ impl StuckDevice {
 
 impl ApprovalBacklog {
     /// A copy carrying at most `cap` stuck devices, for the IPC summary. Every
-    /// total is kept, so the frontend can say how many it is not showing.
+    /// total is kept, so the frontend can say how many it is not showing. Built
+    /// field by field: `..self.clone()` deep-cloned every stuck device only to drop
+    /// all but `cap` of them.
     pub fn capped(&self, cap: usize) -> Self {
         Self {
+            awaiting_approval: self.awaiting_approval,
+            approved_not_installed: self.approved_not_installed,
+            stuck_after_days: self.stuck_after_days,
+            stuck_patches: self.stuck_patches,
+            stuck_devices_total: self.stuck_devices_total,
             stuck_devices: self.stuck_devices.iter().take(cap).cloned().collect(),
-            ..self.clone()
         }
     }
 }

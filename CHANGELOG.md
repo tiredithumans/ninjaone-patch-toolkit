@@ -11,6 +11,48 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Security
+
+- The reference software remediation script starts PowerShell 7 only from Program Files and only
+  when Microsoft signed it, calls `shutdown.exe` by full path in both scripts, and loads the
+  WinGet module only when Microsoft signed it. Re-import both scripts from `remediation/` into
+  the NinjaOne library to pick this up.
+- Confirming an action no longer runs it on devices that changed since you reviewed it — for
+  example an offline device that came back online. Review the plan again instead.
+- **Sign out** now removes the saved sign-in of every instance and client id this install has
+  used, not only the current one.
+- The NinjaOne instance must be just an address such as `https://us2.ninjarmm.com`, with no user
+  name, path, `?` or `#`.
+- On Windows, the saved sign-in and client secret are kept as local credentials that no longer
+  roam with your profile.
+- Exported files are private to you from the moment they are created, and a failed export leaves
+  no partial file behind.
+- The Trend tab shows only the signed-in tenant's runs.
+- The audit trail hides more credential shapes in script parameters, such as JSON passwords.
+
+### Changed
+
+- Large fleets refresh faster and use less memory: results sort and compare with the previous run
+  in about half the time, an unchanged run is not saved again, and each refresh sends the screen
+  a fraction of the data it did.
+- The Needs Reboot tab loads its pages as you move through them, and the Failures tab names up to
+  100 devices per patch and says how many more there are.
+- Large patch lists from NinjaOne are less likely to fail part-way through a slow download.
+- Logs, the first-seen record, run snapshots and exploit data move to the app's local data
+  folder, which on Windows no longer roams with your profile.
+- The organization limit for one action counts organizations, so two with the same name count as
+  two.
+- Scans are limited to 500 devices at a time.
+- Software titles containing `|` can't be sent to the remediation script.
+- The audit log starts a new file every 8 MB instead of growing one file forever, and keeps
+  every record.
+
+### Fixed
+
+- Pressing Escape after visiting the Patches tab no longer causes errors in the app.
+- An export no longer fails because the exploit data's status is unusually long.
+- A damaged line in the run history or audit trail no longer hides the rest of it.
+
 ## [0.22.0] - 2026-10-27
 
 Exploit-aware patching: see which Windows updates close vulnerabilities attackers are using now,

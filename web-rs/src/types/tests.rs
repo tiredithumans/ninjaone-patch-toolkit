@@ -92,7 +92,7 @@ fn run_checks(section: &str, entries: &Value, checks: &[(&str, Check)]) {
 /// Every command result the frontend decodes, through the type its `ipc!` wrapper in
 /// `api.rs` returns. Keyed by the backend command name, which is what the fixture's
 /// `commands` object and `every_ipc_wrapper_is_decoded_or_listed` match on.
-const COMMAND_CHECKS: [(&str, Check); 22] = [
+const COMMAND_CHECKS: [(&str, Check); 23] = [
     ("auth_status", decode_and_compare::<AuthStatus>),
     ("get_settings", decode_and_compare::<SettingsView>),
     ("list_orgs", decode_and_compare::<Vec<Organization>>),
@@ -103,7 +103,14 @@ const COMMAND_CHECKS: [(&str, Check); 22] = [
     ("query_patches", decode_and_compare::<QueryResult>),
     ("get_patch_rows", decode_and_compare::<Vec<PatchRow>>),
     ("get_patch_groups", decode_and_compare::<GroupPage>),
-    ("get_device_rows", decode_and_compare::<Vec<DeviceRows>>),
+    (
+        "selection_status",
+        decode_and_compare::<Vec<SelectionStatus>>,
+    ),
+    (
+        "get_reboot_devices",
+        decode_and_compare::<Vec<DeviceSummary>>,
+    ),
     ("device_detail", decode_and_compare::<Option<DeviceDetail>>),
     ("find_cve", decode_and_compare::<CveExposure>),
     ("plan_action", decode_and_compare::<ActionPlan>),

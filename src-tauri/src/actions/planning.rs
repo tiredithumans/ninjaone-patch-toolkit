@@ -1,12 +1,12 @@
 //! Pure planning: `plan()` guardrails, the plan types, the "Apply all" preview.
 
-use super::parameters::{kb_number, uses_kb_encoding};
+use super::parameters::{is_sendable_title, kb_number, uses_kb_encoding};
 use super::*;
 use crate::model::{Device, Patch, PatchStatus, RebootMode};
-use crate::settings::ActionSettings;
+use crate::settings::{ActionSettings, MAX_DEVICES_PER_ACTION_CEILING};
 use chrono::{DateTime, Datelike, Local, Timelike, Utc};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// A device the action will be dispatched to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -60,6 +60,56 @@ impl ActionPlan {
     pub fn is_blocked(&self) -> bool {
         !self.blockers.is_empty()
     }
+
+    /// The ids of the devices this plan dispatches to, sorted: what the operator was
+    /// shown it would run on, and what an approval of it is bound to.
+    pub fn eligible_ids(&self) -> Vec<i64> {
+        let mut ids: Vec<i64> = self.eligible.iter().map(|t| t.device_id).collect();
+        ids.sort_unstable();
+        ids
+    }
+}
+
+/// What a confirmation token is bound to: the fingerprint of the request as it was
+/// planned, which covers the eligible devices too, and those devices' ids.
+///
+/// The ids are the plan's *eligible* set, not the request's. `run_action` re-plans,
+/// and whether a requested device is eligible depends on state the request does not
+/// carry. A device that was offline (skipped) when the dialog was drawn can be back
+/// online by the time Run is pressed. An approval bound only to the request then
+/// dispatched to a device the dialog said would be skipped, with parameters it never
+/// showed. The fingerprint alone already refuses that dispatch. The ids are kept
+/// beside it so the refusal can say which devices moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmBinding {
+    pub hash: String,
+    /// Sorted, as [`ActionPlan::eligible_ids`] returns them.
+    pub targets: Vec<i64>,
+}
+
+/// A bare fingerprint with no recorded devices, for the job-store tests that
+/// exercise the token slot without a plan.
+#[cfg(test)]
+impl From<&str> for ConfirmBinding {
+    fn from(hash: &str) -> Self {
+        Self {
+            hash: hash.to_string(),
+            targets: Vec::new(),
+        }
+    }
+}
+
+/// What spending a confirmation token found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmCheck {
+    /// The token authorizes exactly this dispatch.
+    Confirmed,
+    /// The token was valid and live, but the re-plan would dispatch to devices other
+    /// than the ones reviewed. Carries the reviewed ids, so the refusal can name what
+    /// moved.
+    TargetsChanged { reviewed: Vec<i64> },
+    /// No token, a wrong, expired or spent one, another session's, or another request.
+    Refused,
 }
 
 /// Everything [`plan`] needs. Borrowed rather than owned so the caller can pass
@@ -328,6 +378,8 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
 
     let mut eligible: Vec<PlannedTarget> = Vec::new();
     let mut skipped: Vec<SkippedTarget> = Vec::new();
+    // Every organization the eligible devices belong to, by id, with its name.
+    let mut orgs: BTreeMap<OrgKey, String> = BTreeMap::new();
 
     for id in input.device_ids {
         let Some(device) = by_id.get(id) else {
@@ -361,20 +413,17 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
             });
             continue;
         }
+        let organization = org_name(input.org_names, device);
+        orgs.insert(org_key(device), organization.clone());
         eligible.push(PlannedTarget {
             device_id: *id,
             device_name: name,
-            organization: org_name(input.org_names, device),
+            organization,
             offline,
         });
     }
 
-    let organizations: Vec<String> = eligible
-        .iter()
-        .map(|t| t.organization.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let organizations = org_labels(&orgs);
 
     let mut warnings = Vec::new();
     let mut blockers = Vec::new();
@@ -426,6 +475,30 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
                     .join(", ")
             ));
         }
+    } else {
+        // Base64 keeps a title's spaces out of the space-split string, but inside it
+        // the titles are joined by `|`, and the script splits on `|` again. A title
+        // that contains one would arrive as several products the dialog never listed,
+        // and a blank one makes the script refuse the whole device's list.
+        let unsendable: BTreeSet<&str> = input
+            .targets
+            .iter()
+            .copied()
+            .filter(|t| !is_sendable_title(t))
+            .collect();
+        if !unsendable.is_empty() {
+            blockers.push(format!(
+                "Can't send these product titles: {}. The titles travel as one \"|\"-separated \
+                 list, so a title containing \"|\" would reach the remediation script as \
+                 several products, and a blank one makes it refuse the whole list. Untick \
+                 those rows.",
+                unsendable
+                    .iter()
+                    .map(|t| format!("\"{t}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
     }
     if input.kind.is_mutating() {
         if eligible.len() > s.max_devices_per_action {
@@ -436,11 +509,13 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
                 s.max_devices_per_action
             ));
         }
-        if organizations.len() > s.max_orgs_per_action {
+        // Counted by id. Counting names let two organizations that share one, or any
+        // number missing from the lookup cache ("(unknown organization)"), pass as one.
+        if orgs.len() > s.max_orgs_per_action {
             blockers.push(format!(
                 "Selection spans {} organizations ({}), above the limit of {}. \
                  Dispatch one organization at a time.",
-                organizations.len(),
+                orgs.len(),
                 organizations.join(", "),
                 s.max_orgs_per_action
             ));
@@ -476,6 +551,18 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
                 ));
             }
         }
+    } else if eligible.len() > MAX_DEVICES_PER_ACTION_CEILING {
+        // A scan changes nothing on the device, so it skips the Settings cap and the
+        // confirmation, but it still costs a POST per device and an activity read per
+        // device every poll tick until it settles, and its jobs are never evicted while
+        // they run. Nothing else bounded it: ticking a handful of 500-row groups and
+        // pressing Scan sent thousands. The ceiling is the most Settings would allow a
+        // mutating action, so no scan is wider than any action can be.
+        blockers.push(format!(
+            "{} devices exceeds the {MAX_DEVICES_PER_ACTION_CEILING}-device limit for one scan. \
+             Narrow the selection and scan in batches.",
+            eligible.len()
+        ));
     }
 
     // A dry run of a native endpoint would be a lie: there is no preview mode, so
@@ -655,6 +742,45 @@ fn org_name(names: &HashMap<i64, String>, device: &Device) -> String {
         .organization_id
         .and_then(|id| names.get(&id).cloned())
         .unwrap_or_else(|| "(unknown organization)".to_string())
+}
+
+/// Which organization a device belongs to, as the org-span cap counts them.
+///
+/// The cap used to count distinct organization *names*, so two organizations sharing
+/// one counted once, and so did any number of organizations missing from the
+/// cached lookup (all named "(unknown organization)"). A device that reports no
+/// organization at all counts as one of its own, since nothing shows it shares one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum OrgKey {
+    Id(i64),
+    Unreported { device_id: i64 },
+}
+
+fn org_key(device: &Device) -> OrgKey {
+    device.organization_id.map_or(
+        OrgKey::Unreported {
+            device_id: device.id,
+        },
+        OrgKey::Id,
+    )
+}
+
+/// One label per organization, sorted: its name, plus its id wherever the name alone
+/// would read as one organization when it is several.
+fn org_labels(orgs: &BTreeMap<OrgKey, String>) -> Vec<String> {
+    let mut uses: HashMap<&str, usize> = HashMap::new();
+    for name in orgs.values() {
+        *uses.entry(name.as_str()).or_default() += 1;
+    }
+    orgs.iter()
+        .map(|(key, name)| match key {
+            _ if uses[name.as_str()] == 1 => name.clone(),
+            OrgKey::Id(id) => format!("{name} (#{id})"),
+            OrgKey::Unreported { device_id } => format!("{name} (device {device_id})"),
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Whether `now` falls inside the configured window. A start later than the end

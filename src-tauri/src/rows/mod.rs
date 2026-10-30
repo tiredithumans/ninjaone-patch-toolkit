@@ -139,9 +139,16 @@ pub struct QuerySummary {
     pub rows: Vec<PatchRow>,
     /// Total detail-row count (the table pages over this, not `rows.len()`).
     pub rows_total: usize,
-    /// Only the devices flagged for reboot — all the reboot view renders. The full
-    /// device list stays in the cache for export.
+    /// The first page of the devices flagged for reboot; the Needs Reboot tab pages
+    /// the rest through `get_reboot_devices`. The full device list stays in the
+    /// cache for export.
+    ///
+    /// Shipped whole, this was most of every summary on a fleet mid patch cycle:
+    /// 4.9 MB of a 5.1 MB summary at 10,000 reboot-pending devices, on every query
+    /// and every auto-refresh tick, decoded on the UI's only thread.
     pub reboot_devices: Vec<DeviceSummary>,
+    /// Every device flagged for reboot — what the tab counts and pages over.
+    pub reboot_devices_total: usize,
     pub compliance: Vec<ComplianceBucket>,
     /// See [`QueryResult::compliance_total`].
     pub compliance_total: ComplianceBucket,
@@ -149,9 +156,13 @@ pub struct QuerySummary {
     pub uncounted_orgs: Vec<String>,
     /// Compliance grouped by OS name (the Compliance tab's "Compliance by OS").
     pub compliance_by_os: Vec<OsCompliance>,
-    /// FAILED-install rollup — small (one entry per failing patch), so it ships
-    /// whole rather than paged like the detail rows.
+    /// FAILED-install rollup, one entry per failing patch, each naming at most
+    /// [`FAILURE_NAMES_SUMMARY_CAP`] of its devices (`affected_devices` still counts
+    /// every one). The exports read the uncapped lists from the cache.
     pub failures: Vec<FailureGroup>,
+    /// Distinct devices with at least one failed install ([`count_failing_devices`]),
+    /// counted here because the capped name lists no longer can be.
+    pub failing_devices: usize,
     /// Per-org pending-patch severity breakdown for the dashboard charts.
     pub severity_by_org: Vec<OrgSeverity>,
     /// Pending-patch age histogram for the dashboard charts.
@@ -210,22 +221,24 @@ pub struct QuerySummary {
 
 impl QuerySummary {
     /// Builds the IPC summary from the full result, cloning only the first
-    /// `first_page` rows and the reboot subset (not the whole row/device sets).
+    /// `first_page` rows and reboot-pending devices (not the whole row/device sets).
     pub fn from_result(result: &QueryResult, first_page: usize) -> Self {
+        let reboot = || result.devices.iter().filter(|d| d.needs_reboot);
         Self {
             rows: result.rows.iter().take(first_page).cloned().collect(),
             rows_total: result.rows.len(),
-            reboot_devices: result
-                .devices
-                .iter()
-                .filter(|d| d.needs_reboot)
-                .cloned()
-                .collect(),
+            reboot_devices: reboot().take(first_page).cloned().collect(),
+            reboot_devices_total: reboot().count(),
             compliance: result.compliance.clone(),
             compliance_total: result.compliance_total.clone(),
             uncounted_orgs: result.uncounted_orgs.clone(),
             compliance_by_os: result.compliance_by_os.clone(),
-            failures: result.failures.clone(),
+            failures: result
+                .failures
+                .iter()
+                .map(|f| f.with_names_capped(FAILURE_NAMES_SUMMARY_CAP))
+                .collect(),
+            failing_devices: count_failing_devices(&result.rows),
             severity_by_org: result.severity_by_org.clone(),
             age_buckets: result.age_buckets.clone(),
             worst_devices: result.worst_devices.clone(),

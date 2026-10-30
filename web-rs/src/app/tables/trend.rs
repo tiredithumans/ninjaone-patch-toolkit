@@ -31,7 +31,13 @@ pub(super) fn TrendTab() -> impl IntoView {
             }
         });
     };
-    load();
+    // Read on mount, and again whenever a new session starts (a tenant switch, a
+    // sign-out or sign-in): the backend returns only the signed-in tenant's runs, so
+    // what is on screen belongs to the session it was read in.
+    Effect::new(move |_| {
+        state.session.epoch.track();
+        load();
+    });
 
     // Only runs that measured the same thing as the newest one; see `trend_series`.
     let series = move || util::trend_series(&history.get(), 60);

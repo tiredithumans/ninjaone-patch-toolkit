@@ -991,7 +991,12 @@ fn RunAsSelect() -> impl IntoView {
         };
         leptos::task::spawn_local(async move {
             let outcome = api::list_run_as_options(device_id).await;
-            if util::is_superseded(request.get_value(), seq) {
+            // `request` is disposed if the action bar unmounted during the read, and
+            // reading a disposed value panics.
+            if request
+                .try_get_value()
+                .is_none_or(|current| util::is_superseded(current, seq))
+            {
                 return;
             }
             match outcome {

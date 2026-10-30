@@ -7,6 +7,14 @@
 # Commit-message prefixes follow this repo's Conventional Commits (AGENTS.md):
 #   ci   -> GitHub Actions workflow bumps
 #   deps -> Cargo crate bumps
+#
+# Every ecosystem waits `cooldown` days after a version is published before proposing
+# it. Minor and patch PRs auto-merge once CI is green (dependabot-automerge.yml), and
+# the next release compiles them with the updater signing key in the environment
+# (docs/design/ci.md), so a malicious release of any dependency would otherwise have
+# only GitHub's 3-day default between publication and a signed bundle. A week gives
+# registries and the community time to yank it first. Security updates ignore the
+# cooldown, so a fix for a published advisory is not delayed.
 version: 2
 updates:
   # GitHub Actions used by .github/workflows/*.yml — all pinned to full commit SHAs.
@@ -14,6 +22,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: ci
     groups:
@@ -38,6 +48,8 @@ updates:
     directory: /src-tauri
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: deps
     open-pull-requests-limit: 10
@@ -55,6 +67,8 @@ updates:
     directory: /web-rs
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: deps
     open-pull-requests-limit: 10
@@ -76,6 +90,8 @@ updates:
     directory: /scripts
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: deps
     open-pull-requests-limit: 5
