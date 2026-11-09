@@ -78,7 +78,7 @@ url = "2.5"
 urlencoding = "2.1"
 
 [dev-dependencies]
-calamine = "0.37"
+calamine = "0.38"
 wiremock = "0.6"
 
 [profile.release]
