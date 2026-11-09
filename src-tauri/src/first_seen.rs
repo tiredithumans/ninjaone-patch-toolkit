@@ -467,7 +467,7 @@ fn file_name(tenant: &str) -> String {
 }
 
 fn ledger_dir() -> Option<PathBuf> {
-    paths::app_dir().ok().map(|d| d.join(LEDGER_DIR))
+    paths::local_subdir(LEDGER_DIR).ok()
 }
 
 fn load_from(dir: &Path, tenant: &str) -> Option<TenantLedger> {

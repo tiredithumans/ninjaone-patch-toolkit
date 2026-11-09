@@ -20,10 +20,12 @@
 //! trail must not require the write feature to be switched on.
 
 use serde::Serialize;
+use tauri::State;
 use tracing::warn;
 
 use crate::error::UiError;
 use crate::paths;
+use crate::state::AppState;
 
 /// How many audit records to return, newest first.
 ///
@@ -59,8 +61,9 @@ pub struct AuditRecord {
 
 /// Reads the newest [`AUDIT_TAIL`] records, newest first.
 ///
-/// Reads the current file and, if present, the one older builds wrote to a different
-/// config directory — see [`paths::legacy_audit_path`]. A malformed line is skipped
+/// Reads the live file, its rotated generations, and the file older builds wrote to
+/// a different config directory — see [`paths::legacy_audit_path`] — each only while
+/// the tail is still short (see [`read_audit_tail`]). A malformed line is skipped
 /// rather than failing the whole read: this is an append-only log that a crash can
 /// truncate mid-line, and one bad tail must not hide the history above it.
 #[tauri::command]
@@ -72,23 +75,54 @@ pub async fn read_action_audit() -> Result<Vec<AuditRecord>, UiError> {
 }
 
 fn read_audit_files() -> Vec<AuditRecord> {
+    let live = paths::audit_path().ok();
+    let legacy = paths::legacy_audit_path();
+    read_audit_tail(live.as_deref(), legacy.as_deref(), AUDIT_TAIL)
+}
+
+/// The newest `tail` records across the live log, as many of its rotated
+/// generations as that takes, and the legacy file, newest first.
+///
+/// The writer moves the live file aside by time (`actions::audit::rotate_if_full`), so
+/// every record in a generation is older than every record in the files after it.
+/// Once `tail` records are in hand an older generation cannot add a newer one, so it
+/// is not read; nor is the legacy file, which predates them all. Reading every file
+/// whole on each visit to the Jobs tab is what the rotation exists to avoid.
+fn read_audit_tail(
+    live: Option<&std::path::Path>,
+    legacy: Option<&std::path::Path>,
+    tail: usize,
+) -> Vec<AuditRecord> {
+    let mut files: Vec<(std::path::PathBuf, bool)> = Vec::new();
+    if let Some(live) = live {
+        files.push((live.to_path_buf(), false));
+        files.extend(
+            crate::actions::audit::rotated_generations(live)
+                .into_iter()
+                .map(|generation| (generation, false)),
+        );
+    }
+    if let Some(legacy) = legacy {
+        files.push((legacy.to_path_buf(), true));
+    }
     let mut records = Vec::new();
-    if let Ok(path) = paths::audit_path() {
-        records.extend(parse_audit_file(&path, false));
+    for (path, is_legacy) in files {
+        if records.len() >= tail {
+            break;
+        }
+        // Each file is append-ordered, oldest first. Reversed, records that share a
+        // timestamp keep newest-first order through the stable sort below.
+        let mut found = parse_audit_file(&path, is_legacy);
+        found.reverse();
+        records.extend(found);
     }
-    if let Some(legacy) = paths::legacy_audit_path() {
-        records.extend(parse_audit_file(&legacy, true));
-    }
-    // Newest first. The two files are each append-ordered but interleave in time
-    // only at the upgrade boundary, so sorting the union is simpler than merging and
-    // costs nothing at this size.
     records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    records.truncate(AUDIT_TAIL);
+    records.truncate(tail);
     records
 }
 
 fn parse_audit_file(path: &std::path::Path, legacy: bool) -> Vec<AuditRecord> {
-    let body = match std::fs::read_to_string(path) {
+    let body = match std::fs::read(path) {
         Ok(body) => body,
         // A missing file is the normal state for an install that has never
         // dispatched anything — not worth a warning.
@@ -98,8 +132,11 @@ fn parse_audit_file(path: &std::path::Path, legacy: bool) -> Vec<AuditRecord> {
             return Vec::new();
         }
     };
-    body.lines()
-        .filter_map(|line| parse_line(line, legacy))
+    // Split as bytes and decoded a line at a time. Read as one `String`, a single
+    // invalid UTF-8 byte (an append torn inside a multi-byte character, say in a
+    // device name) failed the whole read and hid every record in the file.
+    body.split(|b| *b == b'\n')
+        .filter_map(|line| parse_line(&String::from_utf8_lossy(line), legacy))
         .collect()
 }
 
@@ -147,9 +184,16 @@ fn parse_line(line: &str, legacy: bool) -> Option<AuditRecord> {
 /// work" — the two questions a patching team actually has — were unanswerable.
 /// Rollups only, deliberately; see `history` for why storing rows instead would cost
 /// about a thousand times more for a capability nobody asked for.
+///
+/// Only the signed-in tenant's runs: the file holds every tenant this install has
+/// queried, and the Trend tab charts whichever record is newest.
 #[tauri::command]
-pub async fn read_run_history() -> Result<Vec<crate::history::RunRecord>, UiError> {
-    tokio::task::spawn_blocking(crate::history::read_all)
+pub async fn read_run_history(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::history::RunRecord>, UiError> {
+    let instance = state.settings_snapshot().instance_base_url;
+    let tenant = state.tenant_label();
+    tokio::task::spawn_blocking(move || crate::history::read_all(&instance, &tenant))
         .await
         .map_err(|e| UiError::new(format!("reading the run history panicked: {e}")))
 }
@@ -224,5 +268,113 @@ mod tests {
     fn a_non_json_line_is_skipped_rather_than_failing_the_read() {
         assert_eq!(parse_line("not json at all", false), None);
         assert_eq!(parse_line("   ", false), None);
+    }
+
+    /// A fresh directory for one test's audit files.
+    fn audit_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("njp-diag-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn record(timestamp: &str, device: &str) -> String {
+        format!(r#"{{"timestamp":"{timestamp}","kind":"REBOOT","deviceName":"{device}"}}"#)
+    }
+
+    fn write_lines(path: &std::path::Path, lines: &[String]) {
+        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(path, body).expect("write");
+    }
+
+    fn devices(records: &[AuditRecord]) -> Vec<&str> {
+        records.iter().map(|r| r.device_name.as_str()).collect()
+    }
+
+    /// The file used to be read as one `String`, so one invalid UTF-8 byte (an
+    /// append torn inside "Café", say) failed the read and the Jobs tab showed no
+    /// history at all. Each line is decoded on its own now.
+    #[test]
+    fn one_bad_byte_costs_only_its_own_line() {
+        let dir = audit_dir("bad-byte");
+        let path = dir.join("action-audit.jsonl");
+        let mut body = Vec::new();
+        body.extend_from_slice(record("2026-09-02 10:00:00 UTC", "Café-01").as_bytes());
+        body.push(b'\n');
+        body.extend_from_slice(br#"{"timestamp":"2026-09-02 10:05:00 UTC","deviceName":"Caf"#);
+        body.push(0xC3); // the first byte of "é", and nothing after it
+        body.push(b'\n');
+        body.extend_from_slice(record("2026-09-02 10:10:00 UTC", "srv-02").as_bytes());
+        body.push(b'\n');
+        std::fs::write(&path, body).expect("write");
+
+        let records = parse_audit_file(&path, false);
+        assert_eq!(devices(&records), ["Café-01", "srv-02"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The newest records are found across the live file and its generations, newest
+    /// first, and a generation older than the tail needs is not read at all. The
+    /// oldest one here holds a record stamped later than everything else, which only
+    /// a reader that opened it could return.
+    #[test]
+    fn the_tail_reads_generations_newest_first_and_only_as_far_as_it_needs() {
+        let dir = audit_dir("generations");
+        let live = dir.join("action-audit.jsonl");
+        write_lines(
+            &live,
+            &[
+                record("2026-10-30 09:00:00 UTC", "live-1"),
+                record("2026-10-30 10:00:00 UTC", "live-2"),
+            ],
+        );
+        write_lines(
+            &dir.join("action-audit-20261029T120000.jsonl"),
+            &[
+                record("2026-10-29 08:00:00 UTC", "newer-gen-1"),
+                record("2026-10-29 11:00:00 UTC", "newer-gen-2"),
+            ],
+        );
+        write_lines(
+            &dir.join("action-audit-20260101T000000.jsonl"),
+            &[record("2027-01-01 00:00:00 UTC", "never-read")],
+        );
+
+        let records = read_audit_tail(Some(&live), None, 3);
+        assert_eq!(devices(&records), ["live-2", "live-1", "newer-gen-2"]);
+
+        // Asked for more than the newer files hold, the older generation is read.
+        let all = read_audit_tail(Some(&live), None, 10);
+        assert_eq!(all.len(), 5);
+        assert_eq!(all[0].device_name, "never-read");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The legacy file predates everything in the current location, so it fills in
+    /// only when those are short, and its records say where they came from.
+    #[test]
+    fn the_legacy_file_fills_in_only_while_the_tail_is_short() {
+        let dir = audit_dir("legacy");
+        let live = dir.join("action-audit.jsonl");
+        let legacy = dir.join("legacy").join("action-audit.jsonl");
+        std::fs::create_dir_all(legacy.parent().expect("parent")).expect("legacy dir");
+        write_lines(&live, &[record("2026-10-30 09:00:00 UTC", "current")]);
+        write_lines(&legacy, &[record("2026-05-01 09:00:00 UTC", "old-build")]);
+
+        let records = read_audit_tail(Some(&live), Some(&legacy), 10);
+        assert_eq!(devices(&records), ["current", "old-build"]);
+        assert!(!records[0].legacy && records[1].legacy);
+
+        assert_eq!(
+            devices(&read_audit_tail(Some(&live), Some(&legacy), 1)),
+            ["current"]
+        );
+        // An install that never wrote the current file still shows its history.
+        let missing = dir.join("nothing-here.jsonl");
+        assert_eq!(
+            devices(&read_audit_tail(Some(&missing), Some(&legacy), 10)),
+            ["old-build"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -41,7 +41,7 @@ Describe 'Install-SelectedWindowsUpdates.ps1 source' {
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
         $calls = @($ast.FindAll({
                     param($n)
-                    $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'shutdown.exe'
+                    $n -is [System.Management.Automation.Language.CommandAst] -and $n.CommandElements[0].Extent.Text -eq '(Get-ShutdownPath)'
                 }, $true))
         $calls.Count | Should -BeGreaterThan 0
         foreach ($call in $calls) {
@@ -49,6 +49,29 @@ Describe 'Install-SelectedWindowsUpdates.ps1 source' {
             $words -contains '/c' | Should -BeTrue
             $words[$words.IndexOf('/d') + 1] | Should -Match '^p:\d+:\d+$'
         }
+    }
+
+    # As SYSTEM, a bare `shutdown.exe` is looked up on the machine PATH, where a directory a
+    # local user can write, listed ahead of System32, would run that user's own copy.
+    It 'never runs shutdown.exe by name' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
+        $bare = @($ast.FindAll({
+                    param($n)
+                    $n -is [System.Management.Automation.Language.CommandAst] -and @('shutdown', 'shutdown.exe') -contains $n.GetCommandName()
+                }, $true))
+        $bare.Count | Should -Be 0
+    }
+}
+
+Describe 'Get-ShutdownPath' {
+    BeforeEach { $savedSystemRoot = $env:SystemRoot }
+    AfterEach { $env:SystemRoot = $savedSystemRoot }
+
+    It 'names shutdown.exe in the Windows directory itself' {
+        $env:SystemRoot = $TestDrive
+        $path = Get-ShutdownPath
+        $path.StartsWith($TestDrive) | Should -BeTrue
+        $path | Should -Match 'System32[\\/]shutdown\.exe$'
     }
 }
 

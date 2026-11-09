@@ -109,7 +109,9 @@ pub(super) fn FailuresTable() -> impl IntoView {
                                             <td class="patch-name"><span class="clamp-2" title=f.name.clone()>{f.name.clone()}</span></td>
                                             <td>{f.affected_devices}</td>
                                             <td>{f.latest_failure.unwrap_or_default()}</td>
-                                            <td class="device-list">{f.device_names.join(", ")}</td>
+                                            <td class="device-list">
+                                                {util::failure_device_list(&f.device_names, f.affected_devices)}
+                                            </td>
                                         </tr>
                                     }
                                 })

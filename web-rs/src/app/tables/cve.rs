@@ -20,11 +20,15 @@ pub(super) fn CveSearch() -> impl IntoView {
     let load = RwSignal::new(CveLoad::Idle);
     // Only the newest search's reply is applied, and none from an ended session.
     let seq = RwSignal::new(0u64);
-    window_event_listener(leptos::ev::keydown, move |ev| {
+    let escape = window_event_listener(leptos::ev::keydown, move |ev| {
         if ev.key() == "Escape" && open.get_untracked() {
             open.set(false);
         }
     });
+    // A `WindowListenerHandle` removes nothing when dropped. Left in place, the
+    // listener outlived the Patches tab and every later Escape read the disposed
+    // `open` and panicked — once per earlier visit to the tab.
+    on_cleanup(move || escape.remove());
     let search = move || {
         if state.session.demo.get_untracked() {
             load.set(CveLoad::Failed(
@@ -40,7 +44,11 @@ pub(super) fn CveSearch() -> impl IntoView {
         load.set(CveLoad::Loading);
         spawn_local(async move {
             let outcome = api::find_cve(cve).await;
-            if util::is_superseded(seq.get_untracked(), mine) || state.session.outlived(epoch) {
+            // The tab may have closed during the read, which disposes `seq`.
+            let Some(current) = seq.try_get_untracked() else {
+                return;
+            };
+            if util::is_superseded(current, mine) || state.session.outlived(epoch) {
                 return;
             }
             load.set(match outcome {

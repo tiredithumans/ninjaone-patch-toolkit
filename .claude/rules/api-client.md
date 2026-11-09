@@ -9,6 +9,12 @@ paths:
   pure `retry_for`; paginated bodies parse once via `parse_page` + `PagedRow`. A new endpoint is
   a method on `NinjaApiClient` (`api/<domain>.rs`) using `get_paginated` / `request_raw` — never
   a second reqwest/cursor loop. → `docs/design/api-client.md`
+- **An unpaged row list (`/jobs`, `/activities`) decodes through `get_decoded` + `lenient_rows`:
+  typed rows, off the runtime, a malformed entry dropped — never a `Value` tree. A 2xx body that
+  is not JSON is an error quoting `truncate_body` of it (only a bare token is kept, for
+  `script/run`), never a whole-body `Value::String`.** Tests:
+  `a_body_not_labelled_json_is_json_a_token_or_an_error`, `only_a_list_of_jobs_is_read`.
+  → `docs/design/api-client.md#paginated-bodies-and-row-lists-are-deserialized-straight-into-t-everything-else-goes-through-value`
 - **Both pagination branches require forward progress, measured against the *whole* cursor** —
   (`name` is a stable handle; the position rides in `offset`). **A stall is an error, not a short
   read; an unreadable cursor is an error, not end-of-pages; timeout/5xx retries are
@@ -22,14 +28,20 @@ paths:
   a terminal cursor short of the count is otherwise a warning.** NinjaOne's normal end is a
   non-empty last page.
   → `docs/design/api-client.md#a-lost-cursor-page-is-re-read-against-the-count-or-the-scan-restarts`
+- **A cursor page gets `CURSOR_PAGE_TIMEOUT` (100 s, under the cursor's 120 s `expires`) in place
+  of the client's 45 s; every other request keeps the client's.** Test:
+  `a_cursor_page_outlasts_the_client_timeout`.
+  → `docs/design/api-client.md#a-cursor-page-waits-longer-than-any-other-request`
 - **The whole-fleet third-party feed is paged as location slices of the device inventory
   (`fleet_software_patches_sliced`, `plan_location_slices`) only if the slices' one-row
   `feed_size`s, and then their paged rows, sum to exactly the whole feed's; any mismatch pages it
-  whole.** Never trust a `df` slice unverified — NinjaOne drops an unhonored clause silently.
+  whole. A server-announced `count` never sizes an allocation.** Never trust a `df` slice
+  unverified — NinjaOne drops an unhonored clause silently.
   → `docs/design/api-client.md#the-whole-fleet-third-party-feed-is-paged-in-location-slices-that-must-add-up-to-it`
 - **A 429 extends the client-wide `paused_until` (shared by every clone, never shortened) and
-  every attempt waits it out first; `backoff` and the 429 wait are jittered; `Retry-After` is
-  read as seconds or an HTTP-date, capped at `MAX_RETRY_AFTER_SECS`.**
+  every attempt waits it out first, then sleeps its own `rate_limit_jitter()` before re-sending;
+  `backoff` is jittered too; `Retry-After` is read as seconds or an HTTP-date, capped at
+  `MAX_RETRY_AFTER_SECS`.** Test: `requests_the_pause_releases_do_not_all_send_at_once`.
   → `docs/design/api-client.md#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant`
 - **Each attempt's token is bound to the URL's tenant (`access_token_for(&tenant_stamp)`); a moved
   tenant aborts with `TenantMoved` — no retry, no token invalidation.**

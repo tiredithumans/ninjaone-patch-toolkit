@@ -166,6 +166,7 @@ fn a_legacy_global_credential_is_migrated_once() {
         LEGACY_KEYRING_USER_REFRESH,
         "https://migrate.example.com",
         Some("client-m"),
+        save_keyring,
     )
     .expect("migrate");
 
@@ -1454,4 +1455,300 @@ async fn a_request_queued_behind_a_refresh_does_not_refresh_a_new_tenant() {
     let err = queued.await.expect("join").expect_err("tenant moved");
     assert!(is_tenant_moved(&err), "{err:#}");
     host_b.verify().await;
+}
+
+// --- Sign-out removes every tenant's saved sign-in ---------------------------
+
+/// Signing out deleted only the configured tenant's refresh token. A tenant switch
+/// keeps the previous tenant's on purpose, so the next operator to point Settings
+/// at it was silently signed in as the previous one.
+#[test]
+fn signing_out_deletes_every_tenants_saved_sign_in() {
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
+    let (base_a, client_a) = ("https://every-tenant-a.example.com", "client-every-a");
+    let (base_b, client_b) = ("https://every-tenant-b.example.com", "client-every-b");
+    let entry_a = saved_refresh_entry(base_a, client_a);
+    let entry_b = saved_refresh_entry(base_b, client_b);
+
+    let auth = launched(base_a, client_a);
+    auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.grant_stamp(), true)
+        .expect("sign in to A");
+    auth.apply_settings(base_b.into(), Some(client_b.into()), 11434, false);
+    assert_eq!(
+        load_keyring(&entry_a).unwrap().as_deref(),
+        Some("refresh-a"),
+        "a tenant switch keeps the other tenant's sign-in for switching back"
+    );
+    auth.store_tokens_blocking(token_response(Some("refresh-b")), auth.grant_stamp(), true)
+        .expect("sign in to B");
+
+    auth.logout().expect("sign out");
+
+    assert_eq!(
+        load_keyring(&entry_b).unwrap(),
+        None,
+        "the configured tenant's"
+    );
+    assert_eq!(
+        load_keyring(&entry_a).unwrap(),
+        None,
+        "and the tenant switched away from, which is the one that used to survive"
+    );
+    assert_eq!(
+        load_keyring(auth.refresh_index).unwrap(),
+        None,
+        "the index is cleared once everything it named is gone"
+    );
+}
+
+/// The whole shared-workstation path: Alice signs in to A, switches to B and
+/// signs out there; Bob points Settings back at A. Nothing may be restored, and
+/// nothing may be sent to A's token endpoint.
+#[tokio::test]
+async fn switching_back_after_a_sign_out_restores_nobody() {
+    let _legacy = LEGACY_REFRESH_ENTRY.lock().await;
+    let server = wiremock::MockServer::start().await;
+    token_endpoint(&server, granted("never", "never"), 0).await;
+    let base_a = server.uri();
+    let auth = launched(&base_a, "client-switch-back-a");
+    auth.store_tokens_blocking(
+        token_response(Some("alice-refresh")),
+        auth.grant_stamp(),
+        true,
+    )
+    .expect("Alice signs in to A");
+
+    auth.apply_settings(
+        "https://switch-back-b.example.com".into(),
+        Some("client-switch-back-b".into()),
+        11434,
+        false,
+    );
+    auth.logout_async().await.expect("Alice signs out from B");
+    auth.apply_settings(
+        base_a.clone(),
+        Some("client-switch-back-a".into()),
+        11434,
+        false,
+    );
+
+    assert!(
+        !auth.restore_session().await,
+        "Bob must not be signed in as Alice"
+    );
+    server.verify().await;
+}
+
+/// The index is written before the token, and a token whose entry cannot be
+/// indexed is not written at all: a saved sign-in the index does not name is
+/// exactly the one a sign-out from another tenant could not find.
+#[test]
+fn a_refresh_token_that_cannot_be_indexed_is_not_saved() {
+    let base_url = "https://index-refuses.example.com";
+    let client_id = "client-index-refuses";
+    let entry = saved_refresh_entry(base_url, client_id);
+    let auth = launched(base_url, client_id);
+    test_keyring::refuse_writes_to(auth.refresh_index);
+
+    auth.store_tokens_blocking(token_response(Some("unindexed")), auth.grant_stamp(), false)
+        .expect("an index failure degrades like any keyring failure");
+
+    assert!(auth.is_authenticated(), "the session survives in memory");
+    assert_eq!(load_keyring(&entry).unwrap(), None, "but nothing is saved");
+}
+
+/// A saved sign-in is named in the index as soon as it is written.
+#[test]
+fn a_saved_refresh_token_is_indexed() {
+    let base_url = "https://indexed.example.com";
+    let client_id = "client-indexed";
+    let auth = launched(base_url, client_id);
+
+    auth.store_tokens_blocking(token_response(Some("indexed")), auth.grant_stamp(), false)
+        .expect("store");
+
+    assert_eq!(
+        read_refresh_index(auth.refresh_index).unwrap(),
+        vec![saved_refresh_entry(base_url, client_id)]
+    );
+    // Storing the same tenant again does not list it twice.
+    auth.store_tokens_blocking(token_response(Some("rotated")), auth.grant_stamp(), false)
+        .expect("store again");
+    assert_eq!(read_refresh_index(auth.refresh_index).unwrap().len(), 1);
+}
+
+/// A delete that fails is reported, as before — and the index survives it, so the
+/// next sign-out can retry the entry it could not remove.
+#[test]
+fn a_saved_sign_in_that_cannot_be_deleted_is_reported_and_stays_indexed() {
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
+    let (base_a, client_a) = ("https://undeletable-a.example.com", "client-undeletable-a");
+    let entry_a = saved_refresh_entry(base_a, client_a);
+    let auth = launched(base_a, client_a);
+    auth.store_tokens_blocking(token_response(Some("refresh-a")), auth.grant_stamp(), true)
+        .expect("sign in to A");
+    auth.apply_settings(
+        "https://undeletable-b.example.com".into(),
+        Some("client-undeletable-b".into()),
+        11434,
+        false,
+    );
+    test_keyring::refuse_deletes_of(&entry_a);
+
+    let err = auth.logout().expect_err("a failed delete must be reported");
+
+    assert!(
+        format!("{err:#}").contains("could not be deleted"),
+        "{err:#}"
+    );
+    assert!(!auth.is_authenticated(), "the session ends regardless");
+    assert_eq!(
+        read_refresh_index(auth.refresh_index).unwrap(),
+        vec![entry_a],
+        "the entry it could not delete stays listed for the next sign-out"
+    );
+}
+
+/// A token saved before the index existed is not in it. Visiting its tenant reads
+/// it, and from then on a sign-out from any tenant removes it.
+#[test]
+fn a_sign_in_saved_before_the_index_is_indexed_when_its_tenant_is_visited() {
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
+    let (base_a, client_a) = ("https://pre-index-a.example.com", "client-pre-index-a");
+    let entry_a = saved_refresh_entry(base_a, client_a);
+    save_keyring(&entry_a, "saved-before-the-index").unwrap();
+    let auth = launched(base_a, client_a);
+
+    let read = auth
+        .load_saved_refresh_blocking(&auth.grant_stamp())
+        .expect("read");
+
+    assert_eq!(read.as_deref(), Some("saved-before-the-index"));
+    assert_eq!(
+        read_refresh_index(auth.refresh_index).unwrap(),
+        vec![entry_a.clone()]
+    );
+    auth.apply_settings(
+        "https://pre-index-b.example.com".into(),
+        Some("client-pre-index-b".into()),
+        11434,
+        false,
+    );
+    auth.logout().expect("sign out from B");
+    assert_eq!(load_keyring(&entry_a).unwrap(), None);
+}
+
+/// Adopting the pre-tenant-scoping entry writes the tenant's, so it is indexed
+/// like any other saved refresh token.
+#[test]
+fn a_legacy_sign_in_adopted_by_a_tenant_is_indexed() {
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
+    save_keyring(LEGACY_KEYRING_USER_REFRESH, "legacy-refresh").expect("seed legacy");
+    let base_url = "https://legacy-indexed.example.com";
+    let client_id = "client-legacy-indexed";
+    let auth = launched(base_url, client_id);
+
+    let read = auth
+        .load_saved_refresh_blocking(&auth.grant_stamp())
+        .expect("adopt");
+
+    assert_eq!(read.as_deref(), Some("legacy-refresh"));
+    assert_eq!(
+        read_refresh_index(auth.refresh_index).unwrap(),
+        vec![saved_refresh_entry(base_url, client_id)]
+    );
+}
+
+/// A caller that queued for the keyring while its session ended reads nothing. It
+/// used to read on regardless — after a new interactive sign-in that meant finding
+/// the *new* session's refresh token and POSTing it for a grant `store_tokens` then
+/// refused, which under rotation spent the new session's credential.
+#[test]
+fn a_session_that_ended_reads_no_saved_sign_in() {
+    let base_url = "https://ended-session.example.com";
+    let client_id = "client-ended-session";
+    let entry = saved_refresh_entry(base_url, client_id);
+    let auth = launched(base_url, client_id);
+    let queued = auth.grant_stamp();
+    auth.store_tokens_blocking(
+        token_response(Some("new-operator")),
+        auth.grant_stamp(),
+        true,
+    )
+    .expect("a new interactive sign-in");
+
+    let read = auth.load_saved_refresh_blocking(&queued).expect("read");
+
+    assert_eq!(
+        read, None,
+        "the new session's token is not the old one's to use"
+    );
+    assert_eq!(test_keyring::reads_of(&entry), 0, "nor even read for it");
+}
+
+/// Whatever the index holds, sign-out deletes only refresh tokens: a client secret
+/// or the index's own name in it is ignored, as is anything not spelled the way
+/// `tenant_entry` spells a refresh entry.
+#[test]
+fn the_index_can_only_name_refresh_tokens() {
+    // The sign-out below also clears the legacy entry.
+    let _legacy = LEGACY_REFRESH_ENTRY.blocking_lock();
+    let auth = launched("https://hostile-index.example.com", "client-hostile-index");
+    let secret = tenant_entry(
+        KEYRING_SECRET_PREFIX,
+        "https://hostile-index.example.com",
+        Some("client-hostile-index"),
+    );
+    save_keyring(&secret, "client-secret").unwrap();
+    let real = "refresh_token.0123456789abcdef";
+    save_keyring(
+        auth.refresh_index,
+        &format!(
+            "{secret}\n{real}\n{}\nrefresh_token\nrefresh_token.0123456789ABCDEF\n\
+             refresh_token.0123456789abcde\nnot-an-entry",
+            auth.refresh_index
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(read_refresh_index(auth.refresh_index).unwrap(), vec![real]);
+    auth.logout().expect("sign out");
+    assert_eq!(
+        load_keyring(&secret).unwrap().as_deref(),
+        Some("client-secret"),
+        "the client secret is configuration, not a sign-in"
+    );
+}
+
+/// An instance `save_settings` would refuse can still come from `settings.json`.
+/// It reads as not configured: its saved sign-in is not read, the browser is not
+/// opened, and nothing — probe, grant or request — is sent to it.
+#[tokio::test]
+async fn an_instance_settings_would_refuse_is_never_contacted() {
+    let server = wiremock::MockServer::start().await;
+    let instance = format!("{}/ws", server.uri());
+    let entry = saved_refresh_entry(&instance, "client-refused-instance");
+    save_keyring(&entry, "saved-refresh").unwrap();
+    let auth = launched(&instance, "client-refused-instance");
+
+    assert!(!auth.restore_session().await);
+    let err = auth
+        .login_pkce()
+        .await
+        .expect_err("refused before the browser opens");
+
+    assert!(format!("{err:#}").contains("no path"), "{err:#}");
+    assert_eq!(
+        test_keyring::reads_of(&entry),
+        0,
+        "its saved sign-in is not even read"
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "nothing is sent to it"
+    );
 }

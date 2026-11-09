@@ -2,6 +2,8 @@
 //! current result, for display beside them. Read-only. A dispatched action still
 //! resolves from `/activities` alone (`commands::actions::poller`).
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tauri::State;
@@ -92,7 +94,16 @@ fn fmt_time(at: Option<DateTime<Utc>>) -> Option<String> {
 
 /// The running patch-ops jobs on `devices` (the current result's in-scope devices),
 /// labelled from them and ordered by device, then oldest first.
+///
+/// Joined through an id map. Each job used to scan `devices` for its own, so a patch
+/// window — tens of thousands of running jobs over a fleet of as many devices — cost
+/// on the order of a billion comparisons, on every 30-second read.
 pub fn running_job_rows(jobs: Vec<RunningJob>, devices: &[DeviceSummary]) -> Vec<RunningJobRow> {
+    let mut by_id: HashMap<i64, &DeviceSummary> = HashMap::with_capacity(devices.len());
+    for device in devices {
+        // The first device with an id wins, as the scan it replaced found it.
+        by_id.entry(device.device_id).or_insert(device);
+    }
     let mut rows: Vec<RunningJobRow> = jobs
         .into_iter()
         .filter(|j| {
@@ -105,7 +116,7 @@ pub fn running_job_rows(jobs: Vec<RunningJob>, devices: &[DeviceSummary]) -> Vec
                     .is_some_and(|s| FINISHED_STATUSES.contains(&s))
         })
         .filter_map(|j| {
-            let device = devices.iter().find(|d| Some(d.device_id) == j.device_id)?;
+            let device = *by_id.get(&j.device_id?)?;
             Some(RunningJobRow {
                 uid: j.uid.clone(),
                 device_id: device.device_id,
@@ -124,12 +135,8 @@ pub fn running_job_rows(jobs: Vec<RunningJob>, devices: &[DeviceSummary]) -> Vec
             })
         })
         .collect();
-    rows.sort_by(|a, b| {
-        a.device_name
-            .to_lowercase()
-            .cmp(&b.device_name.to_lowercase())
-            .then_with(|| a.started_at.cmp(&b.started_at))
-    });
+    // Each key built once per row, not twice per comparison.
+    rows.sort_by_cached_key(|r| (r.device_name.to_lowercase(), r.started_at.clone()));
     rows
 }
 
@@ -150,7 +157,13 @@ pub async fn list_running_jobs(state: State<'_, AppState>) -> Result<RunningJobs
     }
     let jobs = state.api.running_jobs().await.map_err(UiError::from)?;
     let jobs = match state.current_result_handle()? {
-        Some(result) => running_job_rows(jobs, &result.devices),
+        // Off the runtime, like the decode before it: a patch window's join and sort
+        // are tens of thousands of rows.
+        Some(result) => {
+            tokio::task::spawn_blocking(move || running_job_rows(jobs, &result.devices))
+                .await
+                .map_err(|e| UiError::new(format!("the running-jobs join failed: {e}")))?
+        }
         None => Vec::new(),
     };
     Ok(RunningJobs { fetched_at, jobs })
@@ -232,5 +245,43 @@ mod tests {
         );
         assert_eq!(rows[1].detail.as_deref(), Some("Installing updates"));
         assert_eq!(rows[1].started_at.as_deref(), Some("2026-06-26 13:20 UTC"));
+    }
+
+    /// The join goes through an id map: across a large fleet every job lands on its
+    /// own device, several jobs on one device each get a row (oldest first), a job
+    /// with no device id or an out-of-scope one is dropped, and a repeated device id
+    /// keeps the first device, as the scan it replaced did.
+    #[test]
+    fn jobs_join_to_their_devices_by_id() {
+        let mut devices: Vec<DeviceSummary> = (1..=5_000)
+            .map(|id| device(id, &format!("srv-{id:05}")))
+            .collect();
+        devices.push(device(42, "a-later-duplicate"));
+        let mut later = job(42, "SCRIPTING", "STARTED");
+        later.create_time = Some(1_782_490_000.0);
+        let mut no_device = job(7, "PATCH_MANAGEMENT", "STARTED");
+        no_device.device_id = None;
+        let rows = running_job_rows(
+            vec![
+                later,
+                job(4_999, "SOFTWARE_PATCH_MANAGEMENT", "IN_PROCESS"),
+                job(42, "PATCH_MANAGEMENT", "IN_PROCESS"),
+                no_device,
+                job(6_000, "PATCH_MANAGEMENT", "IN_PROCESS"),
+            ],
+            &devices,
+        );
+        let seen: Vec<(i64, &str, &str)> = rows
+            .iter()
+            .map(|r| (r.device_id, r.device_name.as_str(), r.job_type.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (42, "srv-00042", "OS patching"),
+                (42, "srv-00042", "Script"),
+                (4_999, "srv-04999", "Software patching"),
+            ]
+        );
     }
 }

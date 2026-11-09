@@ -49,7 +49,7 @@ pub(crate) fn RunControls() -> impl IntoView {
                 aria-label="Refresh from NinjaOne"
                 prop:disabled=move || {
                     state.run.busy.get() || state.run.refreshing.get() || state.session.web_mode.get()
-                        || state.session.demo.get() || state.query.result.get().is_none()
+                        || state.session.demo.get() || state.query.result.with(Option::is_none)
                 }
                 title=move || {
                     let base = "Refetch live patch data from NinjaOne for the current filter";

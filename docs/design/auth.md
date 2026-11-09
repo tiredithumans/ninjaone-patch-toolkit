@@ -2,7 +2,7 @@
 
 Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
 Code: `src-tauri/src/auth.rs`, `src-tauri/src/state.rs` (`AppState`),
-`src-tauri/src/commands/auth.rs`.
+`src-tauri/src/commands/auth.rs`, `src-tauri/src/settings.rs` (`instance_url_problem`).
 
 ## Secrets discipline — keyring only, never `settings.json`, never logs
 
@@ -12,6 +12,13 @@ non-sensitive config (instance URL, client id, ports, windows, presets). Never w
 token/secret to disk or a `tracing` event. Types that hold one (`TokenSet`, `TokenResponse`,
 `SaveSettingsArgs`) have hand-written `Debug` impls that print `<redacted>`, so a `{:?}` can't leak
 it either.
+
+On Windows every entry is created with `Local` persistence (`keyring_entry`). Credential Manager's
+store defaults to `Enterprise`, which roams with the user's profile, so the refresh token — a
+fleet-wide `management` grant once actions are on — and the client secret were copied to the
+profile server and to every machine the operator logged on to. Persistence is applied when a secret
+is written, so an entry saved before this moves to `Local` at its next write. `keyring`'s own
+`Entry` cannot take the modifier, which is why `keyring-core` is a direct dependency.
 
 ## PKCE, lazy token, Native-or-Web client
 
@@ -58,6 +65,68 @@ the tenant under the same read lock that reads the token, and the refresh path c
 stamp before it POSTs. Plain `access_token()` refreshed for whichever tenant was current, so a read
 waiting out a 429 across a switch sent tenant B's token to host A
 ([api-client.md](./api-client.md#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant)).
+
+Reading the saved refresh token (`load_saved_refresh`) is under `persist_lock` and checks the
+generation too. Adopting the pre-tenant-scoping entry *writes* the tenant's, and a sign-out landing
+between that read and that write had its deletion undone; and a caller whose session ended while it
+queued read the *next* session's refresh token and POSTed it for a grant `store_tokens` then refused
+— under rotation, spending the new session's credential.
+
+## Sign-out removes every tenant's saved sign-in: the index
+
+A tenant switch keeps the previous tenant's refresh token so that switching back finds it
+(`apply_settings`). That made sign-out partial: `logout` deleted only the configured tenant's entry,
+so after a switch the other tenant's grant stayed on disk behind a clean-looking sign-out, and the
+next operator to point Settings at that tenant was silently signed in as the previous one — with
+their scope, and with NinjaOne attributing every action to them. Saving Settings was enough: the
+frontend's `auth_status` call restores it.
+
+So every refresh token the app writes is first named in an index (`save_refresh_entry` →
+`index_refresh_entry`, under `persist_lock`), and `logout` — and `reauthorize`, which signs out
+first — deletes every named entry as well as the configured tenant's and the legacy one, then the
+index. A failed delete is reported, as before, and leaves the index for the next sign-out to retry.
+Index first, token second: a named entry with nothing behind it costs one no-op delete, while an
+unnamed token is the bug, so a token whose entry cannot be indexed is not written at all — the same
+"no persistence this session" a failed token write degrades to. Every name read back is held to
+`tenant_entry`'s spelling (`is_refresh_entry_name`), so whatever the index holds, sign-out deletes
+only refresh tokens.
+
+The index is itself a keyring entry (`refresh_token_index`, one entry name — a non-secret hash — per
+line), not a file in the config directory. It lives and dies with the tokens it names: same
+machine, same profile, same "reset the keychain". A file could be deleted, roam with a Windows
+profile, or come back from a backup independently of them, and a name missing from the index is
+exactly the failure it exists to prevent. Tests give each `AuthState` its own index name
+(`refresh_index_entry`): they share one in-process keyring and run in parallel.
+
+**Not covered:** a refresh token saved before the index existed, for a tenant other than the one
+configured at sign-out. None of the keyring stores this app links can be listed portably, so such an
+entry is found only by name — once its tenant is visited (`load_saved_refresh` indexes a token it
+reads), or when it is the configured tenant at sign-out.
+
+## The instance is an origin, and one that is not is never contacted
+
+`settings::instance_url_problem` is the one rule: `https` (or `http` to loopback, for a mock
+server), no user name or password, no query, no fragment, no path beyond `/`. A user name moves the
+host — `https://us2.ninjarmm.com@evil.example` is `evil.example` — and every endpoint is appended to
+the instance as written, so a query or fragment swallows `/ws/oauth/token` and a path misdirects
+it. `save_settings` refuses such a value. One that reaches `settings.json` another way (an older
+version, a hand edit) loads exactly as written and reads as *not configured*: `refresh_grant` and
+`login_pkce` refuse it before the keyring read, the probe or the browser, and the load logs the
+problem, never the value. It is not repaired, because the instance string — with the client id —
+keys the saved sign-ins, the first-seen ledger and the run snapshots, so rewriting even a valid
+spelling of it would orphan them. For the same reason the load-time `http`→`https` upgrade applies
+only to a value that is otherwise valid, which also keeps a user name's password out of its log
+line.
+
+## The browser launch neither holds a worker nor logs the URL
+
+`open_browser` runs `open::that_detached` on a blocking thread. `open::that` waited for its
+launcher on a tokio worker: a whole `powershell.exe` run on Windows, and on a generic desktop an
+`xdg-open` that runs a browser that was not already open in the foreground, until it closes —
+before the callback's three-minute clock had started. A failure is logged by `io::ErrorKind` and
+`url_without_query` only, because `open` words its error from the launcher's command line, which is
+the authorize URL with `state` and `code_challenge`. The log directory is created (and tightened
+to) 0700 on Unix (`prepare_log_dir` in `lib.rs`): `tracing_appender` creates its files 0644.
 
 ## `expires_in` is clamped
 

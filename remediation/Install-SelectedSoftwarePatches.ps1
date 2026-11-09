@@ -26,11 +26,15 @@
 
     The module runs as SYSTEM only in PowerShell 7 started with -MTA. NinjaOne runs scripts in
     Windows PowerShell 5.1, so as SYSTEM the script re-runs itself in PowerShell 7 when it is
-    installed. Under any other account (Run as a Windows credential) the module works in Windows
-    PowerShell 5.1 and the script stays there.
+    installed under Program Files and signed by Microsoft. It never looks pwsh.exe up on PATH,
+    where a directory a local user can write would hand that user SYSTEM. Under any other
+    account (Run as a Windows credential) the module works in Windows PowerShell 5.1 and the
+    script stays there.
 
     When the module is missing, the script installs it for all users from the PowerShell Gallery,
     on a dry run too: that is the one change a dry run makes to a device, and the log says so.
+    Installed now or earlier, the module is loaded only once its signature checks out as
+    Microsoft's (Get-ModuleSignatureProblem); otherwise the run exits 5 and says which file failed.
 
     A NinjaOne title ("ChromeEnterprise (X64)") is not a winget package id ("Google.Chrome"), so the
     mapping is an explicit table - Get-ProductPackageMap - rather than a fuzzy search. A title the
@@ -259,6 +263,46 @@ function Test-IsSystem {
     return [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
 }
 
+function Get-ShutdownPath {
+    # By full path. A bare `shutdown.exe` is looked up on the machine PATH, and this runs as
+    # SYSTEM: a PATH directory that a local user can write, listed ahead of System32, would
+    # run that user's own shutdown.exe as SYSTEM.
+    return (Join-Path $env:SystemRoot 'System32\shutdown.exe')
+}
+
+function Get-FileSignature {
+    # Thin wrapper: the one place the script reads an Authenticode signature, and what the
+    # Pester suite mocks (Get-AuthenticodeSignature exists only on Windows).
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return Get-AuthenticodeSignature -LiteralPath $Path
+}
+
+function Get-SignatureProblem {
+    <#
+        $null when the file at Path carries a valid Authenticode signature, from Microsoft when
+        -Microsoft is given, or why it does not. Valid means Windows built the chain to a
+        trusted root and the file is unchanged since it was signed. Microsoft means the signer
+        is the organization Microsoft Corporation, which also signs the third-party components
+        Microsoft ships ("Microsoft 3rd Party Application Component").
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path, [switch]$Microsoft)
+    try {
+        $signature = Get-FileSignature -Path $Path
+    } catch {
+        return "its signature could not be read ($($_.Exception.Message))"
+    }
+    if ($null -eq $signature) { return 'it carries no signature' }
+    $status = [string]$signature.Status
+    if ($status -ne 'Valid') { return "its Authenticode signature is $status" }
+    if ($Microsoft) {
+        $subject = [string]$signature.SignerCertificate.Subject
+        if ($subject -notmatch '(^|,\s*)O=Microsoft Corporation\s*(,|$)') {
+            return "it is signed by '$subject', not by Microsoft"
+        }
+    }
+    return $null
+}
+
 #region install-hook
 $script:WinGetModuleName = 'Microsoft.WinGet.Client'
 # Get-WinGetPackage with no filter lists every installed package; the unmapped-title diagnostic
@@ -332,14 +376,21 @@ function Resolve-ScriptHost {
 }
 
 function Find-Pwsh {
-    $command = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($command) { return $command.Source }
-    # SYSTEM's PATH may predate the PowerShell 7 install; ProgramW6432 is the 64-bit Program
-    # Files even when the agent started a 32-bit Windows PowerShell.
+    <#
+        PowerShell 7 where its installer puts it, and only when Microsoft signed that file.
+        Never looked up on PATH: this runs as SYSTEM, and the machine PATH routinely lists a
+        directory any local user can write (a folder created under C:\ inherits Modify for
+        Authenticated Users), so a pwsh.exe dropped there would run as SYSTEM, on a dry run too.
+        Program Files is writable only by administrators. ProgramW6432 is the 64-bit Program
+        Files even when the agent started a 32-bit Windows PowerShell.
+    #>
     foreach ($root in @($env:ProgramW6432, $env:ProgramFiles)) {
         if (-not $root) { continue }
         $candidate = Join-Path $root 'PowerShell\7\pwsh.exe'
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        $problem = Get-SignatureProblem -Path $candidate -Microsoft
+        if (-not $problem) { return $candidate }
+        Write-Host "Host: not running $candidate, because $problem."
     }
     return $null
 }
@@ -371,13 +422,83 @@ function Install-WinGetModule {
     Install-Module -Name $script:WinGetModuleName -Repository PSGallery -Scope AllUsers -Force -ErrorAction Stop
 }
 
+function Get-ModuleCodeFile {
+    # Every file in a module that PowerShell or .NET can run code from: what signatures have to
+    # cover when the module ships no catalog.
+    param([Parameter(Mandatory = $true)][string]$ModuleBase)
+    $code = @('.psd1', '.psm1', '.ps1', '.ps1xml', '.cdxml', '.dll', '.exe')
+    return @(Get-ChildItem -LiteralPath $ModuleBase -Recurse -File | Where-Object { $code -contains $_.Extension.ToLowerInvariant() })
+}
+
+function Test-ModuleCatalog {
+    # Thin wrapper over Test-FileCatalog (Windows only), and what the Pester suite mocks.
+    # PowerShellGet writes PSGetModuleInfo.xml after the install, so no catalog the publisher
+    # signed can list it.
+    param([Parameter(Mandatory = $true)][string]$ModuleBase, [Parameter(Mandatory = $true)][string]$CatalogPath)
+    return Test-FileCatalog -Path $ModuleBase -CatalogFilePath $CatalogPath -Detailed -FilesToSkip 'PSGetModuleInfo.xml'
+}
+
+function Get-ModuleSignatureProblem {
+    <#
+        $null when the module installed at ModuleBase is signed by Microsoft, or why it is not.
+        Checked before every Import-Module, a module installed earlier included: Install-Module
+        takes whatever the gallery serves, and the module then runs as SYSTEM on every device
+        this script is sent to.
+
+        Which file vouches for a module is PowerShellGet's own rule: its catalog, <Name>.cat,
+        when it ships one, and otherwise its manifest, <Name>.psd1. A catalog's hashes cover every
+        file, so a Microsoft-signed catalog that the files still match is enough. A manifest's
+        signature covers only the manifest, so without a catalog every file code can be loaded
+        from must carry a valid signature of its own, and Microsoft's own (Microsoft.*) files a
+        Microsoft one. Third-party libraries the module bundles may be signed by their own
+        publisher; unsigned or altered, they are refused like the rest.
+    #>
+    param([Parameter(Mandatory = $true)][string]$ModuleBase, [Parameter(Mandatory = $true)][string]$Name)
+    $catalog = Join-Path $ModuleBase "$Name.cat"
+    if (Test-Path -LiteralPath $catalog -PathType Leaf) {
+        $problem = Get-SignatureProblem -Path $catalog -Microsoft
+        if ($problem) { return "$Name.cat: $problem" }
+        try {
+            $check = Test-ModuleCatalog -ModuleBase $ModuleBase -CatalogPath $catalog
+        } catch {
+            return "its files could not be checked against $Name.cat ($($_.Exception.Message))"
+        }
+        if ([string]$check.Status -ne 'Valid') { return "its files do not match $Name.cat" }
+        return $null
+    }
+    $manifest = Join-Path $ModuleBase "$Name.psd1"
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { return "it has no $Name.psd1 or $Name.cat to vouch for it" }
+    $problem = Get-SignatureProblem -Path $manifest -Microsoft
+    if ($problem) { return "$Name.psd1: $problem" }
+    foreach ($file in @(Get-ModuleCodeFile -ModuleBase $ModuleBase)) {
+        $problem = Get-SignatureProblem -Path $file.FullName -Microsoft:($file.Name -like 'Microsoft.*')
+        if ($problem) { return "$($file.Name): $problem" }
+    }
+    return $null
+}
+
+function Get-AvailableWinGetModule {
+    # Newest version first: the copy Import-Module -Name would pick. A thin wrapper the Pester
+    # suite mocks.
+    return @(Get-Module -ListAvailable -Name $script:WinGetModuleName | Sort-Object Version -Descending)
+}
+
+function Import-WinGetModuleManifest {
+    # By the manifest path of the copy that was verified, not by name, so the copy that loads is
+    # the one that was checked. A thin wrapper the Pester suite mocks.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Import-Module -Name $Path -ErrorAction Stop
+}
+
 function Initialize-WinGetModule {
     <#
-        Loads Microsoft.WinGet.Client, installing it for all users first when it is missing.
-        Returns $null when the module is ready, or why it is not (an environment error).
+        Loads Microsoft.WinGet.Client, installing it for all users first when it is missing, and
+        only once Get-ModuleSignatureProblem finds it signed by Microsoft. Returns $null when the
+        module is ready, or why it is not (an environment error).
     #>
     if (Get-Module -Name $script:WinGetModuleName) { return $null }
-    if (-not (Get-Module -ListAvailable -Name $script:WinGetModuleName)) {
+    $available = @(Get-AvailableWinGetModule)
+    if ($available.Count -eq 0) {
         if (-not (Test-IsElevated)) {
             return "$($script:WinGetModuleName) is not installed, and installing it for all users needs an elevated session."
         }
@@ -386,14 +507,19 @@ function Initialize-WinGetModule {
         } catch {
             return "installing $($script:WinGetModuleName) from the PowerShell Gallery failed: $($_.Exception.Message)"
         }
-        $installed = @(Get-Module -ListAvailable -Name $script:WinGetModuleName | Sort-Object Version -Descending)
-        if ($installed.Count -eq 0) {
+        $available = @(Get-AvailableWinGetModule)
+        if ($available.Count -eq 0) {
             return "$($script:WinGetModuleName) reported installed but PowerShell cannot find it."
         }
-        Write-Host "SETUP            : installed $($script:WinGetModuleName) $($installed[0].Version) for all users from the PowerShell Gallery."
+        Write-Host "SETUP            : installed $($script:WinGetModuleName) $($available[0].Version) for all users from the PowerShell Gallery."
+    }
+    $module = $available[0]
+    $problem = Get-ModuleSignatureProblem -ModuleBase $module.ModuleBase -Name $script:WinGetModuleName
+    if ($problem) {
+        return "$($script:WinGetModuleName) $($module.Version) in $($module.ModuleBase) is not signed by Microsoft ($problem), so it was not loaded. Remove that copy and run again to reinstall it from the PowerShell Gallery."
     }
     try {
-        Import-Module -Name $script:WinGetModuleName -ErrorAction Stop
+        Import-WinGetModuleManifest -Path $module.Path
     } catch {
         return "loading $($script:WinGetModuleName) failed: $($_.Exception.Message)"
     }
@@ -608,7 +734,7 @@ function Invoke-SoftwareRemediation {
         if ($request.RebootBehavior -eq 'Auto') {
             # A delayed restart lets this script exit and the NinjaOne agent report the result
             # before the machine goes down.
-            & shutdown.exe /r /t 60 /d p:4:1 /c 'NinjaOne Patch Toolkit: restarting to finish installing software updates.' | Out-Host
+            & (Get-ShutdownPath) /r /t 60 /d p:4:1 /c 'NinjaOne Patch Toolkit: restarting to finish installing software updates.' | Out-Host
             if ($LASTEXITCODE -eq 0) {
                 $rebootScheduled = $true
                 Write-Host 'REBOOT           : restart scheduled in 60 seconds (rebootBehavior=Auto).'

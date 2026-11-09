@@ -28,7 +28,9 @@ paths:
 - **Compact aggregates (`failures`, `approvals`, `changes`, `worst_devices`, …) ride on both
   `QueryResult` and `QuerySummary`.** Add one in lockstep with `QuerySummary::from_result`, the
   `types.rs` mirror, the demo's `assemble`, and a filled sample in the regenerated IPC fixture
-  (`web-rs/tests/backend-ipc.json`, see `ipc-contract.md`).
+  (`web-rs/tests/backend-ipc.json`, see `ipc-contract.md`). A list with one entry per *device*
+  is capped on the summary with its total kept (`stuck_devices`, failure `device_names`,
+  `reboot_devices` — paged via `get_reboot_devices`); never ship one whole.
   → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
 - **Every TTL'd cache slot is a `TenantCache<T>`** — it owns the tenant stamp, TTL,
   single-flight gate, and the epoch sampled on entry and re-checked at the store. A partial

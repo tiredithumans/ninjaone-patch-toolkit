@@ -104,11 +104,26 @@ fn total_severity(by_org: &[OrgSeverity]) -> SeverityCounts {
     t
 }
 
+/// The report's Content-Security-Policy. The page is self-contained — one `<style>`,
+/// inline `style` attributes and inline SVG, nothing fetched and nothing run — so it
+/// allows exactly that. Device, patch and organization names come from managed
+/// endpoints and are escaped (`escape_html`); this is what still holds if one ever is
+/// not: an injected script does not run, an image or form does not reach out, and a
+/// `<base>` cannot re-point a link. `base-uri` and `form-action` are listed because
+/// `default-src` does not cover them.
+const REPORT_CSP: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
+
 /// Builds the standalone HTML report. Infallible — writing into a `String` via
 /// `std::fmt::Write` never errors.
 pub fn render_report(result: &QueryResult) -> String {
     let mut buf = String::with_capacity(8 * 1024);
     buf.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    // First in the head, ahead of anything it governs.
+    let _ = write!(
+        buf,
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"{REPORT_CSP}\">"
+    );
     buf.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
     buf.push_str("<title>NinjaOne Patch Compliance Report</title><style>");
     buf.push_str(REPORT_CSS);
@@ -1049,6 +1064,26 @@ mod tests {
         assert_eq!(t.critical, 5);
         assert_eq!(t.important, 1);
         assert_eq!(t.low, 4);
+    }
+
+    /// The report declares a policy that lets its own styles render and nothing
+    /// else run or load, ahead of every element it governs — the backstop behind
+    /// the escaping of the endpoint-supplied names it prints.
+    #[test]
+    fn the_report_runs_nothing_and_loads_nothing() {
+        let html = render_report(&sample_result());
+        let csp = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; \
+                   style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">";
+        let at = html.find(csp).expect("the policy is declared");
+        assert!(
+            at < html.find("<style>").expect("the stylesheet"),
+            "declared before the stylesheet"
+        );
+        // The sample's names carry markup, escaped; nothing the page itself writes
+        // needs the policy to allow more.
+        for tag in ["<script", "<img", "<link", "<iframe", "<object", "<form"] {
+            assert!(!html.contains(tag), "the report writes no {tag}");
+        }
     }
 
     fn sample_result() -> QueryResult {

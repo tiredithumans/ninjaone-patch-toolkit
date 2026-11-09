@@ -29,9 +29,25 @@ const MAX_RETRY_AFTER_SECS: u64 = 60;
 /// leg of a query that failed together retried together, in lockstep, at 2, 4 and
 /// 8 s — re-creating the burst that failed them.
 const MAX_BACKOFF_JITTER: f64 = 0.25;
-/// The most added to a 429's wait, for the same reason: the shared pause releases
-/// every waiting request at one instant, and the server would see them all at once.
+/// The most added to a 429's wait, for the same reason. It is added twice: to the
+/// shared deadline, and again by each request as the pause releases it — the deadline
+/// is one instant for every waiter, so jitter on it alone moved the burst without
+/// spreading it.
 const MAX_RATE_LIMIT_JITTER_MS: u64 = 1000;
+/// How long one cursor page may take end to end, in place of the client's 45 s.
+///
+/// NinjaOne advances a scan's position when it *serves* a page, not when the client
+/// receives it, so a page the client stopped waiting for at 45 s and the backend went
+/// on to serve was lost by construction: the re-read is answered with the next page,
+/// and the scan ends short of its count and starts over. The 563,255-row software
+/// feed lost a page to that timeout every 19–85 pages on 2026-10-26. Waiting longer
+/// turns a slow page into a page. It stays under the 120 s `expires` NinjaOne stamps
+/// on a cursor (`log_cursor_opened`), past which the page would find its cursor gone
+/// anyway; connecting keeps its own 15 s budget (`state::build_http_client`).
+const CURSOR_PAGE_TIMEOUT: Duration = Duration::from_secs(100);
+/// The longest body [`decode_response`] keeps as a bare string rather than refusing
+/// it as "not JSON": room for an activity-series uid, nothing like a page.
+const MAX_BARE_TOKEN: usize = 128;
 
 /// The failure of a [`ReplaySafety::ActOnce`] request that may nonetheless have
 /// reached NinjaOne: a timeout or a connection lost after the request was sent, a
@@ -172,6 +188,8 @@ pub struct NinjaApiClient {
     /// `std` mutex because it is only ever held to copy or bump an `Instant`, never
     /// across an await.
     paused_until: Arc<Mutex<Option<Instant>>>,
+    /// [`CURSOR_PAGE_TIMEOUT`]; a field only so the tests can shorten it.
+    cursor_page_timeout: Duration,
 }
 
 impl NinjaApiClient {
@@ -181,7 +199,16 @@ impl NinjaApiClient {
             auth,
             send_guard: None,
             paused_until: Arc::new(Mutex::new(None)),
+            cursor_page_timeout: CURSOR_PAGE_TIMEOUT,
         }
+    }
+
+    /// This client with cursor pages timing out after `timeout`, so a test can lose
+    /// one in milliseconds.
+    #[cfg(test)]
+    pub(crate) fn with_cursor_page_timeout(mut self, timeout: Duration) -> Self {
+        self.cursor_page_timeout = timeout;
+        self
     }
 
     /// A clone whose [`ReplaySafety::ActOnce`] requests ask `guard` before every
@@ -239,9 +266,10 @@ impl NinjaApiClient {
     /// the server already answered 2xx, so the action was accepted even though we
     /// cannot say what it reported.
     ///
-    /// The paginated fetchers deliberately do **not** go through here — see
-    /// [`Self::request_page`]. Everything else (the single-shot GETs and the acting
-    /// POSTs) returns small bodies where a `Value` costs nothing.
+    /// The paginated fetchers and the two row lists deliberately do **not** go
+    /// through here — see [`Self::request_page`] and [`Self::get_decoded`].
+    /// Everything else (the single-shot GETs and the acting POSTs) returns small
+    /// bodies where a `Value` costs nothing.
     async fn request_raw(
         &self,
         method: Method,
@@ -296,6 +324,11 @@ impl NinjaApiClient {
             while let Some(wait) = self.pause_left() {
                 debug!(%method, %url, ?wait, "waiting out a rate limit");
                 tokio::time::sleep(wait).await;
+                // The deadline releases every waiter at the same instant, so each
+                // staggers its own re-send; otherwise the burst that drew the 429
+                // comes back as one. A 429 drawn meanwhile extends the pause, and
+                // the loop sits that out too.
+                tokio::time::sleep(rate_limit_jitter()).await;
             }
             let token = match self.auth.access_token_for(&tenant).await {
                 Ok(token) => token,
@@ -330,6 +363,9 @@ impl NinjaApiClient {
             }
             if let Some(b) = &body {
                 req = req.json(b);
+            }
+            if replay == ReplaySafety::CursorPage {
+                req = req.timeout(self.cursor_page_timeout);
             }
 
             let resp = match req.send().await {
@@ -481,6 +517,29 @@ impl NinjaApiClient {
         serde_json::from_value(raw).context("deserialize response body")
     }
 
+    /// Single-shot GET whose body `parse` decodes on the blocking pool, typically
+    /// into rows read one by one through [`lenient_rows`].
+    ///
+    /// `/jobs` and `/activities` came through [`Self::get_json`] as one `Value` tree,
+    /// with every key and string of every record allocated and then walked again per
+    /// row to build it, all inline on a tokio worker. `/jobs` is the whole tenant's
+    /// running jobs, each carrying a full node record, re-read every 30 s and at its
+    /// largest during a patch window, exactly when the operator is watching it.
+    async fn get_decoded<T: Send + 'static>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        parse: fn(&[u8]) -> Result<T>,
+    ) -> Result<T> {
+        let resp = self
+            .send_with_retry(Method::GET, path, query, None, ReplaySafety::Idempotent)
+            .await?;
+        let body = resp.bytes().await.context("read body")?;
+        tokio::task::spawn_blocking(move || parse(&body))
+            .await
+            .context("decode task failed")?
+    }
+
     /// POST to an endpoint whose success is a bare `204 No Content` — the patch
     /// scan/apply family. Never replayed on timeout ([`ReplaySafety::ActOnce`]).
     async fn post_action(&self, path: &str, body: Option<Value>) -> Result<()> {
@@ -598,9 +657,8 @@ fn rate_limit_jitter() -> Duration {
 ///
 /// NinjaOne is inconsistent about what a success body looks like: `204` and an
 /// empty body both mean "nothing to report", and some endpoints return JSON
-/// without a JSON content type. A plain string that doesn't parse is preserved
-/// as `Value::String` rather than discarded, so an unexpected body still reaches
-/// the caller's error message.
+/// without a JSON content type. See [`parse_text_body`] for a body that is not
+/// labelled JSON.
 async fn decode_response(resp: reqwest::Response) -> Result<Value> {
     if resp.status() == StatusCode::NO_CONTENT {
         return Ok(Value::Null);
@@ -615,10 +673,45 @@ async fn decode_response(resp: reqwest::Response) -> Result<Value> {
         return resp.json().await.context("decode json body");
     }
     let text = resp.text().await.context("read body")?;
-    if text.is_empty() {
+    parse_text_body(&text)
+}
+
+/// A success body without a JSON content type: JSON if it parses, nothing if it is
+/// blank, a bare token kept as a string, and otherwise an error quoting at most
+/// [`truncate_body`] of it.
+///
+/// Anything that did not parse used to be kept whole as a `Value::String`. A proxy's
+/// sign-in page answering 200 then reached the toast and the log in full, through
+/// serde's "invalid type: string …" or a shape error's `{other}`, past the cap every
+/// other server text goes through, and on `script/run` it became the job's series
+/// uid. A short token without spaces or markup is still kept, because some tenants
+/// answer `script/run` with the bare activity-series uid (`parse_dispatch_response`).
+fn parse_text_body(text: &str) -> Result<Value> {
+    if text.trim().is_empty() {
         return Ok(Value::Null);
     }
-    Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    if let Ok(value) = serde_json::from_str(text) {
+        return Ok(value);
+    }
+    let token = text.trim();
+    if token.len() <= MAX_BARE_TOKEN
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+    {
+        return Ok(Value::String(token.to_string()));
+    }
+    bail!("the response was not JSON: {}", truncate_body(text))
+}
+
+/// Decodes each element of a JSON array on its own and keeps those that are a `T`,
+/// so one malformed record cannot hide the rest. The elements arrive as borrowed
+/// [`RawValue`](serde_json::value::RawValue)s — the array is scanned, not built into
+/// a tree — and each is parsed once, straight into its final type.
+fn lenient_rows<T: DeserializeOwned>(rows: Vec<&serde_json::value::RawValue>) -> Vec<T> {
+    rows.into_iter()
+        .filter_map(|row| serde_json::from_str(row.get()).ok())
+        .collect()
 }
 
 /// Exponential backoff for a retryable *transport* or 5xx failure: 2s, 4s, 8s,

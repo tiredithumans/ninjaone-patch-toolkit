@@ -154,6 +154,11 @@ compiles or installs holds only the permissions it must:
   [RELEASING.md](../RELEASING.md).
 - `rust-toolchain.toml` pins the same patch toolchain (`1.98.1`) the workflows install, so the
   components CI adds land on the toolchain the build actually uses.
+- Dependabot proposes a version only after a 7-day `cooldown` (every ecosystem in
+  `dependabot.yml`; security updates are exempt). Minor and patch PRs auto-merge on green CI and
+  the next release compiles them with the signing key in the environment, so the cooldown is the
+  window in which a malicious publish can be yanked before it reaches a signed bundle. GitHub's
+  own default is three days.
 
 ## Auto-update packaging
 

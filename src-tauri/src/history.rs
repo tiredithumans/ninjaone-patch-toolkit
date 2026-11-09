@@ -19,11 +19,12 @@
 //! history write must never be able to stop an operator from seeing their fleet.
 
 use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use crate::paths;
@@ -74,13 +75,24 @@ const ORG_DETAIL_RECORDS: usize = 200;
 ///   this app's own first observation.
 pub const METHOD: u32 = 1;
 
-/// Serializes every append and trim in this process.
+/// Serializes every append and trim in this process, and holds the line count of
+/// the file it last touched.
 ///
 /// Queries overlap by design (an auto-refresh tick during a manual Run), and each
 /// records from its own `spawn_blocking` task. Unserialized, one task's trim could
 /// read the file, the other append a line, and the trim's rename then replace the
 /// file with a copy that never saw that line.
-static HISTORY_LOCK: Mutex<()> = Mutex::new(());
+///
+/// The count is what decides when to trim. Counting by reading the file back after
+/// every append read up to ~27 MB per query (4,500 lines of an MSP's per-org detail)
+/// to learn one number; now the file is counted once per process and then tracked.
+static HISTORY_LOCK: Mutex<Option<LineCount>> = Mutex::new(None);
+
+/// Lines in the file at `path`, as of the last append or trim through this process.
+struct LineCount {
+    path: PathBuf,
+    lines: usize,
+}
 
 /// One completed query's fleet-health numbers.
 ///
@@ -101,6 +113,13 @@ pub struct RunRecord {
     /// The instance the numbers describe. A record from another tenant must never
     /// be charted as this one's history.
     pub instance: String,
+    /// The tenant — instance *and* client id, hashed ([`tenant_key`]) — the numbers
+    /// describe. Two client ids on one instance are two tenants, and with only
+    /// `instance` to go on their runs shared one trend line and one org table.
+    /// Empty on lines written before it existed, which [`read_all`] matches by
+    /// `instance` alone, as before.
+    #[serde(default)]
+    pub tenant: String,
     /// Devices in scope, and the two exclusions every compliance surface states.
     pub devices_total: usize,
     pub devices_offline: usize,
@@ -183,10 +202,19 @@ pub struct OrgRun {
     pub urgent_past_sla: usize,
 }
 
+/// The stamp a record carries for `tenant_label` (instance + client id, as
+/// `QueryToken::tenant_label` spells it): a truncated SHA-256, since the line only
+/// needs to tell tenants apart and the client id has no business in it.
+pub fn tenant_key(tenant_label: &str) -> String {
+    let digest = Sha256::digest(tenant_label.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 impl RunRecord {
     /// Projects a completed result. `instance` comes from settings rather than the
-    /// result, which carries no tenant of its own.
-    pub fn from_result(result: &QueryResult, instance: &str) -> Self {
+    /// result, which carries no tenant of its own; `tenant_label` is the tenant the
+    /// rows were fetched under.
+    pub fn from_result(result: &QueryResult, instance: &str, tenant_label: &str) -> Self {
         let total = &result.compliance_total;
         let pending_by_org: std::collections::HashMap<&str, usize> = result
             .severity_by_org
@@ -220,6 +248,7 @@ impl RunRecord {
         Self {
             at: result.generated_at.clone(),
             instance: instance.to_string(),
+            tenant: tenant_key(tenant_label),
             devices_total: result.devices_total,
             devices_offline: result.devices_offline,
             devices_unpatchable: result.devices_unpatchable,
@@ -272,7 +301,7 @@ pub fn record(entry: &RunRecord) {
 fn append(path: &Path, entry: &RunRecord) {
     // Held across the append *and* the trim — see [`HISTORY_LOCK`]. A poisoned lock
     // only means another append panicked; the file itself is still usable.
-    let _guard = HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut count = HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let line = match serde_json::to_string(entry) {
         Ok(l) => l,
         Err(err) => {
@@ -289,7 +318,7 @@ fn append(path: &Path, entry: &RunRecord) {
     // Owner-only, for the same reason the audit log is: these numbers name the
     // operator's organizations and the size of their unpatched backlog.
     let mut opts = OpenOptions::new();
-    opts.create(true).append(true);
+    opts.create(true).append(true).read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -298,12 +327,18 @@ fn append(path: &Path, entry: &RunRecord) {
     match opts.open(path) {
         Ok(mut file) => {
             // One write for record + newline: `writeln!` on an unbuffered File is two
-            // syscalls, so a crash between them left a line with no terminator and
-            // the next append fused onto it.
-            let mut record = line.into_bytes();
+            // syscalls, so a crash between them left a line with no terminator. A
+            // line a crash *did* tear gets its end first, or this record would fuse
+            // onto it and be lost with it.
+            let mut record = Vec::with_capacity(line.len() + 2);
+            if !ends_with_newline(&mut file) {
+                record.push(b'\n');
+            }
+            record.extend_from_slice(line.as_bytes());
             record.push(b'\n');
             if let Err(err) = file.write_all(&record) {
                 warn!(?err, path = %path.display(), "could not append run history");
+                *count = None;
                 return;
             }
         }
@@ -312,24 +347,55 @@ fn append(path: &Path, entry: &RunRecord) {
             return;
         }
     }
-    trim(path);
+    let lines = match count.as_ref().filter(|c| c.path == path) {
+        Some(c) => c.lines + 1,
+        // Counted once per process (or per file, in tests); tracked from then on.
+        None => std::fs::read(path).map_or(0, |body| lines(&body).count()),
+    };
+    let lines = if lines > MAX_LINES + TRIM_SLACK {
+        trim(path).unwrap_or(lines)
+    } else {
+        lines
+    };
+    *count = Some(LineCount {
+        path: path.to_path_buf(),
+        lines,
+    });
+}
+
+/// Whether the file is empty or ends in a newline — a crash can leave its last line
+/// without one. An unreadable end is treated as fine: the append goes ahead.
+fn ends_with_newline(file: &mut std::fs::File) -> bool {
+    if matches!(file.seek(SeekFrom::End(0)), Ok(0) | Err(_)) {
+        return true;
+    }
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::End(-1))
+        .and_then(|_| file.read_exact(&mut last))
+        .map_or(true, |()| last[0] == b'\n')
+}
+
+/// The file's non-blank lines, as bytes. Split before decoding, so one invalid UTF-8
+/// byte costs its own line rather than the whole file.
+fn lines(body: &[u8]) -> impl Iterator<Item = &[u8]> {
+    body.split(|b| *b == b'\n')
+        .filter(|l| !l.iter().all(u8::is_ascii_whitespace))
 }
 
 /// Drops the oldest lines once the file exceeds [`MAX_LINES`] by more than
-/// [`TRIM_SLACK`], keeping the newest [`MAX_LINES`].
+/// [`TRIM_SLACK`], keeping the newest [`MAX_LINES`]. Returns how many lines the
+/// file holds afterwards, or `None` if it could not be read or rewritten.
 ///
 /// Rewrites rather than rotating: this is one small file, and a rotation scheme
 /// would mean the reader had to merge across generations for no benefit. The
 /// rewrite goes to a sibling temp file that is then renamed over the original, so a
 /// crash mid-write leaves the old file intact instead of a truncated one. Callers
 /// hold [`HISTORY_LOCK`].
-fn trim(path: &Path) {
-    let Ok(body) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let lines: Vec<&str> = body.lines().collect();
+fn trim(path: &Path) -> Option<usize> {
+    let body = std::fs::read(path).ok()?;
+    let lines: Vec<&[u8]> = lines(&body).collect();
     if lines.len() <= MAX_LINES + TRIM_SLACK {
-        return;
+        return Some(lines.len());
     }
     let keep = &lines[lines.len() - MAX_LINES..];
     let tmp = path.with_extension("jsonl.tmp");
@@ -341,24 +407,43 @@ fn trim(path: &Path) {
             use std::os::unix::fs::OpenOptionsExt as _;
             opts.mode(0o600);
         }
-        let mut file = opts.open(&tmp)?;
-        file.write_all(format!("{}\n", keep.join("\n")).as_bytes())?;
-        file.sync_all()?;
+        let mut file = std::io::BufWriter::new(opts.open(&tmp)?);
+        for line in keep {
+            file.write_all(line)?;
+            file.write_all(b"\n")?;
+        }
+        file.into_inner().map_err(|e| e.into_error())?.sync_all()?;
         std::fs::rename(&tmp, path)
     })();
-    if let Err(err) = written {
-        warn!(?err, "could not trim the run-history file");
-        let _ = std::fs::remove_file(&tmp);
+    match written {
+        Ok(()) => Some(keep.len()),
+        Err(err) => {
+            warn!(?err, "could not trim the run-history file");
+            let _ = std::fs::remove_file(&tmp);
+            None
+        }
     }
 }
 
-/// Reads every record, oldest first. A malformed line is skipped rather than
-/// failing the read — the file is append-only and a crash can tear the last line.
-pub fn read_all() -> Vec<RunRecord> {
+/// Reads this tenant's records, oldest first: the lines stamped with its key
+/// ([`tenant_key`]), plus lines from before the stamp existed whose instance
+/// matches — the only test those lines can be held to. A malformed line is skipped
+/// rather than failing the read: the file is append-only and a crash can tear the
+/// last line, mid-character even.
+pub fn read_all(instance: &str, tenant_label: &str) -> Vec<RunRecord> {
     let Some(path) = history_path() else {
         return Vec::new();
     };
-    let mut records = parse(&std::fs::read_to_string(&path).unwrap_or_default());
+    read_from(&path, instance, tenant_label)
+}
+
+/// [`read_all`] from a given file.
+fn read_from(path: &Path, instance: &str, tenant_label: &str) -> Vec<RunRecord> {
+    let key = tenant_key(tenant_label);
+    let mut records: Vec<RunRecord> = parse(std::fs::read(path).unwrap_or_default())
+        .into_iter()
+        .filter(|r| r.tenant == key || (r.tenant.is_empty() && r.instance == instance))
+        .collect();
     strip_old_org_detail(&mut records);
     records
 }
@@ -371,10 +456,9 @@ fn strip_old_org_detail(records: &mut [RunRecord]) {
     }
 }
 
-fn parse(body: &str) -> Vec<RunRecord> {
-    body.lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
+fn parse(body: impl AsRef<[u8]>) -> Vec<RunRecord> {
+    lines(body.as_ref())
+        .filter_map(|l| serde_json::from_str(&String::from_utf8_lossy(l)).ok())
         .collect()
 }
 
@@ -382,10 +466,13 @@ fn parse(body: &str) -> Vec<RunRecord> {
 mod tests {
     use super::*;
 
+    const TENANT: &str = "https://app.ninjarmm.com\nclient-a";
+
     fn rec(at: &str, compliant: usize, scope: usize) -> RunRecord {
         RunRecord {
             at: at.into(),
             instance: "https://app.ninjarmm.com".into(),
+            tenant: tenant_key(TENANT),
             devices_total: 100,
             devices_offline: 5,
             devices_unpatchable: 3,
@@ -442,8 +529,78 @@ mod tests {
     #[test]
     fn a_torn_final_line_does_not_hide_the_history_above_it() {
         let good = serde_json::to_string(&rec("2026-09-01T10:00:00Z", 5, 10)).unwrap();
-        let parsed = parse(&format!("{good}\n{{\"at\":\"2026-09-02T\n"));
+        let parsed = parse(format!("{good}\n{{\"at\":\"2026-09-02T\n"));
         assert_eq!(parsed.len(), 1, "one torn line costs only itself");
+    }
+
+    /// The Trend tab reads one tenant's runs: two client ids on one instance are two
+    /// tenants, and a line from before the stamp is matched by its instance alone.
+    #[test]
+    fn the_history_read_is_one_tenants() {
+        let dir = temp_dir("tenant");
+        let path = dir.join(HISTORY_FILE);
+        let other = "https://app.ninjarmm.com\nclient-b";
+        append(&path, &rec("t1", 1, 10));
+        append(
+            &path,
+            &RunRecord {
+                tenant: tenant_key(other),
+                ..rec("t2", 2, 10)
+            },
+        );
+        append(
+            &path,
+            &RunRecord {
+                tenant: String::new(),
+                ..rec("t0-legacy", 3, 10)
+            },
+        );
+        append(
+            &path,
+            &RunRecord {
+                tenant: String::new(),
+                instance: "https://eu.ninjarmm.com".into(),
+                ..rec("eu-legacy", 4, 10)
+            },
+        );
+        let ats = |records: Vec<RunRecord>| records.into_iter().map(|r| r.at).collect::<Vec<_>>();
+        assert_eq!(
+            ats(read_from(&path, "https://app.ninjarmm.com", TENANT)),
+            vec!["t1", "t0-legacy"]
+        );
+        assert_eq!(
+            ats(read_from(&path, "https://app.ninjarmm.com", other)),
+            vec!["t2", "t0-legacy"]
+        );
+        assert!(
+            read_from(
+                &path,
+                "https://us2.ninjarmm.com",
+                "https://us2.ninjarmm.com\n"
+            )
+            .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One invalid UTF-8 byte — a crash tearing a multi-byte org name — costs its own
+    /// line, not the whole history; and the next record is not fused onto the torn
+    /// line, it starts its own.
+    #[test]
+    fn a_torn_multibyte_line_costs_only_itself() {
+        let dir = temp_dir("utf8");
+        let path = dir.join(HISTORY_FILE);
+        append(&path, &rec("t1", 1, 10));
+        let mut torn = std::fs::read(&path).unwrap();
+        torn.extend_from_slice(b"{\"at\":\"Z\xc3");
+        std::fs::write(&path, &torn).unwrap();
+        append(&path, &rec("t2", 2, 10));
+        let ats: Vec<String> = read_from(&path, "https://app.ninjarmm.com", TENANT)
+            .into_iter()
+            .map(|r| r.at)
+            .collect();
+        assert_eq!(ats, vec!["t1", "t2"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn write_lines(path: &Path, n: usize) {
@@ -463,7 +620,7 @@ mod tests {
         write_lines(&path, MAX_LINES + TRIM_SLACK);
         trim(&path);
         assert_eq!(
-            parse(&std::fs::read_to_string(&path).unwrap()).len(),
+            parse(std::fs::read_to_string(&path).unwrap()).len(),
             MAX_LINES + TRIM_SLACK,
             "within the slack the file is left alone"
         );
@@ -472,7 +629,7 @@ mod tests {
         let over = MAX_LINES + TRIM_SLACK + 1;
         write_lines(&path, over);
         trim(&path);
-        let kept = parse(&std::fs::read_to_string(&path).unwrap());
+        let kept = parse(std::fs::read_to_string(&path).unwrap());
         assert_eq!(kept.len(), MAX_LINES);
         assert_eq!(kept[0].at, format!("t{}", over - MAX_LINES));
         assert_eq!(kept[kept.len() - 1].at, format!("t{}", over - 1));
@@ -515,7 +672,7 @@ mod tests {
             t.join().unwrap();
         }
 
-        let kept = parse(&std::fs::read_to_string(&path).unwrap());
+        let kept = parse(std::fs::read_to_string(&path).unwrap());
         let new = kept.iter().filter(|r| r.at.starts_with("new-")).count();
         assert_eq!(new, 80, "every concurrent append survived the trim");
         assert!(kept.len() <= MAX_LINES + TRIM_SLACK);
@@ -527,7 +684,7 @@ mod tests {
     fn a_record_from_before_the_scope_key_still_parses() {
         let mut old = serde_json::to_value(rec("2026-01-01 00:00:00 UTC", 5, 10)).unwrap();
         old.as_object_mut().unwrap().remove("scopeKey");
-        let parsed = parse(&old.to_string());
+        let parsed = parse(old.to_string());
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].scope_key, "");
     }
@@ -544,7 +701,7 @@ mod tests {
             obj.remove(key);
         }
         assert_eq!(obj["pendingCritical"], 7, "the original on-disk key");
-        let parsed = parse(&old.to_string());
+        let parsed = parse(old.to_string());
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].method, 0);
         assert_eq!(parsed[0].devices_within_sla, None);
@@ -558,7 +715,7 @@ mod tests {
         let mut old = serde_json::to_value(rec("2026-01-01 00:00:00 UTC", 5, 10)).unwrap();
         old.as_object_mut().unwrap().remove("orgs");
         old.as_object_mut().unwrap().remove("orgsTotal");
-        let parsed = parse(&old.to_string());
+        let parsed = parse(old.to_string());
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].orgs.is_empty());
         assert_eq!(parsed[0].orgs_total, 0);
@@ -640,7 +797,7 @@ mod tests {
             data_fetched_at: "2026-09-01 10:00:00 UTC".into(),
             exploit_data: Default::default(),
         };
-        let record = RunRecord::from_result(&result, "https://app.ninjarmm.com");
+        let record = RunRecord::from_result(&result, "https://app.ninjarmm.com", TENANT);
         assert_eq!(record.orgs_total, MAX_ORGS + 5);
         assert_eq!(record.orgs.len(), MAX_ORGS);
         let largest = &record.orgs[0];
@@ -695,7 +852,7 @@ mod tests {
                 data_fetched_at: "2026-09-01 10:00:00 UTC".into(),
                 exploit_data: Default::default(),
             };
-            RunRecord::from_result(&result, "https://app.ninjarmm.com")
+            RunRecord::from_result(&result, "https://app.ninjarmm.com", TENANT)
         };
 
         let whole = run(FilterParams::default());

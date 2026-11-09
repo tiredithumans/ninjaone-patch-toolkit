@@ -350,9 +350,17 @@ ipc!(
 );
 
 ipc!(
-    /// Fetches several devices' rows in one call, each capped at `limit` and flagged
-    /// `truncated` past it — the post-refresh selection prune's read.
-    get_device_rows(device_ids: Vec<i64>, limit: usize) -> Vec<crate::types::DeviceRows>
+    /// Re-checks a selection against the cached result in one call — the
+    /// post-refresh prune's read. Answers per device which ticked keys it still
+    /// lists and its offline and reboot flags; nothing on a cache miss.
+    selection_status(probes: Vec<crate::types::SelectionProbe>)
+        -> Vec<crate::types::SelectionStatus>
+);
+
+ipc!(
+    /// Fetches one page of the devices flagged for reboot from the backend's cached
+    /// result; the summary carries only the first.
+    get_reboot_devices(offset: usize, limit: usize) -> Vec<DeviceSummary>
 );
 
 /// Subscribes to a backend event for the lifetime of the app, decoding each

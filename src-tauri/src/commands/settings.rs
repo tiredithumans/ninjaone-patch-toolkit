@@ -4,7 +4,7 @@ use tauri::State;
 use crate::error::UiError;
 use crate::settings::{
     ActionSettings, MAX_ACTION_CONCURRENCY, MAX_DEVICES_PER_ACTION_CEILING, MAX_WINDOW_DAYS,
-    Preset, Settings, SlaBySeverity, SlaExempt, is_cleartext_remote,
+    Preset, Settings, SlaBySeverity, SlaExempt, instance_url_problem,
 };
 use crate::state::AppState;
 
@@ -119,18 +119,13 @@ fn default_auto_check() -> bool {
 }
 
 /// Rejects an instance URL that would carry OAuth tokens, codes, and the client
-/// secret in cleartext. `https` is required everywhere except a loopback host,
-/// where `http` is allowed for local testing against a mock server.
+/// secret in cleartext — `https` is required everywhere except a loopback host,
+/// where `http` is allowed for local testing against a mock server — or that is
+/// more than an origin: a user name moves the host, and a path, query or fragment
+/// swallows the endpoints appended to it. The rule is [`instance_url_problem`],
+/// which `AuthState` also holds a loaded value to.
 fn require_https_instance(url: &str) -> Result<(), UiError> {
-    let parsed = url::Url::parse(url)
-        .map_err(|_| UiError::new(format!("instance URL is not a valid URL: {url}")))?;
-    match parsed.scheme() {
-        "https" => Ok(()),
-        "http" if !is_cleartext_remote(&parsed) => Ok(()),
-        _ => Err(UiError::new(
-            "instance URL must use https:// (http is allowed only for localhost)",
-        )),
-    }
+    instance_url_problem(url).map_or(Ok(()), |problem| Err(UiError::new(problem)))
 }
 
 /// Rejects numeric settings that would break a query or the OAuth redirect, rather
@@ -437,6 +432,32 @@ mod tests {
         }
         assert!(require_https_instance("ftp://us2.ninjarmm.com").is_err());
         assert!(require_https_instance("not a url").is_err());
+    }
+
+    /// An instance is an origin and nothing more. `https://us2.ninjarmm.com@evil.example`
+    /// reads as NinjaOne and is `evil.example`; a query, fragment or path swallows or
+    /// misdirects `/ws/oauth/token` and `/api/v2/…` appended to it.
+    #[test]
+    fn an_instance_with_more_than_an_origin_is_refused() {
+        for (url, says) in [
+            ("https://us2.ninjarmm.com@evil.example", "user name"),
+            ("https://operator:hunter2@us2.ninjarmm.com", "user name"),
+            ("https://us2.ninjarmm.com?region=eu", "no path, ? or #"),
+            ("https://us2.ninjarmm.com?", "no path, ? or #"),
+            ("https://us2.ninjarmm.com#top", "no path, ? or #"),
+            ("https://us2.ninjarmm.com/ws", "no path, ? or #"),
+            ("https://evil.example\\@us2.ninjarmm.com", "no path, ? or #"),
+        ] {
+            let err = require_https_instance(url).expect_err(url);
+            assert!(err.message.contains(says), "{url}: {}", err.message);
+            assert!(
+                !err.message.contains("hunter2"),
+                "the message must not echo a password back"
+            );
+        }
+        // A port, and the trailing slash `save_settings` trims anyway, are fine.
+        assert!(require_https_instance("https://us2.ninjarmm.com:8443").is_ok());
+        assert!(require_https_instance("https://us2.ninjarmm.com/").is_ok());
     }
 
     fn args(callback_port: u16, install_window_days: i64, sla_days: i64) -> SaveSettingsArgs {

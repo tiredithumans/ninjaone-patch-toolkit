@@ -427,7 +427,8 @@ pub struct FailureGroup {
     pub name: String,
     pub severity: String,
     pub affected_devices: usize,
-    /// Every affected device name (the full list, not a sample).
+    /// The first affected device names, capped backend-side; `affected_devices`
+    /// counts every one (`util::failure_device_list` says how many more).
     pub device_names: Vec<String>,
     pub latest_failure: Option<String>,
 }
@@ -735,8 +736,11 @@ pub struct QueryResult {
     pub rows: Vec<PatchRow>,
     /// Total detail-row count — the table pages over this, not `rows.len()`.
     pub rows_total: usize,
-    /// Only the devices flagged for reboot (all the reboot view needs).
+    /// The first page of the devices flagged for reboot; the Needs Reboot tab pages
+    /// the rest through `get_reboot_devices` (`util::reboot_page_source`).
     pub reboot_devices: Vec<DeviceSummary>,
+    /// Every device flagged for reboot — what the tab counts and pages over.
+    pub reboot_devices_total: usize,
     pub compliance: Vec<ComplianceBucket>,
     /// The device-weighted fleet total of `compliance`, labelled "All organizations".
     #[serde(default)]
@@ -748,6 +752,9 @@ pub struct QueryResult {
     pub compliance_by_os: Vec<OsCompliance>,
     /// FAILED-install rollup (empty unless the FAILED status was queried).
     pub failures: Vec<FailureGroup>,
+    /// Distinct devices with at least one failed install. Counted backend-side: each
+    /// group's `device_names` is capped, so it can no longer be counted here.
+    pub failing_devices: usize,
     /// Per-org pending-patch severity breakdown for the dashboard charts.
     pub severity_by_org: Vec<OrgSeverity>,
     /// Pending-patch age histogram for the dashboard charts.
@@ -1617,16 +1624,27 @@ impl RunRecord {
     }
 }
 
-/// One device's rows from the cached result, from `get_device_rows`.
-#[derive(Clone, Debug, Deserialize)]
+/// One selected device, as the post-refresh prune asks `selection_status` about
+/// it: its ticked patch keys (`util::patch_key`), none for a Needs Reboot pick.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionProbe {
+    pub device_id: i64,
+    pub keys: Vec<String>,
+}
+
+/// What the cached result says about one probed device, from `selection_status`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
-pub struct DeviceRows {
+pub struct SelectionStatus {
     pub device_id: i64,
-    pub rows: Vec<PatchRow>,
-    /// `rows` is a prefix of the device's rows, so it cannot say what the device no
-    /// longer lists.
-    pub truncated: bool,
+    /// False for a device the result no longer holds: it keeps nothing ticked.
+    pub in_scope: bool,
+    pub offline: bool,
+    pub needs_reboot: bool,
+    /// The probe's keys that still name one of the device's rows.
+    pub present: Vec<String>,
 }
 
 #[cfg(test)]

@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::types::{
-    ActionKind, ActionRequest, AuthStatus, DeviceRows, DeviceSummary, PatchRow, PlannedTarget,
-    RebootChoice, RebootMode,
+    ActionKind, ActionRequest, AuthStatus, DeviceSummary, PatchRow, PlannedTarget, RebootChoice,
+    RebootMode, SelectionProbe, SelectionStatus,
 };
 
 use super::super::state::{DeviceSelection, SelectedPatch};
@@ -89,37 +89,54 @@ pub(crate) fn apply_rows_selection<R: Borrow<PatchRow>>(
     }
 }
 
-/// Re-checks one selected device against its rows in a fresh result, keeping only
-/// the ticked patches that are still there. Returns how many ticked rows it dropped.
+/// The probes `selection_status` answers for a selection: each selected device with
+/// the keys of its ticked patches ([`patch_key`]) — none for a Needs Reboot pick,
+/// which ticks no patch.
+pub(crate) fn selection_probes(sel: &BTreeMap<i64, DeviceSelection>) -> Vec<SelectionProbe> {
+    sel.iter()
+        .map(|(device_id, entry)| SelectionProbe {
+            device_id: *device_id,
+            keys: entry.patches.keys().cloned().collect(),
+        })
+        .collect()
+}
+
+/// Re-checks the patch-row selection against the backend's answer after a refresh,
+/// keeping only the ticked patches each device still lists. Returns how many ticked
+/// rows it dropped.
 ///
 /// This is what lets an auto-refresh keep the operator's selection. Clearing it on
 /// every tick meant a 5-minute cadence wiped a hand-built 20-device selection while
 /// they were still building it; keeping it blindly would dispatch against patches
 /// the refresh just showed as installed. A ticked row survives only if the same
 /// patch (by [`patch_key`]) is still listed on the same device, and the device's
-/// offline flag is taken from the fresh rows so the summary's offline count stays
-/// true. A device with nothing left leaves the selection.
-pub(crate) fn prune_device_selection(
+/// offline flag is taken from the answer so the summary's offline count stays true.
+/// A device with nothing left, or no longer in scope, leaves the selection. A device
+/// the answer does not mention is left as it was: a cache miss answers nothing, and
+/// nothing is not "gone".
+pub(crate) fn prune_selection_from_status(
     sel: &mut BTreeMap<i64, DeviceSelection>,
-    device_id: i64,
-    fresh_rows: &[PatchRow],
+    status: &[SelectionStatus],
 ) -> usize {
-    let Some(entry) = sel.get_mut(&device_id) else {
-        return 0;
-    };
-    let present: BTreeSet<String> = fresh_rows
-        .iter()
-        .filter(|r| r.device_id == device_id)
-        .map(patch_key)
-        .collect();
-    let before = entry.patches.len();
-    entry.patches.retain(|key, _| present.contains(key));
-    if let Some(row) = fresh_rows.iter().find(|r| r.device_id == device_id) {
-        entry.offline = row.offline;
-    }
-    let removed = before - entry.patches.len();
-    if entry.patches.is_empty() {
-        sel.remove(&device_id);
+    let mut removed = 0;
+    for s in status {
+        let Some(entry) = sel.get_mut(&s.device_id) else {
+            continue;
+        };
+        let before = entry.patches.len();
+        if s.in_scope {
+            let present: BTreeSet<&str> = s.present.iter().map(String::as_str).collect();
+            entry
+                .patches
+                .retain(|key, _| present.contains(key.as_str()));
+            entry.offline = s.offline;
+        } else {
+            entry.patches.clear();
+        }
+        removed += before - entry.patches.len();
+        if entry.patches.is_empty() {
+            sel.remove(&s.device_id);
+        }
     }
     removed
 }
@@ -180,21 +197,6 @@ pub(crate) fn rows_selection_state<R: Borrow<PatchRow>>(
 /// empty list as final left the header checkbox dead for the rest of the result.
 pub(crate) fn needs_member_fetch<T>(entry: Option<&[T]>) -> bool {
     entry.is_none_or(|rows| rows.is_empty())
-}
-
-/// Applies a batch of fresh per-device reads to the selection after a refresh and
-/// returns how many ticked rows it dropped. A truncated read is a prefix of the
-/// device's rows: it cannot say what is gone, so that device is left as it was
-/// rather than pruned against a partial list.
-pub(crate) fn prune_selection_from_reads(
-    sel: &mut BTreeMap<i64, DeviceSelection>,
-    reads: &[DeviceRows],
-) -> usize {
-    reads
-        .iter()
-        .filter(|d| !d.truncated)
-        .map(|d| prune_device_selection(sel, d.device_id, &d.rows))
-        .sum()
 }
 
 /// The `Memo` comparator for one group's slot in the members map: changed only
@@ -737,27 +739,29 @@ pub(crate) fn apply_device_selection(
     }
 }
 
-/// Re-checks a device-level selection against a fresh reboot list, dropping every
-/// device no longer flagged (it rebooted, or left the scope) and refreshing the
-/// offline flag of the rest. Returns how many devices it dropped.
+/// Re-checks a device-level (Needs Reboot) selection against the backend's answer,
+/// dropping every device no longer flagged for reboot (it rebooted, or left the
+/// scope) and refreshing the offline flag of the rest. Returns how many devices it
+/// dropped.
 ///
-/// Same reasoning as [`prune_device_selection`]: an auto-refresh keeps the
+/// Same reasoning as [`prune_selection_from_status`]: an auto-refresh keeps the
 /// operator's selection, but never one that points at a device the refresh just
-/// showed no longer needs the action.
-pub(crate) fn prune_device_level_selection(
+/// showed no longer needs the action — and a device the answer does not mention is
+/// left alone.
+pub(crate) fn prune_device_level_from_status(
     sel: &mut BTreeMap<i64, DeviceSelection>,
-    fresh: &[DeviceSummary],
+    status: &[SelectionStatus],
 ) -> usize {
     let before = sel.len();
-    sel.retain(
-        |id, entry| match fresh.iter().find(|d| d.device_id == *id) {
-            Some(d) => {
-                entry.offline = d.offline;
-                true
+    for s in status {
+        if s.in_scope && s.needs_reboot {
+            if let Some(entry) = sel.get_mut(&s.device_id) {
+                entry.offline = s.offline;
             }
-            None => false,
-        },
-    );
+        } else {
+            sel.remove(&s.device_id);
+        }
+    }
     before - sel.len()
 }
 

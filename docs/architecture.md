@@ -8,7 +8,7 @@ in [`.claude/rules/`](../.claude/rules/); rationale is in [design notes](./desig
 ```
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
-├── src/paths.rs                 # app_dir(): the one on-disk location for settings, logs, audit + history, window-state files
+├── src/paths.rs                 # app_dir() (settings, audit, history, window state) and local_dir()/local_subdir() (logs, ledger, snapshots, exploit data; moved there once)
 ├── src/state.rs                 # AppState: auth, api client, settings, result cache + memos, fleet/lookup accessors, invalidation
 ├── src/state/cache.rs           # TenantCache<T>: tenant-stamped, TTL'd, epoch-gated, single-flight slot
 ├── src/state/jobs.rs            # job store, single-claim poller slot, confirm-token slot
@@ -42,7 +42,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── reboot.rs                # reboot_likely: the per-patch reboot estimate from the patch name (the API has no reboot field)
 │   ├── rollups.rs               # failures, severity by org, age buckets, SeverityCounts::BANDS
 │   ├── backlog.rs · install_time.rs  # worst devices / offline backlog; first seen → installed median
-│   ├── groups.rs                # grouping, sorting, paging, device_detail, rows_by_device over the cache
+│   ├── groups.rs                # grouping, sorting (incl. the canonical key sort), paging, device_detail, selection_status over the cache
 │   ├── scope.rs                 # QueryScope export provenance
 │   ├── table.rs                 # TableCell / TableColumn / format_pct / clamp_cell / join_capped — the shared column definition
 │   ├── wording.rs               # what each figure means: headline figures, definitions, notes, legend (mirrored by web-rs util::compliance)

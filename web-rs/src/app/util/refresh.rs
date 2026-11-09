@@ -27,7 +27,7 @@ pub(crate) enum RefreshHold {
 
 /// The single hold that applies, if any. Selection is deliberately *not* a hold:
 /// a refresh already prunes the selection to the rows still listed (see
-/// `prune_device_selection`), and after a dispatch the selection is still there
+/// `prune_selection_from_status`), and after a dispatch the selection is still there
 /// while the operator watches the patches land — pausing on it would switch the
 /// cadence off exactly when it is for.
 pub(crate) fn refresh_hold(

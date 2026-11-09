@@ -1047,10 +1047,20 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64], statuses: &[String]) -> Que
         .into_iter()
         .filter(|b| keep(&b.organization))
         .collect();
-    let reboot_devices = sample_reboot()
+    let reboot_devices: Vec<DeviceSummary> = sample_reboot()
         .into_iter()
         .filter(|d| keep(&d.organization))
         .collect();
+    // The sample is small, so the summary carries the whole list and the tab never
+    // asks a backend for a page (`util::reboot_page_source`).
+    let reboot_devices_total = reboot_devices.len();
+    // Distinct devices across the groups, as the backend counts them.
+    let failing_devices = rows
+        .iter()
+        .filter(|r| r.status == "FAILED")
+        .map(|r| r.device_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let severity_by_org = sample_severity_by_org()
         .into_iter()
         .filter(|o| keep(&o.organization))
@@ -1077,12 +1087,14 @@ fn assemble(rows: Vec<PatchRow>, org_filter: &[i64], statuses: &[String]) -> Que
         rows_total: rows.len(),
         rows,
         reboot_devices,
+        reboot_devices_total,
         compliance_total: compliance_total(&compliance),
         // Every sample organization has an online device.
         uncounted_orgs: Vec::new(),
         compliance,
         compliance_by_os,
         failures,
+        failing_devices,
         severity_by_org,
         age_buckets,
         worst_devices,

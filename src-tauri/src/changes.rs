@@ -17,7 +17,7 @@
 //! Best-effort throughout, like `history`: a failed snapshot costs the next run
 //! its diff, never the operator their fleet.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ use crate::rows::{PatchFamilies, TableCell, TableColumn, cmp_ci};
 
 const SNAPSHOT_DIR: &str = "run-snapshots";
 
-/// Bumped when the on-disk shape changes — or when [`patch_key`] does, since a
+/// Bumped when the on-disk shape changes — or when [`write_row_key`] does, since a
 /// baseline keyed the old way would report every changed key as resolved and new —
 /// so a file of another version reads as "no previous run" rather than as a
 /// misparsed one. 2: third-party patches keyed by product, not title.
@@ -104,19 +104,29 @@ static LAST_SAVED: LastSaved = LastSaved::new();
 /// pending Chrome update — keyed by title, each new version restarted its age and a
 /// device that never updated Chrome never went past SLA. A record with neither falls
 /// back to its title.
-pub fn patch_key(row: &PatchRow) -> String {
-    let mut key = String::new();
+///
+/// Into a caller-owned buffer, which it clears first: the snapshot keys every row
+/// of a seven-figure result, and a `String` per row was most of what building one
+/// cost.
+pub fn write_row_key(buf: &mut String, row: &PatchRow) {
     write_patch_key(
-        &mut key,
+        buf,
         row.patch_type,
         row.kb.as_deref(),
         &row.name,
         row.product_identifier.as_deref(),
     );
+}
+
+/// [`write_row_key`] as an owned `String`, for tests that compare identities.
+#[cfg(test)]
+pub fn patch_key(row: &PatchRow) -> String {
+    let mut key = String::new();
+    write_row_key(&mut key, row);
     key
 }
 
-/// [`patch_key`] into a caller-owned buffer, which it clears first, from the parts
+/// [`write_row_key`] into a caller-owned buffer, which it clears first, from the parts
 /// a raw record and a row both carry: the family label (`OS`/`SOFTWARE`), the KB,
 /// the display name (`Patch::write_display_name`, which is what a row's `name` is)
 /// and the product identifier. Buffered because the ledger keys every pending record
@@ -200,7 +210,7 @@ pub fn scope_key(fingerprint: &str, families: PatchFamilies, install_days: Optio
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct SnapDevice(i64, String);
 
-/// A patch in a snapshot, once per distinct [`patch_key`].
+/// A patch in a snapshot, once per distinct [`write_row_key`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapPatch {
@@ -250,8 +260,11 @@ impl RunSnapshot {
         let mut device_ix: HashMap<i64, u32> = HashMap::new();
         let mut patches = Vec::new();
         let mut patch_ix: HashMap<String, u32> = HashMap::new();
-        let mut pending = HashSet::new();
-        let mut failed = HashSet::new();
+        let mut pending = Vec::new();
+        let mut failed = Vec::new();
+        // One key buffer for the whole pass: a key is allocated only for a patch the
+        // table has not seen, not once per row of a seven-figure result.
+        let mut key = String::new();
         for row in rows {
             let Some(cat) = category(&row.status) else {
                 continue;
@@ -260,8 +273,8 @@ impl RunSnapshot {
                 devices.push(SnapDevice(row.device_id, row.device_name.to_string()));
                 (devices.len() - 1) as u32
             });
-            let key = patch_key(row);
-            let p = match patch_ix.get(&key) {
+            write_row_key(&mut key, row);
+            let p = match patch_ix.get(key.as_str()) {
                 Some(&p) => p,
                 None => {
                     patches.push(SnapPatch {
@@ -273,19 +286,21 @@ impl RunSnapshot {
                         rank: row.severity_rank,
                     });
                     let p = (patches.len() - 1) as u32;
-                    patch_ix.insert(key, p);
+                    patch_ix.insert(key.clone(), p);
                     p
                 }
             };
             match cat {
-                Category::Pending => pending.insert((d, p)),
-                Category::Failed => failed.insert((d, p)),
+                Category::Pending => pending.push((d, p)),
+                Category::Failed => failed.push((d, p)),
             };
         }
-        let mut pending: Vec<_> = pending.into_iter().collect();
-        let mut failed: Vec<_> = failed.into_iter().collect();
+        // Sorted and de-duplicated rather than collected through a `HashSet`: the
+        // same set, without hashing every item of a seven-figure result.
         pending.sort_unstable();
+        pending.dedup();
         failed.sort_unstable();
+        failed.dedup();
         Self {
             version: SNAPSHOT_VERSION,
             tenant: tenant.to_string(),
@@ -307,15 +322,39 @@ impl RunSnapshot {
         self.pending.len() + self.failed.len() > MAX_ITEMS
     }
 
-    fn identities<'a>(&'a self, items: &'a [(u32, u32)]) -> HashMap<(i64, &'a str), (u32, u32)> {
-        items
+    /// `items` as `(identity, index pair)`, sorted by identity. The identity is the
+    /// device id and a patch id from `patch_id`, which maps this snapshot's patch
+    /// index into a numbering both snapshots of a diff share, so the two compare as
+    /// integers instead of hashing a key string per item. An index that is out of
+    /// range (a damaged file) is skipped.
+    fn identities(
+        &self,
+        items: &[(u32, u32)],
+        patch_id: impl Fn(u32) -> Option<usize>,
+    ) -> Vec<Keyed> {
+        let mut out: Vec<_> = items
             .iter()
             .filter_map(|&(d, p)| {
                 let dev = self.devices.get(d as usize)?;
-                let patch = self.patches.get(p as usize)?;
-                Some(((dev.0, patch.key.as_str()), (d, p)))
+                Some(((dev.0, patch_id(p)?), (d, p)))
             })
-            .collect()
+            .collect();
+        out.sort_unstable_by_key(|&(id, _)| id);
+        out.dedup_by_key(|&mut (id, _)| id);
+        out
+    }
+
+    /// Everything but `at`: whether this run observed exactly what `other` did.
+    fn same_content(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.tenant == other.tenant
+            && self.scope == other.scope
+            && self.tracks_pending == other.tracks_pending
+            && self.tracks_failed == other.tracks_failed
+            && self.devices == other.devices
+            && self.patches == other.patches
+            && self.pending == other.pending
+            && self.failed == other.failed
     }
 
     fn item(&self, (d, p): (u32, u32)) -> Option<ChangeItem> {
@@ -492,35 +531,67 @@ pub fn diff(previous: Option<&RunSnapshot>, now: &RunSnapshot) -> RunChanges {
     };
     out.previous_at = Some(prev.at.clone());
 
-    let now_pending = now.identities(&now.pending);
-    let now_failed = now.identities(&now.failed);
-    let prev_pending = prev.identities(&prev.pending);
-    let prev_failed = prev.identities(&prev.failed);
+    // Patch ids are positions in `now`'s table. A patch only `prev` lists gets an id
+    // past its end — distinct per patch, so it matches nothing in `now`. Only the
+    // distinct patches (thousands) are hashed, not the items (up to a million).
+    let now_ix: HashMap<&str, usize> = now
+        .patches
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.key.as_str(), i))
+        .collect();
+    let now_id = |p: u32| ((p as usize) < now.patches.len()).then_some(p as usize);
+    let prev_id = |p: u32| {
+        let patch = prev.patches.get(p as usize)?;
+        Some(
+            now_ix
+                .get(patch.key.as_str())
+                .copied()
+                .unwrap_or(now.patches.len() + p as usize),
+        )
+    };
+    let now_pending = now.identities(&now.pending, now_id);
+    let now_failed = now.identities(&now.failed, now_id);
+    let prev_pending = prev.identities(&prev.pending, prev_id);
+    let prev_failed = prev.identities(&prev.failed, prev_id);
 
-    let new_pending = now_pending
-        .iter()
-        .filter(|(id, _)| !prev_pending.contains_key(*id))
-        .map(|(_, &ix)| ix);
-    let resolved = prev_pending
-        .iter()
-        .filter(|(id, _)| !now_pending.contains_key(*id) && !now_failed.contains_key(*id))
-        .map(|(_, &ix)| ix);
-    let newly_failed = now_failed
-        .iter()
-        .filter(|(id, _)| !prev_failed.contains_key(*id))
-        .map(|(_, &ix)| ix);
-
-    (out.new_pending, out.new_pending_items) = capped(now, new_pending);
-    (out.resolved, out.resolved_items) = capped(prev, resolved);
-    (out.newly_failed, out.newly_failed_items) = capped(now, newly_failed);
+    (out.new_pending, out.new_pending_items) =
+        capped(now, absent_from(&now_pending, &[&prev_pending]));
+    (out.resolved, out.resolved_items) = capped(
+        prev,
+        absent_from(&prev_pending, &[&now_pending, &now_failed]),
+    );
+    (out.newly_failed, out.newly_failed_items) =
+        capped(now, absent_from(&now_failed, &[&prev_failed]));
     out
 }
+
+/// The index pairs of `items` whose identity is in none of `others`. Every list is
+/// sorted by identity ([`RunSnapshot::identities`]), so membership is a binary
+/// search.
+fn absent_from<'a>(
+    items: &'a [Keyed],
+    others: &'a [&'a [Keyed]],
+) -> impl Iterator<Item = (u32, u32)> + 'a {
+    items
+        .iter()
+        .filter(|(id, _)| {
+            others
+                .iter()
+                .all(|o| o.binary_search_by_key(id, |&(other, _)| other).is_err())
+        })
+        .map(|&(_, ix)| ix)
+}
+
+/// An item as `((device id, patch id), (device index, patch index))`: its identity
+/// across two snapshots, then where it sits in its own.
+type Keyed = ((i64, usize), (u32, u32));
 
 /// One change, borrowed from its snapshot, for ordering before anything is cloned.
 struct Pick<'a> {
     device: &'a SnapDevice,
     patch: &'a SnapPatch,
-    /// Position in the set's iteration order: the tiebreak a stable full sort gave
+    /// Position in the set's identity order: the tiebreak a stable full sort gave
     /// implicitly, so selecting the top entries keeps exactly the ones — in exactly
     /// the order — that sorting everything and truncating did.
     pos: usize,
@@ -528,8 +599,8 @@ struct Pick<'a> {
 }
 
 /// Worst severity first, then device and patch name, so identical diffs list
-/// identically (the sets iterate in hash order). Returns the exact count and the
-/// first [`CHANGE_LIST_LIMIT`] entries.
+/// identically. Returns the exact count and the first [`CHANGE_LIST_LIMIT`]
+/// entries.
 ///
 /// Orders borrowed keys and builds a [`ChangeItem`] (four `String` clones) only
 /// for the listed entries: a whole-fleet first diff can be six figures of
@@ -585,7 +656,7 @@ fn file_name(tenant: &str, scope: &str) -> String {
 }
 
 fn snapshot_dir() -> Option<PathBuf> {
-    paths::app_dir().ok().map(|d| d.join(SNAPSHOT_DIR))
+    paths::local_subdir(SNAPSHOT_DIR).ok()
 }
 
 /// The previous comparable run for this tenant + scope, if one was stored: the one
@@ -622,6 +693,16 @@ fn load_from(dir: &Path, tenant: &str, scope: &str) -> Option<RunSnapshot> {
 ///
 /// **Synchronous file I/O — call from `spawn_blocking`.**
 pub fn save(snapshot: RunSnapshot) {
+    // A run that observed exactly what the stored baseline did (an auto-refresh tick
+    // between patch windows) is not written: rewriting and fsyncing a file of up to
+    // a million items to change only its timestamp sat on every query's reply path.
+    // The baseline keeps its older `at`, which stays true — nothing changed since.
+    if LAST_SAVED
+        .get(&snapshot.tenant, &snapshot.scope)
+        .is_some_and(|stored| stored.same_content(&snapshot))
+    {
+        return;
+    }
     let Some(dir) = snapshot_dir() else {
         warn!("no config directory available; run snapshot dropped");
         return;

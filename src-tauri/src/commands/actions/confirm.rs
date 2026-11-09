@@ -1,13 +1,18 @@
-//! The confirmation fingerprint: what a `plan_action` token is bound to.
+//! The confirmation fingerprint: what a `plan_action` token is bound to, and the
+//! check `run_action` spends it on.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
 use super::ActionRequest;
+use super::plan::PlannedAction;
+use crate::actions::{ActionPlan, ConfirmCheck, summarize_names};
 use crate::api::actions::ScriptRef;
+use crate::error::UiError;
+use crate::state::AppState;
 
 /// Stable fingerprint of everything that determines what would be dispatched **and
 /// everything the guardrails react to**.
@@ -16,6 +21,13 @@ use crate::api::actions::ScriptRef;
 /// device list (or the parameters, the reboot mode and reason, the run-as identity,
 /// or either guardrail toggle) after the dialog opened invalidates the approval instead of
 /// silently widening it.
+///
+/// `eligible` is the plan's eligible device ids, the devices the dialog said it
+/// would run on. The request's ids are not enough: which of them are eligible
+/// depends on state the request does not carry (online status, the inventory,
+/// Settings), and `run_action` dispatches to whatever its re-plan finds eligible.
+/// Bound to the request alone, an approval reviewed with a device skipped as offline
+/// dispatched to it if it came back online before Run was pressed.
 ///
 /// The request is destructured exhaustively so that adding a field to
 /// `ActionRequest` fails to compile here rather than silently falling outside the
@@ -35,6 +47,7 @@ pub(super) fn request_hash(
     parameters: &str,
     script: Option<&ScriptRef>,
     run_as: Option<&str>,
+    eligible: &[i64],
 ) -> String {
     let ActionRequest {
         kind,
@@ -67,6 +80,8 @@ pub(super) fn request_hash(
     // outright; this keeps the hash from ever vouching for one.)
     let mut ids = device_ids.clone();
     ids.sort_unstable();
+    let mut eligible = eligible.to_vec();
+    eligible.sort_unstable();
 
     let mut hasher = Sha256::new();
     // Every field is followed by a separator byte that cannot occur in the encoded
@@ -119,7 +134,77 @@ pub(super) fn request_hash(
     field(&[u8::from(*include_offline)]);
     field(&[u8::from(*override_window)]);
     field(&[u8::from(*dry_run)]);
+    field(
+        eligible
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+            .as_bytes(),
+    );
     hex(&hasher.finalize())
+}
+
+/// What `run_action` says when the token does not authorize its re-plan.
+const NOT_CONFIRMED: &str = "This action was not confirmed, or the confirmation expired or no \
+     longer matches the selection. Review the plan and confirm again.";
+
+/// Spends the request's confirmation token on `planned`, the re-plan `run_action`
+/// would dispatch, or says why the token does not authorize it. A scan is not
+/// confirmed at all, so it passes.
+pub(super) fn confirm_dispatch(
+    state: &AppState,
+    request: &ActionRequest,
+    planned: &PlannedAction,
+) -> Result<(), UiError> {
+    if !request.kind.is_mutating() {
+        return Ok(());
+    }
+    let token = request.confirm_token.as_deref().unwrap_or_default();
+    match state.take_confirmation(token, &planned.hash(request), &planned.plan.eligible_ids()) {
+        ConfirmCheck::Confirmed => Ok(()),
+        ConfirmCheck::TargetsChanged { reviewed } => {
+            Err(UiError::new(targets_changed(&reviewed, &planned.plan)))
+        }
+        ConfirmCheck::Refused => Err(UiError::new(NOT_CONFIRMED)),
+    }
+}
+
+/// The refusal for an approval whose devices moved between review and Run: which
+/// ones the re-plan would add and which it would drop, by name.
+pub(super) fn targets_changed(reviewed: &[i64], plan: &ActionPlan) -> String {
+    let reviewed: BTreeSet<i64> = reviewed.iter().copied().collect();
+    let now: BTreeSet<i64> = plan.eligible.iter().map(|t| t.device_id).collect();
+    let added: Vec<&str> = plan
+        .eligible
+        .iter()
+        .filter(|t| !reviewed.contains(&t.device_id))
+        .map(|t| t.device_name.as_str())
+        .collect();
+    // A device that dropped out is in the re-plan's skipped list with its name; one
+    // that is not (an id the inventory no longer lists) is named by id.
+    let dropped: Vec<String> = reviewed
+        .difference(&now)
+        .map(|id| {
+            plan.skipped
+                .iter()
+                .find(|s| s.device_id == *id)
+                .map_or_else(|| format!("Device {id}"), |s| s.device_name.clone())
+        })
+        .collect();
+    let dropped: Vec<&str> = dropped.iter().map(String::as_str).collect();
+    let mut moved = Vec::new();
+    if !added.is_empty() {
+        moved.push(format!("now also {}", summarize_names(&added)));
+    }
+    if !dropped.is_empty() {
+        moved.push(format!("no longer {}", summarize_names(&dropped)));
+    }
+    format!(
+        "Nothing was sent: the devices this action would run on changed since you reviewed it \
+         ({}). A device may have come back online or gone offline. Review the plan again.",
+        moved.join("; ")
+    )
 }
 
 fn hex(bytes: &[u8]) -> String {

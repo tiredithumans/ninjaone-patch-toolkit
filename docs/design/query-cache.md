@@ -147,10 +147,16 @@ in the drilled query and it came back empty.
 
 The three paging commands all return empty on a cache miss. A miss is a normal transient (tenant
 switch, sign-out, superseded query); the frontend already renders its own empty state from the
-absent result. `get_device_rows` (several devices' rows in one pass, `rows::rows_by_device`, the
-post-refresh selection prune's read) follows the same rule, with one distinction the caller
-needs: an empty *reply* is a miss, so the prune keeps the whole selection; an empty *entry* is a
-device the result no longer lists, so its ticked rows go.
+absent result. `get_reboot_devices` (a page of the needs-reboot devices past the first, which the
+summary carries) does too. `selection_status` (the post-refresh selection prune's read,
+`rows::selection_status`) follows the same rule, with one distinction the caller needs: an empty
+*reply* is a miss, so the prune keeps the whole selection; an answer with `in_scope: false` is a
+device the result no longer lists, so its ticks go. It takes each selected device's ticked keys
+(`rows::write_selection_key`, the frontend's `util::patch_key`, held together by the IPC fixture)
+and answers only which are still listed plus the offline and reboot flags — it replaced
+`get_device_rows`, which shipped up to a thousand full rows per selected device on every
+auto-refresh tick for the prune to compare. A call past `MAX_SELECTION_PROBES` devices or
+`MAX_SELECTION_KEYS` keys is refused, never truncated: a partial answer would read as "gone".
 
 `device_detail` (the device drill-down) follows the same rule: `None` on a miss, which the dialog
 renders as "not in the current results". It is a read over a handle (`current_result_handle`), its
@@ -182,7 +188,7 @@ ones in a meaningless order). The first version built the memo inside the lock, 
 command with no `.await`: the first sorted page of a six-figure fleet ran the whole sweep on a
 tokio worker holding the mutex every paging command and the export take. `get_patch_group_members`
 scans every row for its key, so it too runs on a handle in `spawn_blocking`; so does
-`get_device_rows`, one scan for every device it is asked about.
+`selection_status`, one scan for every device it is asked about.
 
 ## Grouping is backend-side too
 
@@ -230,9 +236,15 @@ rollup, `build_failures`), `severity_by_org` (`build_severity_by_org`), `age_buc
 `sla_policy` they were aged under — are computed backend-side in `rows/` and carried on **both**
 `QueryResult` (cached; the HTML report reads it) and `QuerySummary` (IPC; the dashboard reads it).
 They're bounded (one entry per failing patch / per org / 5 buckets / 25 devices), so they ship
-whole rather than paged — except `approvals.stuck_devices`, which is one entry per *device* and so
-is capped on the summary (`ApprovalBacklog::capped(STUCK_DEVICES_SUMMARY_CAP)`, oldest first,
-totals kept) while the cached result keeps every one for the workbook.
+whole rather than paged — except the lists that are one entry per *device*, which are capped on
+the summary with their totals kept while the cached result keeps every one for the exports:
+`approvals.stuck_devices` (`ApprovalBacklog::capped(STUCK_DEVICES_SUMMARY_CAP)`, oldest first),
+each failure group's `device_names` (`FailureGroup::with_names_capped(FAILURE_NAMES_SUMMARY_CAP)`,
+with the distinct `failing_devices` counted alongside, since capped lists can no longer be), and
+the needs-reboot devices: `reboot_devices` is the Needs Reboot tab's first page and
+`reboot_devices_total` the count, the rest read a page at a time through `get_reboot_devices`
+(`util::reboot_page_source`). Shipped whole, the reboot list was 4.9 MB of a 5.1 MB summary at
+10,000 reboot-pending devices, on every query and auto-refresh tick.
 Add such a field in lockstep: `QueryResult` + `QuerySummary` + clone in `QuerySummary::from_result`
 + the `web-rs/src/types.rs` mirror + the demo's `assemble`, then regenerate
 `web-rs/tests/backend-ipc.json` with the field filled — `types::tests` decodes the summary through

@@ -295,7 +295,7 @@ previous one, and three decisions shape what the numbers mean.
   (interned: device and patch tables, items as index pairs — ~11 bytes a pending row) rather than
   bare hashes. Failed items use the same form; they are few.
 
-Patch identity is `changes::patch_key` (built from a raw record by `changes::write_patch_key`,
+Patch identity is `changes::write_row_key` (built from a raw record by `changes::write_patch_key`,
 which the first-seen ledger uses, so the two cannot disagree): an OS patch is its normalized KB, a
 third-party patch its **product** (`productIdentifier`, shared by every version), anything else
 its lowercased title. Keyed by title, a superseding version ("Chrome …55" → "…66") was a new patch:
@@ -313,11 +313,34 @@ against the run before last. The snapshot that write landed is also kept in memo
 (`changes::LastSaved`, one slot) as the next baseline for the same tenant and scope, so a refresh
 cadence over one scope never re-reads and re-parses the file; another scope reads its file. Only a
 snapshot that reached disk is remembered, so memory never names a baseline the next launch cannot
-find. The directory keeps the 20 most
-recently written scopes within 64 MB, always keeping the newest. A run past a million items is
-not written and says so (`too_large`). Consequence worth knowing: every stored run is the next
-baseline, so re-running the same scope over a warm cache reports "no changes since" the run
-seconds earlier — "since the previous run", literally.
+find. A run that observed exactly what that remembered baseline did — everything but its time
+(`RunSnapshot::same_content`) — is not written at all: rewriting and fsyncing up to a million items
+to change one timestamp sat on the reply path of every auto-refresh tick between patch windows. The
+baseline keeps its older time, which stays true: nothing changed since then. The directory keeps
+the 20 most recently written scopes within 64 MB, always keeping the newest. A run past a million
+items is not written and says so (`too_large`). Consequence worth knowing: every run that observed
+something different is the next baseline, so re-running a scope seconds after a change reports "no
+changes since" that run, while an unchanged scope keeps reporting "since" the first run that saw it
+this way.
+
+The diff itself compares identities as integers. Each snapshot's items become `(device id, patch
+id)` pairs sorted once, where patch ids are positions in the newer run's patch table (a patch only
+the older run lists gets an id past its end, so it matches nothing); only the few thousand distinct
+patch keys are hashed, never the items. Hashing a key string per item for four maps made the diff
+the slowest step after the join on a seven-figure result (~0.9 s at 1M items).
+
+**The run history is per tenant.** Each line carries `tenant`, a truncated SHA-256 of instance +
+client id (`history::tenant_key`, the same label snapshots and the ledger are keyed by), and
+`read_run_history` returns only the signed-in tenant's lines; a line from before the stamp is
+matched by its instance alone, the only test it can be held to. It used to store the instance only
+and return every line, while the Trend tab charts whichever record is newest: after a tenant switch
+the tab showed the previous tenant's trend and organization names until a query ran, and two
+client ids on one instance shared one trend line. The tab re-reads on every new session.
+
+The file is read as bytes and split before decoding, so one invalid UTF-8 byte (a crash tearing a
+multi-byte organization name) costs its own line rather than the whole history, and an append to
+a file whose last line has no end starts on a new line instead of fusing onto it. The trim's line
+count is tracked in memory after one count per process rather than re-read after every append.
 
 **The run history is versioned by calculation method** (`history::METHOD`, stored per line as
 `method`; lines from before it read as 0). `RunRecord::comparable_with` in `web-rs` requires the
@@ -496,8 +519,10 @@ cell joined every affected device name, so a patch failing on ~2,000 machines ma
 unexportable. That cell is now `rows::join_capped` — as many names as fit, then "… and N more" —
 and every other text cell goes through `rows::clamp_cell` as a backstop. Detail rows past one
 sheet continue on `Patches (2)`, `Patches (3)`, … with the header and autofilter repeated, rather
-than being dropped or failing. The report renders the same capped cell so the two artifacts agree;
-the in-app table reads `device_names` whole.
+than being dropped or failing. The report renders the same capped cell so the two artifacts agree.
+The in-app table reads the IPC summary, whose groups carry at most `FAILURE_NAMES_SUMMARY_CAP` names
+each (`affected_devices` and the summary's `failing_devices` still count every one), and says how
+many more there are (`util::failure_device_list`).
 
 ## There is no patch release date in the NinjaOne API
 

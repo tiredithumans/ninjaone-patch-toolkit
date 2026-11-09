@@ -60,7 +60,7 @@ fn init_tracing() {
     // what must not happen here.
     let file_layer = paths::log_dir()
         .and_then(|dir| {
-            std::fs::create_dir_all(&dir)?;
+            prepare_log_dir(&dir)?;
             Ok(tracing_appender::rolling::Builder::new()
                 .rotation(tracing_appender::rolling::Rotation::DAILY)
                 .filename_prefix("ninjaone-patch-toolkit")
@@ -84,6 +84,58 @@ fn init_tracing() {
         // and nothing else — it must never stop the app from starting.
         .with(file_layer)
         .try_init();
+}
+
+/// Creates the log directory owner-only (0700 on Unix), and tightens one an earlier
+/// version created at the default 0755.
+///
+/// `tracing_appender` opens its files with the process umask — 0644 in practice —
+/// and cannot be asked for less, so the directory is what keeps other local users
+/// out of them. Everything else this app writes is 0600 for the same reason: the
+/// logs carry the instance, request paths and NinjaOne's error bodies. Elsewhere the
+/// directory inherits the user profile's ACL, which already is owner-only.
+fn prepare_log_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        // `mode` only reaches directories this call creates.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn mode(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// The log files are 0644 whatever we do, so the directory must not let other
+    /// users reach them — whether this run creates it or an earlier one left it 0755.
+    #[test]
+    fn the_log_directory_is_owner_only() {
+        let root = std::env::temp_dir().join(format!("npt-log-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let fresh = root.join("app").join("logs");
+        super::prepare_log_dir(&fresh).expect("create");
+        assert_eq!(mode(&fresh), 0o700);
+
+        let earlier = root.join("earlier-logs");
+        std::fs::create_dir_all(&earlier).unwrap();
+        std::fs::set_permissions(&earlier, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::prepare_log_dir(&earlier).expect("tighten");
+        assert_eq!(mode(&earlier), 0o700);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -134,7 +186,8 @@ pub fn run() {
             commands::patches::get_patch_rows,
             commands::patches::get_patch_groups,
             commands::patches::get_patch_group_members,
-            commands::patches::get_device_rows,
+            commands::patches::selection_status,
+            commands::patches::get_reboot_devices,
             commands::patches::device_detail,
             commands::export::export_patches_xlsx,
             commands::export::export_report_html,

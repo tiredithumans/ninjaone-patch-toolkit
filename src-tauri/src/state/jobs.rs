@@ -1,7 +1,7 @@
 //! The dispatched-job store, the single-claim poller slot and the confirm-token
 //! slot — the mutable action state `AppState` carries between IPC calls.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -10,7 +10,7 @@ use tracing::warn;
 
 use super::{AppState, TenantKey};
 use crate::actions::audit::AuditEntry;
-use crate::actions::{JobReport, MAX_JOBS};
+use crate::actions::{ConfirmBinding, ConfirmCheck, JobReport, MAX_JOBS};
 
 /// How long a confirmation token issued by `plan_action` stays usable. Short
 /// enough that a dialog left open over lunch fails closed rather than dispatching
@@ -19,11 +19,12 @@ const CONFIRM_TTL: Duration = Duration::from_secs(300);
 
 /// A plan the operator has been shown and may confirm.
 ///
-/// The hash binds the token to the exact action + device set + parameters that
-/// were planned, so an altered request fails the check even with a valid token.
+/// The binding's hash ties the token to the exact action, device set, parameters
+/// and eligible devices that were planned, so an altered request, or a re-plan
+/// that would reach other devices, fails the check even with a valid token.
 pub struct PendingConfirm {
     pub token: String,
-    pub request_hash: String,
+    pub binding: ConfirmBinding,
     pub issued_at: Instant,
     /// The session (tenant + jobs epoch) the plan was built and approved under.
     ///
@@ -220,10 +221,16 @@ impl AppState {
         if *t != session.tenant {
             return applied;
         }
+        // Indexed once rather than searched per update, all under this lock. A settle
+        // tick can carry a whole batch, and the store holds every in-flight row of
+        // every batch, so a linear search per update made the time the lock was held
+        // grow with the product of the two.
+        let position: HashMap<u64, usize> =
+            jobs.iter().enumerate().map(|(i, j)| (j.id, i)).collect();
         for update in updates {
-            if let Some(slot) = jobs.iter_mut().find(|j| j.id == update.id) {
+            if let Some(&i) = position.get(&update.id) {
                 applied.insert(update.id);
-                *slot = update;
+                jobs[i] = update;
             }
         }
         applied
@@ -376,7 +383,7 @@ impl AppState {
         &self,
         session: &JobSession,
         token: String,
-        request_hash: String,
+        binding: ConfirmBinding,
     ) -> bool {
         let Ok(mut guard) = self.pending_confirm.lock() else {
             return false;
@@ -387,16 +394,23 @@ impl AppState {
         }
         *guard = Some(PendingConfirm {
             token,
-            request_hash,
+            binding,
             issued_at: Instant::now(),
             session: session.clone(),
         });
         true
     }
 
-    /// Consumes a confirmation token, returning whether it authorizes this exact
-    /// request. Single-use: the slot is cleared on any match attempt, so a
-    /// double-click can't dispatch twice.
+    /// Spends a confirmation token on the dispatch `request_hash` fingerprints,
+    /// which would reach the devices `targets` (sorted). Single-use: the slot is
+    /// cleared on any attempt, so a double-click can't dispatch twice, and a refused
+    /// attempt leaves nothing to retry with.
+    ///
+    /// [`ConfirmCheck::TargetsChanged`] is a refusal like any other. It is told apart
+    /// only so the operator hears *why*: the token and session were right, but the
+    /// re-plan would dispatch to other devices than the ones reviewed (an offline
+    /// device came back online, say). The fingerprint covers those devices, so it
+    /// already fails; the recorded ids say which moved.
     ///
     /// Both secrets are compared in constant time. The realistic threat here is low —
     /// the slot holds one token at a time, it is single-use, it expires in five
@@ -404,23 +418,45 @@ impl AppState {
     /// handed it — but `==` on a `String` returns on the first differing byte, and
     /// this is the gate standing between a stale or modified frontend and a fleet-wide
     /// reboot. A comparison that leaks nothing costs nothing here.
-    pub fn consume_confirm_token(&self, token: &str, request_hash: &str) -> bool {
+    pub fn take_confirmation(
+        &self,
+        token: &str,
+        request_hash: &str,
+        targets: &[i64],
+    ) -> ConfirmCheck {
         let Ok(mut guard) = self.pending_confirm.lock() else {
-            return false;
+            return ConfirmCheck::Refused;
         };
         let Some(pending) = guard.take() else {
-            return false;
+            return ConfirmCheck::Refused;
         };
         // Not short-circuiting: both comparisons run regardless of the first result.
         let token_ok = constant_time_eq(pending.token.as_bytes(), token.as_bytes());
-        let hash_ok = constant_time_eq(pending.request_hash.as_bytes(), request_hash.as_bytes());
-        // The tenant is compared here rather than folded into `request_hash` because
-        // `ActionRequest` has no field to hash it from — see `PendingConfirm::tenant`.
+        let hash_ok = constant_time_eq(pending.binding.hash.as_bytes(), request_hash.as_bytes());
+        // The tenant is compared here rather than folded into the hash because
+        // `ActionRequest` has no field to hash it from — see `PendingConfirm::session`.
         // An approval is for one instance; the operator can change instance in
         // Settings while the dialog is open.
-        token_ok & hash_ok
-            && self.job_session_is_current(&pending.session)
-            && pending.issued_at.elapsed() < CONFIRM_TTL
+        let live = self.job_session_is_current(&pending.session)
+            && pending.issued_at.elapsed() < CONFIRM_TTL;
+        if !(token_ok && live) {
+            return ConfirmCheck::Refused;
+        }
+        let same_targets = pending.binding.targets == targets;
+        match (hash_ok, same_targets) {
+            (true, true) => ConfirmCheck::Confirmed,
+            (_, false) => ConfirmCheck::TargetsChanged {
+                reviewed: pending.binding.targets,
+            },
+            (false, true) => ConfirmCheck::Refused,
+        }
+    }
+
+    /// [`Self::take_confirmation`] as a yes or no, for a binding with no recorded
+    /// devices: the shape the token-slot tests in `state::tests` drive.
+    #[cfg(test)]
+    pub fn consume_confirm_token(&self, token: &str, request_hash: &str) -> bool {
+        self.take_confirmation(token, request_hash, &[]) == ConfirmCheck::Confirmed
     }
 }
 

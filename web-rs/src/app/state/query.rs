@@ -244,7 +244,7 @@ impl AppState {
                         // Same scope, fresher data: keep what the operator ticked,
                         // minus anything this refresh no longer lists.
                         self.prune_selection_after_refresh(seq);
-                        self.prune_device_selection_after_refresh();
+                        self.prune_device_selection_after_refresh(seq);
                     } else {
                         // A new scope: a selection made against the previous result
                         // no longer describes what is on screen. Said out loud: it
@@ -302,19 +302,16 @@ impl AppState {
         }
     }
 
-    /// After a silent refresh, re-checks every selected device against its rows in
-    /// the new result and drops the ticked patches that are gone (installed,
-    /// rejected, or the device left the scope) — see `util::prune_device_selection`.
+    /// After a silent refresh, re-checks every selected device against the new result
+    /// and drops the ticked patches that are gone (installed, rejected, or the device
+    /// left the scope) — see `util::prune_selection_from_status`.
     ///
     /// One backend read for the whole selection, served from the result just
     /// cached — no NinjaOne traffic. Abandoned if another run lands meanwhile: a
     /// manual run clears the selection itself, and a newer refresh prunes again.
     fn prune_selection_after_refresh(self, seq: u64) {
-        let devices: Vec<i64> = self
-            .actions
-            .selected
-            .with_untracked(|s| s.keys().copied().collect());
-        if devices.is_empty() {
+        let probes = self.actions.selected.with_untracked(util::selection_probes);
+        if probes.is_empty() {
             return;
         }
         spawn_local(async move {
@@ -322,10 +319,10 @@ impl AppState {
             // selection the operator can't rebuild from memory. The backend re-plans
             // against the device inventory (cached up to 15 minutes) and Settings before
             // any dispatch; ticked KBs are not re-checked against current patches, but the
-            // confirm dialog shows each device's parameter string. This was one awaited
-            // call per selected device, in series, each carrying up to the limit in
-            // rows over the IPC bridge.
-            let Ok(fresh) = api::get_device_rows(devices, SELECTION_PRUNE_LIMIT).await else {
+            // confirm dialog shows each device's parameter string. The read sends the
+            // ticked keys and gets back only those still listed — it used to fetch up
+            // to a thousand full rows per selected device, every tick.
+            let Ok(status) = api::selection_status(probes).await else {
                 return;
             };
             if util::is_superseded(self.run.query_seq.get_untracked(), seq) {
@@ -334,7 +331,7 @@ impl AppState {
             let mut removed = 0;
             self.actions
                 .selected
-                .update(|sel| removed = util::prune_selection_from_reads(sel, &fresh));
+                .update(|sel| removed = util::prune_selection_from_status(sel, &status));
             if removed > 0 {
                 self.notify(Toast::ok(format!(
                     "Auto-refresh: {removed} selected patch row(s) are no longer listed and were deselected"

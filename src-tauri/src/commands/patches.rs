@@ -16,13 +16,13 @@ use crate::filter::FilterParams;
 use crate::first_seen::{self, Family, Observation, Resolver, TenantLedger};
 use crate::model::{Device, DeviceGroup, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
-    ComplianceBucket, DeviceDetail, FirstSeenTracking, GroupBy, GroupPage, InstallWindow,
-    LookupMaps, OS_TYPE_LABEL, PatchFamilies, PatchRecord, PatchSource, QueryResult, QuerySummary,
-    RowSort, SOFTWARE_TYPE_LABEL, SlaCutoffs, build_age_buckets, build_approval_backlog,
-    build_compliance, build_compliance_by_os, build_device_backlogs, build_device_summaries,
-    build_failures, build_groups, build_query_scope, build_rows, build_severity_by_org,
-    build_time_to_install, group_member_page, page_rows, slice_groups, sort_device_summaries,
-    sort_order, uncounted_orgs,
+    ComplianceBucket, DeviceDetail, DeviceSummary, FirstSeenTracking, GroupBy, GroupPage,
+    InstallWindow, LookupMaps, OS_TYPE_LABEL, PatchFamilies, PatchRecord, PatchSource, QueryResult,
+    QuerySummary, RowSort, SOFTWARE_TYPE_LABEL, SelectionProbe, SelectionStatus, SlaCutoffs,
+    build_age_buckets, build_approval_backlog, build_compliance, build_compliance_by_os,
+    build_device_backlogs, build_device_summaries, build_failures, build_groups, build_query_scope,
+    build_rows, build_severity_by_org, build_time_to_install, group_member_page, page_rows,
+    slice_groups, sort_device_summaries, sort_order, uncounted_orgs,
 };
 use crate::settings::{MAX_WINDOW_DAYS, SlaPolicy};
 use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
@@ -259,7 +259,8 @@ pub async fn query_patches(
     // Written before the store: this records what this query *measured*, which is
     // true whether or not the result went on to win the cache — a superseded run
     // still observed the fleet. Off the runtime, per the concurrency rule.
-    let entry = crate::history::RunRecord::from_result(&result, &settings.instance_base_url);
+    let entry =
+        crate::history::RunRecord::from_result(&result, &settings.instance_base_url, &tenant);
     tokio::task::spawn_blocking(move || crate::history::record(&entry));
 
     let outcome = state.store_last_result_if_current(token, result);
@@ -991,18 +992,7 @@ fn assemble_result(
     // stamped, so it is applied here rather than in the join.
     rows.retain(|r| prepared.exploited_allowed(r.exploited_cves.as_deref()));
     // Highest severity first, then organization, then device — case-insensitive.
-    //
-    // `cmp_ci` rather than `sort_by_cached_key`: the cached key allocated two owned
-    // lowercase `String`s *per row*, which on a six-figure fleet is a few hundred
-    // thousand allocations to sort data whose repeated strings the row builder went
-    // to lengths to intern into shared `Arc<str>`. `cmp_ci` is the allocation-free
-    // comparison the memoized paging sort already uses on the same fields.
-    rows.sort_by(|a, b| {
-        b.severity_rank
-            .cmp(&a.severity_rank)
-            .then_with(|| crate::rows::cmp_ci(&a.organization, &b.organization))
-            .then_with(|| crate::rows::cmp_ci(&a.device_name, &b.device_name))
-    });
+    crate::rows::sort_canonical(&mut rows);
 
     // Compliance + reboot rollups from the scoped current set.
     let cutoffs = SlaCutoffs::new(&sla, now);
@@ -1242,24 +1232,61 @@ pub async fn get_patch_group_members(
     .map_err(|e| UiError::new(format!("reading the group's rows panicked: {e}")))
 }
 
-/// Serves several devices' rows in one pass over the cached result — the
-/// post-refresh selection prune's read, which was one `get_patch_group_members`
-/// call per selected device. Empty on a cache miss, like the paging commands.
+/// Devices one [`selection_status`] call may probe, and ticked keys across them.
+///
+/// Far above any selection the UI builds (a dispatch is capped at a few hundred
+/// devices); they bound what a hand-built call can make the backend scan, and a
+/// call past them is refused rather than truncated — a prune must not read a
+/// partial answer as "gone".
+const MAX_SELECTION_PROBES: usize = 10_000;
+const MAX_SELECTION_KEYS: usize = 200_000;
+
+/// Answers the post-refresh selection prune from the cached result: for each probed
+/// device, whether it is still in scope, offline, flagged for reboot, and which of
+/// its ticked patch keys still name a row ([`crate::rows::selection_status`]).
+/// Empty on a cache miss, like the paging commands — the caller keeps its selection.
 #[tauri::command]
-pub async fn get_device_rows(
+pub async fn selection_status(
     state: State<'_, AppState>,
-    device_ids: Vec<i64>,
-    limit: usize,
-) -> Result<Vec<crate::rows::DeviceRows>, UiError> {
+    probes: Vec<SelectionProbe>,
+) -> Result<Vec<SelectionStatus>, UiError> {
+    let keys: usize = probes.iter().map(|p| p.keys.len()).sum();
+    if probes.len() > MAX_SELECTION_PROBES || keys > MAX_SELECTION_KEYS {
+        return Err(UiError::new(format!(
+            "too large a selection to re-check ({} devices, {keys} patches)",
+            probes.len()
+        )));
+    }
     let Some(result) = state.current_result_handle()? else {
         return Ok(Vec::new());
     };
-    let limit = clamp_page(limit);
     tokio::task::spawn_blocking(move || {
-        crate::rows::rows_by_device(&result.rows, &device_ids, limit)
+        crate::rows::selection_status(&result.rows, &result.devices, &probes)
     })
     .await
-    .map_err(|e| UiError::new(format!("reading the devices' rows panicked: {e}")))
+    .map_err(|e| UiError::new(format!("re-checking the selection panicked: {e}")))
+}
+
+/// One page of the devices flagged for reboot, in the summary's order — the Needs
+/// Reboot tab's pages past the first, which the summary carries. Empty on a cache
+/// miss, like the other paging commands.
+#[tauri::command]
+pub fn get_reboot_devices(
+    state: State<'_, AppState>,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<DeviceSummary>, UiError> {
+    let Some(result) = state.current_result_handle()? else {
+        return Ok(Vec::new());
+    };
+    Ok(result
+        .devices
+        .iter()
+        .filter(|d| d.needs_reboot)
+        .skip(offset)
+        .take(clamp_page(limit))
+        .cloned()
+        .collect())
 }
 
 /// Serves the device drill-down — one device's facts, its per-device rollup and up

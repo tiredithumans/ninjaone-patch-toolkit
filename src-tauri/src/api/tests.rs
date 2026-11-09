@@ -811,14 +811,71 @@ async fn after_pagination_uses_max_id_and_dedupes_boundary() {
     assert!(devices.iter().any(|d| d.id == 502));
 }
 
-/// A client with a timeout short enough that a delayed mock always trips it.
+/// A client with a timeout short enough that a delayed mock always trips it —
+/// cursor pages included, which otherwise get the longer [`CURSOR_PAGE_TIMEOUT`].
 fn timing_out_client(server: &wiremock::MockServer) -> NinjaApiClient {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(150))
         .build()
         .expect("build client");
     let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
-    NinjaApiClient::new(http, auth)
+    NinjaApiClient::new(http, auth).with_cursor_page_timeout(Duration::from_millis(150))
+}
+
+/// A cursor page is given [`CURSOR_PAGE_TIMEOUT`] in place of the client's own:
+/// NinjaOne moves the scan when it serves a page, so a slow page the client gave up
+/// on was a lost one. Here the client allows 150 ms and the cursor page takes 400;
+/// the scan completes on that page with no re-read. Every other request keeps the
+/// client's limit (`get_timeout_is_replayed`, `post_timeout_is_not_replayed`). Both
+/// limits are scaled down from 45 s and 100 s.
+#[tokio::test]
+async fn a_cursor_page_outlasts_the_client_timeout() {
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .and(query_param("cursor", "scan-1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "results": rows(1),
+                    "cursor": { "name": "", "offset": 3, "count": 3 },
+                }))
+                .set_delay(Duration::from_millis(400)),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .and(query_param_is_missing("cursor"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": rows(2),
+            "cursor": { "name": "scan-1", "offset": 2, "count": 3 },
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_millis(150))
+        .build()
+        .expect("build client");
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let client = NinjaApiClient::new(http, auth).with_cursor_page_timeout(Duration::from_secs(5));
+
+    let patches = client
+        .fleet_software_patches(None, None, None)
+        .await
+        .expect("the slow cursor page is waited for");
+    assert_eq!(patches.len(), 3);
+    assert_eq!(
+        request_cursors(&server).await,
+        [None, Some("scan-1".into())],
+        "no re-read and no restart"
+    );
+    server.verify().await;
 }
 
 #[tokio::test]
@@ -1193,6 +1250,62 @@ async fn the_429_that_ends_a_request_still_pauses_its_siblings() {
     );
 }
 
+/// The pause releases every waiter at one deadline, so jitter on the deadline alone
+/// moved a burst without spreading it. Each request now adds its own once the pause
+/// lets it go: six requests parked on one pause reach the server spread out, and
+/// none before the deadline.
+#[tokio::test]
+async fn requests_the_pause_releases_do_not_all_send_at_once() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let ok = ResponseTemplate::new(200).set_body_json(json!({}));
+    Mock::given(method("GET"))
+        .respond_with(Arrivals {
+            at: Arc::clone(&hits),
+            first: ok.clone(),
+            rest: ok,
+        })
+        .mount(&server)
+        .await;
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let client = NinjaApiClient::new(http, auth);
+    let deadline = Instant::now() + Duration::from_millis(200);
+    client.pause_until(deadline);
+
+    let requests: Vec<_> = (0..6)
+        .map(|_| {
+            let client = client.clone();
+            tokio::spawn(async move { client.get_json::<Value>("/a", &[]).await })
+        })
+        .collect();
+    for request in requests {
+        request
+            .await
+            .expect("join")
+            .expect("each request goes through after the pause");
+    }
+
+    let hits = hits.lock().expect("arrivals").clone();
+    assert_eq!(hits.len(), 6);
+    assert!(
+        hits.iter().all(|at| *at >= deadline),
+        "none before the deadline"
+    );
+    let first = hits.iter().min().expect("a first arrival");
+    let last = hits.iter().max().expect("a last arrival");
+    // Six draws of up to a second each all landing within 50 ms of one another is
+    // a one-in-500,000 event; without the per-request jitter it is every run.
+    assert!(
+        last.duration_since(*first) >= Duration::from_millis(50),
+        "six re-sends within {:?} of one another are one burst",
+        last.duration_since(*first)
+    );
+}
+
 /// A tenant switch during a 429 wait used to send the retry to the old host with
 /// the new tenant's freshly refreshed token, and the old host's 401 then
 /// invalidated it. The retry is abandoned instead: the old host sees nothing more,
@@ -1456,6 +1569,79 @@ async fn an_unreadable_2xx_body_on_an_acting_post_is_an_unknown_outcome() {
         .await
         .expect_err("an undecodable body must surface");
     assert!(is_outcome_unknown(&err), "{err:#}");
+}
+
+/// A success body without a JSON content type: JSON when it parses, nothing when it
+/// is blank, a bare token kept as a string, and anything else an error that quotes
+/// at most a capped excerpt — never the whole body as a string.
+#[test]
+fn a_body_not_labelled_json_is_json_a_token_or_an_error() {
+    assert_eq!(parse_text_body("").unwrap(), Value::Null);
+    assert_eq!(parse_text_body(" \r\n").unwrap(), Value::Null);
+    assert_eq!(parse_text_body(r#"{"id": 5}"#).unwrap(), json!({ "id": 5 }));
+    assert_eq!(parse_text_body(r#""quoted""#).unwrap(), json!("quoted"));
+    assert_eq!(
+        parse_text_body(" 0d1e3c8a-6f0b-4b7e-9c51-2a7b8d9e0f11\n").unwrap(),
+        json!("0d1e3c8a-6f0b-4b7e-9c51-2a7b8d9e0f11")
+    );
+    let page = format!("<html>{}</html>", "sign in to continue ".repeat(5_000));
+    let too_long = "a".repeat(MAX_BARE_TOKEN + 1);
+    for not_json in [page.as_str(), "two words", "<b>x</b>", too_long.as_str()] {
+        let err = format!("{:#}", parse_text_body(not_json).expect_err(not_json));
+        assert!(err.starts_with("the response was not JSON"), "{err}");
+        assert!(err.chars().count() < 600, "{} chars", err.chars().count());
+    }
+}
+
+/// A proxy's sign-in page answering 200 used to become a `Value::String` and reach
+/// the operator whole through serde's "invalid type: string …"; it is an error of a
+/// capped length now. On an acting POST it is an unknown outcome — the request may
+/// have been accepted — and never the dispatch's series uid, which a short token
+/// still is, because some tenants answer `script/run` with the bare uid as text.
+#[tokio::test]
+async fn a_2xx_page_that_is_not_json_is_a_capped_error_but_a_bare_uid_is_kept() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let page = "<html>sign in to continue</html>".repeat(3_000);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/roles"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(page.clone(), "text/html"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/3/script/run"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(page, "text/html"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/4/script/run"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("uid-6f1c", "text/plain"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let client = NinjaApiClient::new(http, auth);
+
+    let err = client.roles().await.expect_err("a page is not a role list");
+    assert!(format!("{err:#}").chars().count() < 700, "{err:#}");
+
+    let script = crate::api::actions::ScriptRef::Script { id: 1 };
+    let err = client
+        .run_script(3, &script, "", "system")
+        .await
+        .expect_err("a page is no dispatch record");
+    assert!(is_outcome_unknown(&err), "{err:#}");
+    assert!(format!("{err:#}").chars().count() < 900, "{err:#}");
+
+    let dispatched = client
+        .run_script(4, &script, "", "system")
+        .await
+        .expect("a bare uid is a dispatch");
+    assert_eq!(dispatched.series_uid.as_deref(), Some("uid-6f1c"));
 }
 
 #[tokio::test]
@@ -2053,11 +2239,13 @@ async fn a_cursor_page_lost_on_every_scan_is_an_error_after_the_restart_budget()
 /// rows. It honors `loc` in `df` — or, unless `honors_df`, drops it silently, the way
 /// NinjaOne drops a clause it does not honor — pages by `pageSize`, and announces
 /// each scan's `count`. With `drifts`, a filtered page loses its first row, as a
-/// device moving between locations mid-fetch would.
+/// device moving between locations mid-fetch would. Each `count` is the scan's rows
+/// times `count_scale`, which is 1 for an honest server.
 struct LocationFeed {
     rows: Vec<(i64, i64)>,
     honors_df: bool,
     drifts: bool,
+    count_scale: usize,
 }
 
 impl wiremock::Respond for LocationFeed {
@@ -2112,7 +2300,7 @@ impl wiremock::Respond for LocationFeed {
         };
         wiremock::ResponseTemplate::new(200).set_body_json(json!({
             "results": results,
-            "cursor": { "name": name, "offset": end, "count": rows.len() },
+            "cursor": { "name": name, "offset": end, "count": rows.len() * self.count_scale },
         }))
     }
 }
@@ -2208,6 +2396,7 @@ async fn the_third_party_feed_is_paged_in_location_slices_that_add_up_to_it() {
             rows: two_rows_each(),
             honors_df: true,
             drifts: false,
+            count_scale: 1,
         },
     )
     .await;
@@ -2241,6 +2430,7 @@ async fn slices_the_server_does_not_filter_are_never_paged() {
             rows: two_rows_each(),
             honors_df: false,
             drifts: false,
+            count_scale: 1,
         },
     )
     .await;
@@ -2265,6 +2455,7 @@ async fn rows_no_slice_covers_page_the_feed_whole() {
             rows,
             honors_df: true,
             drifts: false,
+            count_scale: 1,
         },
     )
     .await;
@@ -2290,10 +2481,33 @@ async fn slices_that_page_a_different_total_page_the_feed_whole() {
             rows: two_rows_each(),
             honors_df: true,
             drifts: true,
+            count_scale: 1,
         },
     )
     .await;
     assert_eq!(kept.len(), 12, "the whole feed, not the slices' 9 rows");
+    let mut paged = requests_for(&requests, &REPORTING_PAGE_SIZE.to_string());
+    paged.retain(Option::is_none);
+    assert_eq!(paged, [None], "the slices were paged, then the feed whole");
+}
+
+/// Counts that add up but are absurd — a hundred billion times the rows — size
+/// nothing. The join used to allocate the announced total before checking it, and
+/// an allocation that size aborts the whole app. Now the slices' rows are counted
+/// first, fall short of the total, and the feed is paged whole like any mismatch.
+#[tokio::test]
+async fn an_absurd_announced_count_is_never_allocated() {
+    let (kept, _, requests) = scan_sliced(
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows: two_rows_each(),
+            honors_df: true,
+            drifts: false,
+            count_scale: 100_000_000_000,
+        },
+    )
+    .await;
+    assert_eq!(kept.len(), 12);
     let mut paged = requests_for(&requests, &REPORTING_PAGE_SIZE.to_string());
     paged.retain(Option::is_none);
     assert_eq!(paged, [None], "the slices were paged, then the feed whole");

@@ -1336,40 +1336,89 @@ fn build_groups_by_product_folds_versions_and_falls_back_to_the_patch_key() {
     }
 }
 
-/// The batched read answers for every device asked — an empty entry for one that
-/// left the scope, a `truncated` prefix for one past the limit — and ignores the
-/// rest, so the selection prune can tell "gone" from "not asked" and "partial".
+/// The prune's probe answers once per device asked, in order: which ticked keys
+/// still name a row (in the probe's order, no repeats), the device's offline and
+/// reboot flags, and `in_scope: false` for a device the result does not hold.
 #[test]
-fn rows_by_device_answers_for_every_requested_device() {
+fn selection_status_answers_each_probe_from_the_cache() {
     let rows = vec![
         group_row(1, "web-01", Some("KB1"), "Cumulative Update", 7),
         group_row(2, "web-02", Some("KB1"), "Cumulative Update", 7),
         group_row(1, "web-01", Some("KB2"), "Security Update", 6),
-        group_row(3, "web-03", Some("KB1"), "Cumulative Update", 7),
+    ];
+    let device = |id: i64, offline: bool, needs_reboot: bool| DeviceSummary {
+        device_id: id,
+        device_name: format!("web-0{id}"),
+        organization: "Org".into(),
+        location: None,
+        device_role: None,
+        os_name: None,
+        node_class: None,
+        needs_reboot,
+        reboot_reason: None,
+        pending_count: 0,
+        offline,
+        rollup_scope: RollupScope::Included,
+        pending_by_severity: SeverityCounts::default(),
+        past_sla: 0,
+        urgent_past_sla: 0,
+        failed_installs: None,
+        last_contact: None,
+        last_contact_ts: None,
+        vulnerabilities: None,
+    };
+    let devices = vec![device(1, true, false), device(2, false, true)];
+    let key = |row: &PatchRow| {
+        let mut k = String::new();
+        write_selection_key(row, &mut k);
+        k
+    };
+    let kb2 = key(&rows[2]);
+    let kb1 = key(&rows[0]);
+    let gone = "OS\u{1f}KB9\u{1f}Gone".to_string();
+    let probes = vec![
+        SelectionProbe {
+            device_id: 1,
+            keys: vec![kb2.clone(), gone.clone(), kb1.clone(), kb2.clone()],
+        },
+        SelectionProbe {
+            device_id: 2,
+            keys: Vec::new(),
+        },
+        SelectionProbe {
+            device_id: 9,
+            keys: vec![kb1.clone()],
+        },
+        SelectionProbe {
+            device_id: 1,
+            keys: vec![gone],
+        },
     ];
 
-    let by = rows_by_device(&rows, &[1, 9, 2], 1);
+    let status = selection_status(&rows, &devices, &probes);
 
     assert_eq!(
-        by.iter().map(|d| d.device_id).collect::<Vec<_>>(),
+        status.iter().map(|s| s.device_id).collect::<Vec<_>>(),
         vec![1, 2, 9],
-        "every requested device, by id; device 3 was not asked"
+        "one answer per device, in probe order"
     );
-    assert_eq!(by[0].rows.len(), 1);
-    assert!(
-        by[0].truncated,
-        "device 1 has two rows and the limit is one"
-    );
+    assert_eq!(status[0].present, vec![kb2, kb1], "probe order, no repeats");
+    assert!(status[0].in_scope && status[0].offline && !status[0].needs_reboot);
+    assert!(status[1].in_scope && status[1].needs_reboot && status[1].present.is_empty());
+    assert!(!status[2].in_scope && status[2].present.is_empty());
+}
+
+/// The backend's selection key is the frontend's `util::patch_key`:
+/// `(patch type, KB, name)` joined by U+001F, an absent KB as empty.
+#[test]
+fn the_selection_key_is_type_kb_and_name() {
+    let mut key = String::new();
+    write_selection_key(&group_row(1, "a", Some("KB1"), "CU", 7), &mut key);
+    assert_eq!(key, "OS\u{1f}KB1\u{1f}CU");
+    write_selection_key(&group_row(1, "a", None, "Chrome", 4), &mut key);
     assert_eq!(
-        by[0].rows[0].kb.as_deref(),
-        Some("KB1"),
-        "the cache's order"
-    );
-    assert_eq!(by[1].rows.len(), 1);
-    assert!(!by[1].truncated);
-    assert!(
-        by[2].rows.is_empty() && !by[2].truncated,
-        "asked, nothing listed"
+        key, "SOFTWARE\u{1f}\u{1f}Chrome",
+        "the buffer is cleared first"
     );
 }
 
@@ -1711,6 +1760,57 @@ fn group_page_slices_and_reports_the_total() {
         5,
         "and the total still describes the whole grouping"
     );
+}
+
+/// The key sort must land on exactly the order the stable comparator it replaced
+/// produced: severity descending, then organization and device case-insensitively,
+/// with ties — including names that differ only in case — kept in join order.
+#[test]
+fn the_canonical_sort_matches_the_stable_comparator_it_replaced() {
+    let orgs = ["Acme", "ACME", "beta", "Beta Corp", "acme"];
+    let devices = ["web-01", "WEB-01", "db", "Db", "app"];
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let rows: Vec<PatchRow> = (0..2_000)
+        .map(|i| {
+            let r = next();
+            PatchRow {
+                organization: orgs[(r % 5) as usize].into(),
+                severity_rank: ((r >> 8) % 4) as u8,
+                // `name` is unique per row, so it identifies where each row went.
+                name: format!("row-{i}").into(),
+                ..group_row(i, devices[((r >> 16) % 5) as usize], Some("KB1"), "x", 0)
+            }
+        })
+        .collect();
+
+    let mut expected = rows.clone();
+    expected.sort_by(|a, b| {
+        b.severity_rank
+            .cmp(&a.severity_rank)
+            .then_with(|| cmp_ci(&a.organization, &b.organization))
+            .then_with(|| cmp_ci(&a.device_name, &b.device_name))
+    });
+    let mut actual = rows;
+    sort_canonical(&mut actual);
+
+    let names = |rows: &[PatchRow]| rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&actual), names(&expected));
+}
+
+#[test]
+fn the_canonical_sort_handles_empty_and_single_row_sets() {
+    let mut none: Vec<PatchRow> = Vec::new();
+    sort_canonical(&mut none);
+    assert!(none.is_empty());
+    let mut one = vec![failed_row(1, "srv1", "KB1", None)];
+    sort_canonical(&mut one);
+    assert_eq!(&*one[0].device_name, "srv1");
 }
 
 #[test]

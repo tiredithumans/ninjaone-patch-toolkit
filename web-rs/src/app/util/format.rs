@@ -1,9 +1,7 @@
 //! Display formatting: counts, labels, durations, the summary line, the
 //! compliance scope note, percentages, CSS-class pickers and the aged badge.
 
-use std::collections::BTreeSet;
-
-use crate::types::{ActionKind, FailureGroup, JobReport, PatchFamilies, RebootChoice, RunRecord};
+use crate::types::{ActionKind, JobReport, PatchFamilies, RebootChoice, RunRecord};
 
 use super::super::Tab;
 
@@ -50,14 +48,14 @@ pub(crate) fn tab_after_key(current: Tab, key: &str) -> Option<Tab> {
     }
 }
 
-/// Distinct devices across every failure group. The groups overlap (one device
-/// usually fails several patches), so the per-group counts cannot simply be added.
-pub(crate) fn failing_device_count(failures: &[FailureGroup]) -> usize {
-    failures
-        .iter()
-        .flat_map(|f| f.device_names.iter())
-        .collect::<BTreeSet<_>>()
-        .len()
+/// The failures table's Devices cell: the names the summary carries, then how many
+/// more the patch failed on — the backend caps each group's list.
+pub(crate) fn failure_device_list(names: &[String], affected: usize) -> String {
+    let listed = names.join(", ");
+    match affected.saturating_sub(names.len()) {
+        0 => listed,
+        more => format!("{listed} … and {} more", group_thousands(more)),
+    }
 }
 
 /// The accessible name of a chart: its title, then every labelled value it draws.

@@ -109,16 +109,24 @@ pub struct QueryToken {
     result_epoch: u64,
 }
 
-impl QueryToken {
-    /// The tenant this run started under, spelled for on-disk state keyed per tenant
-    /// (`changes` snapshots). From the token rather than the settings for the same
-    /// reason the cache stamp is: the tenant can change while a fetch is in flight.
-    pub fn tenant_label(&self) -> String {
+impl TenantKey {
+    /// The tenant spelled for on-disk state keyed per tenant: `changes` snapshots,
+    /// the first-seen ledger, the run history's stamp.
+    fn label(&self) -> String {
         format!(
             "{}\n{}",
-            self.tenant.instance_base_url,
-            self.tenant.client_id.as_deref().unwrap_or_default()
+            self.instance_base_url,
+            self.client_id.as_deref().unwrap_or_default()
         )
+    }
+}
+
+impl QueryToken {
+    /// The tenant this run started under, as [`TenantKey::label`] spells it. From the
+    /// token rather than the settings for the same reason the cache stamp is: the
+    /// tenant can change while a fetch is in flight.
+    pub fn tenant_label(&self) -> String {
+        self.tenant.label()
     }
 }
 
@@ -426,6 +434,12 @@ impl AppState {
             settings: next,
             writer,
         })
+    }
+
+    /// The current tenant, as [`QueryToken::tenant_label`] spells it — for reading
+    /// back on-disk state stamped with it (the run history).
+    pub fn tenant_label(&self) -> String {
+        self.tenant_key().label()
     }
 
     /// The tenant (instance + client id) that owns freshly cached data. Cheap — a

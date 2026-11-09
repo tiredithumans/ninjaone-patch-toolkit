@@ -153,18 +153,22 @@ impl NinjaApiClient {
         )
         .await?;
 
-        let mut rows = Vec::with_capacity(total);
-        for page in pages {
-            rows.extend(page);
-        }
-        if rows.len() != total {
+        // Counted before anything is allocated, and the joined vector sized from the
+        // rows in hand: `total` is the count the server announced, and sizing an
+        // allocation by it let a bogus `count` abort the whole app.
+        let paged: usize = pages.iter().map(Vec::len).sum();
+        if paged != total {
             warn!(
                 path = SOFTWARE_PATCHES,
-                rows = rows.len(),
+                rows = paged,
                 total,
                 "the location slices paged a different total than the whole feed holds; paging it whole"
             );
             return self.fleet_software_patches(None, None, on_progress).await;
+        }
+        let mut rows = Vec::with_capacity(paged);
+        for page in pages {
+            rows.extend(page);
         }
         info!(
             path = SOFTWARE_PATCHES,

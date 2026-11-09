@@ -2647,6 +2647,7 @@ dependencies = [
  "chrono",
  "directories",
  "keyring",
+ "keyring-core",
  "open",
  "rand",
  "reqwest",

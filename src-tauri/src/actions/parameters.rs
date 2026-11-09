@@ -37,9 +37,27 @@ pub fn build_parameters(
             .join(",");
         format!("kbAllowList={kbs} rebootBehavior={reboot} dryRun={dry_run}")
     } else {
-        let encoded = STANDARD.encode(targets.join("|"));
+        // Likewise for a title the `|`-joined list cannot carry: `plan()` blocks it,
+        // and dropping it here keeps it from splitting into extra products.
+        let titles = targets
+            .iter()
+            .map(String::as_str)
+            .filter(|t| is_sendable_title(t))
+            .collect::<Vec<_>>()
+            .join("|");
+        let encoded = STANDARD.encode(titles);
         format!("productAllowListB64={encoded} rebootBehavior={reboot} dryRun={dry_run}")
     }
+}
+
+/// Whether a product title survives the software list's encoding as itself.
+///
+/// The titles are joined by `|` before base64, and the script splits the decoded
+/// text on `|`. So a title containing one would arrive as two products, and the
+/// confirm dialog, which lists titles as titles, would never have shown either.
+/// A blank title makes the script refuse the device's whole list.
+pub(super) fn is_sendable_title(title: &str) -> bool {
+    !title.trim().is_empty() && !title.contains('|')
 }
 
 /// Whether [`build_parameters`] sends this kind's targets as a bare `kbAllowList`

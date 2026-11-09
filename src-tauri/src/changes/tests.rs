@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::*;
 use crate::filter::FilterParams;
 use crate::rows::{LookupMaps, build_query_scope};
@@ -262,30 +264,38 @@ fn the_capped_lists_match_a_full_sort_and_the_counts_stay_exact() {
     );
     let c = diff(Some(&before), &after);
 
-    let now_pending = after.identities(&after.pending);
-    let now_failed = after.identities(&after.failed);
-    let prev_pending = before.identities(&before.pending);
-    let prev_failed = before.identities(&before.failed);
+    // The reference compares identities as `(device id, key string)` — the
+    // definition — rather than the integer ids `diff` derives from them.
+    let ident = |s: &RunSnapshot, &(d, p): &(u32, u32)| {
+        (s.devices[d as usize].0, s.patches[p as usize].key.clone())
+    };
+    let set = |s: &RunSnapshot, items: &[(u32, u32)]| -> HashSet<(i64, String)> {
+        items.iter().map(|ix| ident(s, ix)).collect()
+    };
+    let now_pending = set(&after, &after.pending);
+    let now_failed = set(&after, &after.failed);
+    let prev_pending = set(&before, &before.pending);
+    let prev_failed = set(&before, &before.failed);
     let new_pending = reference(
         &after,
-        now_pending
+        after
+            .pending
             .iter()
-            .filter(|(id, _)| !prev_pending.contains_key(*id))
-            .map(|(_, ix)| ix),
+            .filter(|ix| !prev_pending.contains(&ident(&after, ix))),
     );
     let resolved = reference(
         &before,
-        prev_pending
-            .iter()
-            .filter(|(id, _)| !now_pending.contains_key(*id) && !now_failed.contains_key(*id))
-            .map(|(_, ix)| ix),
+        before.pending.iter().filter(|ix| {
+            let id = ident(&before, ix);
+            !now_pending.contains(&id) && !now_failed.contains(&id)
+        }),
     );
     let newly_failed = reference(
         &after,
-        now_failed
+        after
+            .failed
             .iter()
-            .filter(|(id, _)| !prev_failed.contains_key(*id))
-            .map(|(_, ix)| ix),
+            .filter(|ix| !prev_failed.contains(&ident(&after, ix))),
     );
 
     assert_eq!(
@@ -296,6 +306,54 @@ fn the_capped_lists_match_a_full_sort_and_the_counts_stay_exact() {
     assert_eq!((c.new_pending, c.new_pending_items), new_pending);
     assert_eq!((c.resolved, c.resolved_items), resolved);
     assert_eq!((c.newly_failed, c.newly_failed_items), newly_failed);
+}
+
+/// A patch the previous run listed and this one does not know at all (its key is
+/// in no row now) is resolved, and a patch only this run knows is new pending —
+/// the two runs' patch tables differ, and identities still line up across them.
+#[test]
+fn patches_only_one_run_lists_still_diff_by_identity() {
+    let before = snap(
+        &[
+            row(1, Some("KB1"), "CU", "PENDING"),
+            row(1, Some("KB2"), "Old CU", "PENDING"),
+            row(2, None, "Chrome", "PENDING"),
+        ],
+        "t1",
+    );
+    let after = snap(
+        &[
+            row(2, None, "Chrome", "PENDING"),
+            row(1, Some("KB3"), "New CU", "PENDING"),
+            row(1, Some("KB1"), "CU", "PENDING"),
+        ],
+        "t2",
+    );
+    let c = diff(Some(&before), &after);
+    assert_eq!((c.new_pending, c.resolved, c.newly_failed), (1, 1, 0));
+    assert_eq!(c.new_pending_items[0].kb.as_deref(), Some("KB3"));
+    assert_eq!(c.resolved_items[0].kb.as_deref(), Some("KB2"));
+}
+
+/// What `save` compares to skip a rewrite: the same observation at another time is
+/// the same content; any change to what was observed is not.
+#[test]
+fn only_the_timestamp_may_differ_for_a_run_to_be_unchanged() {
+    let rows = [
+        row(1, Some("KB1"), "CU", "PENDING"),
+        row(2, None, "Chrome", "FAILED"),
+    ];
+    let first = snap(&rows, "t1");
+    assert!(first.same_content(&snap(&rows, "t2")));
+    assert!(!first.same_content(&snap(&rows[..1], "t2")));
+    let mut renamed = rows.clone();
+    renamed[0].device_name = "renamed".into();
+    assert!(
+        !first.same_content(&snap(&renamed, "t2")),
+        "a renamed device rewrites the baseline, which displays the name"
+    );
+    let other_scope = RunSnapshot::build(&rows, TENANT, "other".into(), "t1", &STATUSES);
+    assert!(!first.same_content(&other_scope));
 }
 
 #[test]

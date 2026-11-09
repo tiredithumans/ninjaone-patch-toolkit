@@ -40,10 +40,15 @@ Violating these silently misreports a fleet.
   fetched.** One install status and the window (lookback, or an absolute `install_range` that
   replaces it) are pushed down and re-applied client-side.
   → `docs/design/compliance.md#installedfailed-vs-current-patches-status-routing`
-- **Changes since last run:** identity is `changes::patch_key`, scope is tenant +
+- **Changes since last run:** identity is `changes::write_row_key`, scope is tenant +
   `changes::scope_key`, snapshot saved only on `StoreOutcome::Stored`, and awaited before the
   query returns (never detached); the baseline is served from the last snapshot this process
-  saved when the scope matches, remembered only once it is on disk.
+  saved when the scope matches, remembered only once it is on disk; a run identical to it but for
+  its time (`RunSnapshot::same_content`) is not rewritten.
+  → `docs/design/compliance.md#changes-since-the-previous-comparable-run`
+- **Run history is per tenant:** every `RunRecord` carries `history::tenant_key` of the tenant
+  label, and `read_run_history` returns only the signed-in tenant's lines (pre-stamp lines by
+  instance). Never chart or diff across tenants. Lines are split as bytes before decoding.
   → `docs/design/compliance.md#changes-since-the-previous-comparable-run`
 - **SLA aging is per band** (`SlaCutoffs` from the result's `SlaPolicy`); a band with No SLA
   (`SlaExempt`, Optional by default, never `Unknown`) is never past SLA, undated or not.

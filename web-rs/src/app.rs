@@ -50,12 +50,6 @@ const PATCHES_PAGE_SIZE: usize = 100;
 /// above the 25-device blast-radius cap the backend enforces on dispatch.
 const GROUP_MEMBER_LIMIT: usize = 500;
 
-/// Rows read per selected device when an auto-refresh re-checks the selection —
-/// the backend's page cap. A device whose read comes back full may have more rows
-/// than were read, so its selection is left as it was rather than pruned against a
-/// partial list.
-const SELECTION_PRUNE_LIMIT: usize = 1_000;
-
 const REGIONS: [(&str, &str); 5] = [
     ("https://app.ninjarmm.com", "North America (app)"),
     ("https://us2.ninjarmm.com", "North America (us2)"),

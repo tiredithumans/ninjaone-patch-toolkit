@@ -43,6 +43,36 @@ pub(crate) fn page_bounds(page: usize, page_size: usize, total: usize) -> (usize
     (start, end)
 }
 
+/// Where one page of the Needs Reboot list comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RebootPage {
+    /// Inside the slice the summary carries: `reboot_devices[start..end]`.
+    Seeded { start: usize, end: usize },
+    /// Past it: `get_reboot_devices(offset, limit)`.
+    Fetch { offset: usize, limit: usize },
+}
+
+/// Which source serves `page` of the Needs Reboot list. The summary carries its
+/// first `seeded` devices out of `total`; a page inside them — every page, when the
+/// summary carries the whole list (demo mode, a small fleet) — is sliced locally,
+/// and any other is fetched from the backend's cached result.
+pub(crate) fn reboot_page_source(
+    page: usize,
+    page_size: usize,
+    seeded: usize,
+    total: usize,
+) -> RebootPage {
+    let (start, end) = page_bounds(page, page_size, total);
+    if end <= seeded {
+        RebootPage::Seeded { start, end }
+    } else {
+        RebootPage::Fetch {
+            offset: start,
+            limit: end - start,
+        }
+    }
+}
+
 /// The pager caption, e.g. `Rows 101–200 of 12,300 · Page 2 of 123`.
 ///
 /// `unit` names what is being paged, which is *not* always rows: the grouped view
