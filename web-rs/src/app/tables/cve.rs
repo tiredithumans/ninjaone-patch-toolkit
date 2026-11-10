@@ -29,8 +29,28 @@ pub(super) fn CveSearch() -> impl IntoView {
     // listener outlived the Patches tab and every later Escape read the disposed
     // `open` and panicked — once per earlier visit to the tab.
     on_cleanup(move || escape.remove());
+    // An answer describes the result it was asked against. Kept across a new
+    // result (or a reopen), it showed devices and counts from data no longer on
+    // screen under today's "Data as of". Moving `seq` drops a reply in flight.
+    let forget = move || {
+        seq.update(|s| *s = util::next_query_seq(*s));
+        load.set(CveLoad::Idle);
+    };
+    let generated_at = Memo::new(move |_| {
+        state
+            .query
+            .result
+            .with(|r| r.as_ref().map(|r| r.generated_at.clone()))
+    });
+    Effect::new(move |prev: Option<Option<String>>| {
+        let now = generated_at.get();
+        if prev.is_some_and(|p| p != now) {
+            untrack(forget);
+        }
+        now
+    });
     let search = move || {
-        if state.session.demo.get_untracked() {
+        if state.session.is_demo_untracked() {
             load.set(CveLoad::Failed(
                 "The CVE search needs the desktop app: the browser demo has no exploit data."
                     .into(),
@@ -61,7 +81,10 @@ pub(super) fn CveSearch() -> impl IntoView {
         <button
             class="btn btn-ghost"
             title="Which devices in these results may still be exposed to a CVE"
-            on:click=move |_| open.set(true)
+            on:click=move |_| {
+                forget();
+                open.set(true);
+            }
         >
             "Find CVE"
         </button>

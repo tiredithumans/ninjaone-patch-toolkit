@@ -49,7 +49,7 @@ pub(crate) fn RunControls() -> impl IntoView {
                 aria-label="Refresh from NinjaOne"
                 prop:disabled=move || {
                     state.run.busy.get() || state.run.refreshing.get() || state.session.web_mode.get()
-                        || state.session.demo.get() || state.query.result.with(Option::is_none)
+                        || state.session.is_demo() || state.query.result.with(Option::is_none)
                 }
                 title=move || {
                     let base = "Refetch live patch data from NinjaOne for the current filter";
@@ -221,7 +221,7 @@ impl Export {
 #[component]
 fn ExportButton(kind: Export, exporting: RwSignal<bool>) -> impl IntoView {
     let state = expect_context::<AppState>();
-    let web_only = move || state.session.web_mode.get() || state.session.demo.get();
+    let web_only = move || state.session.web_mode.get() || state.session.is_demo();
     view! {
         <button
             type="button"

@@ -167,7 +167,7 @@ backlog that tab never shows, so it stays where the patches it reaches are liste
 chosen next to the selection it may target. Those buttons are disabled with
 `util::source_disabled_reason`, and the request goes through the same `build_action_request` so
 the run options reach exactly the kinds they reach from the Patches tab. The device selection is
-cleared with the row selection (`clear_selection`) and pruned on an auto-refresh against the fresh
+cleared with the row selection (`clear_selection`) and pruned on a refresh of the same query against the fresh
 reboot list (`util::prune_device_level_selection`), since a device that just rebooted no longer
 belongs in it.
 

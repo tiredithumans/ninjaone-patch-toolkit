@@ -193,6 +193,18 @@ pub fn App() -> impl IntoView {
     })
     .forget();
 
+    // A post-refresh selection prune that landed under the action confirmation
+    // (or while it was planning) waits for it to close; see `util::prune_timing`.
+    Effect::new(move |_| {
+        let held = util::confirmation_holds(
+            state.actions.pending.with(Option::is_some),
+            state.actions.dispatching.get(),
+        );
+        if !held {
+            untrack(|| state.release_deferred_prunes());
+        }
+    });
+
     // Colour theme: applied on launch and on every change, remembered per machine.
     Effect::new(move |_| {
         let theme = state.ui.theme.get();
@@ -246,7 +258,7 @@ pub fn App() -> impl IntoView {
         <Show when=move || !state.session.backend_missing.get()>
         <main class="shell">
             <Header/>
-            <Show when=move || state.session.demo.get()>
+            <Show when=move || state.session.is_demo()>
                 <p class="demo-banner" role="note">
                     "Demo mode — press Run query to list sample patches (not a live fleet)."
                 </p>
@@ -260,7 +272,9 @@ pub fn App() -> impl IntoView {
                 <SettingsDialog/>
             </Show>
             <UpdateSplash/>
-            // Before the confirm dialog, which its "Run script…" opens over it.
+            // Before the confirm dialog. Its "Run script…" closes it before planning,
+            // but a plan already in flight from the action bar can land while it is
+            // open, and the confirmation must then stack above it.
             <ScriptDialog/>
             <ConfirmActionModal/>
             <KeyboardShortcuts/>

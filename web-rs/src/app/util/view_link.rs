@@ -296,6 +296,39 @@ pub(crate) fn prune_unknown_ids(ids: Vec<i64>, known: &[i64]) -> (Vec<i64>, usiz
     (kept, dropped)
 }
 
+/// The ids and OS classes the loaded lookups list, for [`prune_scope_ids`].
+pub(crate) struct KnownScope<'a> {
+    pub orgs: &'a [i64],
+    pub roles: &'a [i64],
+    pub groups: &'a [i64],
+    pub classes: &'a [String],
+}
+
+/// Prunes a filter's organization, role and device-group ids — and its OS classes —
+/// to what this tenant's lookups list ([`prune_unknown_ids`] each, so a list not
+/// loaded yet drops nothing). Returns how many org/role/group picks went, for the
+/// toast; an unknown class is dropped quietly, as the picker never offered it.
+///
+/// Shared by a view link and a preset: both carry ids saved against some tenant,
+/// and a preset saved before a tenant switch otherwise ran the new tenant's query
+/// narrowed to organizations that do not exist there. Locations are pruned on
+/// their own, against the list the restored org scope loads.
+pub(crate) fn prune_scope_ids(filter: &mut FilterParams, known: KnownScope<'_>) -> usize {
+    let (orgs, dropped_orgs) =
+        prune_unknown_ids(std::mem::take(&mut filter.organization_ids), known.orgs);
+    let (roles, dropped_roles) =
+        prune_unknown_ids(std::mem::take(&mut filter.role_ids), known.roles);
+    let (groups, dropped_groups) =
+        prune_unknown_ids(std::mem::take(&mut filter.device_group_ids), known.groups);
+    filter.organization_ids = orgs;
+    filter.role_ids = roles;
+    filter.device_group_ids = groups;
+    if !known.classes.is_empty() {
+        filter.node_classes.retain(|c| known.classes.contains(c));
+    }
+    dropped_orgs + dropped_roles + dropped_groups
+}
+
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// RFC 4648 §5 base64url without padding. Hand-rolled: ~30 lines is cheaper than a
@@ -545,5 +578,31 @@ mod tests {
             (vec![2, 3], 1)
         );
         assert_eq!(prune_unknown_ids(vec![1, 2], &[]), (vec![1, 2], 0));
+    }
+
+    #[test]
+    fn a_saved_scope_is_pruned_to_this_tenants_lookups() {
+        let mut filter = FilterParams {
+            organization_ids: vec![1, 9],
+            role_ids: vec![5],
+            device_group_ids: vec![7, 8],
+            node_classes: vec!["WINDOWS_SERVER".into(), "GONE".into()],
+            ..FilterParams::default()
+        };
+        let classes = vec!["WINDOWS_SERVER".to_string()];
+        let dropped = prune_scope_ids(
+            &mut filter,
+            KnownScope {
+                orgs: &[1, 2],
+                roles: &[],
+                groups: &[8],
+                classes: &classes,
+            },
+        );
+        assert_eq!(dropped, 2, "org 9 and group 7; classes are not counted");
+        assert_eq!(filter.organization_ids, vec![1]);
+        assert_eq!(filter.role_ids, vec![5], "roles not loaded: kept");
+        assert_eq!(filter.device_group_ids, vec![8]);
+        assert_eq!(filter.node_classes, vec!["WINDOWS_SERVER".to_string()]);
     }
 }

@@ -279,15 +279,6 @@ h2 {
   border: 1px solid var(--border);
 }
 
-.pill-on {
-  color: var(--accent-2);
-  border-color: var(--accent);
-}
-
-.pill-off {
-  color: var(--muted);
-}
-
 .pill-demo {
   color: var(--warn);
   border-color: var(--warn);
@@ -991,10 +982,6 @@ tbody tr:hover {
   fill: var(--text);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-}
-
-.chart-track {
-  fill: var(--border);
 }
 
 /* The Within SLA % cell's bar, by health band: the bar chart of the same

@@ -5,7 +5,7 @@
 use super::*;
 
 impl AppState {
-    /// Snapshots the active filters for the applied-filter chips, resolving org/loc/role
+    /// Snapshots the active filters for the applied-filter labels, resolving org/loc/role
     /// ids to display names and severity raw values to labels. All reads are untracked
     /// (this runs imperatively at Run time, not inside a reactive scope).
     pub(in crate::app) fn snapshot_filters(self) -> AppliedFilters {
@@ -108,7 +108,7 @@ impl AppState {
             self.run.busy.get_untracked(),
             self.run.refreshing.get_untracked(),
             silent,
-            self.session.demo.get_untracked(),
+            self.session.is_demo_untracked(),
             self.is_authed(),
             statuses.is_empty(),
         ) {
@@ -154,6 +154,7 @@ impl AppState {
         let started = js_sys::Date::now();
         self.run.query_started_ms.set(started);
         flag.set(true);
+        let sent = args.clone();
         spawn_local(async move {
             let outcome = api::query_patches(args, seq, force).await;
             // Apply only if this is still the newest run. Queries overlap routinely
@@ -179,8 +180,13 @@ impl AppState {
                     // them out. The page bound comes from whichever collection this
                     // view pages (`util::paged_total`, which also sizes the pager).
                     let grouped = self.query.group_by.get_untracked().is_some();
+                    let same_query = self
+                        .query
+                        .applied_args
+                        .with_untracked(|a| util::same_query(a.as_ref(), &sent));
                     let plan = util::run_plan(util::RunContext {
                         silent,
+                        same_query,
                         grouped,
                         rows_total: r.rows_total,
                         groups_total: self.query.groups_total.get_untracked(),
@@ -213,16 +219,16 @@ impl AppState {
                     // flat re-fetches page 0 through `set_group_by`.
                     //
                     // The groups the operator had open survive a silent refresh: they
-                    // are reopened (members reloaded) once the new headers land.
-                    // Every tick used to collapse them under the operator.
-                    let reopen = if plan.reopen_groups {
-                        self.query.expanded.get_untracked()
+                    // stay open on their old members, each replaced once the new
+                    // headers land. Every tick used to collapse them under the
+                    // operator, then refetch and rebuild them.
+                    if plan.reopen_groups {
+                        self.query.keep_open_members();
                     } else {
-                        BTreeSet::new()
-                    };
-                    self.query.reset_members();
+                        self.query.reset_members();
+                    }
                     match plan.fetch {
-                        util::ViewFetch::Groups(page) => self.fetch_groups_reopening(page, reopen),
+                        util::ViewFetch::Groups(page) => self.fetch_groups(page),
                         util::ViewFetch::SeedFirstPage => {
                             // Page 0 ships inline with the summary (canonical order),
                             // so seed it directly. Stamped like a fetch, so a page
@@ -241,10 +247,10 @@ impl AppState {
                     }
                     self.query.query_error.set(None);
                     if plan.keep_selection {
-                        // Same scope, fresher data: keep what the operator ticked,
+                        // Same query, fresher data: keep what the operator ticked,
                         // minus anything this refresh no longer lists.
-                        self.prune_selection_after_refresh(seq);
-                        self.prune_device_selection_after_refresh(seq);
+                        self.prune_selection_after_refresh(seq, SelectionSource::PatchRows);
+                        self.prune_selection_after_refresh(seq, SelectionSource::Devices);
                     } else {
                         // A new scope: a selection made against the previous result
                         // no longer describes what is on screen. Said out loud: it
@@ -302,44 +308,6 @@ impl AppState {
         }
     }
 
-    /// After a silent refresh, re-checks every selected device against the new result
-    /// and drops the ticked patches that are gone (installed, rejected, or the device
-    /// left the scope) — see `util::prune_selection_from_status`.
-    ///
-    /// One backend read for the whole selection, served from the result just
-    /// cached — no NinjaOne traffic. Abandoned if another run lands meanwhile: a
-    /// manual run clears the selection itself, and a newer refresh prunes again.
-    fn prune_selection_after_refresh(self, seq: u64) {
-        let probes = self.actions.selected.with_untracked(util::selection_probes);
-        if probes.is_empty() {
-            return;
-        }
-        spawn_local(async move {
-            // A failed read keeps every device as it was rather than drop a
-            // selection the operator can't rebuild from memory. The backend re-plans
-            // against the device inventory (cached up to 15 minutes) and Settings before
-            // any dispatch; ticked KBs are not re-checked against current patches, but the
-            // confirm dialog shows each device's parameter string. The read sends the
-            // ticked keys and gets back only those still listed — it used to fetch up
-            // to a thousand full rows per selected device, every tick.
-            let Ok(status) = api::selection_status(probes).await else {
-                return;
-            };
-            if util::is_superseded(self.run.query_seq.get_untracked(), seq) {
-                return;
-            }
-            let mut removed = 0;
-            self.actions
-                .selected
-                .update(|sel| removed = util::prune_selection_from_status(sel, &status));
-            if removed > 0 {
-                self.notify(Toast::ok(format!(
-                    "Auto-refresh: {removed} selected patch row(s) are no longer listed and were deselected"
-                )));
-            }
-        });
-    }
-
     /// Narrows the filters to one organization and shows the matching patch rows.
     ///
     /// The rollup tabs used to be terminal: reading "Contoso · 63% · 41 pending
@@ -392,9 +360,8 @@ impl AppState {
     /// Shared tail of every drill-down: re-run and land the operator on the rows.
     ///
     /// Flat view on purpose — a drill-down is a request to see *the rows behind this
-    /// number*, and a grouped view would re-collapse them behind headers. Filters are
-    /// left expanded/collapsed as the operator had them; the chip row already reports
-    /// what the drill-down applied.
+    /// number*, and a grouped view would re-collapse them behind headers. The scope
+    /// bar's pickers and the patch filter bar show what the drill-down applied.
     fn drill_run(self) {
         self.query.patches_page.set(0);
         self.set_group_by(None);
@@ -536,8 +503,10 @@ impl AppState {
     /// covers any modal not listed here, and — like `hidden`, which is not a
     /// signal either — is picked up by the next one-second tick.
     pub(in crate::app) fn refresh_hold(self) -> Option<util::RefreshHold> {
-        let dialog_open = self.actions.pending.with(Option::is_some)
-            || self.updates.update.with(Option::is_some)
+        let dialog_open = util::confirmation_holds(
+            self.actions.pending.with(Option::is_some),
+            self.actions.dispatching.get(),
+        ) || self.updates.update.with(Option::is_some)
             || self.ui.shortcuts_open.get()
             || self.ui.pending_view.with(Option::is_some)
             || self.ui.show_settings.get()
@@ -555,7 +524,9 @@ impl AppState {
     pub(in crate::app) fn tick_auto_refresh(self) {
         let secs = self.run.refresh_secs.get_untracked();
         let now = js_sys::Date::now();
-        if secs == 0 || !self.is_authed() {
+        // Untracked: this runs from a timer, outside any reactive context, and
+        // `is_authed` / `refresh_hold` read tracked for the label's sake.
+        if secs == 0 || !untrack(|| self.is_authed()) {
             self.run
                 .refresh_clock
                 .set(util::RefreshClock::start(secs, now));
@@ -565,7 +536,7 @@ impl AppState {
             self.run.refresh_clock.get_untracked(),
             secs,
             now,
-            self.refresh_hold(),
+            untrack(|| self.refresh_hold()),
         );
         self.run.refresh_clock.set(clock);
         if fire {
@@ -594,7 +565,7 @@ impl AppState {
     }
 
     /// Drops everything derived from the last query: the summary, the current page,
-    /// grouping state, the applied-filter chips and any device selection made
+    /// grouping state, the applied-filter snapshot and any device selection made
     /// against those rows.
     pub(in crate::app) fn clear_results(self) {
         self.query.result.set(None);

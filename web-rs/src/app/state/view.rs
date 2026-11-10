@@ -12,7 +12,7 @@ impl AppState {
     pub(in crate::app) fn fetch_page(self, page: usize) {
         let sort = self.query.patches_sort.get_untracked();
         let seq = self.query.next_view_seq();
-        if self.session.demo.get_untracked() {
+        if self.session.is_demo_untracked() {
             let mut rows = self.demo_rows();
             if let Some(sort) = sort {
                 sort_patch_rows(&mut rows, sort);
@@ -65,22 +65,15 @@ impl AppState {
         }
     }
 
-    /// Loads one page of group headers for the active grouping.
+    /// Loads one page of group headers for the active grouping. Once they land,
+    /// the groups a silent refresh kept open are settled against them
+    /// ([`settle_open_groups`](Self::settle_open_groups)).
     pub(in crate::app) fn fetch_groups(self, page: usize) {
-        self.fetch_groups_reopening(page, BTreeSet::new());
-    }
-
-    /// `fetch_groups`, then reopens the groups in `reopen` that the new page still
-    /// lists — the ones a silent refresh found open — and reloads their members
-    /// (`util::groups_to_reopen`). Each reopen is `toggle_group` on a collapsed
-    /// group with no cached members, since `reset_members` ran first; one the
-    /// operator reopened while the headers loaded is left open.
-    pub(in crate::app) fn fetch_groups_reopening(self, page: usize, reopen: BTreeSet<String>) {
         let Some(group_by) = self.query.group_by.get_untracked() else {
             return;
         };
         let seq = self.query.next_view_seq();
-        if self.session.demo.get_untracked() {
+        if self.session.is_demo_untracked() {
             let all = demo::group_rows(&self.demo_rows(), group_by);
             self.query.groups_total.set(all.len());
             let groups: Vec<PatchGroup> = all
@@ -88,12 +81,8 @@ impl AppState {
                 .skip(page * PATCHES_PAGE_SIZE)
                 .take(PATCHES_PAGE_SIZE)
                 .collect();
-            let keys =
-                util::groups_to_reopen(&reopen, &self.query.expanded.get_untracked(), &groups);
+            self.settle_open_groups(&groups);
             self.query.groups.set(groups);
-            for key in keys {
-                self.toggle_group(key);
-            }
             return;
         }
         spawn_local(async move {
@@ -118,18 +107,11 @@ impl AppState {
                         util::clamp_page(page, util::page_count(response.total, PATCHES_PAGE_SIZE));
                     if clamped != page {
                         self.query.patches_page.set(clamped);
-                        self.fetch_groups_reopening(clamped, reopen);
+                        self.fetch_groups(clamped);
                         return;
                     }
-                    let keys = util::groups_to_reopen(
-                        &reopen,
-                        &self.query.expanded.get_untracked(),
-                        &response.groups,
-                    );
+                    self.settle_open_groups(&response.groups);
                     self.query.groups.set(response.groups);
-                    for key in keys {
-                        self.toggle_group(key);
-                    }
                 }
                 Err(e) => {
                     self.query.query_error.set(Some(e.clone()));
@@ -137,6 +119,53 @@ impl AppState {
                 }
             }
         });
+    }
+
+    /// Applies `util::settle_open_groups` to a landed header page: closes the open
+    /// groups it no longer lists, drops stale members nobody shows, and refetches
+    /// the open groups still on their previous-result rows — replacing each slot
+    /// with a fresh `Arc` when it lands, so the group never shows "Loading…".
+    /// A no-op unless a silent refresh left stale members behind.
+    fn settle_open_groups(self, groups: &[PatchGroup]) {
+        if self.query.stale_members.with_untracked(BTreeSet::is_empty) {
+            return;
+        }
+        let stale = self
+            .query
+            .stale_members
+            .try_update(std::mem::take)
+            .unwrap_or_default();
+        let settled =
+            util::settle_open_groups(&stale, &self.query.expanded.get_untracked(), groups);
+        self.query.members.update(|m| {
+            m.retain(|k, _| {
+                settled.open.contains(k) && (!stale.contains(k) || settled.refetch.contains(k))
+            })
+        });
+        self.query.expanded.set(settled.open);
+        let Some(group_by) = self.query.group_by.get_untracked() else {
+            return;
+        };
+        for key in settled.refetch {
+            spawn_local(async move {
+                let Some(outcome) = self.load_group_members(group_by, key.clone()).await else {
+                    return;
+                };
+                match outcome {
+                    Ok(rows) => self.query.members.update(|m| {
+                        m.insert(key, Arc::new(rows));
+                    }),
+                    // As in `toggle_group`: open, empty, and retried on the next
+                    // open or refresh.
+                    Err(e) => {
+                        self.query.members.update(|m| {
+                            m.insert(key, Arc::default());
+                        });
+                        self.notify(Toast::err(e));
+                    }
+                }
+            });
+        }
     }
 
     /// Fetches one group's members (capped at `GROUP_MEMBER_LIMIT`), from the demo
@@ -148,7 +177,7 @@ impl AppState {
         group_by: GroupBy,
         key: String,
     ) -> Option<Result<Vec<PatchRow>, String>> {
-        if self.session.demo.get_untracked() {
+        if self.session.is_demo_untracked() {
             return Some(Ok(demo::group_members(&self.demo_rows(), group_by, &key)));
         }
         let generation = self.query.members_gen.get_untracked();
@@ -224,8 +253,12 @@ impl AppState {
     /// by-patch group can hold hundreds of devices, and selecting them behind a
     /// collapsed header left the only trace in the action bar's running total.
     pub(in crate::app) fn toggle_group_selection(self, key: &str, label: String, checked: bool) {
+        // Members kept from before a refresh are not ticked from: the rows may
+        // be gone from the result now on screen.
         let cached = self.query.members.with_untracked(|m| m.get(key).cloned());
+        let stale = self.query.stale_members.with_untracked(|s| s.contains(key));
         if let Some(rows) = cached
+            && !stale
             && !util::needs_member_fetch(Some(rows.as_slice()))
         {
             self.toggle_rows_selection(&rows, checked);
@@ -352,7 +385,7 @@ impl AppState {
                 }
             });
         };
-        if self.session.demo.get_untracked() {
+        if self.session.is_demo_untracked() {
             // Read off the Run-time snapshot, not the live controls: it is the
             // query on screen that did or did not ask about failures.
             let failed_queried = self.query.applied_filters.with_untracked(|a| {
