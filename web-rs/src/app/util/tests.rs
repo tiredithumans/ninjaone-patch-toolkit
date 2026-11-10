@@ -552,10 +552,10 @@ fn same_query_needs_a_query_on_screen_and_no_change() {
     assert!(!same_query(Some(&args), &other));
 }
 
-/// Only the groups still listed on the new header page are reopened, in header
-/// order; one that moved to another page or left the result stays closed.
+/// Only the groups still listed on the new header page stay open, and only those
+/// holding the previous result's members are refetched, in header order.
 #[test]
-fn only_groups_still_listed_are_reopened() {
+fn only_groups_still_listed_stay_open() {
     let group = |key: &str| PatchGroup {
         key: key.into(),
         label: String::new(),
@@ -570,21 +570,29 @@ fn only_groups_still_listed_are_reopened() {
         reboot_likely: false,
         exploited: false,
     };
+    let set = |keys: &[&str]| -> BTreeSet<String> { keys.iter().map(|k| k.to_string()).collect() };
     let groups = [group("b"), group("a"), group("c")];
-    let open: BTreeSet<String> = ["a", "c", "gone"].into_iter().map(String::from).collect();
-    let none = BTreeSet::new();
+    // Open when the refresh landed: a, c and one that left the result.
+    let stale = set(&["a", "c", "gone"]);
+    let settled = settle_open_groups(&stale, &stale, &groups);
+    assert_eq!(settled.open, set(&["a", "c"]));
     assert_eq!(
-        groups_to_reopen(&open, &none, &groups),
-        vec!["a".to_string(), "c".to_string()]
+        settled.refetch,
+        vec!["a".to_string(), "c".to_string()],
+        "in header order"
     );
-    assert!(groups_to_reopen(&none, &none, &groups).is_empty());
-    // The operator reopened "a" while the headers loaded: toggling it again would
-    // close it, so it is left alone.
-    let already: BTreeSet<String> = ["a".to_string()].into_iter().collect();
     assert_eq!(
-        groups_to_reopen(&open, &already, &groups),
-        vec!["c".to_string()]
+        settle_open_groups(&BTreeSet::new(), &BTreeSet::new(), &groups),
+        OpenGroups {
+            open: BTreeSet::new(),
+            refetch: Vec::new()
+        }
     );
+    // While the headers loaded the operator closed "c" and opened "b", whose
+    // members came from the new result: "c" stays closed, "b" is not refetched.
+    let settled = settle_open_groups(&stale, &set(&["a", "b"]), &groups);
+    assert_eq!(settled.open, set(&["a", "b"]));
+    assert_eq!(settled.refetch, vec!["a".to_string()]);
 }
 
 /// The load-bearing half of the selection model. Ticking one row must affect

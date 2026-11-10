@@ -219,16 +219,16 @@ impl AppState {
                     // flat re-fetches page 0 through `set_group_by`.
                     //
                     // The groups the operator had open survive a silent refresh: they
-                    // are reopened (members reloaded) once the new headers land.
-                    // Every tick used to collapse them under the operator.
-                    let reopen = if plan.reopen_groups {
-                        self.query.expanded.get_untracked()
+                    // stay open on their old members, each replaced once the new
+                    // headers land. Every tick used to collapse them under the
+                    // operator, then refetch and rebuild them.
+                    if plan.reopen_groups {
+                        self.query.keep_open_members();
                     } else {
-                        BTreeSet::new()
-                    };
-                    self.query.reset_members();
+                        self.query.reset_members();
+                    }
                     match plan.fetch {
-                        util::ViewFetch::Groups(page) => self.fetch_groups_reopening(page, reopen),
+                        util::ViewFetch::Groups(page) => self.fetch_groups(page),
                         util::ViewFetch::SeedFirstPage => {
                             // Page 0 ships inline with the summary (canonical order),
                             // so seed it directly. Stamped like a fetch, so a page

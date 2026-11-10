@@ -213,20 +213,38 @@ pub(crate) fn same_query(applied: Option<&PatchQueryArgs>, sent: &PatchQueryArgs
     applied.is_some() && !filters_changed(applied, sent)
 }
 
-/// The groups to reopen after a silent refresh: those that were `open` and are
-/// still on the new header page, in header order. One that moved to another page
-/// or left the result stays closed — its key would otherwise sit in `expanded`
-/// with no header to show it under. One in `already_open` is skipped: the operator
-/// reopened it while the headers were loading, and the reopen is a toggle that
-/// would close it again.
-pub(crate) fn groups_to_reopen(
-    open: &BTreeSet<String>,
-    already_open: &BTreeSet<String>,
+/// What a silent refresh's new header page does to the open groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenGroups {
+    /// The groups left open: those open now that the new page still lists. One
+    /// that moved to another page or left the result closes — its key would
+    /// otherwise sit in `expanded` with no header to show it under.
+    pub open: BTreeSet<String>,
+    /// The open groups whose members are from the previous result, in header
+    /// order: each is refetched, its old rows shown until the new ones land.
+    pub refetch: Vec<String>,
+}
+
+/// Settles the open groups once a silent refresh's headers land. `stale` holds
+/// the groups whose cached members predate the refresh (those open when it
+/// landed); `open_now` is `expanded` as it is now, so a group the operator
+/// closed while the headers loaded stays closed, and one opened meanwhile —
+/// loaded from the new result — is kept without a second fetch.
+pub(crate) fn settle_open_groups(
+    stale: &BTreeSet<String>,
+    open_now: &BTreeSet<String>,
     groups: &[PatchGroup],
-) -> Vec<String> {
-    groups
+) -> OpenGroups {
+    let listed: Vec<&str> = groups.iter().map(|g| g.key.as_str()).collect();
+    let open: BTreeSet<String> = open_now
         .iter()
-        .filter(|g| open.contains(&g.key) && !already_open.contains(&g.key))
-        .map(|g| g.key.clone())
-        .collect()
+        .filter(|k| listed.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    let refetch = listed
+        .iter()
+        .filter(|k| open.contains(**k) && stale.contains(**k))
+        .map(|k| k.to_string())
+        .collect();
+    OpenGroups { open, refetch }
 }

@@ -395,6 +395,10 @@ pub(crate) struct QueryState {
     /// member fetch started before that is from a result no longer on screen, so
     /// it must neither fill the cache nor tick anything into the selection.
     pub(super) members_gen: RwSignal<u64>,
+    /// Open groups whose `members` entry is from the previous result: a silent
+    /// refresh keeps them on screen until the new header page lands and their
+    /// replacements are fetched (`util::settle_open_groups`).
+    pub(super) stale_members: RwSignal<BTreeSet<String>>,
     /// The sort the next manual run lands on instead of the canonical order —
     /// set by applying a shared view link, consumed (and cleared) by that run.
     pub(super) sort_on_next_run: RwSignal<Option<RowSort>>,
@@ -438,6 +442,18 @@ impl QueryState {
     pub(super) fn reset_members(self) {
         self.expanded.update(|e| e.clear());
         self.members.update(|m| m.clear());
+        self.stale_members.update(|s| s.clear());
+        self.members_gen.update(|g| *g = util::next_query_seq(*g));
+    }
+
+    /// A silent refresh landed: the open groups stay open with their old members
+    /// (marked stale) until the new headers land and each is refetched; a closed
+    /// group's cached members are dropped. Bumps `members_gen`, so a member fetch
+    /// still in flight for the old result is not cached.
+    pub(super) fn keep_open_members(self) {
+        let open = self.expanded.get_untracked();
+        self.members.update(|m| m.retain(|k, _| open.contains(k)));
+        self.stale_members.set(open);
         self.members_gen.update(|g| *g = util::next_query_seq(*g));
     }
 
@@ -468,6 +484,7 @@ impl QueryState {
             members: RwSignal::new(BTreeMap::new()),
             view_seq: RwSignal::new(0),
             members_gen: RwSignal::new(0),
+            stale_members: RwSignal::new(BTreeSet::new()),
             sort_on_next_run: RwSignal::new(None),
             drill: RwSignal::new(None),
             drill_seq: RwSignal::new(0),

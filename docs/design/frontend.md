@@ -159,8 +159,10 @@ nested `.with` reads (`util::rows_selection_state`), never a clone of the rows.
 group-member fetch is stamped (`QueryState.view_seq`, `members_gen`) and dropped on arrival if a
 newer request, a regroup, or a re-query has moved the stamp. Without it a slow sort overwrote a
 newer one, and a late member fetch ticked the previous result's rows into the new selection. A
-silent refresh still drops every member slot, then reopens the groups the operator had open that
-the new header page still lists, each with a fresh member fetch (`util::groups_to_reopen`); a
+silent refresh keeps the open groups open on their old member `Arc`s (marked
+`stale_members`, bumping `members_gen`); once the new header page lands, a group it no longer
+lists closes and each one still listed is refetched, its slot replaced in place
+(`util::settle_open_groups`) — every tick used to collapse them all and flash "Loading…". A
 manual run starts collapsed. What a landed run does to the view — page, sort, which collection
 to fetch, what to keep — is `util::run_plan`'s decision, so it is host-tested. The selection is
 cleared only by a run of a *different* query (`util::same_query`); a manual ↻ Refresh, or Run with
