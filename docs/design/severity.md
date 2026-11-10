@@ -38,7 +38,7 @@ left an engine-graded fleet's urgent backlog at its Criticals alone. Recommended
     `get`s are exhaustive matches, so the backend fails to compile) **and** the
     `web-rs/src/types.rs` mirrors' fields and `BANDS` (nothing fails there —
     `every_sla_band_reads_and_writes_its_own_field` and `no_sla_bands_follow_the_sla_bands` only
-    check the ones listed). `SeverityCounts::bump` is exhaustive too.
+    check the ones listed). `SeverityCounts::add` is exhaustive too.
 
 The CSS end of this is guarded: the eight band colors are `--sev-*` / `--sev-*-fg` custom
 properties defined once on `:root`, and the three rule families (`.sev-*`, `.chart .seg-*`,
@@ -72,5 +72,5 @@ severity tables and the export/report sheets all render through it.
 missing (blank legend squares), `.sev-optional`/`.sev-unknown` were missing (both collapsed into
 `.sev-none`, so "low priority" and "unmapped" rendered identically), and `sev_ordinal` ranked both
 classifications *below* `Optional`. Prefer deriving over enumerating where you can —
-`write_severity_chart` now sums via `SEVERITY_BANDS` so its denominator cannot diverge from the
+`write_severity_chart` now sums via `SeverityCounts::BANDS` so its denominator cannot diverge from the
 segments it draws, which removes one hand-maintained site from this list entirely.

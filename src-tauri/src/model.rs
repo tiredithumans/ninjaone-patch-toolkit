@@ -72,7 +72,7 @@ pub struct Device {
     #[serde(default)]
     pub last_contact: Option<f64>,
     /// NinjaOne's free-form `pendingRebootReason` for this device, merged in from
-    /// `/queries/device-health` ([`apply_reboot_reasons`]) — `devices-detailed` does
+    /// `/queries/device-health` ([`apply_health`]) — `devices-detailed` does
     /// not carry it. Shown verbatim beside the reboot flag; `None` when the device
     /// reports none or the health feed could not be read.
     #[serde(skip)]

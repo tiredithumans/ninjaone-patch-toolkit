@@ -74,7 +74,9 @@ the protocol, because the protocol *is* the type.
 
 `AppState` went from 18 hand-managed synchronization primitives (8 `std` mutexes,
 3 `tokio` mutexes, 6 `AtomicU64`, 1 `AtomicBool`) to 8 plus four `TenantCache`
-fields.
+fields. It has since grown back to 10 (4 `std` mutexes, 1 `tokio` mutex, 4 `AtomicU64`,
+1 `AtomicBool`) — the settings writer lock and the result cache's `result_epoch` among
+them — beside the same four `TenantCache`s.
 
 **`last_result` deliberately stays outside it.** Its protocol is *generation*-gated,
 not TTL-gated: `begin_query` issues a `QueryToken` claimed before any fetch and
@@ -97,7 +99,8 @@ a second source of truth for the rows.
 ## Tenant-keyed, method-gated access
 
 `last_result` is **private** and stamped with the tenant
-(`Mutex<Option<(TenantKey, QueryResult)>>`, `TenantKey` = instance URL + client id). Never touch
+(`Mutex<Option<CachedResult>>` — the `TenantKey`, an `Arc<QueryResult>` and the sort/group
+memos; `TenantKey` = instance URL + client id). Never touch
 it directly — write via `state.store_last_result_if_current(token, result)` and read via
 `state.with_current_result(|r| …)`, which compare the stamp at read time, so a result from a
 different tenant reads as a miss. The whole-fleet input caches (devices/current/lookups) carry the
@@ -116,9 +119,10 @@ was *fetched* under; a whole-fleet fetch runs for minutes, so stamping at write 
 the old tenant's rows under the new one — the one way the tenant check can be *wrong* rather than
 merely miss. A superseded or tenant-drifted result is dropped, not stored.
 
-## The three drop reasons are distinct, and the caller must treat them differently
+## The four drop reasons are distinct, and the caller must treat them differently
 
-`store_last_result_if_current` returns a `StoreOutcome`, not a bool. `Superseded` is invisible to
+`store_last_result_if_current` returns a `StoreOutcome`, not a bool: `Stored`, or one of
+`Superseded`, `TenantChanged`, `SessionCleared` and `Poisoned`. `Superseded` is invisible to
 the operator and the frontend already discards the response itself (`run_query` compares
 `query_seq` after the await and drops a superseded one, while still clearing its own busy flag),
 so the summary is still returned. `TenantChanged` and `Poisoned` are **errors**:
@@ -127,6 +131,14 @@ guard can arrive too late — `clear_session()` bumps `query_seq` only once the 
 command replies, and the query's reply can land first, so returning the summary painted the
 previous tenant's rows over the new tenant's empty cache while paging and export read the miss.
 The rule: return a summary only when the rows behind it are readable.
+
+`SessionCleared` covers what the tenant stamp cannot: a sign-out, sign-in or re-authorization
+while a query is in flight leaves the tenant unchanged, but the rows belong to the session that
+just ended. `QueryToken` carries the `result_epoch` sampled at `begin_query`;
+`clear_last_result` bumps it *before* it empties the slot, and the store re-reads it under the
+slot lock — the same bump-then-clear the `TenantCache` epochs use, so either interleaving loses
+the write. `summary_for` makes it an error ("The session ended while this query was running"),
+like `TenantChanged`.
 
 ## A tenant switch, a sign-out, a sign-in and a re-authorization all clear the frontend
 
@@ -287,7 +299,7 @@ the third-party feed as location slices that must add up to it, see
 and cached in `AppState` (`fleet_devices_cache`, `DEVICE_TTL` ~15 min since devices change rarely;
 the current patches in `fleet_current_os` / `fleet_current_sw`, refreshed on `force_refresh` or
 past `CURRENT_PATCHES_TTL`). `run_query` then scopes them to the selected identity facets
-(org/location/role/group/class) **client-side** via `FilterParams::device_allowed` — so changing
+(org/location/role/group/class) **client-side** via `PreparedFilter::device_allowed` — so changing
 org/location/role/type/severity re-filters the cache with **no** round trip. A device group is the
 exception: its membership is one small read per selected group per query (see
 [filter.md](./filter.md#device-groups-are-read-per-query-and-fail-closed)). This is why

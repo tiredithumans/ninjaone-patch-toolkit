@@ -12,8 +12,10 @@ paths:
   `with_current_result` / `current_result_handle` (memos via `sort_memo` / `group_memo` +
   `store_*_memo`); never touch the slot directly. → `docs/design/query-cache.md`
 - **Claim the `QueryToken` (`begin_query`) before any fetch and redeem it at the store.** A
-  superseded or tenant-drifted result is dropped. `StoreOutcome::Superseded` still returns the
-  summary; `TenantChanged`/`Poisoned` are errors (`commands::patches::summary_for`).
+  superseded, tenant-drifted or session-cleared result is dropped (the token carries
+  `result_epoch`, which `clear_last_result` bumps before clearing). `StoreOutcome::Superseded`
+  still returns the summary; `TenantChanged`/`SessionCleared`/`Poisoned` are errors
+  (`commands::patches::summary_for`).
   → `docs/design/query-cache.md#the-write-is-generation--and-tenant-gated`
 - **Tenant switch, sign-out, sign-in and re-authorize all call `clear_session()`** on the
   frontend and `clear_session_state` on the backend, and every lookup-like reply is dropped when

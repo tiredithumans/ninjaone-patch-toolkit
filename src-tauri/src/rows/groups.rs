@@ -35,7 +35,7 @@ pub enum RowSortKey {
 }
 
 /// `PartialEq` so the cache can tell whether its memoized order still answers the
-/// sort being asked for — the same check `with_grouped_result` makes on [`GroupBy`].
+/// sort being asked for — the same check `AppState::group_memo` makes on [`GroupBy`].
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RowSort {
