@@ -334,8 +334,9 @@ hover. Hiding is positional CSS generated per table
 **host**. Never the selection, a credential or a client id
 (`the_code_carries_no_selection_or_credentials`). The version sits outside the payload so a
 future format is refused before parsing; decoding drops unknown statuses/severities/tabs/sort keys,
-clamps numbers to what the controls accept, caps text, and `apply_view` prunes org/role/class ids
-against the loaded lookups. A code from another host is held behind an **Apply anyway** banner —
+clamps numbers to what the controls accept, caps text, and `apply_view` prunes org/role/group/class ids
+against the loaded lookups (`util::prune_scope_ids` — a saved preset goes through the same prune,
+and both toast how many picks were dropped). A code from another host is held behind an **Apply anyway** banner —
 its organization ids mean something else there. The web demo keeps the code in the URL fragment
 (`history.replaceState`, so Back is not an undo stack of checkboxes) and applies it on load; the
 desktop copies a bare code via `navigator.clipboard` — a web API, not a Tauri capability, and not

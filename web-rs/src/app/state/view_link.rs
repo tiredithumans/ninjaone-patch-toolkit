@@ -84,39 +84,14 @@ impl AppState {
         self.apply_view(view);
     }
 
-    /// Applies a validated view: the filters (through the preset path, which also
-    /// reloads and prunes locations), the tab, the grouping and the sort, then runs.
+    /// Applies a validated view: the filters (through the preset path, which prunes
+    /// ids this tenant does not list and reloads and prunes locations), the tab,
+    /// the grouping and the sort, then runs.
     pub(in crate::app) fn apply_view(self, view: util::SharedView) {
         self.ui.pending_view.set(None);
-        let mut filter = view.filter;
-        let known_orgs: Vec<i64> = self
-            .lookups
-            .orgs
-            .with_untracked(|o| o.iter().map(|o| o.id).collect());
-        let known_roles: Vec<i64> = self
-            .lookups
-            .roles
-            .with_untracked(|r| r.iter().map(|r| r.id).collect());
-        let (orgs, dropped_orgs) = util::prune_unknown_ids(filter.organization_ids, &known_orgs);
-        let known_groups: Vec<i64> = self
-            .lookups
-            .device_groups
-            .with_untracked(|g| g.iter().map(|g| g.id).collect());
-        let (roles, dropped_roles) = util::prune_unknown_ids(filter.role_ids, &known_roles);
-        let (groups, dropped_groups) =
-            util::prune_unknown_ids(filter.device_group_ids, &known_groups);
-        filter.organization_ids = orgs;
-        filter.role_ids = roles;
-        filter.device_group_ids = groups;
-        let classes = self.lookups.node_classes.get_untracked();
-        if !classes.is_empty() {
-            filter
-                .node_classes
-                .retain(|c| classes.iter().any(|nc| &nc.value == c));
-        }
-        self.apply_preset(Preset {
+        let dropped = self.restore_preset(Preset {
             name: String::new(),
-            filter,
+            filter: view.filter,
             patch_type: Some(view.patch_type),
             statuses: Some(view.statuses),
             install_days: Some(view.install_days),
@@ -130,7 +105,6 @@ impl AppState {
             self.query.reset_members();
         }
         self.query.sort_on_next_run.set(view.sort);
-        let dropped = dropped_orgs + dropped_roles + dropped_groups;
         self.notify(Toast::ok(if dropped > 0 {
             format!("View applied — {dropped} organization/role/group pick(s) not in this instance were ignored")
         } else {

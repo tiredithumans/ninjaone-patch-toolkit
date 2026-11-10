@@ -57,8 +57,47 @@ impl AppState {
         self.lookups.device_groups.set(Vec::new());
     }
 
+    /// A saved preset, from the Presets menu: restores it and says which saved
+    /// picks this tenant does not list.
     pub(in crate::app) fn apply_preset(self, p: Preset) {
-        let f = p.filter;
+        let dropped = self.restore_preset(p);
+        if dropped > 0 {
+            self.notify(Toast::ok(format!(
+                "Preset applied — {dropped} organization/role/group pick(s) not in this instance were ignored"
+            )));
+        }
+    }
+
+    /// Writes a preset's filters into the controls, its org/role/group ids and OS
+    /// classes pruned to the loaded lookups (`util::prune_scope_ids`). Returns how
+    /// many org/role/group picks were dropped.
+    pub(in crate::app) fn restore_preset(self, p: Preset) -> usize {
+        let mut f = p.filter;
+        let known_orgs: Vec<i64> = self
+            .lookups
+            .orgs
+            .with_untracked(|o| o.iter().map(|o| o.id).collect());
+        let known_roles: Vec<i64> = self
+            .lookups
+            .roles
+            .with_untracked(|r| r.iter().map(|r| r.id).collect());
+        let known_groups: Vec<i64> = self
+            .lookups
+            .device_groups
+            .with_untracked(|g| g.iter().map(|g| g.id).collect());
+        let known_classes: Vec<String> = self
+            .lookups
+            .node_classes
+            .with_untracked(|c| c.iter().map(|c| c.value.clone()).collect());
+        let dropped = util::prune_scope_ids(
+            &mut f,
+            util::KnownScope {
+                orgs: &known_orgs,
+                roles: &known_roles,
+                groups: &known_groups,
+                classes: &known_classes,
+            },
+        );
         // Restore the patch-query selectors only when the preset captured them, so a
         // legacy preset leaves the current Type/Status/install-window untouched.
         if let Some(pt) = p.patch_type {
@@ -99,5 +138,6 @@ impl AppState {
         // location selection pruned to that list.
         self.filters.org_ids.set(f.organization_ids);
         self.load_locations(Some(f.location_ids));
+        dropped
     }
 }
