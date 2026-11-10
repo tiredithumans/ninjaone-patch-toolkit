@@ -165,10 +165,15 @@ pub fn restore<R: Runtime>(window: &WebviewWindow<R>) {
     let Some(place) = placement(saved, &areas) else {
         return;
     };
-    let _ = window.set_size(PhysicalSize::new(place.width, place.height));
+    // Position first, then size. Moving onto a monitor with a different scale factor
+    // makes Windows send WM_DPICHANGED, and tao rescales the window's *current* size
+    // to the new DPI; sized first, the saved physical size was rescaled, the debounced
+    // save stored the result, and the window grew or shrank on every launch. Sized
+    // after the move, the saved size is what lands.
     if let Some((x, y)) = place.position {
         let _ = window.set_position(PhysicalPosition::new(x, y));
     }
+    let _ = window.set_size(PhysicalSize::new(place.width, place.height));
     if place.maximized {
         let _ = window.maximize();
     }
