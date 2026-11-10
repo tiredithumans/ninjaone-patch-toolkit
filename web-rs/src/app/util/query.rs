@@ -233,3 +233,22 @@ pub(crate) fn query_error_banner(error: &str, has_result: bool, paging: bool) ->
         format!("Last query failed: {error}")
     }
 }
+
+/// How old the data on screen is, from the backend's `YYYY-MM-DD HH:MM UTC` stamp
+/// and the wall clock in whole minutes: "just now", "12 min ago", "3 h ago",
+/// "2 days ago". `None` for a stamp in another shape or one in the future (a
+/// skewed clock), where the absolute time alone is the honest answer.
+pub(crate) fn data_age_label(fetched_at: &str, now_min: i64) -> Option<String> {
+    let (date, rest) = fetched_at.split_once(' ')?;
+    let (hh, mm) = rest.strip_suffix(" UTC")?.split_once(':')?;
+    let (hh, mm): (i64, i64) = (hh.parse().ok()?, mm.parse().ok()?);
+    let at_min = super::date_to_epoch(date)? / 60 + hh * 60 + mm;
+    let age = now_min - at_min;
+    Some(match age {
+        i64::MIN..=-1 => return None,
+        0 => "just now".to_string(),
+        1..=59 => format!("{age} min ago"),
+        60..=2879 => format!("{} h ago", age / 60),
+        _ => format!("{} days ago", age / 1440),
+    })
+}

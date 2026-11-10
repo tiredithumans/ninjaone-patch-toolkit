@@ -4751,3 +4751,26 @@ fn a_preset_name_is_taken_on_an_exact_trimmed_match() {
     assert!(!preset_name_taken("servers", names.iter().copied()));
     assert!(!preset_name_taken("  ", names.iter().copied()));
 }
+
+#[test]
+fn data_age_reads_the_backend_stamp_against_the_clock() {
+    // 2026-03-01 12:00 UTC, in minutes since the epoch.
+    let at = date_to_epoch("2026-03-01").unwrap() / 60 + 12 * 60;
+    let stamp = "2026-03-01 12:00 UTC";
+    assert_eq!(data_age_label(stamp, at).as_deref(), Some("just now"));
+    assert_eq!(
+        data_age_label(stamp, at + 12).as_deref(),
+        Some("12 min ago")
+    );
+    assert_eq!(data_age_label(stamp, at + 185).as_deref(), Some("3 h ago"));
+    assert_eq!(
+        data_age_label(stamp, at + 2 * 1440 + 5).as_deref(),
+        Some("2 days ago")
+    );
+    assert_eq!(
+        data_age_label(stamp, at - 3),
+        None,
+        "a clock behind the data"
+    );
+    assert_eq!(data_age_label("yesterday", at), None);
+}

@@ -32,21 +32,37 @@ pub(crate) fn RunControls() -> impl IntoView {
                     }
                 }}
             </button>
+            // The live region announces that a query started and what it ended on.
+            // The counter beside it ticks twice a second and is hidden from it: as
+            // the region's own text it was re-announced on every tick.
             <span class="run-status" role="status">
                 {move || {
                     if state.run.busy.get() {
-                        return progress_label(state);
+                        return view! { <span class="sr-only">"Query running"</span> }.into_any();
                     }
                     if state.run.refreshing.get() {
-                        return "↻ refreshing…".to_string();
+                        return "↻ refreshing…".into_any();
                     }
                     state
                         .query
                         .result
-                        .with(|r| r.as_ref().map(|r| format!("Data as of {}", r.data_fetched_at)))
+                        .with(|r| r.as_ref().map(|r| r.data_fetched_at.clone()))
+                        .map(|at| {
+                            let age = util::data_age_label(&at, state.run.now_min.get());
+                            match age {
+                                Some(age) => format!("Data as of {at} ({age})"),
+                                None => format!("Data as of {at}"),
+                            }
+                        })
                         .unwrap_or_default()
+                        .into_any()
                 }}
             </span>
+            <Show when=move || state.run.busy.get()>
+                <span class="run-status" aria-hidden="true">
+                    {move || progress_label(state)}
+                </span>
+            </Show>
             <button
                 class="btn btn-ghost btn-icon"
                 aria-label="Refresh from NinjaOne"
@@ -158,6 +174,10 @@ pub(crate) fn ExportMenu() -> impl IntoView {
             <ExportButton kind=Export::Workbook exporting=exporting/>
             <ExportButton kind=Export::Csv exporting=exporting/>
             <ExportButton kind=Export::Report exporting=exporting/>
+            <p class="menu__note">
+                "Every row and column of the last query, in its default order — "
+                "not the sort, hidden columns or page on screen."
+            </p>
         </MenuButton>
     }
 }
@@ -249,6 +269,11 @@ fn ExportButton(kind: Export, exporting: RwSignal<bool>) -> impl IntoView {
             }
         >
             {kind.label()}
+            // The Save dialog can sit behind the window, and a large workbook takes
+            // a while to write after it closes.
+            <Show when=move || exporting.get()>
+                <span class="chips-label">" · saving…"</span>
+            </Show>
         </button>
     }
 }

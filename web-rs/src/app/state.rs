@@ -525,6 +525,9 @@ pub(crate) struct RunState {
     /// `elapsed_tick` is bumped by a timer to re-evaluate the elapsed label.
     pub(super) query_started_ms: RwSignal<f64>,
     pub(super) elapsed_tick: RwSignal<u32>,
+    /// The wall clock in whole minutes, moved by the one-second ticker, so "data
+    /// as of … (12 min ago)" re-renders once a minute and not once a second.
+    pub(super) now_min: RwSignal<i64>,
     pub(super) last_duration_ms: RwSignal<Option<f64>>,
     /// Live record counts from backend `query:progress` events, plus a sequence
     /// number stamped on each run so stale events from a superseded run are dropped.
@@ -548,6 +551,7 @@ impl RunState {
             refreshing: RwSignal::new(false),
             query_started_ms: RwSignal::new(0.0),
             elapsed_tick: RwSignal::new(0),
+            now_min: RwSignal::new((js_sys::Date::now() / 60_000.0) as i64),
             last_duration_ms: RwSignal::new(None),
             progress: RwSignal::new(Progress::default()),
             query_seq: RwSignal::new(0),
@@ -664,8 +668,12 @@ impl UpdateState {
 /// App-chrome state: the toast, panel visibility, and the active results tab.
 #[derive(Clone, Copy)]
 pub(crate) struct UiState {
+    /// The success/notice toast and the error toast: one slot each, so a routine
+    /// "Preset saved" cannot replace an error nobody has read yet.
     pub(super) toast: RwSignal<Option<Toast>>,
+    pub(super) toast_err: RwSignal<Option<Toast>>,
     pub(super) toast_gen: RwSignal<u64>,
+    pub(super) toast_err_gen: RwSignal<u64>,
     pub(super) show_settings: RwSignal<bool>,
     pub(super) active_tab: RwSignal<Tab>,
     /// The keyboard-shortcuts help dialog.
@@ -695,7 +703,9 @@ impl UiState {
     pub(super) fn new() -> Self {
         Self {
             toast: RwSignal::new(None),
+            toast_err: RwSignal::new(None),
             toast_gen: RwSignal::new(0),
+            toast_err_gen: RwSignal::new(0),
             show_settings: RwSignal::new(false),
             // Remembered per machine: an operator who lives on Compliance should
             // not land on Patches every launch.
@@ -716,20 +726,46 @@ impl UiState {
     }
 
     pub(super) fn notify(self, t: Toast) {
-        // Auto-dismiss after a few seconds; a newer toast supersedes this one via
-        // the generation guard. An error stays three times as long: it usually
-        // carries a backend message worth reading in full, and 7s was not enough
-        // to read one — let alone act on it — before it vanished.
-        let ms = if t.error { 12_000 } else { 4000 };
-        let generation = self.toast_gen.get_untracked().wrapping_add(1);
-        self.toast_gen.set(generation);
-        self.toast.set(Some(t));
+        let error = t.error;
+        self.toast_slot(error).0.set(Some(t));
+        self.arm_toast(error);
+    }
+
+    /// The toast of a kind and the stamp of its dismiss timer.
+    fn toast_slot(self, error: bool) -> (RwSignal<Option<Toast>>, RwSignal<u64>) {
+        if error {
+            (self.toast_err, self.toast_err_gen)
+        } else {
+            (self.toast, self.toast_gen)
+        }
+    }
+
+    /// Starts (or restarts) the auto-dismiss. A newer toast, a hold or a dismiss
+    /// moves the stamp, which retires this timer. An error stays three times as
+    /// long: it usually carries a backend message worth reading in full, and 7s
+    /// was not enough to read one — let alone act on it — before it vanished.
+    pub(super) fn arm_toast(self, error: bool) {
+        let (slot, stamp) = self.toast_slot(error);
+        let ms = if error { 12_000 } else { 4000 };
+        let generation = stamp.get_untracked().wrapping_add(1);
+        stamp.set(generation);
         gloo_timers::callback::Timeout::new(ms, move || {
-            if self.toast_gen.get_untracked() == generation {
-                self.toast.set(None);
+            if stamp.get_untracked() == generation {
+                slot.set(None);
             }
         })
         .forget();
+    }
+
+    /// Keeps a toast up while the pointer or keyboard focus is on it; leaving
+    /// re-arms it (`arm_toast`). It used to vanish mid-read and mid-reach.
+    pub(super) fn hold_toast(self, error: bool) {
+        self.toast_slot(error).1.update(|g| *g = g.wrapping_add(1));
+    }
+
+    pub(super) fn dismiss_toast(self, error: bool) {
+        self.hold_toast(error);
+        self.toast_slot(error).0.set(None);
     }
 }
 

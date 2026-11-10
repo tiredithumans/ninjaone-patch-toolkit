@@ -49,10 +49,15 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
         spawn_local(async move {
             match api::save_settings(args).await {
                 Ok(v) => {
+                    let switched = v.tenant_changed;
                     state.apply_settings_view(v);
                     state.settings.f_client_secret.set(String::new());
                     state.session.refresh_auth();
-                    state.notify(Toast::ok("Settings saved"));
+                    state.notify(Toast::ok(if switched {
+                        "Settings saved. The instance changed, so you were signed out — sign in again."
+                    } else {
+                        "Settings saved"
+                    }));
                 }
                 Err(e) => {
                     if util::save_switched_tenant(e.code.as_deref()) {

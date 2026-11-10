@@ -15,9 +15,18 @@ version and start a fresh `[Unreleased]`.
 
 - **Reset filters** in the scope bar puts every filter back to the starting query, including after a drill-down replaced your scope.
 - Pressing Enter in Search or "OS name contains…" runs the query.
+- "Data as of…" also shows how old the data is ("12 min ago").
+
+### Changed
+
+- An error notification no longer disappears when a success message arrives, and a notification stays up while the pointer is on it.
+- The Export menu says what an export contains and shows when a save is in progress.
 
 ### Fixed
 
+- Saving Settings with a new instance says that it signed you out.
+- A failed clipboard copy is shown as an error.
+- Screen readers announce a query once when it starts, not on every tick of its timer.
 - Custom date ranges say they are UTC days, and a reversed First seen range is flagged beside the dates.
 - Saving a preset under an existing name shows **Replace** instead of overwriting silently.
 - A disabled Locations or Groups picker says why in its tooltip.

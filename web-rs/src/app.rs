@@ -180,6 +180,12 @@ pub fn App() -> impl IntoView {
     // The same ticker reads NinjaOne's running jobs on their own cadence
     // (`util::live_jobs_due`), which holds only while the window is hidden.
     gloo_timers::callback::Interval::new(1000, move || {
+        let minute = (js_sys::Date::now() / 60_000.0) as i64;
+        state.run.now_min.maybe_update(|m| {
+            let moved = *m != minute;
+            *m = minute;
+            moved
+        });
         state.tick_auto_refresh();
         state.tick_live_jobs();
     })
