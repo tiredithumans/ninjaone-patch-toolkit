@@ -110,8 +110,8 @@ async fn save_dialog(
 }
 
 /// Opens a save dialog and writes the most recent query result to an `.xlsx`
-/// workbook (Patches + Compliance + Needs Reboot sheets). Returns the saved path,
-/// or `None` if the operator cancelled the dialog.
+/// workbook (the sheets [`crate::export::write_result_workbook`] writes). Returns
+/// the saved path, or `None` if the operator cancelled the dialog.
 ///
 /// Declared `async` so it runs off the main thread, which `blocking_save_file`
 /// requires (the dialog needs the main thread free to pump its event loop).

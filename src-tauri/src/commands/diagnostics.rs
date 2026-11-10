@@ -15,9 +15,10 @@
 //! * [`read_run_history`] renders `run-history.jsonl`, the one-rollup-per-query
 //!   trend `history` appends, so "is the backlog shrinking" has an answer.
 //!
-//! None of the commands touches the network or `AppState`, and none mutates
-//! anything, so none is gated on `require_actions_enabled` — reading your own audit
-//! trail must not require the write feature to be switched on.
+//! None of the commands touches the network, and none mutates anything —
+//! `read_run_history` reads `AppState` only for the signed-in tenant — so none is
+//! gated on `require_actions_enabled`: reading your own audit trail must not
+//! require the write feature to be switched on.
 
 use serde::Serialize;
 use tauri::State;
