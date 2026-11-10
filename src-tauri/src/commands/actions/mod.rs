@@ -322,9 +322,13 @@ pub async fn run_action(
     .await;
     jobs.extend(dispatched);
 
+    // What NinjaOne took, or may have taken: a job it refused at the send is
+    // already `Failed` and changed nothing on the device. Counting those as
+    // dispatched announced a batch of 403s as a success and invalidated the patch
+    // cache over it.
     let live = jobs
         .iter()
-        .filter(|j| !matches!(j.state, JobState::Skipped(_)))
+        .filter(|j| matches!(j.state, JobState::Running | JobState::Unknown(_)))
         .count();
     if !state.append_jobs(&session, jobs.clone()) {
         // Nothing of this batch is recorded, invalidated or polled in the session

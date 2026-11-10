@@ -2406,17 +2406,33 @@ fn the_confirm_dialog_says_whether_it_is_a_dry_run() {
 
 #[test]
 fn the_dispatch_toast_says_where_a_dry_runs_report_is() {
-    assert_eq!(dispatch_toast(3, 0, false), "Dispatched to 3 devices");
+    assert_eq!(dispatch_toast(3, 0, 0, false), "Dispatched to 3 devices");
     assert_eq!(
-        dispatch_toast(3, 1, false),
+        dispatch_toast(3, 0, 1, false),
         "Dispatched to 3 devices; 1 skipped"
     );
-    let dry = dispatch_toast(2, 1, true);
+    let dry = dispatch_toast(2, 0, 1, true);
     assert!(
         dry.starts_with("Dry run sent to 2 devices; 1 skipped"),
         "{dry}"
     );
     assert!(dry.contains("NinjaOne activity"), "{dry}");
+}
+
+#[test]
+fn a_rejected_batch_is_not_announced_as_dispatched() {
+    let all = dispatch_toast(0, 25, 0, false);
+    assert!(
+        all.starts_with("Nothing was sent: NinjaOne rejected the request for 25 devices"),
+        "{all}"
+    );
+    assert!(!all.contains("Dispatched"), "{all}");
+    let some = dispatch_toast(3, 2, 1, false);
+    assert!(
+        some.starts_with("Dispatched to 3 devices; 2 rejected; 1 skipped"),
+        "{some}"
+    );
+    assert!(some.contains("Jobs tab"), "{some}");
 }
 
 #[test]

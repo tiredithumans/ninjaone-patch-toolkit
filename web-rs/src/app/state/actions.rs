@@ -388,14 +388,19 @@ impl AppState {
                     // to switch to Jobs, so every follow-up was a round trip. The
                     // toast offers Jobs, the tab counts what is in flight, and the
                     // batch is announced when it settles.
-                    self.notify(
-                        Toast::ok(util::dispatch_toast(
-                            batch.dispatched,
-                            batch.skipped,
-                            dry_run,
-                        ))
-                        .with_action(ToastAction::ViewJobs),
-                    );
+                    let failed = batch
+                        .jobs
+                        .iter()
+                        .filter(|j| matches!(j.state, JobState::Failed(_)))
+                        .count();
+                    let msg =
+                        util::dispatch_toast(batch.dispatched, failed, batch.skipped, dry_run);
+                    let toast = if failed > 0 {
+                        Toast::err(msg)
+                    } else {
+                        Toast::ok(msg)
+                    };
+                    self.notify(toast.with_action(ToastAction::ViewJobs));
                     // A batch already settled as it returned (every device skipped,
                     // say) is said by the toast above; watching it would only announce
                     // it later, on some unrelated job's update.

@@ -123,17 +123,35 @@ pub(crate) fn confirm_mode_line(
 
 /// The toast after a dispatch. A dry run says where its report is: NinjaOne's v2 API
 /// returns no script output, so it is not anywhere in this app.
-pub(crate) fn dispatch_toast(dispatched: usize, skipped: usize, dry_run: bool) -> String {
+///
+/// `failed` counts the devices NinjaOne refused at the send. They are named first
+/// when nothing went out, so a batch of rejections never reads as a dispatch.
+pub(crate) fn dispatch_toast(
+    dispatched: usize,
+    failed: usize,
+    skipped: usize,
+    dry_run: bool,
+) -> String {
     let devices = count_of(dispatched, "device", "devices");
-    let mut msg = if dry_run {
+    let mut msg = if dispatched == 0 && failed > 0 {
+        format!(
+            "Nothing was sent: NinjaOne rejected the request for {}",
+            count_of(failed, "device", "devices")
+        )
+    } else if dry_run {
         format!("Dry run sent to {devices}")
     } else {
         format!("Dispatched to {devices}")
     };
+    if dispatched > 0 && failed > 0 {
+        msg.push_str(&format!("; {failed} rejected"));
+    }
     if skipped > 0 {
         msg.push_str(&format!("; {skipped} skipped"));
     }
-    if dry_run && dispatched > 0 {
+    if failed > 0 {
+        msg.push_str(". The Jobs tab has each device's reason.");
+    } else if dry_run && dispatched > 0 {
         msg.push_str(". Each script's report is in its NinjaOne activity.");
     }
     msg
