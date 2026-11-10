@@ -870,7 +870,7 @@ fn assemble_result(
     // a scope, only patches whose device is in the scoped set survive.
     //
     // These **borrow** from the `Arc` cache rather than cloning out of it. A whole-fleet
-    // third-party feed runs to six figures, and each `Patch` owns six `Option<String>`s,
+    // third-party feed runs to six figures, and each `Patch` owns five `Option<String>`s,
     // so cloning the scoped subset cost millions of allocations per query for data the
     // cache already owns and outlives.
     //

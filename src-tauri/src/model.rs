@@ -435,18 +435,13 @@ pub struct Patch {
     #[serde(default)]
     pub kb_number: Option<String>,
     /// `name` on `DeviceOSPatch`, `title` on `DeviceSoftwarePatch`. Those are the
-    /// only two keys either schema declares for it.
+    /// only two keys either schema declares for it. Neither schema declares a
+    /// version or a vendor: the third-party feed folds the version into `title`
+    /// ("Google Chrome 141.0.7390.55"), which is why a software row's display name
+    /// is its title alone. The schemas' `type` is not bound either — the family is
+    /// known from the endpoint, and nothing read it.
     #[serde(default, alias = "title")]
     pub name: Option<String>,
-    /// Always `None` in practice: **neither** patch schema declares a version. The
-    /// third-party feed folds the version into `title` ("Google Chrome 141.0.7390.55"),
-    /// which is why a software row's display name is its title alone.
-    #[serde(default)]
-    pub version: Option<String>,
-    /// Always `None` in practice, for the same reason as [`Patch::version`] —
-    /// no vendor or publisher field exists on either patch schema.
-    #[serde(default)]
-    pub product_vendor: Option<String>,
     /// `severity` on `DeviceOSPatch`, `impact` on `DeviceSoftwarePatch` — the
     /// software schema declares no `severity` property at all, so this alias is the
     /// only path by which a third-party patch is ever graded.
@@ -454,8 +449,6 @@ pub struct Patch {
     pub severity: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
-    #[serde(default, rename = "type")]
-    pub patch_type: Option<String>,
     /// When NinjaOne last collected/updated this patch record — **not** a patch
     /// release date.
     ///
@@ -504,8 +497,8 @@ impl Patch {
         self.installed_timestamp.and_then(unix_to_datetime)
     }
 
-    /// The operator-facing patch title — KB, vendor, name and version, joined — into
-    /// a caller-owned buffer, which it clears first.
+    /// The operator-facing patch title — KB and name, joined — into a caller-owned
+    /// buffer, which it clears first.
     ///
     /// Buffered rather than returning a `String` because the join calls it once per
     /// patch across the whole fleet purely to produce a key for the row interner, and
@@ -513,14 +506,9 @@ impl Patch {
     /// `String` allocated and dropped per row" into one allocation for the whole join.
     pub fn write_display_name(&self, buf: &mut String) {
         buf.clear();
-        for field in [
-            self.kb_number.as_deref(),
-            self.product_vendor.as_deref(),
-            self.name.as_deref(),
-            self.version.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
+        for field in [self.kb_number.as_deref(), self.name.as_deref()]
+            .into_iter()
+            .flatten()
         {
             if field.is_empty() {
                 continue;
@@ -1403,11 +1391,8 @@ mod tests {
             device_id: None,
             kb_number: None,
             name: None,
-            version: None,
-            product_vendor: None,
             severity: None,
             status: None,
-            patch_type: None,
             collected_timestamp: Some(ts),
             installed_timestamp: None,
             product_identifier: None,

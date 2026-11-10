@@ -210,11 +210,8 @@ fn patch(device_id: i64, status: &str, sev: &str, first_seen_days_ago: Option<i6
         device_id: Some(device_id),
         kb_number: Some("KB5040434".into()),
         name: Some("Cumulative Update".into()),
-        version: None,
-        product_vendor: None,
         severity: Some(sev.into()),
         status: Some(status.into()),
-        patch_type: None,
         collected_timestamp: first_seen_days_ago
             .map(|d| (Utc::now() - Duration::days(d)).timestamp() as f64),
         installed_timestamp: None,

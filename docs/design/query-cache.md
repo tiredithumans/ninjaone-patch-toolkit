@@ -349,7 +349,7 @@ per scoped record (the `&Patch`, its parsed severity, its pending verdict and it
 seen), OS first — and the rollups (`build_device_summaries`, `build_compliance`,
 `build_compliance_by_os`, `build_severity_by_org`, `build_age_buckets`, `build_device_backlogs`,
 `build_approval_backlog`) plus `PatchSource.records` all take `&[PatchRecord]`. A whole-fleet
-third-party feed runs to six figures and each `Patch` owns **eight** `Option<String>`s, so cloning
+third-party feed runs to six figures and each `Patch` owns **five** `Option<String>`s, so cloning
 the scoped subset costs millions of allocations per query for data the cache already owns and
 outlives. Keep new rollups on `&[PatchRecord]`; don't reintroduce an owned `Vec<Patch>` to make a
 signature more convenient, and don't read `Patch::collected_at` for an age — the view's
