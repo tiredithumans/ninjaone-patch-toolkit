@@ -842,6 +842,9 @@ pub(crate) struct ActionState {
     /// Type-to-confirm text for the forced-reboot tier.
     pub(super) confirm_input: RwSignal<String>,
     pub(super) dispatching: RwSignal<bool>,
+    /// A plan is being fetched for the confirm dialog. `dispatching` is set too
+    /// (it is what disables the bar); this only lets the bar say which it is.
+    pub(super) planning: RwSignal<bool>,
     /// Why the last `run_action` from the open dialog failed. Shown inside the
     /// dialog, and it disables Run: the confirm token is single-use and already
     /// spent, so the only way forward is a fresh plan (or Cancel).
@@ -890,6 +893,7 @@ impl ActionState {
             pending: RwSignal::new(None),
             confirm_input: RwSignal::new(String::new()),
             dispatching: RwSignal::new(false),
+            planning: RwSignal::new(false),
             dispatch_error: RwSignal::new(None),
             dispatch_progress: RwSignal::new(None),
             jobs: RwSignal::new(Vec::new()),
