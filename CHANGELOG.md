@@ -65,6 +65,12 @@ version and start a fresh `[Unreleased]`.
 - An update whose download stalls now fails after a while instead of leaving the app stuck on
   "Updating…".
 - A crash is now written to the log file.
+- An export that fails, or is interrupted, no longer destroys the file it was replacing.
+- An export no longer fails when a very long cell contains an emoji.
+- An action no longer times out because this computer's clock runs ahead of NinjaOne's.
+- The action bar now follows your saved settings, not edits left unsaved in the Settings dialog.
+- In an action's confirmation, the lists of targeted and skipped devices can be opened from the
+  keyboard.
 - With auto-refresh on, the Trend tab no longer fills with identical runs: a run that changed
   nothing is recorded at most once an hour.
 - Clicking **Re-authorize** twice no longer makes the sign-in you then complete fail.

@@ -92,10 +92,21 @@ pub const CELL_MAX_CHARS: usize = 32_767;
 /// The backstop for any free-text cell. A list that can say what it dropped should
 /// use [`join_capped`] instead.
 pub fn clamp_cell(s: String) -> String {
-    if s.len() <= CELL_MAX_CHARS || s.chars().count() <= CELL_MAX_CHARS {
+    // Excel's limit — and the writer's check — is in UTF-16 units, so a character
+    // outside the BMP counts twice. Counting `char`s let a cut cell with one emoji
+    // in it through at 32,768 units, which failed the whole workbook.
+    if s.len() <= CELL_MAX_CHARS || s.encode_utf16().count() <= CELL_MAX_CHARS {
         return s;
     }
-    let mut out: String = s.chars().take(CELL_MAX_CHARS - 1).collect();
+    let mut out = String::new();
+    let mut units = 0;
+    for c in s.chars() {
+        units += c.len_utf16();
+        if units > CELL_MAX_CHARS - 1 {
+            break;
+        }
+        out.push(c);
+    }
     out.push('…');
     out
 }

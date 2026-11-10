@@ -2091,6 +2091,10 @@ fn a_capped_list_says_how_many_it_left_out_and_stays_inside_the_cap() {
         assert_eq!(shown + rest, names.len(), "{out:?}");
     }
     assert_eq!(clamp_cell("short".into()), "short");
+    // Excel counts UTF-16 units: an emoji is two, and a cut cell must still fit.
+    let emoji = clamp_cell("😀".repeat(CELL_MAX_CHARS));
+    assert!(emoji.encode_utf16().count() <= CELL_MAX_CHARS);
+    assert!(emoji.ends_with('…'));
     let long = clamp_cell("é".repeat(CELL_MAX_CHARS + 5));
     assert_eq!(long.chars().count(), CELL_MAX_CHARS);
     assert!(long.ends_with('…'));

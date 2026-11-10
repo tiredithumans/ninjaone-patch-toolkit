@@ -1565,12 +1565,12 @@ fn feed_reads_group_by_device_and_narrow_only_to_a_confirmed_series() {
             poller::FeedRead {
                 device_id: 7,
                 series_uid: None,
-                since_ts: 895,
+                since_ts: 900 - super::poller::FEED_READ_SLACK_SECS,
             },
             poller::FeedRead {
                 device_id: 8,
                 series_uid: None,
-                since_ts: 1_995,
+                since_ts: 2_000 - super::poller::FEED_READ_SLACK_SECS,
             },
         ]
     );

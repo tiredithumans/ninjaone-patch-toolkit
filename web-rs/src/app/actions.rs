@@ -236,9 +236,15 @@ fn RunOptions(source: SelectionSource) -> impl IntoView {
             rows_source,
             state.actions.dry_run.get(),
             state.actions.override_window.get()
-                && state.settings.f_actions.with(util::window_override_offered),
+                && state
+                    .settings
+                    .saved_actions
+                    .with(util::window_override_offered),
             state.actions.include_offline.get()
-                && state.settings.f_actions.with(util::offline_targets_offered),
+                && state
+                    .settings
+                    .saved_actions
+                    .with(util::offline_targets_offered),
         )
     });
     view! {
@@ -259,15 +265,15 @@ fn RunOptions(source: SelectionSource) -> impl IntoView {
                 <label class="checkbox">
                     <input
                         type="checkbox"
-                        prop:disabled=move || !state.settings.f_actions.with(util::offline_targets_offered)
+                        prop:disabled=move || !state.settings.saved_actions.with(util::offline_targets_offered)
                         prop:checked=move || {
                             state.actions.include_offline.get()
-                                && state.settings.f_actions.with(util::offline_targets_offered)
+                                && state.settings.saved_actions.with(util::offline_targets_offered)
                         }
                         on:change=move |ev| state.actions.include_offline.set(event_target_checked(&ev))
                     />
                     "Include offline devices"
-                    <Show when=move || !state.settings.f_actions.with(util::offline_targets_offered)>
+                    <Show when=move || !state.settings.saved_actions.with(util::offline_targets_offered)>
                         <span class="action-options-note">
                             "(switched off in "
                             <SettingsLink label="Settings → Patch actions"/>
@@ -280,7 +286,7 @@ fn RunOptions(source: SelectionSource) -> impl IntoView {
                 // closed, and audits the dispatch only when it was. Cleared after
                 // every dispatch and when the session ends, so it never outlives the
                 // one it was ticked for.
-                <Show when=move || state.settings.f_actions.with(util::window_override_offered)>
+                <Show when=move || state.settings.saved_actions.with(util::window_override_offered)>
                     <label
                         class="checkbox"
                         title="Only needed outside the window. The backend checks the window at plan and again at confirm, and records an override on the audit trail."
@@ -295,7 +301,7 @@ fn RunOptions(source: SelectionSource) -> impl IntoView {
                             {move || {
                                 format!(
                                     "(window: {}, this computer's local time)",
-                                    state.settings.f_actions.with(util::window_summary),
+                                    state.settings.saved_actions.with(util::window_summary),
                                 )
                             }}
                         </span>
@@ -1062,7 +1068,7 @@ fn RunAsSelect() -> impl IntoView {
         <select on:change=move |ev| state.actions.run_as.set(event_target_value(&ev))>
             // Blank sends no override; the backend resolves it to the saved default.
             <option value="" prop:selected=move || state.actions.run_as.with(String::is_empty)>
-                {move || state.settings.f_actions.with(|a| util::run_as_default_label(&a.run_as))}
+                {move || state.settings.saved_actions.with(|a| util::run_as_default_label(&a.run_as))}
             </option>
             {move || choices.get().0.into_iter().map(option).collect_view()}
             {move || {

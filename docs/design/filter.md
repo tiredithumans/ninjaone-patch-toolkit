@@ -1,6 +1,6 @@
 # Filter: device scope, the install `df`, and row facets
 
-Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
+Contract lines: [AGENTS.md → Domain rules](../../AGENTS.md#domain-rules--read-the-file-before-you-change-the-domain).
 Code: `src-tauri/src/filter.rs` (`FilterParams`, `PreparedFilter`), `src-tauri/src/rows/join.rs`
 (`build_rows`).
 

@@ -17,6 +17,8 @@ paths:
 - **Patch facets (Status, Severity, Search, First seen, Install history) render only in
   `PatchFilterBar`, on Patches and Failures; auto-refresh re-runs `applied_args`, never the live
   controls.** → `docs/design/frontend.md#operator-ux`
+- **Outside `settings.rs`, read `settings.saved_actions`, never the form draft `f_actions`** —
+  the draft keeps unsaved edits after Close.
 - **A menu or popover is never `aria-modal`** (`menu::MenuButton`, `dismiss_on_outside`): that
   attribute holds auto-refresh and silences the shortcuts. → `docs/design/frontend.md#operator-ux`
 - **A `query.members` entry is replaced with a fresh `Arc`, never mutated in place** — open

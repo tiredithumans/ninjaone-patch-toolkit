@@ -67,9 +67,12 @@ fmt-check:
 clippy:
     cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-# Lint the frontend (wasm target) with warnings denied.
+# Lint the frontend (wasm target) with warnings denied, then its test code on the
+# host target: the wasm build compiles no `#[cfg(test)]` module, so the suites that
+# hold the IPC mirrors to the backend fixture were never linted.
 web-clippy:
     cargo clippy --manifest-path web-rs/Cargo.toml --target {{wasm}} -- -D warnings
+    cargo clippy --manifest-path web-rs/Cargo.toml --tests -- -D warnings
 
 # Backend unit + integration tests.
 test:

@@ -562,6 +562,10 @@ pub(crate) struct SettingsState {
     /// Whole write-path block, held as one value so a field the panel doesn't
     /// expose round-trips unchanged instead of resetting to its default on save.
     pub(super) f_actions: RwSignal<ActionSettings>,
+    /// The write-path block as *saved*. `f_actions` is the Settings form's draft,
+    /// which keeps unsaved edits after Close; the action bar read it, so it offered
+    /// and explained dispatches by settings the backend was not using.
+    pub(super) saved_actions: RwSignal<ActionSettings>,
     pub(super) presets: RwSignal<Vec<Preset>>,
     pub(super) preset_name: RwSignal<String>,
     /// The saved settings have arrived from the backend. Until then the form holds
@@ -587,6 +591,7 @@ impl SettingsState {
             f_auto_update: RwSignal::new(true),
             f_exploit_data: RwSignal::new(true),
             f_actions: RwSignal::new(ActionSettings::default()),
+            saved_actions: RwSignal::new(ActionSettings::default()),
             presets: RwSignal::new(Vec::new()),
             preset_name: RwSignal::new(String::new()),
             loaded: RwSignal::new(false),

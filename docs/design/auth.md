@@ -1,6 +1,6 @@
 # Auth: PKCE, keyring, scope, refresh
 
-Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
+Contract lines: [AGENTS.md → Domain rules](../../AGENTS.md#domain-rules--read-the-file-before-you-change-the-domain).
 Code: `src-tauri/src/auth.rs`, `src-tauri/src/state.rs` (`AppState`),
 `src-tauri/src/commands/auth.rs`, `src-tauri/src/settings.rs` (`instance_url_problem`).
 

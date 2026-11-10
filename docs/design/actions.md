@@ -1,6 +1,6 @@
 # The write path: device actions
 
-Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
+Contract lines: [AGENTS.md → Domain rules](../../AGENTS.md#domain-rules--read-the-file-before-you-change-the-domain).
 Code: `src-tauri/src/actions/` (domain + `plan()`; `kind`, `job`, `planning`, `parameters`,
 `activity`, `audit`, re-exported flat as `crate::actions::*`), `src-tauri/src/api/actions.rs` (the
 POSTs), `src-tauri/src/commands/actions/` (`mod.rs` the commands, `plan.rs`, `confirm.rs`,

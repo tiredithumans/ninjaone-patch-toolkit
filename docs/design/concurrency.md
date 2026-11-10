@@ -1,6 +1,6 @@
 # Concurrency: blocking work and lock discipline
 
-Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
+Contract lines: [AGENTS.md → Domain rules](../../AGENTS.md#domain-rules--read-the-file-before-you-change-the-domain).
 Code: `src-tauri/src/state.rs`, `src-tauri/src/commands/*.rs`, `src-tauri/src/auth.rs`,
 `src-tauri/src/actions/audit.rs`.
 
