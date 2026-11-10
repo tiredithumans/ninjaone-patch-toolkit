@@ -188,5 +188,42 @@ MSG
 run_hook conventional-commit-validator.sh "$(bash_payload "$heredoc_bad")"
 expect_code "validator: heredoc after a global option is checked" 2
 
+# --- secrets-scanner ---------------------------------------------------------
+# Run in a throwaway repo: the scanner reads the working tree's changed files.
+scan_dir=$(mktemp -d)
+trap 'rm -rf "$scan_dir"' EXIT
+git -C "$scan_dir" init -q
+scan() { # → stderr in $out, exit code in $code
+  out=$(CLAUDE_PROJECT_DIR="$scan_dir" SCAN_MODE="${1:-warn}" SCAN_NO_GITLEAKS=1 \
+    "$here/secrets-scanner.sh" 2>&1 >/dev/null </dev/null)
+  code=$?
+}
+printf 'nothing to see\n' > "$scan_dir/clean.txt"
+scan
+expect_silent "secrets: a clean file says nothing"
+printf 'untrusted comment: minisign public key: 424FBE63E42A5A7D\n' > "$scan_dir/pub.txt"
+printf 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQyNEZCRTYzRTQyQTVBN0QK\n' >> "$scan_dir/pub.txt"
+scan
+expect_silent "secrets: the updater's public key is not flagged"
+printf 'dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V5CnRlc3Q=\n' > "$scan_dir/updater.key"
+scan
+expect_contains "secrets: the updater's signing key is flagged" "updater.key:1:<redacted>"
+scan block
+expect_code "secrets: block mode refuses it" 2
+rm -f "$scan_dir/updater.key"
+
+# --- .githooks/commit-msg ----------------------------------------------------
+msg_file="$scan_dir/COMMIT_EDITMSG"
+for subject in 'fix(actions): stop a rejected batch reading as sent' 'Merge branch main' 'deps: bump x'; do
+  printf '%s\n\n# comment\n' "$subject" > "$msg_file"
+  out=$("$project/.githooks/commit-msg" "$msg_file" 2>&1); code=$?
+  expect_code "commit-msg: passes: $subject" 0
+done
+for subject in 'Fixed the dialog' 'fix: ' 'feature(web): x'; do
+  printf '%s\n' "$subject" > "$msg_file"
+  out=$("$project/.githooks/commit-msg" "$msg_file" 2>&1); code=$?
+  expect_code "commit-msg: refuses: $subject" 1
+done
+
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

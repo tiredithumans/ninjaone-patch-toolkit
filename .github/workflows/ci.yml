@@ -15,6 +15,13 @@ on:
   # Manual re-run of everything, including the live contract check.
   workflow_dispatch:
 
+# Line tables, not full debuginfo, for every dev/test build CI does: backtraces keep
+# file and line, while target/ (cached and restored on every leg) and Windows' PDB
+# link step shrink. Local builds keep the default; nothing here debugs a binary.
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 # A new push to the same branch/PR supersedes the in-flight run — without this
 # every PR update queues a duplicate full 3-OS matrix.
 concurrency:

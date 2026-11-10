@@ -78,7 +78,7 @@ review-time copy; when a domain here feels thin, Read its rule file before judgi
 ## 3. Check conventions
 
 - Conventional Commits: `<type>[(scope)][!]: <description>`; scopes `desktop`, `web`, `api`,
-  `auth`, `export`, `filter`, `settings`, `ci`, `docs`.
+  `auth`, `actions`, `export`, `filter`, `settings`, `ci`, `docs`, `release`.
 
 ## 4. Produce output
 

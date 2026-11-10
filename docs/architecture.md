@@ -95,7 +95,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ```
 
 Supporting surfaces: `.claude/hooks/` (commit-msg rule + command parity + staleness + secrets
-scan, `test.sh` self-tests them), `.github/workflows/` (ci · codeql · dependabot-automerge ·
+scan, `test.sh` self-tests them and `.githooks/commit-msg`), `.github/workflows/` (ci · codeql · dependabot-automerge ·
 pages · release · screenshot), `remediation/` (reference "Apply selected" PowerShell scripts; `tests/fixtures`
 pins `build_parameters`), `scripts/` (screenshot tooling, changelog-notes.sh,
 check-license-lists.sh, ninjaone-spec-digest.py, run-pester.ps1 behind `just pester`), `about.toml` + templates →

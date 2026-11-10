@@ -20,7 +20,9 @@ set -uo pipefail
 command -v just >/dev/null 2>&1 || exit 0
 
 # Everything `just verify` compiles, lints, formats or is configured by.
-paths=(src-tauri web-rs justfile rust-toolchain.toml deny.toml .cargo)
+# `remediation/` too: `just test` reads its parameter-contract fixture (include_str!),
+# so a push touching only the scripts' side of that contract can break the Rust half.
+paths=(src-tauri web-rs remediation justfile rust-toolchain.toml deny.toml .cargo)
 
 needs_verify=0
 while read -r _local_ref local_sha _remote_ref remote_sha; do

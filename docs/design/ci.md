@@ -1,7 +1,7 @@
 # CI-only gates
 
 Contract lines: [AGENTS.md → Verification playbook](../../AGENTS.md#verification-playbook).
-Workflows: `.github/workflows/{ci,codeql,release,screenshot,pages}.yml`; recipes in `/justfile`.
+Workflows: `.github/workflows/{ci,codeql,dependabot-automerge,release,screenshot,pages}.yml`; recipes in `/justfile`.
 
 `just verify` is the local gate and runs every Rust step `ci.yml`'s backend and frontend jobs run,
 in the same order. **Keep it that way** — a CI sequence that quietly differs from the documented
