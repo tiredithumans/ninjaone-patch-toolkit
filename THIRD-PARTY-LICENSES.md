@@ -11,8 +11,8 @@ Regenerate with `just licenses`. Do not edit by hand.
 
 ## Desktop app (src-tauri)
 
-- MIT License (529 crates)
-- ISC License (20 crates)
+- MIT License (519 crates)
+- ISC License (25 crates)
 - Unicode License v3 (19 crates)
 - Apache License 2.0 (9 crates)
 - BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (7 crates)
@@ -1652,6 +1652,42 @@ Used by:
 - [ring 0.17.14](https://github.com/briansmith/ring)
 
 ```
+// Copyright 2015-2024 Brian Smith.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+#[cfg(target_pointer_width &#x3D; &quot;64&quot;)]
+type CompilerWord &#x3D; u64;
+
+#[cfg(target_pointer_width &#x3D; &quot;32&quot;)]
+type CompilerWord &#x3D; u32;
+
+/// A native word that isn&#x27;t secret.
+///
+/// &#x60;LeakyWord&#x60; supports &#x60;as&#x60; conversions to/from native types.
+///
+/// XXX: This isn&#x27;t the native word size on targets where a pointer isn&#x27;t the
+/// same size as a native word. TODO: Fix this.
+pub(crate) type LeakyWord &#x3D; CompilerWord;
+
+```
+
+### ISC License
+
+Used by:
+- [ring 0.17.14](https://github.com/briansmith/ring)
+
+```
 // Copyright 2015-2025 Brian Smith.
 //
 // Permission to use, copy, modify, and/or distribute this software for any
@@ -1770,6 +1806,47 @@ Used by:
 // OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 // CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
+#[cfg(target_arch &#x3D; &quot;x86&quot;)]
+pub fn shift_full_blocks&lt;const BLOCK_LEN: usize&gt;(
+    in_out: super::overlapping::Overlapping&lt;&#x27;_, u8&gt;,
+    mut transform: impl FnMut(&amp;[u8; BLOCK_LEN]) -&gt; [u8; BLOCK_LEN],
+) {
+    let (in_out, src) &#x3D; in_out.into_slice_src_mut();
+    let in_out_len &#x3D; in_out[src.clone()].len();
+
+    for i in (0..in_out_len).step_by(BLOCK_LEN) {
+        let block &#x3D; {
+            let input &#x3D;
+                &lt;&amp;[u8; BLOCK_LEN]&gt;::try_from(&amp;in_out[(src.start + i)..][..BLOCK_LEN]).unwrap();
+            transform(input)
+        };
+        let output &#x3D; &lt;&amp;mut [u8; BLOCK_LEN]&gt;::try_from(&amp;mut in_out[i..][..BLOCK_LEN]).unwrap();
+        *output &#x3D; block;
+    }
+}
+
+```
+
+### ISC License
+
+Used by:
+- [ring 0.17.14](https://github.com/briansmith/ring)
+
+```
+// Copyright 2018 Brian Smith.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
 //! Serialization and deserialization.
 
 #[doc(hidden)]
@@ -1830,6 +1907,44 @@ mod ffi;
 pub(super) mod fallback;
 mod sha2_32;
 mod sha2_64;
+
+```
+
+### ISC License
+
+Used by:
+- [ring 0.17.14](https://github.com/briansmith/ring)
+
+```
+// Copyright 2022 Brian Smith.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+/// Polyfill for &#x60;Option::unwrap()&#x60; as a const fn; feature &#x60;const_option&#x60;.
+/// https://github.com/rust-lang/rust/issues/67441.
+/// TODO(MSRV): Replace this with &#x60;x.unwrap()&#x60;.
+///
+/// &#x60;T: Copy&#x60; avoids &quot;constant functions cannot evaluate destructors.&quot;
+pub const fn unwrap_const&lt;T&gt;(x: Option&lt;T&gt;) -&gt; T
+where
+    T: Copy,
+{
+    if let Some(x) &#x3D; x {
+        x
+    } else {
+        panic!(&quot;unwrap_const on &#x60;None&#x60;&quot;);
+    }
+}
 
 ```
 
@@ -1915,6 +2030,38 @@ Used by:
 // OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 // CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
+//! Utilities to make dealing with slices less tediuous.
+
+/// Replaces the first N elements of &#x60;a&#x60; with the first N elements of &#x60;b&#x60;, where
+/// N is &#x60;core::cmp::min(a.len(), b.len())&#x60;, leaving the rest unchanged.
+pub fn overwrite_at_start&lt;T: Copy&gt;(a: &amp;mut [T], b: &amp;[T]) {
+    a.iter_mut().zip(b).for_each(|(a, b)| {
+        *a &#x3D; *b;
+    });
+}
+
+```
+
+### ISC License
+
+Used by:
+- [ring 0.17.14](https://github.com/briansmith/ring)
+
+```
+// Copyright 2024 Brian Smith.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
 pub use self::{
     array::Array,
     base::{IndexError, Overlapping},
@@ -1924,6 +2071,45 @@ pub use self::{
 mod array;
 mod base;
 mod partial_block;
+
+```
+
+### ISC License
+
+Used by:
+- [ring 0.17.14](https://github.com/briansmith/ring)
+
+```
+// Copyright 2024 Brian Smith.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+use crate::testutil;
+use core::{marker::PhantomData, mem::size_of};
+
+/// A ZST that can be added to any type to make the type &#x60;!Send&#x60;.
+#[derive(Clone, Copy)]
+pub struct NotSend(PhantomData&lt;*mut ()&gt;);
+
+impl NotSend {
+    pub const VALUE: Self &#x3D; Self(PhantomData);
+}
+
+#[allow(deprecated)]
+const _: () &#x3D; testutil::compile_time_assert_clone::&lt;NotSend&gt;();
+#[allow(deprecated)]
+const _: () &#x3D; testutil::compile_time_assert_copy::&lt;NotSend&gt;();
+const _: () &#x3D; assert!(size_of::&lt;NotSend&gt;() &#x3D;&#x3D; 0);
 
 ```
 
@@ -2087,14 +2273,13 @@ Used by:
 - [aws-lc-sys 0.45.0](https://github.com/aws/aws-lc-rs)
 
 ```
-ISC License:
+ISC License
 
-Copyright (c) 2004-2010 by Internet Systems Consortium, Inc. (&quot;ISC&quot;)
-Copyright (c) 1995-2003 by Internet Software Consortium
+Copyright &lt;year&gt; &lt;owner&gt; 
 
 Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies.
 
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND ISC DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL ISC BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ```
 
@@ -3206,7 +3391,6 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [png 0.17.16](https://github.com/image-rs/image-png)
 - [png 0.18.1](https://github.com/image-rs/image-png)
 
 ```
@@ -3621,7 +3805,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [apple-native-keyring-store 1.0.2](https://github.com/open-source-cooperative/apple-native-keyring-store.git)
-- [keyring-core 1.0.0](https://github.com/open-source-cooperative/keyring-core.git)
+- [keyring-core 1.0.1](https://github.com/open-source-cooperative/keyring-core.git)
 - [keyring 4.2.0](https://github.com/open-source-cooperative/keyring-rs)
 - [zbus-secret-service-keyring-store 1.0.1](https://github.com/open-source-cooperative/zbus-secret-service-keyring-store.git)
 
@@ -6424,13 +6608,13 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [tauri-build 2.7.3](https://github.com/tauri-apps/tauri)
-- [tauri-codegen 2.7.1](https://github.com/tauri-apps/tauri)
-- [tauri-macros 2.7.1](https://github.com/tauri-apps/tauri)
-- [tauri-runtime-wry 2.12.1](https://github.com/tauri-apps/tauri)
-- [tauri-runtime 2.12.1](https://github.com/tauri-apps/tauri)
+- [tauri-build 2.7.4](https://github.com/tauri-apps/tauri)
+- [tauri-codegen 2.7.4](https://github.com/tauri-apps/tauri)
+- [tauri-macros 2.7.4](https://github.com/tauri-apps/tauri)
+- [tauri-runtime-wry 2.12.3](https://github.com/tauri-apps/tauri)
+- [tauri-runtime 2.12.2](https://github.com/tauri-apps/tauri)
 - [tauri-utils 2.10.2](https://github.com/tauri-apps/tauri)
-- [tauri 2.12.2](https://github.com/tauri-apps/tauri)
+- [tauri 2.12.5](https://github.com/tauri-apps/tauri)
 
 ```
 MIT License
@@ -6612,7 +6796,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [ico 0.5.0](https://github.com/mdsteele/rust-ico)
+- [ico 0.6.0](https://github.com/mdsteele/rust-ico)
 
 ```
 MIT License
@@ -6819,6 +7003,36 @@ Used by:
 MIT License
 
 Copyright (c) 2019-2020 CreepySkeleton
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
+- [rfd 0.17.2](https://github.com/PolyMeilex/rfd)
+
+```
+MIT License
+
+Copyright (c) 2020 Bilal Elmoussaoui
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the &quot;Software&quot;), to deal
@@ -7090,7 +7304,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [rfd 0.16.0](https://github.com/PolyMeilex/rfd)
+- [rfd 0.17.2](https://github.com/PolyMeilex/rfd)
 
 ```
 MIT License
@@ -7341,11 +7555,11 @@ Used by:
 - [objc2 0.6.4](https://github.com/madsmtm/objc2)
 - [r-efi 5.3.0](https://github.com/r-efi/r-efi)
 - [r-efi 6.0.0](https://github.com/r-efi/r-efi)
-- [rust_xlsxwriter 0.100.0](https://github.com/jmcnamara/rust_xlsxwriter)
+- [rust_xlsxwriter 0.102.0](https://github.com/jmcnamara/rust_xlsxwriter)
 - [rustls-platform-verifier-android 0.2.0](https://github.com/rustls/rustls-platform-verifier)
-- [tauri-plugin-dialog 2.8.3](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-dialog 2.8.4](https://github.com/tauri-apps/plugins-workspace)
 - [tauri-plugin-fs 2.7.1](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin-updater 2.14.0](https://github.com/tauri-apps/plugins-workspace)
+- [tauri-plugin-updater 2.14.1](https://github.com/tauri-apps/plugins-workspace)
 - [tauri-plugin 2.7.1](https://github.com/tauri-apps/tauri)
 - [webview2-com-macros 0.8.1](https://github.com/wravery/webview2-rs)
 - [webview2-com-sys 0.39.1](https://github.com/wravery/webview2-rs)
@@ -7365,37 +7579,27 @@ Used by:
 - [windows-sys 0.45.0](https://github.com/microsoft/windows-rs)
 - [windows-sys 0.52.0](https://github.com/microsoft/windows-rs)
 - [windows-sys 0.59.0](https://github.com/microsoft/windows-rs)
-- [windows-sys 0.60.2](https://github.com/microsoft/windows-rs)
 - [windows-sys 0.61.2](https://github.com/microsoft/windows-rs)
 - [windows-targets 0.42.2](https://github.com/microsoft/windows-rs)
 - [windows-targets 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows-targets 0.53.5](https://github.com/microsoft/windows-rs)
 - [windows-threading 0.2.1](https://github.com/microsoft/windows-rs)
 - [windows-version 0.1.7](https://github.com/microsoft/windows-rs)
 - [windows 0.62.2](https://github.com/microsoft/windows-rs)
 - [windows_aarch64_gnullvm 0.42.2](https://github.com/microsoft/windows-rs)
 - [windows_aarch64_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_aarch64_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
 - [windows_aarch64_msvc 0.42.2](https://github.com/microsoft/windows-rs)
 - [windows_aarch64_msvc 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_aarch64_msvc 0.53.1](https://github.com/microsoft/windows-rs)
 - [windows_i686_gnu 0.42.2](https://github.com/microsoft/windows-rs)
 - [windows_i686_gnu 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_i686_gnu 0.53.1](https://github.com/microsoft/windows-rs)
 - [windows_i686_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_i686_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
 - [windows_i686_msvc 0.42.2](https://github.com/microsoft/windows-rs)
 - [windows_i686_msvc 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_i686_msvc 0.53.1](https://github.com/microsoft/windows-rs)
 - [windows_x86_64_gnu 0.42.2](https://github.com/microsoft/windows-rs)
 - [windows_x86_64_gnu 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_x86_64_gnu 0.53.1](https://github.com/microsoft/windows-rs)
 - [windows_x86_64_gnullvm 0.42.2](https://github.com/microsoft/windows-rs)
 - [windows_x86_64_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_x86_64_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
 - [windows_x86_64_msvc 0.42.2](https://github.com/microsoft/windows-rs)
 - [windows_x86_64_msvc 0.52.6](https://github.com/microsoft/windows-rs)
-- [windows_x86_64_msvc 0.53.1](https://github.com/microsoft/windows-rs)
 
 ```
 MIT License
@@ -7423,7 +7627,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [tokio-util 0.7.19](https://github.com/tokio-rs/tokio)
-- [tokio 1.53.3](https://github.com/tokio-rs/tokio)
+- [tokio 1.54.1](https://github.com/tokio-rs/tokio)
 
 ```
 MIT License
@@ -8360,7 +8564,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [calamine 0.37.0](https://github.com/tafia/calamine)
+- [calamine 0.38.0](https://github.com/tafia/calamine)
 - [quick-xml 0.42.0](https://github.com/tafia/quick-xml)
 
 ```
@@ -8744,7 +8948,7 @@ THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [open 5.4.4](https://github.com/Byron/open-rs)
+- [open 5.4.5](https://github.com/Byron/open-rs)
 
 ```
 The MIT License (MIT)
@@ -11853,17 +12057,17 @@ Used by:
 - [gloo-timers 0.4.0](https://github.com/rustwasm/gloo/tree/master/crates/timers)
 - [gloo-utils 0.2.0](https://github.com/rustwasm/gloo/tree/master/crates/utils)
 - [hydration_context 0.3.2](https://github.com/leptos-rs/leptos)
-- [leptos 0.8.22](https://github.com/leptos-rs/leptos)
+- [leptos 0.8.23](https://github.com/leptos-rs/leptos)
 - [leptos_config 0.8.10](https://github.com/leptos-rs/leptos)
 - [leptos_dom 0.8.8](https://github.com/leptos-rs/leptos)
 - [leptos_hot_reload 0.8.7](https://github.com/leptos-rs/leptos)
-- [leptos_macro 0.8.19](https://github.com/leptos-rs/leptos)
+- [leptos_macro 0.8.20](https://github.com/leptos-rs/leptos)
 - [leptos_server 0.8.8](https://github.com/leptos-rs/leptos)
 - [next_tuple 0.1.0](https://github.com/leptos-rs/leptos)
 - [oco_ref 0.2.1](https://github.com/leptos-rs/leptos)
 - [or_poisoned 0.1.0](https://github.com/leptos-rs/leptos)
 - [r-efi 6.0.0](https://github.com/r-efi/r-efi)
-- [reactive_graph 0.2.15](https://github.com/leptos-rs/leptos)
+- [reactive_graph 0.2.16](https://github.com/leptos-rs/leptos)
 - [reactive_stores 0.4.4](https://github.com/leptos-rs/leptos)
 - [reactive_stores_macro 0.4.4](https://github.com/leptos-rs/leptos)
 - [rstml 0.13.1](https://github.com/rs-tml/rstml)

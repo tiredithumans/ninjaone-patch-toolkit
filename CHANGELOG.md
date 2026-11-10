@@ -11,6 +11,11 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-11-10
+
+Safer patch actions: the confirmation names exactly what will run, the audit trail records what
+NinjaOne accepted, and sign-out and instance switches leave nothing of the previous session behind.
+
 ### Security
 
 - The reference software remediation script starts PowerShell 7 only from Program Files and only
@@ -28,8 +33,8 @@ version and start a fresh `[Unreleased]`.
   name, path, `?` or `#`.
 - On Windows, the saved sign-in and client secret are kept as local credentials that no longer
   roam with your profile.
-- Exported files are private to you from the moment they are created, and a failed export leaves
-  no partial file behind.
+- Exported files are private to you from the moment they are created, and a failed or interrupted
+  export leaves no partial file behind and no longer destroys the file it was replacing.
 - The Trend tab shows only the signed-in tenant's runs.
 - The audit trail hides more credential shapes in script parameters, such as JSON passwords.
 
@@ -65,7 +70,6 @@ version and start a fresh `[Unreleased]`.
 - An update whose download stalls now fails after a while instead of leaving the app stuck on
   "Updating…".
 - A crash is now written to the log file.
-- An export that fails, or is interrupted, no longer destroys the file it was replacing.
 - An export no longer fails when a very long cell contains an emoji.
 - An action no longer times out because this computer's clock runs ahead of NinjaOne's.
 - The action bar now follows your saved settings, not edits left unsaved in the Settings dialog.
