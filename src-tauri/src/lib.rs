@@ -152,10 +152,24 @@ fn log_panics() {
     }));
 }
 
+/// Makes ring the process's one TLS crypto provider, before any reqwest client is
+/// built. reqwest is compiled without a provider of its own (`rustls-no-provider`,
+/// see `Cargo.toml`) and panics building a client without a default; the updater
+/// installs ring too on its first check, and ignores that it is already there.
+fn install_crypto_provider() {
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("a TLS crypto provider was already installed");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
     log_panics();
+    install_crypto_provider();
 
     let app_state = AppState::new().expect("failed to initialize application state");
     let window_saver = Arc::new(window_state::WindowStateSaver::default());

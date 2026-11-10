@@ -31,6 +31,9 @@ tauri-plugin-dialog = "2"
 # was dead code that pinned zip 4.x and its extraction advisories.
 tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 anyhow = "1.0"
+# Already in the tree through reqwest; named only for `bytes::Bytes`, the type a
+# response body is read into (`api::Fetched`).
+bytes = "1"
 # `simd-unsafe` is on by default in 0.23 and is the crate's *only* source of
 # `unsafe`; without it base64 is `#![forbid(unsafe_code)]`. It only accelerates the
 # `Simd`/`Avx2`/`Neon` engines, and we exclusively use the scalar
@@ -61,7 +64,16 @@ rand = "0.10"
 # cannot reach NinjaOne at all. `gzip` is the single biggest byte-count lever:
 # the reporting feeds are six-figure row counts of repetitive JSON, and reqwest
 # only sends `Accept-Encoding` when the feature is compiled in.
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "rustls", "charset", "http2", "system-proxy", "gzip"] }
+#
+# `rustls-no-provider`, not `rustls`: the latter compiles aws-lc-rs in as reqwest's
+# fallback, while tauri-plugin-updater's `rustls-tls` brings ring and installs it as
+# the process default on its first check — so which provider a client got depended
+# on whether an update check had run yet, and both were linked. `run()` installs
+# ring once, before any client is built (`install_crypto_provider`).
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "rustls-no-provider", "charset", "http2", "system-proxy", "gzip"] }
+# Named only to install ring as the one crypto provider (see reqwest above); the
+# version is the one reqwest and the updater already pull in.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # `constant_memory` lets the detail sheets stream rows to a temp file instead of
 # holding every cell until `save` (see `export::write_workbook_split`). It adds
 # `tempfile`, which the lockfile already carries for other crates.
@@ -83,6 +95,9 @@ url = "2.5"
 urlencoding = "2.1"
 
 [dev-dependencies]
+# The unit tests build reqwest clients without going through `run()`, so they keep
+# reqwest's own fallback provider. Dev-only: the shipped binary links ring alone.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 calamine = "0.38"
 wiremock = "0.6"
 

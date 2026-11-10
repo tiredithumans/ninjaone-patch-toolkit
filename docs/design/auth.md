@@ -27,6 +27,20 @@ PKCE flow with a **loopback** redirect on the configured `callback_port` (defaul
 sign-in usually means the callback never arrived. **Native** (public) clients have **no** secret;
 **Web** (confidential) clients do — the app supports both, so don't hardcode either.
 
+**An unreadable secret is not an absent one** (`ClientSecret::{Known, Unreadable}`). The secret is
+read when `AuthState` is built and on a tenant switch, and a keyring fault there used to become
+"no secret" (`unwrap_or_default`) for the rest of the process: error dropped, never re-read, so a
+keychain locked at launch and unlocked a minute later still refreshed and signed in as a public
+client, which a Web client's token endpoint refuses. The fault is now logged and kept as
+`Unreadable`; `token_for` re-reads it on a blocking thread before the refresh (`reload_secret`),
+and `login_pkce` before the browser opens, so an unlocked keychain works without a restart. While
+it cannot be read nothing is sent — a failure shared like a keyring read of the refresh token — and
+`refresh` refuses `Unreadable` before the POST as well, so a keyring fault can never reach
+`refresh_grant_is_dead` and delete the saved sign-in
+(`a_client_secret_the_keyring_could_not_read_is_read_again_never_sent_missing`). The read at
+construction stays on the main thread: the Settings view shows whether a secret is stored
+synchronously.
+
 `11434` is also Ollama's default port, so a bind failure names "another program" and the Settings
 field rather than blaming a second copy of this app. The default itself stays: it is the redirect
 registered in customers' NinjaOne apps.
