@@ -735,6 +735,14 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                 }
                             })}
 
+                        // The offline check read a cached inventory; say how old.
+                        {plan
+                            .devices_fetched_at
+                            .as_deref()
+                            .map(|at| {
+                                view! { <p class="modal-sub">{util::device_status_as_of(at)}</p> }
+                            })}
+
                         {(!plan.blockers.is_empty())
                             .then(|| {
                                 view! {

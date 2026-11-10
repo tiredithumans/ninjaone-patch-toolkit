@@ -541,8 +541,18 @@ impl AppState {
         &self,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Arc<Vec<Device>>> {
+        Ok(self.fleet_devices_fetched(on_progress).await?.0)
+    }
+
+    /// [`fleet_devices`](Self::fleet_devices) with the inventory's fetch time, for a
+    /// caller that has to say how old the online/offline status it read is (the
+    /// action planner: up to [`DEVICE_TTL`]).
+    pub async fn fleet_devices_fetched(
+        &self,
+        on_progress: Option<&ProgressFn<'_>>,
+    ) -> Result<(Arc<Vec<Device>>, DateTime<Utc>)> {
         let key = self.tenant_key();
-        let (devices, _) = self
+        self
             .fleet_devices_cache
             .get_or_fetch(&key, DEVICE_TTL, "device inventory", || async {
                 // Fetched with the inventory so the reboot reasons share its TTL and
@@ -570,8 +580,7 @@ impl AppState {
                     degraded,
                 })
             })
-            .await?;
-        Ok(devices)
+            .await
     }
 
     /// Whole-fleet current patches (no `df`) for the requested families, cached so a

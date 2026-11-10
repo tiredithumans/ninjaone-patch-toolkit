@@ -288,6 +288,12 @@ So does "Include offline devices", which is disabled while Settings forbids offl
 be offered regardless and then ignored. An offline device's skip reason names whichever switch is
 off.
 
+Online or offline is read from the whole-fleet device inventory, which `build_plan` takes from
+the cache (`AppState::fleet_devices_fetched`, up to `DEVICE_TTL`, 15 minutes old) rather than
+refetching per plan. The dialog used to state it as current. The plan now carries the inventory's
+fetch time (`ActionPlan.devices_fetched_at`) and the dialog says "Online/offline status as of
+HH:MM UTC" (`util::device_status_as_of`).
+
 ### Run as is a menu of what NinjaOne reports
 
 The spec types `runAs` only as "Credential role/identifier". It takes a role string (`system`,

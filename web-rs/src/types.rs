@@ -1313,6 +1313,9 @@ pub struct ActionPlan {
     /// This dispatch goes out only because it overrides a closed maintenance window.
     #[serde(default)]
     pub window_overridden: bool,
+    /// When the device inventory the offline check read was fetched (`fmt_ts`, UTC).
+    #[serde(default)]
+    pub devices_fetched_at: Option<String>,
     /// Absent when the plan is blocked — there is nothing to confirm.
     pub confirm_token: Option<String>,
 }

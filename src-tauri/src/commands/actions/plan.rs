@@ -9,7 +9,7 @@ use super::ActionRequest;
 use super::confirm::{canonical_parameters, request_hash};
 use crate::actions::{
     ActionKind, ActionPlan, CachedFamily, ConfirmBinding, DryRunSupport, PlanInput, PlannedTarget,
-    plan,
+    fmt_ts, plan,
 };
 use crate::api::actions::ScriptRef;
 use crate::error::UiError;
@@ -366,7 +366,10 @@ pub(super) async fn build_plan(
     let settings = state.settings_snapshot().actions;
     // Borrowed out of the warm caches: this runs on every plan *and* every confirm,
     // and used to deep-clone the whole fleet (and all three lookup lists) to read it.
-    let devices = state.fleet_devices(None).await.map_err(UiError::from)?;
+    let (devices, devices_fetched_at) = state
+        .fleet_devices_fetched(None)
+        .await
+        .map_err(UiError::from)?;
     let org_names = state.org_names().await.map_err(UiError::from)?;
 
     let targets = composed_targets(req);
@@ -425,6 +428,7 @@ pub(super) async fn build_plan(
 
     let parameters = per_device_parameters(req);
     p.parameters_preview = parameters_preview(&parameters, &p.eligible);
+    p.devices_fetched_at = Some(fmt_ts(devices_fetched_at));
     let run_as = resolve_run_as(req, &settings);
     p.script = script_check.label;
     p.run_as = run_as.clone();

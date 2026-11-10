@@ -541,6 +541,7 @@ fn ipc_fixture_is_current() {
         script: Some("Install-SelectedWindowsUpdates (#142)".into()),
         run_as: Some("system".into()),
         window_overridden: true,
+        devices_fetched_at: Some(fmt_ts(FIXTURE_NOW - Duration::minutes(4))),
         confirm_token: Some("fixture-confirm-token".into()),
     };
 

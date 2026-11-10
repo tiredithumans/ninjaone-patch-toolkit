@@ -59,6 +59,10 @@ pub struct ActionPlan {
     /// True when this dispatch goes out *because* the operator overrode a closed
     /// maintenance window — recorded on the audit trail, so a bypass is never silent.
     pub window_overridden: bool,
+    /// When the device inventory the offline check read was fetched — it is served
+    /// from a cache up to 15 minutes old, so the dialog says how current "online"
+    /// is. Set by `build_plan`; `None` from the pure planner.
+    pub devices_fetched_at: Option<String>,
     pub confirm_token: Option<String>,
 }
 
@@ -709,6 +713,7 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
         run_as: None,
         apply_preview,
         window_overridden,
+        devices_fetched_at: None,
         confirm_token: None,
     }
 }

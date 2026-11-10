@@ -239,6 +239,23 @@ pub(crate) fn apply_preview_summary(p: &ApplyPreview) -> String {
     out
 }
 
+/// The confirm dialog's note on how current the online/offline status is. The
+/// planner reads a device inventory cached for up to 15 minutes, so a device it
+/// calls online may have dropped off since. `at` is the backend's `fmt_ts`
+/// ("2026-07-29 10:04:00 UTC"); anything else is shown whole rather than guessed at.
+pub(crate) fn device_status_as_of(at: &str) -> String {
+    let hhmm = at
+        .strip_suffix(" UTC")
+        .and_then(|rest| rest.split_once(' '))
+        .map(|(_, time)| time)
+        .filter(|time| time.len() == 8)
+        .and_then(|time| time.get(..5));
+    match hhmm {
+        Some(hhmm) => format!("Online/offline status as of {hhmm} UTC."),
+        None => format!("Online/offline status as of {at}."),
+    }
+}
+
 /// One device's line in the preview.
 pub(crate) fn apply_preview_line(d: &ApplyPreviewDevice) -> String {
     let will = if d.approved == 0 {

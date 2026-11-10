@@ -3332,6 +3332,19 @@ fn the_apply_preview_states_what_will_and_will_not_install() {
 }
 
 #[test]
+fn the_confirm_dialog_says_how_current_online_status_is() {
+    assert_eq!(
+        device_status_as_of("2026-07-29 10:04:59 UTC"),
+        "Online/offline status as of 10:04 UTC."
+    );
+    assert_eq!(
+        device_status_as_of("yesterday"),
+        "Online/offline status as of yesterday.",
+        "an unexpected shape is shown whole"
+    );
+}
+
+#[test]
 fn the_audit_trail_marks_a_window_override() {
     assert_eq!(audit_mode_label(false, false), "Live");
     assert_eq!(audit_mode_label(false, true), "Live (window override)");
