@@ -330,4 +330,10 @@ jobs:
           # Unknown `with:` inputs are silently ignored, so keeping the old name
           # would drop latest.json from the release and break auto-update.
           uploadUpdaterJson: true
+          # An exact CLI. With no `tauriScript` (this repo has no root package.json)
+          # the action runs `npm install -g @tauri-apps/cli@v2`: whatever 2.x was
+          # newest at tag time, chosen inside the step that holds the signing key,
+          # with no diff in the repo and none of Dependabot's cooldown. Bump it by
+          # hand, in its own PR, to a release at least a week old.
+          tauriScript: npx --yes @tauri-apps/cli@2.12.4
           args: --config src-tauri/updater-build.json
