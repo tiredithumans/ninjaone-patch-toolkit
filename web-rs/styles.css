@@ -593,6 +593,12 @@ select:disabled {
   margin: 0 6px;
 }
 
+/* A page, sort or grouping is on its way: these are still the previous rows. */
+.is-loading {
+  opacity: 0.55;
+  transition: opacity 0.15s;
+}
+
 .table-wrap {
   overflow: auto;
   max-height: 56vh;

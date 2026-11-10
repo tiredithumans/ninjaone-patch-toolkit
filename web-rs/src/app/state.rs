@@ -119,6 +119,10 @@ impl Progress {
 #[derive(Clone, Copy)]
 pub(crate) struct SessionState {
     pub(super) auth: RwSignal<Option<AuthStatus>>,
+    /// The first sign-in check has come back (it may refresh a token over the
+    /// network). Until then "not signed in" is not known, and saying it flashed
+    /// the Sign in card at every launch of an already signed-in app.
+    pub(super) auth_checked: RwSignal<bool>,
     pub(super) signing_in: RwSignal<bool>,
     /// Sample data is loaded (drives the "sample data" banner). Set by `enter_demo`.
     pub(super) demo: RwSignal<bool>,
@@ -139,6 +143,7 @@ impl SessionState {
     pub(super) fn new() -> Self {
         Self {
             auth: RwSignal::new(None),
+            auth_checked: RwSignal::new(false),
             signing_in: RwSignal::new(false),
             demo: RwSignal::new(false),
             web_mode: RwSignal::new(false),
@@ -166,6 +171,8 @@ impl SessionState {
             if let Ok(a) = api::auth_status().await {
                 self.auth.set(Some(a));
             }
+            // Answered either way: a failed check must not hide Sign in for good.
+            self.auth_checked.set(true);
         });
     }
 }
@@ -366,6 +373,13 @@ pub(crate) struct QueryState {
     /// results area after the announcing toast auto-dismisses. Cleared by the next
     /// successful run/page fetch or an explicit dismiss.
     pub(super) query_error: RwSignal<Option<String>>,
+    /// `query_error` came from loading a page, a sort or group headers of a result
+    /// that is still good, not from the query — the banner must not call that a
+    /// failed query (`util::query_error_banner`).
+    pub(super) error_is_paging: RwSignal<bool>,
+    /// A page, sort or group-header request is in flight, so the rows on screen
+    /// are the previous ones. Cleared by whichever request owns the view.
+    pub(super) view_loading: RwSignal<bool>,
     /// Active sort for the Patches detail table; pages re-fetch with it. `None` is
     /// the backend's canonical order. Reset by each manual run.
     pub(super) patches_sort: RwSignal<Option<RowSort>>,
@@ -430,6 +444,8 @@ impl QueryState {
     pub(super) fn next_view_seq(self) -> u64 {
         let seq = util::next_query_seq(self.view_seq.get_untracked());
         self.view_seq.set(seq);
+        // The request this supersedes will never clear the flag itself.
+        self.view_loading.set(false);
         seq
     }
 
@@ -458,6 +474,8 @@ impl QueryState {
             patches_page: RwSignal::new(0),
             page_rows: RwSignal::new(Vec::new()),
             query_error: RwSignal::new(None),
+            error_is_paging: RwSignal::new(false),
+            view_loading: RwSignal::new(false),
             patches_sort: RwSignal::new(None),
             group_by: RwSignal::new(util::group_by_from_pref(
                 api::ui_pref_str(api::PREF_PATCH_VIEW).as_deref(),
@@ -574,6 +592,9 @@ pub(crate) struct SettingsState {
     /// Whether the *saved* settings carry a client id — not the form field, which
     /// moves as the operator types.
     pub(super) has_client_id: RwSignal<bool>,
+    /// Why the saved settings could not be read at launch. Nothing else on screen
+    /// says so: the onboarding card waits for `loaded`, which then never comes.
+    pub(super) load_error: RwSignal<Option<String>>,
 }
 
 impl SettingsState {
@@ -596,6 +617,7 @@ impl SettingsState {
             preset_name: RwSignal::new(String::new()),
             loaded: RwSignal::new(false),
             has_client_id: RwSignal::new(false),
+            load_error: RwSignal::new(None),
         }
     }
 }

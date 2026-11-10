@@ -219,3 +219,17 @@ pub(crate) fn groups_to_reopen(
         .map(|g| g.key.clone())
         .collect()
 }
+
+/// The results area's error banner. A failed page, sort or group-header load is
+/// not a failed query: the result is still good, only that view of it did not
+/// arrive, and calling it "Last query failed" sent operators to re-run a query
+/// that had worked.
+pub(crate) fn query_error_banner(error: &str, has_result: bool, paging: bool) -> String {
+    if paging {
+        format!("Couldn't load those rows — what is below is the last view that loaded: {error}")
+    } else if has_result {
+        format!("Last query failed — the results below are from the previous run: {error}")
+    } else {
+        format!("Last query failed: {error}")
+    }
+}

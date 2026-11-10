@@ -12,12 +12,15 @@ pub(super) fn TrendTab() -> impl IntoView {
     let state = expect_context::<AppState>();
     let history = RwSignal::new(Vec::<RunRecord>::new());
     let loaded = RwSignal::new(false);
+    // A failed read is not an empty history: say which it is.
+    let failed = RwSignal::new(None::<String>);
 
     let load = move || {
         if !api::is_tauri() {
             loaded.set(true);
             return;
         }
+        failed.set(None);
         spawn_local(async move {
             match api::read_run_history().await {
                 Ok(rows) => {
@@ -26,7 +29,7 @@ pub(super) fn TrendTab() -> impl IntoView {
                 }
                 Err(e) => {
                     loaded.set(true);
-                    state.notify(Toast::err(e));
+                    failed.set(Some(e));
                 }
             }
         });
@@ -52,6 +55,14 @@ pub(super) fn TrendTab() -> impl IntoView {
             {move || {
                 if !loaded.get() {
                     return view! { <p class="empty">"Reading run history…"</p> }.into_any();
+                }
+                if let Some(e) = failed.get() {
+                    return view! {
+                        <p class="error-banner" role="alert">
+                            {format!("Couldn't read the run history: {e}. Press Reload to try again.")}
+                        </p>
+                    }
+                        .into_any();
                 }
                 let runs = series();
                 let older = util::older_method_note(util::older_method_runs(&history.get()))

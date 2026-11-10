@@ -4,6 +4,25 @@
 use super::*;
 
 impl AppState {
+    /// Reads the saved settings at launch (and on the banner's Retry), then checks
+    /// for an update if they ask for it. A failed read is kept for the banner:
+    /// nothing else would say why the app never offers to connect.
+    pub(in crate::app) fn load_saved_settings(self) {
+        spawn_local(async move {
+            match api::get_settings().await {
+                Ok(s) => {
+                    self.settings.load_error.set(None);
+                    let auto = s.auto_check_updates;
+                    self.apply_settings_view(s);
+                    if auto && let Ok(Some(info)) = api::check_for_update().await {
+                        self.updates.update.set(Some(info));
+                    }
+                }
+                Err(e) => self.settings.load_error.set(Some(e)),
+            }
+        });
+    }
+
     pub(in crate::app) fn apply_settings_view(self, v: SettingsView) {
         self.settings.f_instance.set(v.instance_base_url);
         self.settings.has_client_id.set(

@@ -123,7 +123,7 @@ impl AppState {
             }
             util::RunDecision::NotSignedIn => {
                 if !silent {
-                    self.notify(Toast::err("Sign in first"));
+                    self.notify(Toast::err("Sign in to run a query"));
                 }
                 return;
             }
@@ -268,8 +268,12 @@ impl AppState {
                 // The toast announces the failure (aria-live); the banner keeps it
                 // visible after the toast auto-dismisses.
                 Err(e) => {
+                    self.query.error_is_paging.set(false);
                     self.query.query_error.set(Some(e.clone()));
                     self.notify(Toast::err(e));
+                    // A dead sign-in fails the query and signs the backend out;
+                    // re-read the status so the top bar stops saying Connected.
+                    self.session.refresh_auth();
                 }
             }
             // Record the round-trip so the next run can show "Last run took Ns"

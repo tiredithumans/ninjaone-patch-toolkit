@@ -11,6 +11,16 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- The "Sign in" card and button no longer flash at launch when you are already signed in.
+- Needs Reboot and Failures say "Run a query…" before the first run instead of reporting nothing found.
+- A failed Trend or Needs Reboot load shows the error with a way to retry, not an empty view.
+- A page or sort that fails to load no longer reads "Last query failed", and rows dim while the next page loads.
+- An expired sign-in says so in plain words, and the top bar stops showing "Connected".
+- Run query is disabled until you sign in, and Sign in appears only once a Client ID is saved.
+- A banner with Retry appears when saved settings cannot be read at launch.
+
 ## [0.22.1] - 2026-11-10
 
 Safer patch actions: the confirmation names exactly what will run, the audit trail records what

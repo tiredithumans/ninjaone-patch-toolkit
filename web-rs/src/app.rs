@@ -91,15 +91,7 @@ pub fn App() -> impl IntoView {
         // What to load once signed in (and once actions become usable) is decided
         // by the effects below, off the auth status itself — not here.
         state.session.refresh_auth();
-        spawn_local(async move {
-            if let Ok(s) = api::get_settings().await {
-                let auto = s.auto_check_updates;
-                state.apply_settings_view(s);
-                if auto && let Ok(Some(info)) = api::check_for_update().await {
-                    state.updates.update.set(Some(info));
-                }
-            }
-        });
+        state.load_saved_settings();
     } else if api::is_desktop_build() {
         // The desktop bundle expected a backend and did not find one. Demo data is
         // the wrong fallback here and always was: this app's output is used to decide
@@ -250,6 +242,21 @@ pub fn App() -> impl IntoView {
                 <p class="demo-banner" role="note">
                     "Demo mode — press Run query to list sample patches (not a live fleet)."
                 </p>
+            </Show>
+            <Show when=move || state.settings.load_error.with(Option::is_some)>
+                <div class="error-banner" role="alert">
+                    <span>
+                        {move || {
+                            format!(
+                                "Couldn't read your saved settings, so the app can't connect yet: {}",
+                                state.settings.load_error.get().unwrap_or_default(),
+                            )
+                        }}
+                    </span>
+                    <button class="link-btn" on:click=move |_| state.load_saved_settings()>
+                        "Retry"
+                    </button>
+                </div>
             </Show>
             <ViewNotices/>
             <ScopeBar/>

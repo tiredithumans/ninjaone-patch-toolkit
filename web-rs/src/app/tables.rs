@@ -37,6 +37,7 @@ fn OnboardingCard() -> impl IntoView {
         util::onboarding(
             state.session.web_mode.get(),
             state.settings.loaded.get(),
+            state.session.auth_checked.get(),
             state.settings.has_client_id.get(),
             state.is_authed(),
         )
@@ -157,13 +158,11 @@ pub(crate) fn Results() -> impl IntoView {
                     <span>
                         {move || {
                             let e = state.query.query_error.get().unwrap_or_default();
-                            if state.query.result.with(|r| r.is_some()) {
-                                format!(
-                                    "Last query failed — the results below are from the previous run: {e}",
-                                )
-                            } else {
-                                format!("Last query failed: {e}")
-                            }
+                            util::query_error_banner(
+                                &e,
+                                state.query.result.with(|r| r.is_some()),
+                                state.query.error_is_paging.get(),
+                            )
                         }}
                     </span>
                     <button
