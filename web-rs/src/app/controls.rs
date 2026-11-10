@@ -10,13 +10,16 @@ use super::*;
 #[component]
 pub(crate) fn RunControls() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // The demo has no session and runs its sample.
+    let can_run = move || state.session.demo.get() || state.is_authed();
     view! {
         <div class="run-controls">
             // Enabled during an auto-refresh on purpose: a click then queues behind
             // it (see `util::run_decision`) and says so.
             <button
                 class="btn btn-primary"
-                prop:disabled=move || state.run.busy.get()
+                prop:disabled=move || state.run.busy.get() || !can_run()
+                title=move || if can_run() { "" } else { "Sign in to run a query" }
                 on:click=move |_| state.run_query()
             >
                 {move || {

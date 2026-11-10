@@ -4365,21 +4365,43 @@ fn the_within_sla_bands_match_their_colours() {
 #[test]
 fn onboarding_names_the_missing_step_once_settings_have_loaded() {
     assert_eq!(
-        onboarding(false, false, false, false),
+        onboarding(false, false, true, false, false),
         None,
         "settings not loaded yet"
     );
-    assert_eq!(onboarding(true, true, false, false), None, "web demo");
-    assert_eq!(onboarding(false, true, true, true), None, "signed in");
-    assert_eq!(onboarding(false, true, false, true), None, "signed in");
     assert_eq!(
-        onboarding(false, true, false, false),
+        onboarding(false, true, false, true, false),
+        None,
+        "the sign-in check has not answered: signed out is not known yet"
+    );
+    assert_eq!(onboarding(true, true, true, false, false), None, "web demo");
+    assert_eq!(onboarding(false, true, true, true, true), None, "signed in");
+    assert_eq!(
+        onboarding(false, true, true, false, true),
+        None,
+        "signed in"
+    );
+    assert_eq!(
+        onboarding(false, true, true, false, false),
         Some(Onboarding::Connect)
     );
     assert_eq!(
-        onboarding(false, true, true, false),
+        onboarding(false, true, true, true, false),
         Some(Onboarding::SignIn)
     );
+}
+
+/// A page that failed to load is not a failed query.
+#[test]
+fn error_banner_tells_a_failed_page_from_a_failed_query() {
+    assert_eq!(
+        query_error_banner("boom", false, false),
+        "Last query failed: boom"
+    );
+    assert!(query_error_banner("boom", true, false).contains("previous run"));
+    let paging = query_error_banner("boom", true, true);
+    assert!(!paging.contains("query failed"), "{paging}");
+    assert!(paging.ends_with("boom"));
 }
 
 fn query(statuses: &[&str]) -> PatchQueryArgs {

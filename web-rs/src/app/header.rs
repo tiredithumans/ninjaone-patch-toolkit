@@ -88,7 +88,22 @@ fn Account() -> impl IntoView {
         });
     };
     view! {
-        <Show when=move || state.is_authed() fallback=|| view! { <SignInButton/> }>
+        // Sign in only once it is known to be the missing step: not while the
+        // launch check is still out, and not before a client id is saved (it could
+        // only answer "client ID not configured"; the card points at Settings).
+        <Show
+            when=move || state.is_authed()
+            fallback=move || {
+                let step = util::onboarding(
+                    state.session.web_mode.get(),
+                    state.settings.loaded.get(),
+                    state.session.auth_checked.get(),
+                    state.settings.has_client_id.get(),
+                    false,
+                );
+                (step == Some(util::Onboarding::SignIn)).then(|| view! { <SignInButton/> })
+            }
+        >
             <MenuButton
                 label=String::from("● Connected ▾")
                 class="btn-ghost account"

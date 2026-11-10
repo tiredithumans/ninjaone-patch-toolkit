@@ -24,12 +24,14 @@ impl AppState {
             self.query.query_error.set(None);
             return;
         }
+        self.query.view_loading.set(true);
         spawn_local(async move {
             let outcome =
                 api::get_patch_rows(page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE, sort).await;
             if util::is_superseded(self.query.view_seq.get_untracked(), seq) {
                 return;
             }
+            self.query.view_loading.set(false);
             match outcome {
                 Ok(rows) => {
                     self.query
@@ -38,6 +40,7 @@ impl AppState {
                     self.query.query_error.set(None);
                 }
                 Err(e) => {
+                    self.query.error_is_paging.set(true);
                     self.query.query_error.set(Some(e.clone()));
                     self.notify(Toast::err(e));
                 }
@@ -96,6 +99,7 @@ impl AppState {
             }
             return;
         }
+        self.query.view_loading.set(true);
         spawn_local(async move {
             let outcome =
                 api::get_patch_groups(group_by, page * PATCHES_PAGE_SIZE, PATCHES_PAGE_SIZE).await;
@@ -104,6 +108,7 @@ impl AppState {
             if util::is_superseded(self.query.view_seq.get_untracked(), seq) {
                 return;
             }
+            self.query.view_loading.set(false);
             match outcome {
                 Ok(response) => {
                     self.query.groups_total.set(response.total);
@@ -132,6 +137,7 @@ impl AppState {
                     }
                 }
                 Err(e) => {
+                    self.query.error_is_paging.set(true);
                     self.query.query_error.set(Some(e.clone()));
                     self.notify(Toast::err(e));
                 }

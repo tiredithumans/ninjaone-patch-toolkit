@@ -844,7 +844,12 @@ impl AuthState {
                 tauri::async_runtime::spawn_blocking(move || this.discard_dead_grant(&stamp))
                     .await
                     .context("keyring delete task failed")?;
-                return Err(anyhow!("refresh failed ({status}): {text}").into());
+                // Said for the operator: this text is the toast and the banner.
+                debug!(%status, "refresh grant is dead; credential cleared");
+                return Err(anyhow!(
+                    "Your NinjaOne sign-in has expired. Sign in again to continue."
+                )
+                .into());
             }
             debug!(%status, "refresh failed transiently; keeping stored credential");
             return Err(RefreshError::Transient(anyhow!(

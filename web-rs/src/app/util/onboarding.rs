@@ -15,15 +15,19 @@ pub(crate) enum Onboarding {
 ///
 /// Nothing until the saved settings have loaded: the form starts on defaults (no
 /// client id), so deciding earlier flashed "Connect to NinjaOne" on every launch.
+/// Nothing until the first sign-in check has answered, for the same reason: "not
+/// signed in" was assumed while it ran, which flashed "Sign in to load your fleet"
+/// at every launch of an app that was signed in all along.
 /// Nothing in the web demo either, which has no settings or sign-in, and nothing
 /// once signed in — the tabs' own empty states take over from there.
 pub(crate) fn onboarding(
     web_mode: bool,
     settings_loaded: bool,
+    auth_checked: bool,
     has_client_id: bool,
     authed: bool,
 ) -> Option<Onboarding> {
-    if web_mode || !settings_loaded || authed {
+    if web_mode || !settings_loaded || !auth_checked || authed {
         return None;
     }
     Some(if has_client_id {
