@@ -545,7 +545,9 @@ SLA rollup compared *now* against an always-recent timestamp and reported ~0 bre
 fleet — and the wiremock fixtures fed `releaseDate`, so CI proved only that the aliasing worked.
 **Fixtures must emit `timestamp`.** Undated pending patches get their own `Unknown` age bucket
 rather than inflating `181+ days`; they still count as aged in the SLA rollup (`unwrap_or(true)`
-— can't prove recent).
+— can't prove recent). The bucket bounds compare the exact age, as `SlaCutoffs::is_aged` does
+(`first_seen < now − N days`): flooring to whole days put a patch 30.5 days old in "0-30 days"
+while a 30-day SLA already counted it past due. "31-60 days" therefore holds (30, 60] days.
 
 ## There is no per-patch reboot field in the NinjaOne API
 

@@ -826,6 +826,13 @@ pub fn cmp_ci(a: &str, b: &str) -> Ordering {
         .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
 }
 
+/// [`cmp_ci`], with ties ("Acme" / "ACME") broken byte-wise — a total order, for
+/// sorting a `HashMap`'s output, whose iteration order is random per process. With
+/// `cmp_ci` alone two such names swapped places between identical runs.
+pub fn cmp_ci_total(a: &str, b: &str) -> Ordering {
+    cmp_ci(a, b).then_with(|| a.cmp(b))
+}
+
 /// Missing values sort last regardless of direction, so a descending sort by
 /// e.g. installed date leads with real dates rather than blanks.
 fn cmp_opt_last<T, F>(a: Option<T>, b: Option<T>, desc: bool, cmp: F) -> Ordering

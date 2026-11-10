@@ -7,7 +7,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
 use crate::model::{Device, PatchRow, PatchStatus, Severity, row_status};
@@ -361,7 +361,7 @@ pub fn build_severity_by_org(
             counts,
         })
         .collect();
-    out.sort_by(|a, b| cmp_ci(&a.organization, &b.organization));
+    out.sort_by(|a, b| cmp_ci_total(&a.organization, &b.organization));
     out
 }
 
@@ -385,6 +385,10 @@ const AGE_BUCKET_LABELS: [&str; 6] = [
     "Unknown",
 ];
 
+/// The inclusive upper bound, in days of exact age, of each dated bucket in
+/// [`AGE_BUCKET_LABELS`] but the last: "31-60 days" holds an age in (30, 60] days.
+const AGE_BUCKET_UPPER_DAYS: [i64; 4] = [30, 60, 90, 180];
+
 /// Index of the undated bucket in [`AGE_BUCKET_LABELS`].
 const AGE_BUCKET_UNKNOWN: usize = 5;
 
@@ -406,15 +410,18 @@ pub fn build_age_buckets(
         if !r.pending || rollup_device(devices_by_id, r.patch.device_id).is_none() {
             continue;
         }
+        // Bounds compared on the exact age, as `SlaCutoffs::is_aged` compares
+        // `first_seen < now - N days`. Flooring to whole days put a patch 30.5 days
+        // old in "0-30 days" while a 30-day SLA already counted it past due.
         let idx = match r.first_seen {
             None => AGE_BUCKET_UNKNOWN,
-            Some(seen) => match (now - seen).num_days().max(0) {
-                0..=30 => 0,
-                31..=60 => 1,
-                61..=90 => 2,
-                91..=180 => 3,
-                _ => 4,
-            },
+            Some(seen) => {
+                let age = now - seen;
+                AGE_BUCKET_UPPER_DAYS
+                    .iter()
+                    .position(|&days| age <= Duration::days(days))
+                    .unwrap_or(AGE_BUCKET_UPPER_DAYS.len())
+            }
         };
         counts[idx] += 1;
     }

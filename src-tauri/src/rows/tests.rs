@@ -889,7 +889,7 @@ fn a_current_patch_with_no_status_still_counts_as_pending() {
     let d = device(1, 10, "Windows Server 2022");
     let by_id = HashMap::from([(1, &d)]);
     let maps = maps();
-    let mut untyped = patch(1, "MANUAL", "CRITICAL", Some(90));
+    let mut untyped = patch(1, "MANUAL", "CRITICAL", Some(75));
     untyped.status = None;
     let current = vec![untyped];
     let summaries = summaries_for(&[&d], &refs(&current), &sla30(), &maps);
@@ -897,7 +897,7 @@ fn a_current_patch_with_no_status_still_counts_as_pending() {
     let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets[0].devices_fully_patched, 0);
     assert_eq!(buckets[0].urgent_pending, 1);
-    // 90 days old → the "61-90 days" bucket.
+    // 75 days old → the "61-90 days" bucket.
     assert_eq!(
         build_age_buckets(&refs(&current), &by_id, Utc::now())[2].count,
         1
@@ -2000,6 +2000,19 @@ fn patch_type_and_status_sort_by_byte_order() {
     );
 }
 
+/// The org-keyed rollups sort a `HashMap`'s output; with a case-insensitive key
+/// alone, "Acme" and "ACME" landed in whichever order the map's random seed gave
+/// them, so identical runs listed them differently.
+#[test]
+fn case_only_ties_sort_the_same_way_every_run() {
+    let mut a = vec!["acme", "Beta", "ACME", "Acme", "beta"];
+    let mut b = vec!["beta", "Acme", "ACME", "Beta", "acme"];
+    a.sort_by(|x, y| cmp_ci_total(x, y));
+    b.sort_by(|x, y| cmp_ci_total(x, y));
+    assert_eq!(a, b);
+    assert_eq!(a, ["ACME", "Acme", "acme", "Beta", "beta"]);
+}
+
 /// `sort_order` ranks the text columns once instead of comparing strings on every
 /// comparison; the order must be exactly the stable comparator's, ties, case
 /// folding, missing values and direction included.
@@ -2872,18 +2885,42 @@ fn build_age_buckets_separate_undated_patches_from_genuinely_old_ones() {
 }
 
 /// Each label claims exactly the days its arm matches: 180 days is "91-180", and
-/// the open-ended bucket starts at 181. The labels once read "91-180" / "180+",
-/// assigning day 180 to both.
+/// the open-ended bucket starts past 180. The labels once read "91-180" / "180+",
+/// assigning day 180 to both. A bound is compared on the exact age, as the SLA is:
+/// 30.5 days old used to floor into "0-30 days" while a 30-day SLA counted it past.
 #[test]
 fn age_bucket_labels_match_their_boundaries() {
     let d = device(1, 10, "Windows Server 2022");
     let by_id = HashMap::from([(1, &d)]);
-    let now = Utc::now();
-    let aged = |days: i64| {
+    // Whole seconds, so a record stamped exactly N days back is exactly N days old.
+    let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
+    let aged_secs = |secs: i64| {
         let mut p = patch(1, "MANUAL", "CRITICAL", None);
-        p.collected_timestamp = Some((now - Duration::days(days)).timestamp() as f64);
+        p.collected_timestamp = Some((now - Duration::seconds(secs)).timestamp() as f64);
         p
     };
+    let aged = |days: i64| aged_secs(days * 86_400);
+    let sla = SlaCutoffs::new(
+        &SlaPolicy {
+            exempt: SlaExempt::NONE,
+            ..SlaPolicy::default()
+        },
+        now,
+    );
+    for (secs, label, past_sla) in [
+        (30 * 86_400, "0-30 days", false),
+        (30 * 86_400 + 43_200, "31-60 days", true),
+    ] {
+        let current = [aged_secs(secs)];
+        let buckets = build_age_buckets(&refs(&current), &by_id, now);
+        let hit: Vec<&str> = buckets
+            .iter()
+            .filter(|b| b.count > 0)
+            .map(|b| b.label.as_str())
+            .collect();
+        assert_eq!(hit, [label], "a patch first seen {secs}s ago");
+        assert_eq!(sla.is_aged(&refs(&current)[0]), past_sla, "{secs}s");
+    }
     for (days, label) in [
         (30, "0-30 days"),
         (31, "31-60 days"),
