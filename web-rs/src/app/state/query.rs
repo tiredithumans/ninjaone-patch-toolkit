@@ -108,7 +108,7 @@ impl AppState {
             self.run.busy.get_untracked(),
             self.run.refreshing.get_untracked(),
             silent,
-            self.session.demo.get_untracked(),
+            self.session.is_demo_untracked(),
             self.is_authed(),
             statuses.is_empty(),
         ) {

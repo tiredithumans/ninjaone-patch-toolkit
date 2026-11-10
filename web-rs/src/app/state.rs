@@ -121,6 +121,7 @@ pub(crate) struct SessionState {
     pub(super) auth: RwSignal<Option<AuthStatus>>,
     pub(super) signing_in: RwSignal<bool>,
     /// Sample data is loaded (drives the "sample data" banner). Set by `enter_demo`.
+    /// Read only through [`is_demo`](Self::is_demo), never directly.
     pub(super) demo: RwSignal<bool>,
     /// Running in a plain browser with no Tauri backend — the GitHub Pages demo.
     /// Disables the backend-only actions (sign-in, live query, export).
@@ -155,6 +156,19 @@ impl SessionState {
     /// Whether a reply stamped `epoch` belongs to a session that has ended.
     pub(super) fn outlived(self, epoch: u64) -> bool {
         util::outlived_session(self.epoch.get_untracked(), epoch)
+    }
+
+    /// Whether the demo's sample data drives the app. Always false in a desktop
+    /// build, by construction rather than by a flag nobody sets: `is_desktop_build`
+    /// is const, so there every demo branch folds away (and `demo.rs` with it), and
+    /// no path can put invented orgs or patches in front of a patching operator.
+    pub(super) fn is_demo(self) -> bool {
+        !api::is_desktop_build() && self.demo.get()
+    }
+
+    /// [`is_demo`](Self::is_demo), untracked.
+    pub(super) fn is_demo_untracked(self) -> bool {
+        !api::is_desktop_build() && self.demo.get_untracked()
     }
 
     pub(super) fn is_authed(self) -> bool {

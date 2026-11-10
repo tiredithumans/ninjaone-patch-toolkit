@@ -10,7 +10,7 @@ const DEMO_HOST: &str = "demo";
 impl AppState {
     /// The instance this app is pointed at, as a view link names it.
     pub(in crate::app) fn current_view_host(self) -> String {
-        if self.session.demo.get_untracked() {
+        if self.session.is_demo_untracked() {
             return DEMO_HOST.to_string();
         }
         let url = self

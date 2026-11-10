@@ -187,7 +187,10 @@ filtering (identity/class/text facets + date windows) over the sample rows so th
 actually filter — Compliance/Reboot stay representative (narrowed only by org; the reboot list and
 the device drill-down share `demo::sample_device_summary`, so their counts agree). Demo mode is
 **web-only**: there is no "load sample data" affordance and the desktop release never enters it
-(no auto-load → `demo` stays false and the normal auth path runs). `web_mode` also disables the
+(no auto-load → `demo` stays false and the normal auth path runs). That holds by construction:
+every read goes through `SessionState::is_demo`, which is `!api::is_desktop_build() && demo`, and
+`enter_demo` returns early in a desktop build — `is_desktop_build` is const, so the desktop bundle's
+demo branches fold away and no runtime flag can bring sample data up. `web_mode` also disables the
 backend-only actions (sign-in, **export**).
 
 The Pages build (`just web-build-pages`, `.github/workflows/pages.yml`) sets the subpath base

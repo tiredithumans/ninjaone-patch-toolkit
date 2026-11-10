@@ -258,7 +258,7 @@ pub fn App() -> impl IntoView {
         <Show when=move || !state.session.backend_missing.get()>
         <main class="shell">
             <Header/>
-            <Show when=move || state.session.demo.get()>
+            <Show when=move || state.session.is_demo()>
                 <p class="demo-banner" role="note">
                     "Demo mode — press Run query to list sample patches (not a live fleet)."
                 </p>

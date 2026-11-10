@@ -12,7 +12,7 @@ impl AppState {
     pub(in crate::app) fn fetch_page(self, page: usize) {
         let sort = self.query.patches_sort.get_untracked();
         let seq = self.query.next_view_seq();
-        if self.session.demo.get_untracked() {
+        if self.session.is_demo_untracked() {
             let mut rows = self.demo_rows();
             if let Some(sort) = sort {
                 sort_patch_rows(&mut rows, sort);
@@ -73,7 +73,7 @@ impl AppState {
             return;
         };
         let seq = self.query.next_view_seq();
-        if self.session.demo.get_untracked() {
+        if self.session.is_demo_untracked() {
             let all = demo::group_rows(&self.demo_rows(), group_by);
             self.query.groups_total.set(all.len());
             let groups: Vec<PatchGroup> = all
@@ -177,7 +177,7 @@ impl AppState {
         group_by: GroupBy,
         key: String,
     ) -> Option<Result<Vec<PatchRow>, String>> {
-        if self.session.demo.get_untracked() {
+        if self.session.is_demo_untracked() {
             return Some(Ok(demo::group_members(&self.demo_rows(), group_by, &key)));
         }
         let generation = self.query.members_gen.get_untracked();
@@ -385,7 +385,7 @@ impl AppState {
                 }
             });
         };
-        if self.session.demo.get_untracked() {
+        if self.session.is_demo_untracked() {
             // Read off the Run-time snapshot, not the live controls: it is the
             // query on screen that did or did not ask about failures.
             let failed_queried = self.query.applied_filters.with_untracked(|a| {

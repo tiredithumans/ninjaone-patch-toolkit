@@ -50,7 +50,7 @@ pub(super) fn CveSearch() -> impl IntoView {
         now
     });
     let search = move || {
-        if state.session.demo.get_untracked() {
+        if state.session.is_demo_untracked() {
             load.set(CveLoad::Failed(
                 "The CVE search needs the desktop app: the browser demo has no exploit data."
                     .into(),
