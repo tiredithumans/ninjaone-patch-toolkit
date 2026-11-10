@@ -435,6 +435,7 @@ fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
     };
     let base = RunContext {
         silent: false,
+        same_query: false,
         grouped: false,
         rows_total: 450,
         groups_total: 0,
@@ -475,6 +476,15 @@ fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
     assert!(silent.keep_selection);
     assert_eq!(silent.fetch, ViewFetch::Rows(3));
 
+    // A manual ↻ Refresh of the query on screen lands like a manual run, but the
+    // selection is pruned rather than dropped.
+    let refreshed = run_plan(RunContext {
+        same_query: true,
+        ..base
+    });
+    assert_eq!(refreshed.page, 0);
+    assert!(refreshed.keep_selection && !refreshed.reopen_groups);
+
     // The result shrank under the refresh: the page is clamped to the last one.
     let shrunk = run_plan(RunContext {
         silent: true,
@@ -490,6 +500,7 @@ fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
 fn a_grouped_run_fetches_headers_and_a_silent_one_reopens_groups() {
     let base = RunContext {
         silent: false,
+        same_query: false,
         grouped: true,
         rows_total: 10_000,
         groups_total: 250,
@@ -522,6 +533,23 @@ fn a_grouped_run_fetches_headers_and_a_silent_one_reopens_groups() {
         ViewFetch::Groups(1),
         "paged by groups, not rows"
     );
+}
+
+/// Only a run of the query already on screen counts as the same query; with no
+/// query on screen there is nothing a selection was made against.
+#[test]
+fn same_query_needs_a_query_on_screen_and_no_change() {
+    let args = query(&["PENDING", "FAILED"]);
+    assert!(!same_query(None, &args));
+    let mut reordered = args.clone();
+    reordered.statuses.reverse();
+    assert!(
+        same_query(Some(&args), &reordered),
+        "tick order is no change"
+    );
+    let mut other = args.clone();
+    other.patch_type = "OS".into();
+    assert!(!same_query(Some(&args), &other));
 }
 
 /// Only the groups still listed on the new header page are reopened, in header

@@ -64,7 +64,7 @@ impl AppState {
     }
 
     /// Drops both selections — the patch rows and the Needs Reboot tab's devices.
-    /// Every caller is a new scope (a manual query, a dropped result, a session
+    /// Every caller is a new scope (a different query, a dropped result, a session
     /// change), and neither selection describes what is on screen after one.
     pub(in crate::app) fn clear_selection(self) {
         self.actions.selected.update(|s| s.clear());
@@ -132,7 +132,7 @@ impl AppState {
         });
     }
 
-    /// After a silent refresh, re-checks the selection against the new result and
+    /// After a refresh of the same query, re-checks the selection against the new result and
     /// drops what is gone: ticked patches installed, rejected or out of scope
     /// (`util::prune_selection_from_status`), or Needs Reboot devices that no
     /// longer need one (`util::prune_device_level_from_status`).
@@ -207,7 +207,7 @@ impl AppState {
                     removed = util::prune_selection_from_status(sel, &prune.probes, &prune.status)
                 });
                 format!(
-                    "Auto-refresh: {removed} selected patch row(s) are no longer listed and were deselected"
+                    "Refreshed: {removed} selected patch row(s) are no longer listed and were deselected"
                 )
             }
             SelectionSource::Devices => {
@@ -215,7 +215,7 @@ impl AppState {
                     removed = util::prune_device_level_from_status(sel, &prune.status)
                 });
                 format!(
-                    "Auto-refresh: {removed} selected device(s) no longer need a reboot and were deselected"
+                    "Refreshed: {removed} selected device(s) no longer need a reboot and were deselected"
                 )
             }
         };

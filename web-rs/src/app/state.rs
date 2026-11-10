@@ -744,9 +744,9 @@ pub(crate) struct SelectedPatch {
 /// web/demo mode — there is no backend to dispatch to.
 #[derive(Clone, Copy)]
 pub(crate) struct ActionState {
-    /// device id → what was checked. Survives page changes; cleared by every
-    /// manual query (a new scope), pruned by an auto-refresh to the rows it still
-    /// lists.
+    /// device id → what was checked. Survives page changes; cleared by a run of a
+    /// different query (a new scope), pruned by a refresh of the same one — silent
+    /// or ↻ Refresh — to the rows it still lists.
     pub(super) selected: RwSignal<BTreeMap<i64, DeviceSelection>>,
     /// The Needs Reboot tab's **device-level** selection (`util::SelectionSource`).
     /// Its entries carry no patch rows, and it is a separate map from `selected` so

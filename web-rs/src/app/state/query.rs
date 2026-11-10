@@ -154,6 +154,7 @@ impl AppState {
         let started = js_sys::Date::now();
         self.run.query_started_ms.set(started);
         flag.set(true);
+        let sent = args.clone();
         spawn_local(async move {
             let outcome = api::query_patches(args, seq, force).await;
             // Apply only if this is still the newest run. Queries overlap routinely
@@ -179,8 +180,13 @@ impl AppState {
                     // them out. The page bound comes from whichever collection this
                     // view pages (`util::paged_total`, which also sizes the pager).
                     let grouped = self.query.group_by.get_untracked().is_some();
+                    let same_query = self
+                        .query
+                        .applied_args
+                        .with_untracked(|a| util::same_query(a.as_ref(), &sent));
                     let plan = util::run_plan(util::RunContext {
                         silent,
+                        same_query,
                         grouped,
                         rows_total: r.rows_total,
                         groups_total: self.query.groups_total.get_untracked(),
@@ -241,7 +247,7 @@ impl AppState {
                     }
                     self.query.query_error.set(None);
                     if plan.keep_selection {
-                        // Same scope, fresher data: keep what the operator ticked,
+                        // Same query, fresher data: keep what the operator ticked,
                         // minus anything this refresh no longer lists.
                         self.prune_selection_after_refresh(seq, SelectionSource::PatchRows);
                         self.prune_selection_after_refresh(seq, SelectionSource::Devices);

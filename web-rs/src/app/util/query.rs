@@ -4,10 +4,10 @@
 
 use std::collections::BTreeSet;
 
-use crate::types::{PatchGroup, RowSort};
+use crate::types::{PatchGroup, PatchQueryArgs, RowSort};
 
 use super::super::state::Progress;
-use super::{clamp_page, page_count, paged_total};
+use super::{clamp_page, filters_changed, page_count, paged_total};
 
 /// What [`AppState::run_query_inner`] should do, decided from the flags alone.
 ///
@@ -146,6 +146,9 @@ pub(crate) enum ViewFetch {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RunContext {
     pub silent: bool,
+    /// The run re-sent the query already on screen ([`same_query`]): a manual
+    /// ↻ Refresh, or Run with the controls untouched.
+    pub same_query: bool,
     pub grouped: bool,
     pub rows_total: usize,
     pub groups_total: usize,
@@ -158,11 +161,13 @@ pub(crate) struct RunContext {
 /// What a run that succeeded does to the view.
 ///
 /// Lifted out of the `Ok` arm of `AppState::run_query_inner` so the decisions are
-/// reachable by a test; that arm is compile-checked only. A manual run is a new
-/// scope: page 1, the sort a view link queued (or the canonical order), the
-/// selection dropped, the groups collapsed. A silent refresh is the same scope with
-/// fresher data: the page is kept (clamped in case the result shrank), the sort and
-/// the ticked rows are kept, and the groups the operator had open are reopened.
+/// reachable by a test; that arm is compile-checked only. A manual run lands on
+/// page 1, the sort a view link queued (or the canonical order), the groups
+/// collapsed. A silent refresh is the same scope with fresher data: the page is
+/// kept (clamped in case the result shrank), the sort is kept, and the groups the
+/// operator had open are reopened. The selection is dropped only for a different
+/// query: a manual ↻ Refresh of the same one prunes it like a silent refresh, so
+/// "Software after OS from the same selection" survives refreshing in between.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RunPlan {
     pub page: usize,
@@ -197,9 +202,15 @@ pub(crate) fn run_plan(ctx: RunContext) -> RunPlan {
         page,
         sort,
         fetch,
-        keep_selection: ctx.silent,
+        keep_selection: ctx.silent || ctx.same_query,
         reopen_groups: ctx.silent && ctx.grouped,
     }
+}
+
+/// Whether a run re-sends the query already on screen. No query on screen is not
+/// "the same": there is nothing for a selection to have been made against.
+pub(crate) fn same_query(applied: Option<&PatchQueryArgs>, sent: &PatchQueryArgs) -> bool {
+    applied.is_some() && !filters_changed(applied, sent)
 }
 
 /// The groups to reopen after a silent refresh: those that were `open` and are
