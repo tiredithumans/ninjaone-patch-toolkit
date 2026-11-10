@@ -300,6 +300,7 @@ pub async fn run_action(
         reboot_mode: request.reboot_mode.unwrap_or(RebootMode::Normal),
         dry_run: request.dry_run,
         window_overridden: p.window_overridden,
+        window: dispatch::send_window(request.kind, p.window_overridden, &settings.actions),
         detail: detail.clone(),
         instance: settings.instance_base_url.clone(),
         client_id: settings.client_id.clone(),

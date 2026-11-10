@@ -794,7 +794,7 @@ fn org_labels(orgs: &BTreeMap<OrgKey, String>) -> Vec<String> {
 /// Whether `now` falls inside the configured window. A start later than the end
 /// means the window wraps past midnight (e.g. 22:00–04:00), in which case the day
 /// check applies to the day the window *opened*.
-pub(super) fn window_is_open(s: &ActionSettings, now: DateTime<Local>) -> bool {
+pub fn window_is_open(s: &ActionSettings, now: DateTime<Local>) -> bool {
     if s.window_days.is_empty() {
         return false;
     }

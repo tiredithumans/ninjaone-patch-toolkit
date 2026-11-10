@@ -410,6 +410,16 @@ dispatch is cut short by a sign-out or tenant switch. When it actually bypasses 
 set and every opening audit record carries `windowOverride: true` (omitted otherwise, so ordinary
 records keep their shape); the audit trail shows "Live (window override)".
 
+`plan()` reads the window once, but a batch wider than the dispatch semaphore can queue its tail
+for minutes, and those devices used to be sent whenever their permit came, past the window's end.
+So every send re-reads it once its permit is held (`dispatch::send_if_current`, against the
+batch's settings snapshot and this computer's clock, through the same `window_is_open`), and a
+device whose turn comes after the window closed records `Skipped("not sent: maintenance window
+closed while dispatching")`. `dispatch::send_window` exempts what `plan()` exempts — a scan, a
+window not enforced — and a batch sent under an override (`window_overridden`). An override
+requested while the window was open overrode nothing, so it does not exempt the batch. The
+re-check is per device, not per retry attempt: a 429 retry already under way still goes out.
+
 ## After a mutating action, invalidate the current-patch cache
 
 Call `invalidate_current_patches()` (and `invalidate_fleet_devices()` after a reboot) —

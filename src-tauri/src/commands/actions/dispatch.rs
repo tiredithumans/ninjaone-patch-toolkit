@@ -3,17 +3,20 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{Local, Utc};
 use tauri::AppHandle;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::warn;
 
 use super::{ActionProgressEvent, ActionRequest, emit_progress};
-use crate::actions::{ActionKind, JobReport, JobRequest, JobState, PlannedTarget, audit, fmt_ts};
+use crate::actions::{
+    ActionKind, JobReport, JobRequest, JobState, PlannedTarget, audit, fmt_ts, window_is_open,
+};
 use crate::api::actions::{ScriptDispatch, ScriptRef};
 use crate::api::{NinjaApiClient, SendGuard, is_outcome_unknown, is_send_refused};
 use crate::model::{PatchType, RebootMode};
+use crate::settings::ActionSettings;
 use crate::state::AppState;
 
 /// The part of a dispatch that is identical for every device in a batch.
@@ -38,6 +41,11 @@ pub(super) struct DispatchContext {
     /// The plan's `window_overridden`: this batch goes out only because the operator
     /// overrode a closed maintenance window. Audited on every opening record.
     pub(super) window_overridden: bool,
+    /// The maintenance window every send re-checks once its permit is held (see
+    /// [`send_if_current`]), from the batch's settings snapshot. `None` when the
+    /// batch is exempt: not a mutating kind, no window enforced, or sent under an
+    /// override (`window_overridden`).
+    pub(super) window: Option<ActionSettings>,
     pub(super) detail: String,
     pub(super) instance: String,
     pub(super) client_id: Option<String>,
@@ -59,6 +67,23 @@ pub(super) struct DispatchContext {
 /// a send.
 pub(super) const NOT_SENT_SESSION_ENDED: &str =
     "not sent: you signed in again or switched instance while the batch was dispatching";
+
+/// What a device still queued when the maintenance window closed records instead
+/// of a send.
+pub(super) const NOT_SENT_WINDOW_CLOSED: &str =
+    "not sent: maintenance window closed while dispatching";
+
+/// The maintenance window a batch's sends re-check, or `None` when the batch is
+/// exempt — the same exemptions `plan()` applies (a scan changes nothing; a window
+/// not enforced), plus a batch the operator sent under an override.
+pub(super) fn send_window(
+    kind: ActionKind,
+    window_overridden: bool,
+    settings: &ActionSettings,
+) -> Option<ActionSettings> {
+    (kind.is_mutating() && settings.require_maintenance_window && !window_overridden)
+        .then(|| settings.clone())
+}
 
 /// Dispatches every eligible target concurrently (bounded by `permits`), emitting
 /// progress as each completes, and returns the jobs in the plan's order.
@@ -266,9 +291,9 @@ pub(super) async fn send_and_record(
     let mut job = queued_job(ctx, target, job_id, turn.at);
 
     match turn.outcome {
-        Some(outcome) => record_dispatch(&mut job, outcome, Utc::now()),
+        Ok(outcome) => record_dispatch(&mut job, outcome, Utc::now()),
         // Terminal, so `dispatch_one`'s closing record says it never went out.
-        None => job.finish(JobState::Skipped(NOT_SENT_SESSION_ENDED.into()), Utc::now()),
+        Err(why) => job.finish(JobState::Skipped(why.into()), Utc::now()),
     }
     job
 }
@@ -307,12 +332,20 @@ pub(super) struct SendTurn {
     /// goes out (for a device not sent, as its turn came). It is the job's
     /// `dispatched_at`.
     pub(super) at: chrono::DateTime<Utc>,
-    /// `None` when the session ended while the device waited: nothing was sent.
-    pub(super) outcome: Option<anyhow::Result<Option<ScriptDispatch>>>,
+    /// `Err` with the reason when nothing was sent: the session ended, or the
+    /// maintenance window closed, while the device waited.
+    pub(super) outcome: Result<anyhow::Result<Option<ScriptDispatch>>, &'static str>,
 }
 
-/// Sends to one device once a permit is free — unless the session ended while it
-/// waited, in which case nothing is sent and the outcome is `None`.
+/// Sends to one device once a permit is free — unless the session ended, or the
+/// batch's maintenance window closed, while it waited. Then nothing is sent and the
+/// outcome is the reason.
+///
+/// `plan()` checks the window once, but a batch wider than the semaphore can queue
+/// its tail for minutes, and those devices used to be sent whenever their permit
+/// came, past the window's end. The window is re-read here against this
+/// computer's clock, as `plan()` reads it, unless the batch went out under an
+/// override (`DispatchContext::window`).
 ///
 /// The check sits after the permit on purpose: that wait is the long one. So does
 /// the dispatch time. It used to be taken before the wait, and with 8 permits, a
@@ -328,10 +361,16 @@ pub(super) async fn send_if_current(
     let _permit = sem.acquire().await;
     let current = (ctx.still_current)();
     let at = Utc::now();
-    let outcome = if current {
-        Some(send_action(ctx, device_id).await)
+    let window_closed = ctx
+        .window
+        .as_ref()
+        .is_some_and(|w| !window_is_open(w, Local::now()));
+    let outcome = if !current {
+        Err(NOT_SENT_SESSION_ENDED)
+    } else if window_closed {
+        Err(NOT_SENT_WINDOW_CLOSED)
     } else {
-        None
+        Ok(send_action(ctx, device_id).await)
     };
     SendTurn { at, outcome }
 }

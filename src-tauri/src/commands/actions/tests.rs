@@ -1768,6 +1768,7 @@ fn scan_context(
         reboot_mode: RebootMode::Normal,
         dry_run: false,
         window_overridden: false,
+        window: None,
         detail: "scan".into(),
         instance: "https://a.example".into(),
         client_id: None,
@@ -1932,7 +1933,7 @@ async fn a_device_queued_when_the_session_ends_is_not_sent() {
     drop(ahead);
 
     assert!(
-        queued.await.outcome.is_none(),
+        matches!(queued.await.outcome, Err(why) if why == dispatch::NOT_SENT_SESSION_ENDED),
         "a queued device must not be sent"
     );
     assert!(
@@ -1946,8 +1947,86 @@ async fn a_device_queued_when_the_session_ends_is_not_sent() {
     // A live session sends as before.
     live.store(true, Ordering::SeqCst);
     let sent = dispatch::send_if_current(&ctx, 7, &sem).await.outcome;
-    assert!(matches!(sent, Some(Ok(None))), "{sent:?}");
+    assert!(matches!(sent, Ok(Ok(None))), "{sent:?}");
     assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+}
+
+/// `plan()` checks the maintenance window once; a batch wider than the semaphore
+/// queues its tail for minutes, and those devices used to be sent whenever their
+/// permit came, past the window's end. Each send re-checks it, so a device whose
+/// turn comes after the window closed is not sent.
+#[tokio::test]
+async fn a_device_whose_turn_comes_after_the_window_closed_is_not_sent() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/7/patch/os/apply"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let mut ctx = scan_context(mock_api(&server), Arc::new(AtomicBool::new(true)));
+    ctx.kind = ActionKind::OsPatchApply;
+    let sem = tokio::sync::Semaphore::new(1);
+
+    // No window days: closed whatever this computer's clock says.
+    ctx.window = Some(crate::settings::ActionSettings {
+        require_maintenance_window: true,
+        window_days: Vec::new(),
+        ..Default::default()
+    });
+    let target = PlannedTarget {
+        device_id: 7,
+        device_name: "srv-7".into(),
+        organization: "Contoso".into(),
+        offline: false,
+    };
+    let job = dispatch::send_and_record(&ctx, &target, 1, &sem).await;
+    assert!(
+        matches!(&job.state, JobState::Skipped(why) if why == dispatch::NOT_SENT_WINDOW_CLOSED),
+        "{:?}",
+        job.state
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+
+    // Open every minute of every day: sent as before.
+    ctx.window = Some(crate::settings::ActionSettings {
+        require_maintenance_window: true,
+        window_days: (0..7).collect(),
+        window_start_minute: 0,
+        window_end_minute: 24 * 60,
+        ..Default::default()
+    });
+    let sent = dispatch::send_if_current(&ctx, 7, &sem).await.outcome;
+    assert!(matches!(sent, Ok(Ok(None))), "{sent:?}");
+    assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+}
+
+/// Which batches re-check the window per send: the ones `plan()` held to it. A
+/// scan is exempt, so is a batch with no window enforced, and an override approved
+/// for a closed window covers the whole batch.
+#[test]
+fn only_a_mutating_batch_held_to_the_window_rechecks_it() {
+    let enforced = crate::settings::ActionSettings {
+        require_maintenance_window: true,
+        ..Default::default()
+    };
+    let not_enforced = crate::settings::ActionSettings {
+        require_maintenance_window: false,
+        ..Default::default()
+    };
+    assert!(dispatch::send_window(ActionKind::Reboot, false, &enforced).is_some());
+    assert!(dispatch::send_window(ActionKind::OsPatchRemediate, false, &enforced).is_some());
+    assert!(dispatch::send_window(ActionKind::OsPatchScan, false, &enforced).is_none());
+    assert!(dispatch::send_window(ActionKind::Reboot, true, &enforced).is_none());
+    assert!(dispatch::send_window(ActionKind::Reboot, false, &not_enforced).is_none());
 }
 
 /// A device's dispatch time is when its POST goes out, not when its batch began.
@@ -1982,8 +2061,8 @@ async fn a_queued_device_is_stamped_when_its_turn_comes() {
     let ((first, first_done), second) =
         tokio::join!(first, dispatch::send_if_current(&ctx, 8, &sem));
 
-    assert!(matches!(first.outcome, Some(Ok(None))));
-    assert!(matches!(second.outcome, Some(Ok(None))));
+    assert!(matches!(first.outcome, Ok(Ok(None))));
+    assert!(matches!(second.outcome, Ok(Ok(None))));
     assert!(
         second.at >= first_done - chrono::Duration::milliseconds(50),
         "device 8 was stamped at {} but could only send after {}",

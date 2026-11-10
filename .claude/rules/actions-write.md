@@ -57,8 +57,9 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   `ActionPlan.script` / `.run_as` name what the token binds and the dialog shows them. Test:
   `a_live_script_is_checked_against_the_library_and_named`. → `docs/design/actions.md`
 - **Dry run requires a script declaring `dryRun`** (`DryRunSupport::Declared`); the window
-  override is per dispatch and audited; the "Apply all" preview reads only cached patches (cold =
-  "unknown"). → `docs/design/actions.md`
+  override is per dispatch and audited; a batch held to the window re-checks it per send
+  (`dispatch::send_window`, test `a_device_whose_turn_comes_after_the_window_closed_is_not_sent`);
+  the "Apply all" preview reads only cached patches (cold = "unknown"). → `docs/design/actions.md`
 - **One dispatch surface (`ActionBar`, on Patches and Needs Reboot); run options render once.**
   A retry is `Failed`-only (never `Unknown`) and re-plans from `JobReport.request`.
   → `docs/design/actions.md#there-is-one-dispatch-surface-and-the-run-options-are-shared`
