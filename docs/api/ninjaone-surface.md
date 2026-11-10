@@ -114,7 +114,28 @@ For each field the toolkit branches on: the vocabulary the spec declares, or **f
 ### `Activity`
 
 - `severity` — `NONE`, `MINOR`, `MODERATE`, `MAJOR`, `CRITICAL`
-- `statusCode` — 702 values (count only: NinjaOne's whole activity vocabulary, which grows every release; `actions::is_action_activity` matches the handful the native action endpoints emit)
+- `activityType` — `ACTIONSET`, `ACTION`, `CONDITION`, `CONDITION_ACTIONSET`, `CONDITION_ACTION`, `ANTIVIRUS`, `PATCH_MANAGEMENT`, `TEAMVIEWER`, `MONITOR`, `SYSTEM`, `COMMENT`, `SHADOWPROTECT`, `IMAGEMANAGER`, `HELP_REQUEST`, `SOFTWARE_PATCH_MANAGEMENT`, `SPLASHTOP`, `CLOUDBERRY`, `CLOUDBERRY_BACKUP`, `SCHEDULED_TASK`, `RDP`, `SCRIPTING`, `SECURITY`, `REMOTE_TOOLS`, `VIRTUALIZATION`, `PSA`, `MDM`, `NINJA_REMOTE`, `NINJA_QUICK_CONNECT`, `NINJA_NETWORK_DISCOVERY`, `NINJA_BACKUP`, `NINJA_TICKETING`, `KNOWLEDGE_BASE`, `RELATED_ITEM`, `CLIENT_CHECKLIST`, `CHECKLIST_TEMPLATE`, `DOCUMENTATION`, `MICROSOFT_INTUNE`, `DYNAMIC_POLICY`, `MAINTENANCE_MODE`, `AOSP_ACTION`, `AOSP_POLICY`, `AOSP`
+- `statusCode` — 702 values, counted only: NinjaOne's whole activity vocabulary, which grows every release. The job resolver (`actions::is_run_code`, `model::NATIVE_END_CODES`) matches these by name:
+  - `STARTED` — present
+  - `IN_PROCESS` — present
+  - `COMPLETED` — present
+  - `CANCEL_REQUESTED` — present
+  - `FAILED` — **absent**
+  - `TIMED_OUT` — **absent**
+  - `CANCELED` — **absent**
+  - `CANCELLED` — present
+  - `BLOCKED` — present
+  - `EVALUATION_FAILURE` — present
+  - `PATCH_MANAGEMENT_SCAN_STARTED` — present
+  - `PATCH_MANAGEMENT_SCAN_COMPLETED` — present
+  - `PATCH_MANAGEMENT_APPLY_PATCH_STARTED` — present
+  - `PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED` — present
+  - `PATCH_MANAGEMENT_FAILURE` — present
+  - `SOFTWARE_PATCH_MANAGEMENT_SCAN_STARTED` — present
+  - `SOFTWARE_PATCH_MANAGEMENT_SCAN_COMPLETED` — present
+  - `SOFTWARE_PATCH_MANAGEMENT_APPLY_PATCH_STARTED` — present
+  - `SOFTWARE_PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED` — present
+  - `SYSTEM_REBOOTED` — present
 - `status` — **free-form string**, no enum declared
 - `activityResult` — `SUCCESS`, `FAILURE`, `UNSUPPORTED`, `UNCOMPLETED`
 - `type` — **free-form string**, no enum declared
