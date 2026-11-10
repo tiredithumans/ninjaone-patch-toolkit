@@ -276,9 +276,11 @@ impl AppState {
         self.actions.confirm_input.set(String::new());
         self.actions.dispatch_error.set(None);
         self.actions.dispatching.set(true);
+        self.actions.planning.set(true);
         let epoch = self.session.epoch();
         spawn_local(async move {
             let reply = api::plan_action(request.clone()).await;
+            self.actions.planning.set(false);
             // The flag is this task's to release either way: `clear_session` leaves
             // it alone because a dispatch in flight owns it too, and nothing else
             // can plan while it is set.
