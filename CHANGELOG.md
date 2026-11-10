@@ -18,24 +18,8 @@ version and start a fresh `[Unreleased]`.
 - The app window can now only receive events from the app, not call its other built-in
   functions.
 
-### Added
-
-- **Reset filters** in the scope bar puts every filter back to the starting query, including after a drill-down replaced your scope.
-- Pressing Enter in Search or "OS name contains…" runs the query.
-- "Data as of…" also shows how old the data is ("12 min ago").
-- Settings shows the redirect URI to register in NinjaOne, with a Copy link, and a short hint under each connection field.
-- Settings marks unsaved changes beside the Save button.
-
 ### Changed
 
-- Confirming a live action that changes devices uses a red button, and a list of up to ten target devices is shown without expanding it.
-- An unavailable action button can be reached with the keyboard and says why it is unavailable.
-- "Run a script…" is disabled until patch rows are selected, and the action bar says when it is checking a plan.
-- Buttons that cannot be pressed no longer light up on hover, and checkboxes, text boxes and focus outlines follow the app's colours.
-- Sign-in errors are written in plain sentences that say what to do next.
-- Sign out asks for a second click while jobs you dispatched are still running.
-- An error notification no longer disappears when a success message arrives, and a notification stays up while the pointer is on it.
-- The Export menu says what an export contains and shows when a save is in progress.
 - The action confirmation says how current each device's online/offline status is.
 - Devices still queued when the maintenance window closes are no longer sent the action; they show
   as "not sent: maintenance window closed while dispatching".
@@ -55,19 +39,6 @@ version and start a fresh `[Unreleased]`.
 
 ### Fixed
 
-- Saving Settings with a new instance says that it signed you out.
-- A failed clipboard copy is shown as an error.
-- Screen readers announce a query once when it starts, not on every tick of its timer.
-- Custom date ranges say they are UTC days, and a reversed First seen range is flagged beside the dates.
-- Saving a preset under an existing name shows **Replace** instead of overwriting silently.
-- A disabled Locations or Groups picker says why in its tooltip.
-- The "Sign in" card and button no longer flash at launch when you are already signed in.
-- Needs Reboot and Failures say "Run a query…" before the first run instead of reporting nothing found.
-- A failed Trend or Needs Reboot load shows the error with a way to retry, not an empty view.
-- A page or sort that fails to load no longer reads "Last query failed", and rows dim while the next page loads.
-- An expired sign-in says so in plain words, and the top bar stops showing "Connected".
-- Run query is disabled until you sign in, and Sign in appears only once a Client ID is saved.
-- A banner with Retry appears when saved settings cannot be read at launch.
 - Two actions of the same type sent to one device seconds apart no longer report each other's
   result.
 - A script run with typed parameters no longer lists ticked patches it never sent.
@@ -98,6 +69,46 @@ version and start a fresh `[Unreleased]`.
 - Organizations whose names differ only in capitalization list in the same order every run.
 - After a dialog opened from a menu or the Reboot popover closes, keyboard focus returns to the
   button that opened it.
+
+## [0.23.0] - 2026-11-10
+
+A usability pass: screens stop saying things that are not true yet, filters can be reset, errors
+stay readable, and Settings explains its connection fields.
+
+### Added
+
+- **Reset filters** in the scope bar puts every filter back to the starting query, including after a drill-down replaced your scope.
+- Pressing Enter in Search or "OS name contains…" runs the query.
+- "Data as of…" also shows how old the data is ("12 min ago").
+- Settings shows the redirect URI to register in NinjaOne, with a Copy link, and a short hint under each connection field.
+- Settings marks unsaved changes beside the Save button.
+
+### Changed
+
+- Confirming a live action that changes devices uses a red button, and a list of up to ten target devices is shown without expanding it.
+- An unavailable action button can be reached with the keyboard and says why it is unavailable.
+- "Run a script…" is disabled until patch rows are selected, and the action bar says when it is checking a plan.
+- Buttons that cannot be pressed no longer light up on hover, and checkboxes, text boxes and focus outlines follow the app's colours.
+- Sign-in errors are written in plain sentences that say what to do next.
+- Sign out asks for a second click while jobs you dispatched are still running.
+- An error notification no longer disappears when a success message arrives, and a notification stays up while the pointer is on it.
+- The Export menu says what an export contains and shows when a save is in progress.
+
+### Fixed
+
+- Saving Settings with a new instance says that it signed you out.
+- A failed clipboard copy is shown as an error.
+- Screen readers announce a query once when it starts, not on every tick of its timer.
+- Custom date ranges say they are UTC days, and a reversed First seen range is flagged beside the dates.
+- Saving a preset under an existing name shows **Replace** instead of overwriting silently.
+- A disabled Locations or Groups picker says why in its tooltip.
+- The "Sign in" card and button no longer flash at launch when you are already signed in.
+- Needs Reboot and Failures say "Run a query…" before the first run instead of reporting nothing found.
+- A failed Trend or Needs Reboot load shows the error with a way to retry, not an empty view.
+- A page or sort that fails to load no longer reads "Last query failed", and rows dim while the next page loads.
+- An expired sign-in says so in plain words, and the top bar stops showing "Connected".
+- Run query is disabled until you sign in, and Sign in appears only once a Client ID is saved.
+- A banner with Retry appears when saved settings cannot be read at launch.
 
 ## [0.22.1] - 2026-11-10
 
