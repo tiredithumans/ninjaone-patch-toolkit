@@ -65,6 +65,8 @@ version and start a fresh `[Unreleased]`.
 - An update whose download stalls now fails after a while instead of leaving the app stuck on
   "Updating…".
 - A crash is now written to the log file.
+- With auto-refresh on, the Trend tab no longer fills with identical runs: a run that changed
+  nothing is recorded at most once an hour.
 - Clicking **Re-authorize** twice no longer makes the sign-in you then complete fail.
 - The action audit trail now records whether NinjaOne accepted each request, and closes the
   entries of actions still running when you quit the app.
