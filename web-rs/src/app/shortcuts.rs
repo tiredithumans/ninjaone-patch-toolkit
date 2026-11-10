@@ -77,7 +77,7 @@ pub(crate) fn KeyboardShortcuts() -> impl IntoView {
                         node_ref=dialog
                         on:keydown=move |ev| on_tab(&ev)
                     >
-                        <h3 id="shortcuts-title">"Keyboard shortcuts"</h3>
+                        <h2 id="shortcuts-title">"Keyboard shortcuts"</h2>
                         <p class="modal-sub">
                             "Ignored while typing in a field or while a dialog is open. No key \
                              dispatches, exports or changes a device."

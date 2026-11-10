@@ -338,13 +338,21 @@ label.inline {
 }
 
 input,
-select {
+select,
+textarea {
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
   color: var(--text);
   padding: 8px 10px;
   font-size: 13px;
+  font-family: inherit;
+}
+
+/* Ticks and radios in the app's teal, not the operating system's accent. */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
 }
 
 /* Text fields show focus through their border, which is why the default ring is
@@ -355,6 +363,8 @@ input:not([type="checkbox"]):not([type="radio"]):focus,
 select:focus,
 textarea:focus {
   border-color: var(--accent);
+  /* A 1px colour change alone was easy to miss on a dense form. */
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
   outline: none;
 }
 
@@ -438,8 +448,15 @@ select:disabled {
   cursor: pointer;
 }
 
-.btn:hover {
+/* Not on a button that cannot be pressed, and not over the warn border that marks
+   the wide-reaching applies and a Live run: hover used to repaint both as ordinary. */
+.btn:hover:not(:disabled):not([aria-disabled="true"]):not(.btn-wide-radius):not(.options-live) {
   border-color: var(--accent);
+}
+
+.btn-primary:hover:not(:disabled),
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(1.1);
 }
 
 .btn:disabled,
@@ -465,15 +482,6 @@ select:disabled {
 
 .btn-ghost {
   background: transparent;
-}
-
-.link {
-  background: none;
-  border: none;
-  color: var(--accent-2);
-  cursor: pointer;
-  padding: 4px 6px;
-  font-size: 13px;
 }
 
 .x {
@@ -1354,7 +1362,7 @@ tbody tr:hover {
 
 .picker__button:disabled {
   opacity: 0.55;
-  cursor: not-allowed;
+  cursor: default;
 }
 
 .picker__label {
@@ -2441,7 +2449,8 @@ td.patch-name .chip-note {
   border-color: var(--warn);
   color: var(--warn);
 }
-.btn-wide-radius:disabled {
+.btn-wide-radius:disabled,
+.btn-wide-radius[aria-disabled="true"] {
   border-color: var(--border);
   color: var(--muted);
 }

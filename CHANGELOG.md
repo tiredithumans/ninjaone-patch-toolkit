@@ -24,6 +24,7 @@ version and start a fresh `[Unreleased]`.
 - Confirming a live action that changes devices uses a red button, and a list of up to ten target devices is shown without expanding it.
 - An unavailable action button can be reached with the keyboard and says why it is unavailable.
 - "Run a script…" is disabled until patch rows are selected, and the action bar says when it is checking a plan.
+- Buttons that cannot be pressed no longer light up on hover, and checkboxes, text boxes and focus outlines follow the app's colours.
 - Sign-in errors are written in plain sentences that say what to do next.
 - Sign out asks for a second click while jobs you dispatched are still running.
 - An error notification no longer disappears when a success message arrives, and a notification stays up while the pointer is on it.
