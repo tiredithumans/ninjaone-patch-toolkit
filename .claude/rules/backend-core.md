@@ -2,7 +2,6 @@
 paths:
   - "src-tauri/src/**/*.rs"
   - "src-tauri/build.rs"
-  - "src-tauri/.cargo/config.toml"
   - "justfile"
 ---
 
@@ -22,5 +21,6 @@ paths:
   counter temp, sync, rename; `owner_only` for anything naming devices) — never a hand-rolled
   temp-and-rename. Tests: `paths::tests::*atomic*`.
   → `docs/design/concurrency.md#every-rewritten-file-goes-through-pathswrite_atomic`
-- **Windows links an 8 MiB main-thread stack** (`src-tauri/.cargo/config.toml`, never
-  `RUSTFLAGS`). → `docs/design/concurrency.md`
+- **Windows links an 8 MiB main-thread stack** (`src-tauri/build.rs`, MSVC only,
+  `rustc-link-arg-bins`; never `.cargo/config.toml` or `RUSTFLAGS`).
+  → `docs/design/concurrency.md`

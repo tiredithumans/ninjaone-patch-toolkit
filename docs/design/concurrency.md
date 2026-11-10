@@ -76,7 +76,10 @@ reading one as data.
 Windows MSVC gives the main thread 1 MiB; macOS and Linux give 8 MiB. v0.15.0's optimized build
 overflowed it on every Run query (`STATUS_STACK_OVERFLOW`, `thread 'main' has overflowed its
 stack`) while `just dev` (debug) did not, so the overflow only exists in an optimized Windows build.
-`src-tauri/.cargo/config.toml` links an 8 MiB stack for `x86_64-pc-windows-msvc`, which fixed it.
+`src-tauri/build.rs` links an 8 MiB stack (`cargo:rustc-link-arg-bins=/STACK:8388608`) when the
+target env is MSVC, which fixed it. It used to live in `src-tauri/.cargo/config.toml`, which cargo
+reads only when run from inside `src-tauri/`: the justfile's `--manifest-path` builds from the repo
+root never saw it, and releases got it only because the Tauri CLI changes into `src-tauri/` first.
 
 The query itself is not the cause: assembling 548,000 software patches, diffing and serializing the
 summary passes on a 1 MiB stack off the main thread. The frames that use main-thread stack at the end
