@@ -1953,6 +1953,48 @@ fn patch_type_and_status_sort_by_byte_order() {
     );
 }
 
+/// `sort_order` ranks the text columns once instead of comparing strings on every
+/// comparison; the order must be exactly the stable comparator's, ties, case
+/// folding, missing values and direction included.
+#[test]
+fn ranked_sort_matches_the_comparator() {
+    let words = [
+        "acme", "ACME", "Acme", "beta", "Beta", "alpha", "a", "", "Zulu", "zulu",
+    ];
+    let pick = |i: usize, salt: usize| words[(i * 7 + salt) % words.len()];
+    let rows: Vec<PatchRow> = (0..60)
+        .map(|i| {
+            let opt = |salt: usize| (i % 4 != salt % 4).then(|| pick(i, salt).into());
+            PatchRow {
+                organization: pick(i, 1).into(),
+                device_name: pick(i, 2).into(),
+                name: pick(i, 3).into(),
+                location: opt(4),
+                device_role: opt(5),
+                os_name: opt(6),
+                kb: opt(7),
+                ..failed_row(i as i64, "dev", "KB1", None)
+            }
+        })
+        .collect();
+    for key in [
+        RowSortKey::Organization,
+        RowSortKey::Device,
+        RowSortKey::Name,
+        RowSortKey::Location,
+        RowSortKey::Role,
+        RowSortKey::Os,
+        RowSortKey::Kb,
+    ] {
+        for desc in [false, true] {
+            let sort = RowSort { key, desc };
+            let mut expected: Vec<u32> = (0..rows.len() as u32).collect();
+            expected.sort_by(|a, b| compare_rows(&rows[*a as usize], &rows[*b as usize], sort));
+            assert_eq!(sort_order(&rows, sort), expected, "{key:?} desc={desc}");
+        }
+    }
+}
+
 #[test]
 fn page_rows_sorts_case_insensitively_then_slices() {
     let rows = vec![
