@@ -572,6 +572,13 @@ once, so a 500-device batch put 500 GETs on the wire every 15 s and a 429 parked
 the same `Retry-After`. The bound is a constant, not the "Dispatch concurrency" setting, so
 lowering that setting to send cautiously does not also slow every status check.
 
+Each read is also small. It asks for 50 rows (`ACTIVITY_FIRST_PAGE_SIZE`) and repeats at 500
+only when that page is full and its oldest row is still inside the window
+(`api::activities::window_may_be_cut_short`), and every row's `data` bag stays raw JSON until
+`Activity::exit_code` parses the one a job settles on. Every read used to ask for 500 rows and
+build a `Value` tree of each, so a 500-device batch moved up to 250 000 activities every 15 s
+for rows that were almost all discarded.
+
 The tick interval is 15 s and **backs off after failed reads**: `resolve_pending` returns how many
 feed reads failed, and `poller::next_poll_interval` doubles the wait after any failure, up to 60 s,
 and resets to 15 s on the first clean tick. A read error is swallowed per device, since it says

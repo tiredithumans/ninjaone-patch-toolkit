@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -822,8 +823,13 @@ pub struct Activity {
     /// a key the schema does not define meant `exit_code()` silently returned `None`
     /// for every job, which surfaced as "Completed, no exit code" rather than as an
     /// error.
+    ///
+    /// Kept as raw JSON and parsed only by [`exit_code`](Self::exit_code): a poll
+    /// tick reads up to a page of activities per pending device, and almost none of
+    /// them is the one a job settles on, so building a `Value` tree of every row's
+    /// bag was work thrown away.
     #[serde(default, alias = "result")]
-    pub data: Option<Value>,
+    pub data: Option<Box<RawValue>>,
 }
 
 /// The `statusCode`s that end a native scan, apply or reboot successfully.
@@ -920,7 +926,8 @@ impl Activity {
     }
 
     pub fn exit_code(&self) -> Option<i32> {
-        let v = self.data.as_ref()?;
+        let data: Value = serde_json::from_str(self.data.as_ref()?.get()).ok()?;
+        let v = &data;
         // Checked at the top level and one nesting down: `data` is an untyped bag
         // (`additionalProperties: true`), and tenants have been seen putting the
         // script result under `data.result` as well as directly on `data`.

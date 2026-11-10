@@ -75,8 +75,9 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **`/jobs` is display-only** (`commands::live_jobs`, polled by `util::live_jobs_due`), never a
   resolution source. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 - **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`,
-  at most `MAX_FEED_READS_IN_FLIGHT` in flight; the 15 s interval backs off to 60 s after failed
-  reads via `poller::next_poll_interval`): `statusCode` is lifecycle, `activityResult` is
+  at most `MAX_FEED_READS_IN_FLIGHT` in flight; a 50-row read, repeated at 500 only when
+  `window_may_be_cut_short`; `Activity.data` stays raw until `exit_code()`; the 15 s interval
+  backs off to 60 s after failed reads via `poller::next_poll_interval`): `statusCode` is lifecycle, `activityResult` is
   the verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is
   applied client-side; `is_action_activity(kind, type)` and `is_run_code(kind, code)` accept only
   the types and codes that kind emits. Native runs write start and end as separate activities
