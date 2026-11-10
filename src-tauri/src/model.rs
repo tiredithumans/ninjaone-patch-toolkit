@@ -787,8 +787,8 @@ impl RebootMode {
 ///   `COMPLETED`, `CANCELLED`, `BLOCKED`, … for scripts; kind-prefixed codes such as
 ///   `PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED` for the native actions).
 /// * `status` — "Status description", free text, with no enum at all.
-/// * `activityResult` — `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED` /
-///   `AGENT_OFFLINE`.
+/// * `activityResult` — `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED`, the
+///   spec's enum (`docs/api/ninjaone-surface.md`); any other value reads as a failure.
 ///
 /// This modelled only `status` and matched the *code* vocabulary against it, so on a
 /// tenant where `status` really is a description, no job ever reached a terminal
@@ -809,7 +809,7 @@ pub struct Activity {
     /// version relied on exclusively.
     #[serde(default)]
     pub status: Option<String>,
-    /// `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED` / `AGENT_OFFLINE`.
+    /// `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED` (the spec's enum).
     #[serde(default, rename = "activityResult")]
     pub activity_result: Option<String>,
     #[serde(default, rename = "activityTime")]

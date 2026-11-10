@@ -454,7 +454,8 @@ jobs:
 
           Read the diff above and decide what it means:
             * a new enum value on a field the code branches on -> check
-              Severity::from_raw, rows::is_pending, actions::is_action_activity
+              Severity::from_raw, rows::is_pending, actions::is_action_activity,
+              actions::is_run_code, model::NATIVE_END_CODES
             * a field that became free-form -> the parser must stay total
             * a removed or renamed endpoint -> a code path is already broken
           Then run:  python3 scripts/ninjaone-spec-digest.py <spec> > docs/api/ninjaone-surface.md

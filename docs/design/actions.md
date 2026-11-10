@@ -544,7 +544,8 @@ Three fields decide a job's fate and the spec gives them different jobs: `status
 enumerated lifecycle (`STARTED`/`IN_PROCESS`/`COMPLETED`/`CANCELLED`/`BLOCKED` for scripts,
 kind-prefixed codes for the native actions — see below), `status` is
 free-text "Status description" with no enum, and `activityResult` is the outcome
-(`SUCCESS`/`FAILURE`/`UNSUPPORTED`/`UNCOMPLETED`/`AGENT_OFFLINE`). `Activity::lifecycle()`
+(`SUCCESS`/`FAILURE`/`UNSUPPORTED`/`UNCOMPLETED` — the spec's whole enum, per the digest; any
+other value a tenant sends reads as a failure). `Activity::lifecycle()`
 prefers `statusCode` and falls back to `status`; `Activity::outcome()` takes the verdict from
 `activityResult` first, so a `COMPLETED` activity carrying `FAILURE` is a failed job. The exit code
 comes from `data` (the spec's untyped bag), with `result` kept as an alias — reading only `result`

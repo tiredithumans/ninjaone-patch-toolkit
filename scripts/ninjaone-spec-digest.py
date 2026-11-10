@@ -74,9 +74,35 @@ SCHEMAS = [
 # third-party grade arrives only through `Patch::severity`'s `impact` alias, so
 # leaving it out pointed this gate at a field the software feed never sends while the
 # one it does send moved unwatched.
+#
+# `activityType` is here because `actions::is_action_activity` accepts an activity
+# only by its type (`PATCH_MANAGEMENT`, `SOFTWARE_PATCH_MANAGEMENT`, `SYSTEM`,
+# `SCRIPTING`, `ACTION`, `ACTIONSET`): a vendor rename there leaves every native
+# action resolving by timeout, and nothing watched it.
 BRANCHED_FIELDS = [
-    "severity", "impact", "status", "type", "activityResult", "statusCode", "rebootMode",
-    "jobType", "jobStatus",
+    "severity", "impact", "status", "type", "activityType", "activityResult", "statusCode",
+    "rebootMode", "jobType", "jobStatus",
+]
+
+# The `Activity.statusCode` values the job resolver matches by name: the bare
+# lifecycle codes in `actions::is_run_code` / `Activity::is_terminal`, and the
+# kind-prefixed start and end codes in `actions::native_run_codes` /
+# `model::NATIVE_END_CODES`. The enum itself is NinjaOne's whole activity vocabulary
+# (700+ values, growing every release) and is digested as a count, so a vendor
+# rename of one of these would otherwise pass unseen. Each gets a present/absent
+# line. Some are absent on purpose (`FAILED`, `TIMED_OUT`, `CANCELED` are spellings
+# kept for tenants that send them); what matters is a line that *changes*. Keep
+# this list in step with those functions.
+DEPENDED_STATUS_CODES = [
+    "STARTED", "IN_PROCESS", "COMPLETED", "CANCEL_REQUESTED", "FAILED", "TIMED_OUT",
+    "CANCELED", "CANCELLED", "BLOCKED", "EVALUATION_FAILURE",
+    "PATCH_MANAGEMENT_SCAN_STARTED", "PATCH_MANAGEMENT_SCAN_COMPLETED",
+    "PATCH_MANAGEMENT_APPLY_PATCH_STARTED", "PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED",
+    "PATCH_MANAGEMENT_FAILURE",
+    "SOFTWARE_PATCH_MANAGEMENT_SCAN_STARTED", "SOFTWARE_PATCH_MANAGEMENT_SCAN_COMPLETED",
+    "SOFTWARE_PATCH_MANAGEMENT_APPLY_PATCH_STARTED",
+    "SOFTWARE_PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED",
+    "SYSTEM_REBOOTED",
 ]
 
 
@@ -207,11 +233,14 @@ def main() -> int:
                 out.append(f"- `{field}` — **free-form string**, no enum declared")
             elif field == "statusCode":
                 out.append(
-                    f"- `{field}` — {len(values)} values (count only: NinjaOne's whole "
-                    "activity vocabulary, which grows every release; "
-                    "`actions::is_action_activity` matches the handful the native "
-                    "action endpoints emit)"
+                    f"- `{field}` — {len(values)} values, counted only: NinjaOne's whole "
+                    "activity vocabulary, which grows every release. The job resolver "
+                    "(`actions::is_run_code`, `model::NATIVE_END_CODES`) matches these "
+                    "by name:"
                 )
+                for code in DEPENDED_STATUS_CODES:
+                    state = "present" if code in values else "**absent**"
+                    out.append(f"  - `{code}` — {state}")
             else:
                 out.append(f"- `{field}` — `{'`, `'.join(values)}`")
         out.append("")

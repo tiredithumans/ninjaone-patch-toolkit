@@ -69,6 +69,12 @@ break. It depends on a URL this repo does not control, so it runs on the weekly 
 manual dispatch, and on a PR or push only when `docs/api/`, `src-tauri/src/api/`, the digest
 script or `ci.yml` changed — a vendor outage cannot block unrelated work.
 
+`Activity.statusCode` is NinjaOne's whole activity vocabulary (700+ values) and is digested as a
+count, which would let a rename of a code the job resolver matches pass unseen. So the codes the
+resolver names (`DEPENDED_STATUS_CODES`, kept in step with `actions::is_run_code`,
+`native_run_codes` and `model::NATIVE_END_CODES`) each get a present/absent line, and the
+`activityType` enum that `actions::is_action_activity` matches is listed in full.
+
 ## Repo-tooling gates (`shellcheck`, `actionlint`, `commits` jobs)
 
 - **shellcheck** lints `.claude/hooks/*.sh`, `.githooks/*` and `scripts/*.sh`, then runs
