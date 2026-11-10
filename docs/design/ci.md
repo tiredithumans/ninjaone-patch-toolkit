@@ -52,7 +52,8 @@ crates are ignored so the file does not churn on a version bump. The job first r
 `allow` lists disagree, then re-runs the recipe, which fails on a license about.toml does not
 accept. A diff fails only a `release/*` PR; on any other PR it is a notice. The notice matters
 in what ships, and failing every dependency bump on it kept Dependabot PRs from auto-merging
-(`dependabot-automerge.yml`, minor and patch only). The release skill regenerates the file, and
+(`dependabot-automerge.yml`, grouped minor and patch only — a 0.x "minor" is a breaking bump for
+Cargo, arrives ungrouped and waits for a person). The release skill regenerates the file, and
 `release.yml`'s `verify` job refuses a tag whose copy is stale. The recipe is `[unix]`: PowerShell redirection would
 rewrite encoding and line endings.
 
