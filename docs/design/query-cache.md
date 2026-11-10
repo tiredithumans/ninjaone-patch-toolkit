@@ -328,11 +328,19 @@ is a hint, and unbounded `force` makes the whole cache decorative on the one pat
 unattended for hours. The frontend also skips a tick while `document.hidden`
 (`api::document_hidden`).
 
+`force` does **not** reach the device inventory, which keeps its `DEVICE_TTL`: honoring it would
+re-page the whole inventory (and the health feed) on every auto-refresh tick, roughly doubling the
+unattended path's cost for the two fields that move mid-patching (Needs Reboot, offline). What
+the label says is honest instead: `data_fetched_at` is the oldest of the fetched patch families'
+times **and** the inventory's (`AppState::fleet_devices_with_time`), so after ↻ it still names an
+inventory fetched up to fifteen minutes earlier rather than claiming the refresh time.
+
 ### Install history is not prefetched
 
 Install history is fetched fresh per query, scoped server-side by `patch_filter` +
-status-pushed-down (too large to cache). The summary carries `data_fetched_at` (when the patch
-data was last fetched, distinct from `generated_at`) for the UI's "patch data as of …" label. The
+status-pushed-down (too large to cache). The summary carries `data_fetched_at` (when the oldest
+cached input — a patch family or the device inventory — was fetched, distinct from
+`generated_at`) for the UI's "patch data as of …" label. The
 whole-fleet caches are tenant-scoped, so `clear_lookups_cache` drops them too.
 
 The pull runs in the same `join!` as the cache legs, which all finish even when one fails so the

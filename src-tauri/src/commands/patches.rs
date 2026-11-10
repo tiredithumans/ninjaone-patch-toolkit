@@ -173,7 +173,7 @@ pub async fn query_patches(
     let p_devices = |n: usize| progress("devices", n);
     let p_os = |n: usize| progress("osPatches", n);
     let p_sw = |n: usize| progress("swPatches", n);
-    let devices_fut = state.fleet_devices(Some(&p_devices as &ProgressFn));
+    let devices_fut = state.fleet_devices_with_time(Some(&p_devices as &ProgressFn));
     // The requested `PatchType` decides which families are fetched at all — a
     // family this query can't display is never worth a whole-fleet page-through.
     let current_fut = state.fleet_current_patches(
@@ -536,6 +536,8 @@ impl QueryPlan {
 /// Everything a query fetched, before scoping and joining.
 struct FetchedSources {
     devices: Arc<Vec<Device>>,
+    /// When the inventory was fetched; it can be older than the patch families.
+    devices_fetched_at: DateTime<Utc>,
     current: CurrentPatches,
     lookups: Lookups,
     /// Every device in any selected device group; `None` when no group is selected.
@@ -659,7 +661,7 @@ async fn run_query<L, D, C, G>(
 ) -> anyhow::Result<QueryRun>
 where
     L: std::future::Future<Output = anyhow::Result<Lookups>>,
-    D: std::future::Future<Output = anyhow::Result<Arc<Vec<Device>>>>,
+    D: std::future::Future<Output = anyhow::Result<(Arc<Vec<Device>>, DateTime<Utc>)>>,
     C: std::future::Future<Output = anyhow::Result<CurrentPatches>>,
     G: std::future::Future<Output = anyhow::Result<Arc<TenantLedger>>>,
 {
@@ -750,7 +752,7 @@ where
     // Surfaced in the same order `try_join!` would have, so the operator sees the
     // same first error; the difference is only that the siblings were allowed to
     // finish and cache.
-    let devices = devices?;
+    let (devices, devices_fetched_at) = devices?;
     let current = current?;
     let (lookups, group_members) = lookup_leg?;
     let device_group_members = group_members?;
@@ -784,6 +786,7 @@ where
     };
     let src = FetchedSources {
         devices,
+        devices_fetched_at,
         current,
         lookups,
         device_group_members,
@@ -1103,9 +1106,14 @@ fn assemble_result(
         // Needs the stored snapshot, so `query_patches` fills it after the join.
         changes: Default::default(),
         generated_at: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        // As old as the oldest input: the inventory (Needs Reboot, the offline
+        // exclusion) is cached longer than the patch families and a forced refresh
+        // does not shorten it, so a label that took only the families' time
+        // over-promised.
         data_fetched_at: src
             .current
             .fetched_at
+            .min(src.devices_fetched_at)
             .format("%Y-%m-%d %H:%M:%S UTC")
             .to_string(),
         exploit_data: exploits.status.clone(),
