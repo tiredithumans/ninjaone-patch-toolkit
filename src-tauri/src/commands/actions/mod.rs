@@ -271,17 +271,8 @@ pub async fn run_action(
         });
     }
 
-    emit_progress(
-        &app,
-        ActionProgressEvent {
-            batch_id,
-            stage: "dispatching",
-            dispatched: 0,
-            total: p.eligible.len(),
-            jobs: Vec::new(),
-        },
-    );
-
+    // `dispatch_batch` announces the batch ("dispatching 0/total") itself; this
+    // emitted the identical event just before it.
     // Everything that does not vary per device is built once and shared, so a
     // 25-device batch stops re-cloning the script ref, run-as identity, parameter
     // string, detail line, instance URL and client id 25 times over.

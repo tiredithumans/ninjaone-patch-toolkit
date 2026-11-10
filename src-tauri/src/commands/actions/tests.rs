@@ -801,7 +801,7 @@ fn job_updates_land_on_their_own_rows_in_any_order() {
     // Not in the store: never applied, never reported.
     updates.push(pending_job(999, 999, ActionKind::Reboot, 1_000));
 
-    let applied = state.apply_job_updates(&session, updates);
+    let applied = state.apply_job_updates(&session, &updates);
     assert_eq!(applied, HashSet::from([31, 2, 17]));
     let jobs = state.jobs_snapshot();
     assert_eq!(jobs.len(), 40, "an update never adds a row");

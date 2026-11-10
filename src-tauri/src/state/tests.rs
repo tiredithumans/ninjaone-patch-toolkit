@@ -1011,7 +1011,7 @@ fn a_poll_tick_from_the_previous_session_applies_nothing() {
     let _closings = state.clear_jobs();
     assert!(state.append_jobs(&state.job_session(), vec![sample_job(1, JobState::Running)]));
 
-    let applied = state.apply_job_updates(&session, vec![sample_job(1, JobState::Completed)]);
+    let applied = state.apply_job_updates(&session, &[sample_job(1, JobState::Completed)]);
     assert!(applied.is_empty());
     assert_eq!(state.jobs_snapshot()[0].state, JobState::Running);
 }
@@ -1124,10 +1124,8 @@ fn job_updates_key_on_job_id_not_device_id() {
         ]
     ));
 
-    let applied = state.apply_job_updates(
-        &state.job_session(),
-        vec![sample_job(2, JobState::Completed)],
-    );
+    let applied =
+        state.apply_job_updates(&state.job_session(), &[sample_job(2, JobState::Completed)]);
     assert!(applied.contains(&2));
     let jobs = state.jobs_snapshot();
     assert_eq!(jobs[0].state, JobState::Running, "row 1 must be untouched");
@@ -1312,10 +1310,8 @@ fn the_poller_keeps_its_claim_when_work_arrives_during_release() {
     );
 
     // Once the job settles, the poller may retire.
-    let applied = state.apply_job_updates(
-        &state.job_session(),
-        vec![sample_job(1, JobState::Completed)],
-    );
+    let applied =
+        state.apply_job_updates(&state.job_session(), &[sample_job(1, JobState::Completed)]);
     assert!(applied.contains(&1));
     assert!(state.release_job_poller_if_idle(claim).is_none());
     assert!(state.try_claim_job_poller().is_some());
@@ -1387,4 +1383,22 @@ async fn the_apply_preview_peek_never_fetches() {
 
     state.invalidate_current_patches();
     assert!(state.cached_current_patches(PatchType::Os).is_none());
+}
+
+/// The poller's claimed set: every bound activity id in the store, settled jobs
+/// included (they still own their activity).
+#[test]
+fn claimed_activity_ids_cover_the_whole_store() {
+    let state = AppState::new().expect("build state");
+    let mut settled = sample_job(1, JobState::Completed);
+    settled.activity_id = Some(11);
+    let mut running = sample_job(2, JobState::Running);
+    running.activity_id = Some(22);
+    let unbound = sample_job(3, JobState::Running);
+    assert!(state.append_jobs(&state.job_session(), vec![settled, running, unbound]));
+
+    assert_eq!(
+        state.claimed_activity_ids(),
+        std::collections::HashSet::from([11, 22])
+    );
 }
