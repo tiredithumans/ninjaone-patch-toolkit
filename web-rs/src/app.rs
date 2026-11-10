@@ -193,6 +193,18 @@ pub fn App() -> impl IntoView {
     })
     .forget();
 
+    // A post-refresh selection prune that landed under the action confirmation
+    // (or while it was planning) waits for it to close; see `util::prune_timing`.
+    Effect::new(move |_| {
+        let held = util::confirmation_holds(
+            state.actions.pending.with(Option::is_some),
+            state.actions.dispatching.get(),
+        );
+        if !held {
+            untrack(|| state.release_deferred_prunes());
+        }
+    });
+
     // Colour theme: applied on launch and on every change, remembered per machine.
     Effect::new(move |_| {
         let theme = state.ui.theme.get();

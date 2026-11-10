@@ -49,6 +49,41 @@ pub(crate) fn refresh_hold(
     }
 }
 
+/// Whether the action confirmation holds auto-refresh: its dialog is open, or a
+/// plan or dispatch is in flight. `pending` stays empty for the whole plan round
+/// trip, so a hold on it alone let a tick fire between the click and the dialog —
+/// and the result land under the confirmation, re-scoping what it lists.
+pub(crate) fn confirmation_holds(pending_open: bool, dispatching: bool) -> bool {
+    pending_open || dispatching
+}
+
+/// What to do with a post-refresh selection prune whose answer has arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PruneTiming {
+    /// Prune now and say what went.
+    Apply,
+    /// Hold it until the confirmation closes. A refresh already in flight when
+    /// the operator opened the dialog still lands; unticking rows (and toasting
+    /// "N selected rows are no longer listed") while the dialog lists them reads
+    /// as the dispatch having changed under them.
+    Defer,
+    /// A newer run has landed (or the session ended): it prunes, or clears, for
+    /// itself, and this answer describes a result no longer on screen.
+    Drop,
+}
+
+/// Decided on arrival and again when a held prune is released; `superseded` is
+/// checked first both times, so a prune held across a newer run is dropped.
+pub(crate) fn prune_timing(superseded: bool, confirmation_open: bool) -> PruneTiming {
+    if superseded {
+        PruneTiming::Drop
+    } else if confirmation_open {
+        PruneTiming::Defer
+    } else {
+        PruneTiming::Apply
+    }
+}
+
 /// Time left until the next automatic refresh, measured in wall-clock
 /// milliseconds between ticks — not by counting ticks, which a webview throttles
 /// when it is in the background.
@@ -155,6 +190,28 @@ mod tests {
             Some(RefreshHold::Running)
         );
         assert_eq!(refresh_hold(false, false, false, false), None);
+    }
+
+    #[test]
+    fn a_plan_in_flight_holds_like_the_open_confirmation() {
+        assert!(confirmation_holds(true, false));
+        assert!(
+            confirmation_holds(false, true),
+            "planning: the dialog is about to open"
+        );
+        assert!(!confirmation_holds(false, false));
+    }
+
+    #[test]
+    fn a_prune_waits_for_the_confirmation_and_yields_to_a_newer_run() {
+        assert_eq!(prune_timing(false, false), PruneTiming::Apply);
+        assert_eq!(prune_timing(false, true), PruneTiming::Defer);
+        assert_eq!(prune_timing(true, true), PruneTiming::Drop);
+        assert_eq!(
+            prune_timing(true, false),
+            PruneTiming::Drop,
+            "released after a newer run landed"
+        );
     }
 
     #[test]

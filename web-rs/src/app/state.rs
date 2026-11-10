@@ -671,6 +671,21 @@ impl UiState {
         }
     }
 
+    /// [`notify`](Self::notify), unless a toast is already showing: then the
+    /// message joins it, so a dispatch toast (and its View jobs button) is not
+    /// replaced by the news that arrives the moment its dialog closes.
+    pub(super) fn notify_or_append(self, t: Toast) {
+        if self.toast.with_untracked(Option::is_some) {
+            self.toast.update(|cur| {
+                if let Some(cur) = cur {
+                    cur.msg = format!("{} {}", cur.msg, t.msg);
+                }
+            });
+        } else {
+            self.notify(t);
+        }
+    }
+
     pub(super) fn notify(self, t: Toast) {
         // Auto-dismiss after a few seconds; a newer toast supersedes this one via
         // the generation guard. An error stays three times as long: it usually
@@ -773,6 +788,19 @@ pub(crate) struct ActionState {
     pub(super) script_dialog: RwSignal<bool>,
     /// A mutating action landed since the displayed result was computed.
     pub(super) results_stale: RwSignal<bool>,
+    /// Post-refresh prunes held while the confirmation is open or planning
+    /// (`util::prune_timing`), applied once it closes.
+    pub(super) deferred_prunes: RwSignal<Vec<SelectionPrune>>,
+}
+
+/// One post-refresh selection prune: what was asked, what the backend answered,
+/// and which run's result it describes.
+#[derive(Clone, Debug)]
+pub(crate) struct SelectionPrune {
+    pub seq: u64,
+    pub source: SelectionSource,
+    pub probes: Vec<SelectionProbe>,
+    pub status: Vec<SelectionStatus>,
 }
 
 /// A planned action held open in the confirmation modal.
@@ -812,6 +840,7 @@ impl ActionState {
             watched: RwSignal::new(Vec::new()),
             script_dialog: RwSignal::new(false),
             results_stale: RwSignal::new(false),
+            deferred_prunes: RwSignal::new(Vec::new()),
         }
     }
 }

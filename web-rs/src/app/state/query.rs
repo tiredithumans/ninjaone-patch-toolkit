@@ -243,8 +243,8 @@ impl AppState {
                     if plan.keep_selection {
                         // Same scope, fresher data: keep what the operator ticked,
                         // minus anything this refresh no longer lists.
-                        self.prune_selection_after_refresh(seq);
-                        self.prune_device_selection_after_refresh(seq);
+                        self.prune_selection_after_refresh(seq, SelectionSource::PatchRows);
+                        self.prune_selection_after_refresh(seq, SelectionSource::Devices);
                     } else {
                         // A new scope: a selection made against the previous result
                         // no longer describes what is on screen. Said out loud: it
@@ -300,44 +300,6 @@ impl AppState {
             self.run.queued.set(queued);
             self.run_query_inner(false, force);
         }
-    }
-
-    /// After a silent refresh, re-checks every selected device against the new result
-    /// and drops the ticked patches that are gone (installed, rejected, or the device
-    /// left the scope) — see `util::prune_selection_from_status`.
-    ///
-    /// One backend read for the whole selection, served from the result just
-    /// cached — no NinjaOne traffic. Abandoned if another run lands meanwhile: a
-    /// manual run clears the selection itself, and a newer refresh prunes again.
-    fn prune_selection_after_refresh(self, seq: u64) {
-        let probes = self.actions.selected.with_untracked(util::selection_probes);
-        if probes.is_empty() {
-            return;
-        }
-        spawn_local(async move {
-            // A failed read keeps every device as it was rather than drop a
-            // selection the operator can't rebuild from memory. The backend re-plans
-            // against the device inventory (cached up to 15 minutes) and Settings before
-            // any dispatch; ticked KBs are not re-checked against current patches, but the
-            // confirm dialog shows each device's parameter string. The read sends the
-            // ticked keys and gets back only those still listed — it used to fetch up
-            // to a thousand full rows per selected device, every tick.
-            let Ok(status) = api::selection_status(probes.clone()).await else {
-                return;
-            };
-            if util::is_superseded(self.run.query_seq.get_untracked(), seq) {
-                return;
-            }
-            let mut removed = 0;
-            self.actions
-                .selected
-                .update(|sel| removed = util::prune_selection_from_status(sel, &probes, &status));
-            if removed > 0 {
-                self.notify(Toast::ok(format!(
-                    "Auto-refresh: {removed} selected patch row(s) are no longer listed and were deselected"
-                )));
-            }
-        });
     }
 
     /// Narrows the filters to one organization and shows the matching patch rows.
@@ -536,8 +498,10 @@ impl AppState {
     /// covers any modal not listed here, and — like `hidden`, which is not a
     /// signal either — is picked up by the next one-second tick.
     pub(in crate::app) fn refresh_hold(self) -> Option<util::RefreshHold> {
-        let dialog_open = self.actions.pending.with(Option::is_some)
-            || self.updates.update.with(Option::is_some)
+        let dialog_open = util::confirmation_holds(
+            self.actions.pending.with(Option::is_some),
+            self.actions.dispatching.get(),
+        ) || self.updates.update.with(Option::is_some)
             || self.ui.shortcuts_open.get()
             || self.ui.pending_view.with(Option::is_some)
             || self.ui.show_settings.get()

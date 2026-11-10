@@ -132,36 +132,102 @@ impl AppState {
         });
     }
 
-    /// After a silent refresh, drops the ticked devices that no longer need a
-    /// reboot. Asks the backend: the summary carries only the first page of the
-    /// reboot list. Abandoned if another run lands meanwhile, like the row prune.
-    pub(in crate::app) fn prune_device_selection_after_refresh(self, seq: u64) {
+    /// After a silent refresh, re-checks the selection against the new result and
+    /// drops what is gone: ticked patches installed, rejected or out of scope
+    /// (`util::prune_selection_from_status`), or Needs Reboot devices that no
+    /// longer need one (`util::prune_device_level_from_status`).
+    ///
+    /// One backend read per selection, served from the result just cached — no
+    /// NinjaOne traffic; the summary carries only the first page of the reboot
+    /// list, so even the device prune has to ask. Abandoned if another run lands
+    /// meanwhile (a manual run clears the selection itself, a newer refresh prunes
+    /// again), and held while the action confirmation is open or planning.
+    pub(in crate::app) fn prune_selection_after_refresh(self, seq: u64, source: SelectionSource) {
         let probes = self
-            .actions
-            .device_selected
+            .selection_signal(source)
             .with_untracked(util::selection_probes);
         if probes.is_empty() {
             return;
         }
         spawn_local(async move {
-            // A failed read keeps the selection as it was; the backend re-plans
-            // against the device inventory before any dispatch.
-            let Ok(status) = api::selection_status(probes).await else {
+            // A failed read keeps every device as it was rather than drop a
+            // selection the operator can't rebuild from memory. The backend re-plans
+            // against the device inventory (cached up to 15 minutes) and Settings before
+            // any dispatch; ticked KBs are not re-checked against current patches, but the
+            // confirm dialog shows each device's parameter string. The read sends the
+            // ticked keys and gets back only those still listed — it used to fetch up
+            // to a thousand full rows per selected device, every tick.
+            let Ok(status) = api::selection_status(probes.clone()).await else {
                 return;
             };
-            if util::is_superseded(self.run.query_seq.get_untracked(), seq) {
-                return;
-            }
-            let mut removed = 0;
-            self.actions
-                .device_selected
-                .update(|sel| removed = util::prune_device_level_from_status(sel, &status));
-            if removed > 0 {
-                self.notify(Toast::ok(format!(
-                    "Auto-refresh: {removed} selected device(s) no longer need a reboot and were deselected"
-                )));
-            }
+            self.settle_prune(
+                SelectionPrune {
+                    seq,
+                    source,
+                    probes,
+                    status,
+                },
+                false,
+            );
         });
+    }
+
+    /// Applies, holds or drops one prune — see `util::prune_timing`. `released`
+    /// marks one held until the confirmation closed.
+    fn settle_prune(self, prune: SelectionPrune, released: bool) {
+        let superseded = util::is_superseded(self.run.query_seq.get_untracked(), prune.seq);
+        let held = util::confirmation_holds(
+            self.actions.pending.with_untracked(Option::is_some),
+            self.actions.dispatching.get_untracked(),
+        );
+        match util::prune_timing(superseded, held) {
+            util::PruneTiming::Drop => {}
+            util::PruneTiming::Defer => self.actions.deferred_prunes.update(|d| d.push(prune)),
+            util::PruneTiming::Apply => self.apply_prune(prune, released),
+        }
+    }
+
+    /// Applies the prunes held while the confirmation was open. Called by an
+    /// effect in `App` whenever the confirmation closes and nothing is planning.
+    pub(in crate::app) fn release_deferred_prunes(self) {
+        if self.actions.deferred_prunes.with_untracked(Vec::is_empty) {
+            return;
+        }
+        let held = self.actions.deferred_prunes.try_update(std::mem::take);
+        for prune in held.unwrap_or_default() {
+            self.settle_prune(prune, true);
+        }
+    }
+
+    fn apply_prune(self, prune: SelectionPrune, released: bool) {
+        let mut removed = 0;
+        let msg = match prune.source {
+            SelectionSource::PatchRows => {
+                self.actions.selected.update(|sel| {
+                    removed = util::prune_selection_from_status(sel, &prune.probes, &prune.status)
+                });
+                format!(
+                    "Auto-refresh: {removed} selected patch row(s) are no longer listed and were deselected"
+                )
+            }
+            SelectionSource::Devices => {
+                self.actions.device_selected.update(|sel| {
+                    removed = util::prune_device_level_from_status(sel, &prune.status)
+                });
+                format!(
+                    "Auto-refresh: {removed} selected device(s) no longer need a reboot and were deselected"
+                )
+            }
+        };
+        if removed == 0 {
+            return;
+        }
+        // Released as the dialog closes, the dispatch toast is usually showing.
+        if released {
+            self.ui.notify_or_append(Toast::ok(msg));
+        } else {
+            self.notify(Toast::ok(msg));
+        }
     }
 
     /// Per-device targets for a remediation kind, and the devices that have any.

@@ -260,7 +260,11 @@ Per-machine view conveniences — none of them configuration, so none go through
 wall-clock countdown (`util::advance_refresh`; ticks are throttled in the background, so counting
 them drifts). `util::refresh_hold` decides, in this order, why it waits: the operator's **Pause**,
 an open dialog (any `aria-modal` element, Settings included through its own signal so the label
-reacts at once), a hidden window, a run in flight. A run restarts the full cadence, so a manual Run also pushes the next automatic one out.
+reacts at once; the action confirmation counts from the click, while its plan is still in flight —
+`util::confirmation_holds`), a hidden window, a run in flight. A run restarts the full cadence, so a manual Run also pushes the next automatic one out.
+A refresh already in flight when the confirmation opens still lands; its selection prune (and
+its toast) waits until the dialog closes (`util::prune_timing`), so rows never untick under a
+dialog that lists them.
 **A selection is deliberately not a hold**: a refresh already prunes the selection to rows still
 listed, and after a dispatch the selection is still there exactly while the operator watches the
 patches land — pausing on it would switch the cadence off when it is most wanted. Picking a
