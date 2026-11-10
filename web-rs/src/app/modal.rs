@@ -12,10 +12,27 @@
 //! JS-backed, so nothing here is host-testable; the logic is kept to the minimum
 //! that cannot live anywhere else.
 
+use std::cell::RefCell;
+
 use leptos::html::Div;
 use leptos::prelude::*;
 use leptos::web_sys::{Element, HtmlElement, KeyboardEvent, Node};
 use wasm_bindgen::JsCast;
+
+thread_local! {
+    /// Where the next dialog returns focus when nothing had it as the dialog
+    /// opened; see [`return_focus_to`].
+    static RETURN_TO: RefCell<Option<HtmlElement>> = const { RefCell::new(None) };
+}
+
+/// Names the element the next dialog hands focus back to if, when it opens,
+/// focus has fallen to `<body>`. For a dialog opened from inside a menu or
+/// popover that hides as the item is pressed: the hidden item drops focus, the
+/// trap recorded `<body>` as the opener, and closing the dialog left keyboard
+/// focus nowhere. The menu's trigger is the honest place to come back to.
+pub(crate) fn return_focus_to(el: HtmlElement) {
+    RETURN_TO.with(|r| *r.borrow_mut() = Some(el));
+}
 
 /// What Tab can land on inside a dialog. `tabindex="-1"` is excluded so the dialog
 /// container itself (which carries it to be focusable on open) is not a stop.
@@ -31,9 +48,22 @@ const FOCUSABLE: &str = "button:not([disabled]), summary, input:not([disabled]),
 /// created, which is the click that opened it.
 pub(crate) fn focus_trap() -> (NodeRef<Div>, impl Fn(&KeyboardEvent) + Clone + 'static) {
     let dialog: NodeRef<Div> = NodeRef::new();
-    let opener = document()
+    let doc = document();
+    let focused = doc
         .active_element()
+        .filter(|e| {
+            doc.body().is_none_or(|b| {
+                let b: &Element = b.as_ref();
+                b != e
+            })
+        })
         .and_then(|e| e.dyn_into::<HtmlElement>().ok());
+    // Taken either way, so a hint left by a menu whose dialog never opened (the
+    // plan failed) cannot steer a later, unrelated dialog.
+    let hint = RETURN_TO
+        .with(|r| r.borrow_mut().take())
+        .filter(|el| el.is_connected());
+    let opener = focused.or(hint);
 
     // Runs once the element is mounted (the ref is a signal, so the effect re-runs
     // when it is filled in).
