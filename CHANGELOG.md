@@ -57,6 +57,11 @@ version and start a fresh `[Unreleased]`.
 - Pressing Escape after visiting the Patches tab no longer causes errors in the app.
 - An export no longer fails because the exploit data's status is unusually long.
 - A damaged line in the run history or audit trail no longer hides the rest of it.
+- An action NinjaOne rejects for every device is no longer announced as dispatched; the message
+  says how many devices were rejected.
+- An update whose download stalls now fails after a while instead of leaving the app stuck on
+  "Updating…".
+- A crash is now written to the log file.
 
 ## [0.22.0] - 2026-10-27
 
