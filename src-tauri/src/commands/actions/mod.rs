@@ -322,6 +322,23 @@ pub async fn run_action(
     .await;
     jobs.extend(dispatched);
 
+    // One write for the batch: what each send came back with, for every device
+    // whose verdict is still to come. A job rejected at the send already has its
+    // closing record (`dispatch_one`).
+    audit::record_off_runtime(
+        jobs.iter()
+            .filter(|j| matches!(j.state, JobState::Running | JobState::Unknown(_)))
+            .map(|j| {
+                audit::AuditEntry::sent(
+                    j,
+                    settings.instance_base_url.clone(),
+                    settings.client_id.clone(),
+                )
+            })
+            .collect(),
+    )
+    .await;
+
     // What NinjaOne took, or may have taken: a job it refused at the send is
     // already `Failed` and changed nothing on the device. Counting those as
     // dispatched announced a batch of 403s as a success and invalidated the patch

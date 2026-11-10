@@ -65,6 +65,8 @@ version and start a fresh `[Unreleased]`.
 - An update whose download stalls now fails after a while instead of leaving the app stuck on
   "Updating…".
 - A crash is now written to the log file.
+- The action audit trail now records whether NinjaOne accepted each request, and closes the
+  entries of actions still running when you quit the app.
 
 ## [0.22.0] - 2026-10-27
 

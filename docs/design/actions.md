@@ -489,6 +489,14 @@ read now). The Jobs tab's Clear keeps unsettled rows, so a row that is not appli
 append was removed by the session ending. That means `clear_jobs` already closed it as
 unresolved.
 
+Between the opening record and the close a job has one more: `AuditEntry::sent`, written once per
+batch as `dispatch_batch` returns, for every job NinjaOne accepted ("sent: accepted…") or may have
+("sent, outcome unknown: <why>"). Without it "dispatching" could not tell an accepted request from
+a device still queued or a crash, and the reason for an `Unknown` lived only in memory. The app's
+exit (`RunEvent::Exit` in `lib.rs`) runs `clear_jobs` and writes its unresolved closings
+synchronously, so closing the window mid-run leaves a close too. Job and batch ids are seeded from
+the clock at launch (`job_seq`), because the log joins a job's records by them across launches.
+
 **Every opening "dispatching" audit record gets a close**, even when the session ends first. The
 close is `AuditEntry::unresolved` ("unresolved: session ended before the outcome was known", with
 no activity id or exit code) in two places, so each job gets at most one. `clear_jobs` returns one

@@ -220,6 +220,14 @@ pub fn run() {
             commands::actions::list_scripts,
             commands::actions::list_run_as_options,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // Jobs still awaiting a verdict lose their poller with the process.
+            // Synchronous, like the window geometry: nothing runs after this.
+            if let tauri::RunEvent::Exit = event {
+                let unresolved = app.state::<AppState>().clear_jobs();
+                actions::audit::record_all(&unresolved);
+            }
+        });
 }

@@ -86,6 +86,10 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   dispatch task that panics still yields an `Unknown` job** (`dispatch::fill_unreported`, dated
   from the batch start) so the poller resolves it and its opening record gets its close.
   → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
+- **Every job NinjaOne accepted or may have gets an `AuditEntry::sent` record when the batch
+  returns, and the app's exit closes whatever is unsettled** (`RunEvent::Exit` → `clear_jobs`);
+  job ids are clock-seeded so they do not repeat across launches.
+  → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 - **Audit `parameters` are `audit::Redacted`**, constructible only through `Redacted::of`, which
   runs the redaction; never add a raw-string path into the log.
   → `docs/design/actions.md#the-audit-log-redacts-credentials-in-every-shape-a-script-takes-them`

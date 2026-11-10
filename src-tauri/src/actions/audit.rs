@@ -153,6 +153,23 @@ impl AuditEntry {
         }
     }
 
+    /// The record written as a device's POST returns without a verdict: NinjaOne
+    /// took the request, or may have. Until this existed such a job had only its
+    /// "dispatching" record until the poller settled it, up to 45 minutes later —
+    /// indistinguishable, in between and for good if the app closed, from a device
+    /// still queued behind the semaphore or a crash before any send. It also keeps
+    /// *why* a send was ambiguous, which lived only in memory.
+    pub fn sent(job: &JobReport, instance: String, client_id: Option<String>) -> Self {
+        Self {
+            outcome: match &job.state {
+                JobState::Unknown(why) => format!("sent, outcome unknown: {why}"),
+                _ => SENT_ACCEPTED.into(),
+            },
+            exit_code: None,
+            ..Self::closing(job, instance, client_id)
+        }
+    }
+
     /// The closing record for a job whose session ended before its outcome was
     /// known — refused at `append_jobs` or wiped by `clear_jobs` (which every tenant
     /// switch runs). Without it the trail held a "dispatching" record with no close,
@@ -170,6 +187,9 @@ impl AuditEntry {
         }
     }
 }
+
+/// The outcome [`AuditEntry::sent`] records for a request NinjaOne accepted.
+pub const SENT_ACCEPTED: &str = "sent: accepted by NinjaOne, awaiting its result";
 
 /// The outcome [`AuditEntry::unresolved`] records.
 pub const UNRESOLVED_SESSION_ENDED: &str = "unresolved: session ended before the outcome was known";
@@ -1253,6 +1273,20 @@ mod tests {
         assert_eq!(entry.activity_id, Some(11));
         assert_eq!(entry.exit_code, Some(1));
         assert!(entry.parameters.is_none() && entry.confirm_token_prefix.is_none());
+
+        // What the send came back with, for a job whose verdict is still to come:
+        // the correlator stays, the reason an ambiguous send was ambiguous is kept.
+        let mut job = job;
+        job.state = JobState::Running;
+        let sent = AuditEntry::sent(&job, "https://x".into(), None);
+        assert_eq!(sent.outcome, SENT_ACCEPTED);
+        assert_eq!((sent.activity_id, sent.exit_code), (Some(11), None));
+        job.state = JobState::Unknown("the request timed out after it was sent".into());
+        let sent = AuditEntry::sent(&job, "https://x".into(), None);
+        assert_eq!(
+            sent.outcome,
+            "sent, outcome unknown: the request timed out after it was sent"
+        );
     }
 
     /// What the log stores for `raw`, through the one constructor it has.
