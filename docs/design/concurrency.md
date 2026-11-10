@@ -48,6 +48,17 @@ switch re-pointing auth and clearing caches) keeps later writers out until those
 The lock and `replace_settings` are private precisely so no second writer can hand-roll the
 sequence without them.
 
+The edit starts from `settings.json` as it is on disk, read under the writer lock
+(`Settings::rebased_on_disk`), not from the in-memory snapshot. The lock serializes writers inside
+one process only; a second app instance shares the file, and editing the snapshot meant instance A's
+next preset save wrote back everything A had loaded at launch — reverting instance B's change in
+between, actions being switched off included. The connection fields (instance, client id, callback
+port) are kept from the snapshot: they are bound to this process's signed-in session and caches,
+which only `save_settings`' effects re-point. An unreadable or unparseable file falls back to the
+snapshot. The other instance's in-memory copy is still stale until its own next write — a reader
+does not re-read; `tauri-plugin-single-instance` would remove the second instance altogether, at
+the cost of a dependency.
+
 ## Every rewritten file goes through `paths::write_atomic`
 
 Settings, window state, the exploit data, the run snapshots, the first-seen ledger, the run-history
