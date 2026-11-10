@@ -322,7 +322,7 @@ impl AppState {
             // confirm dialog shows each device's parameter string. The read sends the
             // ticked keys and gets back only those still listed — it used to fetch up
             // to a thousand full rows per selected device, every tick.
-            let Ok(status) = api::selection_status(probes).await else {
+            let Ok(status) = api::selection_status(probes.clone()).await else {
                 return;
             };
             if util::is_superseded(self.run.query_seq.get_untracked(), seq) {
@@ -331,7 +331,7 @@ impl AppState {
             let mut removed = 0;
             self.actions
                 .selected
-                .update(|sel| removed = util::prune_selection_from_status(sel, &status));
+                .update(|sel| removed = util::prune_selection_from_status(sel, &probes, &status));
             if removed > 0 {
                 self.notify(Toast::ok(format!(
                     "Auto-refresh: {removed} selected patch row(s) are no longer listed and were deselected"

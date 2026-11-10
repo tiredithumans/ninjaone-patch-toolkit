@@ -102,38 +102,45 @@ pub(crate) fn selection_probes(sel: &BTreeMap<i64, DeviceSelection>) -> Vec<Sele
 }
 
 /// Re-checks the patch-row selection against the backend's answer after a refresh,
-/// keeping only the ticked patches each device still lists. Returns how many ticked
+/// dropping the ticked patches each device no longer lists. Returns how many ticked
 /// rows it dropped.
 ///
 /// This is what lets an auto-refresh keep the operator's selection. Clearing it on
 /// every tick meant a 5-minute cadence wiped a hand-built 20-device selection while
 /// they were still building it; keeping it blindly would dispatch against patches
-/// the refresh just showed as installed. A ticked row survives only if the same
-/// patch (by [`patch_key`]) is still listed on the same device, and the device's
-/// offline flag is taken from the answer so the summary's offline count stays true.
-/// A device with nothing left, or no longer in scope, leaves the selection. A device
-/// the answer does not mention is left as it was: a cache miss answers nothing, and
-/// nothing is not "gone".
+/// the refresh just showed as installed. A ticked row is dropped only if it was in
+/// the `probes` sent and the answer no longer lists it on the same device (by
+/// [`patch_key`]); the device's offline flag is taken from the answer so the
+/// summary's offline count stays true. A device with nothing left, or no longer in
+/// scope, loses what was probed. A device the answer does not mention is left as it
+/// was: a cache miss answers nothing, and nothing is not "gone".
+///
+/// Only *probed* keys can be dropped: the read is async, and a row ticked while it
+/// was in flight was never asked about — its absence from `present` means nothing.
 pub(crate) fn prune_selection_from_status(
     sel: &mut BTreeMap<i64, DeviceSelection>,
+    probes: &[SelectionProbe],
     status: &[SelectionStatus],
 ) -> usize {
     let mut removed = 0;
     for s in status {
+        let Some(probe) = probes.iter().find(|p| p.device_id == s.device_id) else {
+            continue;
+        };
         let Some(entry) = sel.get_mut(&s.device_id) else {
             continue;
         };
-        let before = entry.patches.len();
-        if s.in_scope {
-            let present: BTreeSet<&str> = s.present.iter().map(String::as_str).collect();
-            entry
-                .patches
-                .retain(|key, _| present.contains(key.as_str()));
+        let present: BTreeSet<&str> = if s.in_scope {
             entry.offline = s.offline;
+            s.present.iter().map(String::as_str).collect()
         } else {
-            entry.patches.clear();
+            BTreeSet::new()
+        };
+        for key in &probe.keys {
+            if !present.contains(key.as_str()) && entry.patches.remove(key).is_some() {
+                removed += 1;
+            }
         }
-        removed += before - entry.patches.len();
         if entry.patches.is_empty() {
             sel.remove(&s.device_id);
         }

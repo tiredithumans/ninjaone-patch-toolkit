@@ -772,8 +772,9 @@ fn a_device_the_answer_does_not_mention_keeps_its_selection() {
     let mut sel = BTreeMap::new();
     apply_rows_selection(&mut sel, &[a, b, c], true);
 
+    let probes = selection_probes(&sel);
     assert_eq!(
-        prune_selection_from_status(&mut sel, &[]),
+        prune_selection_from_status(&mut sel, &probes, &[]),
         0,
         "a miss prunes nothing"
     );
@@ -786,7 +787,7 @@ fn a_device_the_answer_does_not_mention_keeps_its_selection() {
         needs_reboot: false,
         present: vec![],
     };
-    assert_eq!(prune_selection_from_status(&mut sel, &[gone]), 1);
+    assert_eq!(prune_selection_from_status(&mut sel, &probes, &[gone]), 1);
     assert!(!sel.contains_key(&2), "out of scope drops the device");
     assert_eq!(sel[&1].patches.len(), 2, "device 1 was not mentioned");
 }
@@ -2890,8 +2891,13 @@ fn prune_keeps_only_ticked_rows_the_fresh_result_still_lists() {
         present,
     };
 
+    let probes = selection_probes(&sel);
     // KB2 was installed; KB1 is still pending and the device went offline.
-    let removed = prune_selection_from_status(&mut sel, &[status(10, true, vec![patch_key(&kb1)])]);
+    let removed = prune_selection_from_status(
+        &mut sel,
+        &probes,
+        &[status(10, true, vec![patch_key(&kb1)])],
+    );
     assert_eq!(removed, 1);
     let device = &sel[&10];
     assert_eq!(device.patches.len(), 1);
@@ -2901,15 +2907,77 @@ fn prune_keeps_only_ticked_rows_the_fresh_result_still_lists() {
 
     // A device with nothing left leaves the selection entirely.
     assert_eq!(
-        prune_selection_from_status(&mut sel, &[status(20, false, vec![])]),
+        prune_selection_from_status(&mut sel, &probes, &[status(20, false, vec![])]),
         1
     );
     assert!(!sel.contains_key(&20));
 
     // An unselected device is a no-op.
     assert_eq!(
-        prune_selection_from_status(&mut sel, &[status(99, false, vec![patch_key(&kb1)])]),
+        prune_selection_from_status(
+            &mut sel,
+            &probes,
+            &[status(99, false, vec![patch_key(&kb1)])]
+        ),
         0
+    );
+}
+
+/// The read is async: a row ticked while it was in flight was never asked about,
+/// so its absence from the answer must not untick it — on a device that was
+/// probed, on one that left the scope, and on one that was not probed at all.
+#[test]
+fn prune_spares_rows_ticked_after_the_probe_was_sent() {
+    use crate::types::SelectionStatus;
+    let probed = sel_row(10, "srv-a", Some("KB1"), "Patch 1", "OS");
+    let gone = sel_row(10, "srv-a", Some("KB2"), "Patch 2", "OS");
+    let late = sel_row(10, "srv-a", Some("KB3"), "Patch 3", "OS");
+    let late_new_device = sel_row(30, "srv-c", Some("KB1"), "Patch 1", "OS");
+    let mut sel = BTreeMap::new();
+    apply_rows_selection(&mut sel, &[&probed, &gone], true);
+    let probes = selection_probes(&sel);
+    // Ticked while the read was in flight.
+    apply_rows_selection(&mut sel, &[&late, &late_new_device], true);
+
+    let answer = [
+        SelectionStatus {
+            device_id: 10,
+            in_scope: true,
+            offline: false,
+            needs_reboot: false,
+            present: vec![patch_key(&probed)],
+        },
+        // Answered although not probed (never happens today): still not touched.
+        SelectionStatus {
+            device_id: 30,
+            in_scope: false,
+            offline: false,
+            needs_reboot: false,
+            present: vec![],
+        },
+    ];
+    assert_eq!(prune_selection_from_status(&mut sel, &probes, &answer), 1);
+    let device = &sel[&10];
+    assert!(device.patches.contains_key(&patch_key(&probed)));
+    assert!(!device.patches.contains_key(&patch_key(&gone)));
+    assert!(
+        device.patches.contains_key(&patch_key(&late)),
+        "a key absent from the probe is kept"
+    );
+    assert!(sel.contains_key(&30), "an unprobed device is kept");
+
+    // Out of scope drops only what was probed on the device.
+    let out = SelectionStatus {
+        device_id: 10,
+        in_scope: false,
+        offline: false,
+        needs_reboot: false,
+        present: vec![],
+    };
+    assert_eq!(prune_selection_from_status(&mut sel, &probes, &[out]), 1);
+    assert_eq!(
+        sel[&10].patches.keys().cloned().collect::<Vec<_>>(),
+        vec![patch_key(&late)]
     );
 }
 
