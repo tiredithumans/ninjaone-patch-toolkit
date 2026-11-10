@@ -31,6 +31,8 @@ impl AppState {
                 .is_some_and(|id| !id.trim().is_empty()),
         );
         self.settings.loaded.set(true);
+        // The form now holds exactly what is saved.
+        self.settings.dirty.set(false);
         self.settings
             .f_client_id
             .set(v.client_id.unwrap_or_default());

@@ -724,3 +724,17 @@ pub(crate) fn filter_chips(f: &AppliedFilters) -> Vec<FilterChip> {
     }
     out
 }
+
+/// What is plainly wrong with the instance URL as typed, for the hint under the
+/// field. Only the two mistakes worth catching before Save; the backend's
+/// `settings::instance_url_problem` stays the judge of everything else.
+pub(crate) fn instance_url_hint(url: &str) -> Option<&'static str> {
+    let url = url.trim();
+    if url.is_empty() {
+        Some("Pick a region or enter your instance URL.")
+    } else if !(url.starts_with("https://") || url.starts_with("http://127.0.0.1")) {
+        Some("The instance URL starts with https://")
+    } else {
+        None
+    }
+}

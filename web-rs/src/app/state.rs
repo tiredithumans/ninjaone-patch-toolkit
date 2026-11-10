@@ -621,6 +621,9 @@ pub(crate) struct SettingsState {
     /// Why the saved settings could not be read at launch. Nothing else on screen
     /// says so: the onboarding card waits for `loaded`, which then never comes.
     pub(super) load_error: RwSignal<Option<String>>,
+    /// Something in the Settings form was edited since it last matched what is
+    /// saved. Close keeps the edits, so without this nothing said they were unsaved.
+    pub(super) dirty: RwSignal<bool>,
 }
 
 impl SettingsState {
@@ -644,6 +647,7 @@ impl SettingsState {
             loaded: RwSignal::new(false),
             has_client_id: RwSignal::new(false),
             load_error: RwSignal::new(None),
+            dirty: RwSignal::new(false),
         }
     }
 }

@@ -35,6 +35,9 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
     let custom_region = RwSignal::new(false);
     // One save in flight at a time — a second click raced the first.
     let saving = RwSignal::new(false);
+    // What the backend builds its redirect from (`auth::login_pkce`): 127.0.0.1,
+    // never localhost, and no path.
+    let redirect_uri = move || format!("http://127.0.0.1:{}", state.settings.f_port.get());
 
     let save = move |_| {
         if saving.get_untracked() {
@@ -114,6 +117,9 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
             tabindex="-1"
             node_ref=dialog
             on:keydown=move |ev| on_tab(&ev)
+            // Every field's edit bubbles here; a save resets it (`apply_settings_view`).
+            on:input=move |_| state.settings.dirty.set(true)
+            on:change=move |_| state.settings.dirty.set(true)
         >
             <div class="modal-head">
                 <h2 id="settings-title">"Settings"</h2>
@@ -170,6 +176,10 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                         prop:value=move || state.settings.f_instance.get()
                         on:input=move |ev| state.settings.f_instance.set(event_target_value(&ev))
                     />
+                    {move || {
+                        state.settings.f_instance.with(|i| util::instance_url_hint(i))
+                            .map(|msg| view! { <span class="field-hint" role="alert">{msg}</span> })
+                    }}
                 </label>
                 <label>
                     "Client ID"
@@ -177,13 +187,16 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                         prop:value=move || state.settings.f_client_id.get()
                         on:input=move |ev| state.settings.f_client_id.set(event_target_value(&ev))
                     />
+                    <span class="settings-hint">
+                        "From your API app in NinjaOne: Administration → Apps → API."
+                    </span>
                 </label>
                 <label>
                     {move || {
                         if state.settings.has_secret.get() {
                             "Client secret (leave blank to keep)"
                         } else {
-                            "Client secret (Native apps have none)"
+                            "Client secret (only for a Web app; leave empty for a Native app)"
                         }
                     }}
                     <input
@@ -209,6 +222,30 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                             state.settings.f_port.set(v);
                         }
                     />
+                    <span class="settings-hint">
+                        "Sign-in comes back to this port on your computer. Register this "
+                        "redirect URI on the NinjaOne API app:"
+                    </span>
+                    <span class="redirect-uri">
+                        <code>{redirect_uri}</code>
+                        <button
+                            type="button"
+                            class="link-btn"
+                            on:click=move |_| {
+                                let uri = redirect_uri();
+                                spawn_local(async move {
+                                    match api::copy_to_clipboard(&uri).await {
+                                        Ok(()) => state.notify(Toast::ok("Redirect URI copied")),
+                                        Err(_) => state.notify(Toast::err(
+                                            "Couldn't reach the clipboard — select the address and copy it",
+                                        )),
+                                    }
+                                });
+                            }
+                        >
+                            "Copy"
+                        </button>
+                    </span>
                 </label>
                 <label>
                     "Install history window (days)"
@@ -227,6 +264,9 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                             state.settings.f_install_days.set(v);
                         }
                     />
+                    <span class="settings-hint">
+                        "How far back Installed and Failed patches are read by default."
+                    </span>
                 </label>
                 <label class="inline">
                     <input
@@ -256,6 +296,14 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                 <button class="btn btn-primary" prop:disabled=move || saving.get() on:click=save>
                     {move || if saving.get() { "Saving…" } else { "Save settings" }}
                 </button>
+                <Show when=move || state.settings.dirty.get()>
+                    <span class="field-hint" role="status">"Unsaved changes"</span>
+                </Show>
+                <button class="btn" on:click=move |_| close()>
+                    "Close"
+                </button>
+                // Everything that is not "save or leave", pushed to the far side.
+                <span class="settings-footer__util">
                 <Show when=move || state.settings.has_secret.get()>
                     <button
                         class=move || {
@@ -311,9 +359,7 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                 <span class="app-version">
                     {concat!("NinjaOne Patch Toolkit v", env!("CARGO_PKG_VERSION"))}
                 </span>
-                <button class="btn" on:click=move |_| close()>
-                    "Close"
-                </button>
+                </span>
             </div>
         </div>
         </div>

@@ -68,7 +68,17 @@ pub(crate) fn Header() -> impl IntoView {
 #[component]
 fn Account() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // Signing out stops this app tracking jobs it dispatched (the updater refuses
+    // outright in the same situation), so with jobs in flight the first click only
+    // says so and the second signs out.
+    let armed = RwSignal::new(false);
+    let in_flight = move || state.actions.jobs.with(|j| util::jobs_in_flight(j));
     let sign_out = move |_| {
+        if in_flight() > 0 && !armed.get_untracked() {
+            armed.set(true);
+            return;
+        }
+        armed.set(false);
         spawn_local(async move {
             match api::sign_out().await {
                 Ok(()) => {
@@ -120,8 +130,25 @@ fn Account() -> impl IntoView {
                             .unwrap_or_default()
                     }}
                 </p>
-                <button type="button" class="menu__item" on:click=sign_out>
-                    "Sign out"
+                <button
+                    type="button"
+                    class="menu__item"
+                    // Stays open across the arming click.
+                    data-keep-open=move || (in_flight() > 0 && !armed.get()).then_some("")
+                    on:click=sign_out
+                    on:mouseleave=move |_| armed.set(false)
+                    on:blur=move |_| armed.set(false)
+                >
+                    {move || {
+                        if armed.get() {
+                            format!(
+                                "{} still running will stop being tracked — sign out anyway?",
+                                util::count_of(in_flight(), "job", "jobs"),
+                            )
+                        } else {
+                            "Sign out".to_string()
+                        }
+                    }}
                 </button>
             </MenuButton>
         </Show>
