@@ -1,6 +1,6 @@
 # The write path: device actions
 
-Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
+Contract lines: [AGENTS.md → Domain rules](../../AGENTS.md#domain-rules--read-the-file-before-you-change-the-domain).
 Code: `src-tauri/src/actions/` (domain + `plan()`; `kind`, `job`, `planning`, `parameters`,
 `activity`, `audit`, re-exported flat as `crate::actions::*`), `src-tauri/src/api/actions.rs` (the
 POSTs), `src-tauri/src/commands/actions/` (`mod.rs` the commands, `plan.rs`, `confirm.rs`,
@@ -375,9 +375,16 @@ necessary but not sufficient: `build_plan` resolves the script and classifies it
   sent verbatim, so no flag is added; the alternative — appending `dryRun=true` when the string
   lacks it — would rewrite what the operator typed and put a parse of free-form text between them
   and a live run. Clearing the box composes the parameters instead, which always carry the flag.
-- The library is read only for a dry run of a script, on plan **and** on confirm (`run_action`
+- The library is read for a dry run of a script, on plan **and** on confirm (`run_action`
   re-plans), so a script edited to drop `dryRun` between review and confirm is refused. A library
   that cannot be read, or no longer lists the id, is `Unverified` — blocked, fail closed.
+- A **live** run of a library script reads it too (`plan::check_script`). It used not to, to save
+  the round trip, which left the dangerous half unchecked: a remediation id mistyped in Settings
+  ran whatever script held that number. An id the library does not list, or lists as deactivated,
+  is a blocker; a library that cannot be read is a warning, so a listing outage does not stop a
+  script NinjaOne would still run. The plan carries the script as the library names it and the
+  resolved run-as (`ActionPlan.script`, `.run_as`), and the dialog shows both — they are what the
+  token binds. The frontend drops its Run-as choice with the session, like the script id.
 - `ScriptSummary.accepts_dry_run` lets the action bar disable the affected buttons while Dry run is
   on, and name the scripts that cannot preview; it is advisory, the planner decides.
 
@@ -481,6 +488,14 @@ only for an **applied** row, labelled with the session's instance and client id 
 read now). The Jobs tab's Clear keeps unsettled rows, so a row that is not applied after its
 append was removed by the session ending. That means `clear_jobs` already closed it as
 unresolved.
+
+Between the opening record and the close a job has one more: `AuditEntry::sent`, written once per
+batch as `dispatch_batch` returns, for every job NinjaOne accepted ("sent: accepted…") or may have
+("sent, outcome unknown: <why>"). Without it "dispatching" could not tell an accepted request from
+a device still queued or a crash, and the reason for an `Unknown` lived only in memory. The app's
+exit (`RunEvent::Exit` in `lib.rs`) runs `clear_jobs` and writes its unresolved closings
+synchronously, so closing the window mid-run leaves a close too. Job and batch ids are seeded from
+the clock at launch (`job_seq`), because the log joins a job's records by them across launches.
 
 **Every opening "dispatching" audit record gets a close**, even when the session ends first. The
 close is `AuditEntry::unresolved` ("unresolved: session ended before the outcome was known", with

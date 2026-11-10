@@ -23,6 +23,7 @@ impl AppState {
         self.settings.has_secret.set(v.has_client_secret);
         self.settings.f_auto_update.set(v.auto_check_updates);
         self.settings.f_exploit_data.set(v.exploit_data);
+        self.settings.saved_actions.set(v.actions.clone());
         self.settings.f_actions.set(v.actions);
         self.filters.install_days.set(v.install_window_days);
         self.settings.presets.set(v.presets);

@@ -1,6 +1,6 @@
 # Query result cache and whole-fleet prefetch
 
-Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
+Contract lines: [AGENTS.md → Domain rules](../../AGENTS.md#domain-rules--read-the-file-before-you-change-the-domain).
 Code: `src-tauri/src/state.rs` (`AppState`), `src-tauri/src/state/cache.rs` (`TenantCache`),
 `src-tauri/src/commands/patches.rs` (`query_patches`, `run_query`, `assemble_result`),
 `src-tauri/src/rows/`.

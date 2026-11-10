@@ -34,9 +34,10 @@ const HISTORY_FILE: &str = "run-history.jsonl";
 
 /// Lines kept before the file is trimmed from the front.
 ///
-/// At a 15-minute cadence round the clock this is about five weeks, which covers
-/// "did last month's patch window work" without letting an install that never
-/// closes the app grow the file without bound.
+/// A changing fleet at a 15-minute cadence round the clock fills this in about five
+/// weeks, and an unchanged scope writes at most one line an hour
+/// ([`UNCHANGED_INTERVAL`]) — which covers "did last month's patch window work"
+/// without letting an install that never closes the app grow the file without bound.
 const MAX_LINES: usize = 4_000;
 
 /// How far past [`MAX_LINES`] the file may grow before it is trimmed back.
@@ -293,7 +294,53 @@ pub fn record(entry: &RunRecord) {
         warn!("no config directory available; run-history record dropped");
         return;
     };
+    let now = std::time::Instant::now();
+    {
+        let mut last = LAST_RECORDED.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (entry.tenant.clone(), entry.scope_key.clone());
+        if repeats_last(last.get(&key), entry, now) {
+            return;
+        }
+        // A handful of scopes per session; the bound is only against a process
+        // that never closes cycling through view links.
+        if last.len() >= 64 {
+            last.clear();
+        }
+        last.insert(key, (now, entry.clone()));
+    }
     append(&path, entry);
+}
+
+/// How long an unchanged scope goes without a line. Long enough that a quiet fleet
+/// costs 24 lines a day whatever the auto-refresh cadence; short enough that the
+/// newest record's time is never far behind the run on screen.
+const UNCHANGED_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// The last record this process wrote per (tenant, scope), and when.
+///
+/// Every completed query used to append, including an auto-refresh tick that
+/// measured exactly what the tick before it did. At the 1-minute cadence that
+/// filled the [`MAX_LINES`] file in under three days, and the Trend tab's 60 newest
+/// runs spanned one hour of identical points — so "did last month's patch window
+/// work" was answerable only with auto-refresh off.
+static LAST_RECORDED: Mutex<LastRecorded> = Mutex::new(std::collections::BTreeMap::new());
+
+type LastRecorded = std::collections::BTreeMap<(String, String), (std::time::Instant, RunRecord)>;
+
+/// Whether `entry` says nothing its scope's last line did not: the same figures,
+/// within [`UNCHANGED_INTERVAL`] of it. Only `at` may differ.
+fn repeats_last(
+    last: Option<&(std::time::Instant, RunRecord)>,
+    entry: &RunRecord,
+    now: std::time::Instant,
+) -> bool {
+    last.is_some_and(|(written, record)| {
+        now.duration_since(*written) < UNCHANGED_INTERVAL
+            && RunRecord {
+                at: entry.at.clone(),
+                ..record.clone()
+            } == *entry
+    })
 }
 
 /// The half of [`record`] that takes its destination, so the append, the trim and
@@ -680,6 +727,23 @@ mod tests {
     }
 
     /// Lines written before `scopeKey` existed must still read back.
+    /// An auto-refresh tick that measured what the last one did writes no line; a
+    /// changed figure, or an hour without one, does.
+    #[test]
+    fn an_unchanged_run_is_recorded_once_an_hour_not_every_tick() {
+        let t0 = std::time::Instant::now();
+        let first = rec("2026-06-01 10:00:00 UTC", 90, 100);
+        let last = (t0, first.clone());
+        let minute = std::time::Duration::from_secs(60);
+
+        let same = rec("2026-06-01 10:01:00 UTC", 90, 100);
+        assert!(repeats_last(Some(&last), &same, t0 + minute));
+        assert!(!repeats_last(Some(&last), &same, t0 + UNCHANGED_INTERVAL));
+        let moved = rec("2026-06-01 10:01:00 UTC", 91, 100);
+        assert!(!repeats_last(Some(&last), &moved, t0 + minute));
+        assert!(!repeats_last(None, &first, t0));
+    }
+
     #[test]
     fn a_record_from_before_the_scope_key_still_parses() {
         let mut old = serde_json::to_value(rec("2026-01-01 00:00:00 UTC", 5, 10)).unwrap();

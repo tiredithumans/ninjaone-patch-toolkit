@@ -33,7 +33,9 @@ paths:
   → `docs/design/auth.md#the-browser-launch-neither-holds-a-worker-nor-logs-the-url`
 - **Scope is conditional on `settings.actions.enabled` and the refresh grant never re-sends it.**
   `management_grant()` detects a read-only grant; `None` means unknowable, not denied.
-  `reauthorize` drops the keyring refresh token first.
+  `reauthorize` drops the keyring refresh token first — but only after it holds the login gate
+  (`AuthState::reauthorize`), so a second click cannot sign out under a pending consent. Test:
+  `a_second_reauthorize_leaves_the_pending_sign_in_alone`.
   → `docs/design/auth.md#scope-is-conditional-and-the-refresh-grant-never-re-sends-it`
 - **`store_tokens` assigns in-memory first (session-gated) and downgrades a keyring failure to a
   warning.** `invalidate_access_token(&stale)` no-ops unless the token is still current.

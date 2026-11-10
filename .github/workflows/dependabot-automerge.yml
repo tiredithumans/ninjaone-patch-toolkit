@@ -28,11 +28,16 @@ jobs:
       - id: meta
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
       # A grouped PR reports its largest bump; anything other than minor or patch
-      # (major, or a type Dependabot could not tell) is left for a person.
+      # (major, or a type Dependabot could not tell) is left for a person. So is a
+      # PR outside a group: Dependabot calls 0.101 -> 0.102 "minor", which for Cargo
+      # is a breaking bump, and it opens those on their own because the groups in
+      # dependabot.yml take only compatible updates. The update type alone merged
+      # two of them unreviewed.
       - name: Enable auto-merge
         if: >-
-          steps.meta.outputs.update-type == 'version-update:semver-minor' ||
-          steps.meta.outputs.update-type == 'version-update:semver-patch'
+          steps.meta.outputs.dependency-group != '' &&
+          (steps.meta.outputs.update-type == 'version-update:semver-minor' ||
+          steps.meta.outputs.update-type == 'version-update:semver-patch')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}

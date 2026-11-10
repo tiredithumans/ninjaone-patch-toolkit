@@ -1145,9 +1145,35 @@ impl AuthState {
             .await
             .context("sign-out task failed")?
     }
+}
+
+/// Proof that the caller holds the login gate; see [`AuthState::claim_login`].
+struct LoginClaim<'a>(#[allow(dead_code)] tokio::sync::MutexGuard<'a, ()>);
+
+impl AuthState {
     /// Interactive PKCE login: opens the browser and waits up to 3 minutes for the
     /// callback, then exchanges the code for tokens.
     pub async fn login_pkce(&self) -> Result<()> {
+        let claim = self.claim_login()?;
+        self.login_pkce_claimed(&claim).await
+    }
+
+    /// Signs out and runs the interactive flow, as one claim on the login gate.
+    ///
+    /// The gate is taken *before* the sign-out. `reauthorize` used to sign out and
+    /// only then find the gate held, so a second click on Re-authorize bumped the
+    /// session generation under the first click's pending consent — whose tokens
+    /// `store_tokens` then discarded as "signed out while this sign-in was in
+    /// progress" — and failed itself. `before_logout` runs once the claim is held,
+    /// for the session state the caller clears.
+    pub async fn reauthorize(&self, before_logout: impl Future<Output = ()>) -> Result<()> {
+        let claim = self.claim_login()?;
+        before_logout.await;
+        self.logout_async().await?;
+        self.login_pkce_claimed(&claim).await
+    }
+
+    fn claim_login(&self) -> Result<LoginClaim<'_>> {
         // One interactive flow at a time. Without this, a second sign-in (a
         // double-click on Sign in, or a retry while the first browser tab is still
         // open) raced to `bind` the same callback port and failed with "could not
@@ -1156,12 +1182,18 @@ impl AuthState {
         // the port is held by this process's own in-flight flow. `try_lock` rather
         // than `lock`: queueing a second browser window behind a three-minute wait
         // is not what the operator asked for.
-        let _login = self.login_gate.try_lock().map_err(|_| {
+        //
+        // The message does not suggest closing the tab: that releases nothing, the
+        // flow waits out its three minutes for a callback either way.
+        self.login_gate.try_lock().map(LoginClaim).map_err(|_| {
             anyhow!(
-                "a sign-in is already in progress — finish or close the browser tab that opened, \
-                 then try again"
+                "a sign-in is already in progress — finish it in the browser tab that opened, \
+                 or wait up to three minutes for it to expire"
             )
-        })?;
+        })
+    }
+
+    async fn login_pkce_claimed(&self, _claim: &LoginClaim<'_>) -> Result<()> {
         // One read, so the stamp, the client and its secret all describe the same
         // tenant. Sampled before the browser opens: an interactive flow waits up to
         // three minutes, ample room for the operator to change instance in Settings

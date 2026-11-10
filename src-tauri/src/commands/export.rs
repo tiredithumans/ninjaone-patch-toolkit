@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::Path;
@@ -56,11 +57,23 @@ fn write_export(
     path: &Path,
     write: impl FnOnce(&mut File) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let mut file = create_owner_only(path)?;
-    let written = write(&mut file);
+    // Written beside the target and renamed over it. Writing in place truncated
+    // the file the operator chose to overwrite before the new one existed, so a
+    // failed write deleted last week's export, and a crash mid-write left a
+    // shorter CSV that looked whole.
+    let mut name = std::ffi::OsString::from(".");
+    name.push(path.file_name().unwrap_or_default());
+    name.push(format!(".tmp-{}", std::process::id()));
+    let tmp = path.with_file_name(name);
+    let mut file = create_owner_only(&tmp)?;
+    let written = write(&mut file)
+        .and_then(|()| file.sync_all().context("flushing the export to disk"))
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+        });
     if written.is_err() {
-        drop(file);
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&tmp);
     }
     written
 }

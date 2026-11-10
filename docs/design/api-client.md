@@ -1,6 +1,6 @@
 # NinjaOne API client: retry and pagination
 
-Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
+Contract lines: [AGENTS.md → Domain rules](../../AGENTS.md#domain-rules--read-the-file-before-you-change-the-domain).
 Code: `src-tauri/src/api/mod.rs` (`NinjaApiClient`, retry), `src-tauri/src/api/paging.rs`
 (`get_paginated`, `parse_page`, `PagedRow`, `PageCursor`), `src-tauri/Cargo.toml` (reqwest features).
 Spec: rendered docs at <https://app.ninjarmm.com/apidocs/?links.active=core>; raw OpenAPI at

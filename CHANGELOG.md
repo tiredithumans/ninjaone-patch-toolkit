@@ -17,6 +17,9 @@ version and start a fresh `[Unreleased]`.
   when Microsoft signed it, calls `shutdown.exe` by full path in both scripts, and loads the
   WinGet module only when Microsoft signed it. Re-import both scripts from `remediation/` into
   the NinjaOne library to pick this up.
+- An action's confirmation now names the script it runs and the identity it runs as, and refuses
+  a script id that is not in your NinjaOne library or is deactivated there.
+- The Run-as choice no longer carries over when you sign out or switch instances.
 - Confirming an action no longer runs it on devices that changed since you reviewed it — for
   example an offline device that came back online. Review the plan again instead.
 - **Sign out** now removes the saved sign-in of every instance and client id this install has
@@ -57,6 +60,22 @@ version and start a fresh `[Unreleased]`.
 - Pressing Escape after visiting the Patches tab no longer causes errors in the app.
 - An export no longer fails because the exploit data's status is unusually long.
 - A damaged line in the run history or audit trail no longer hides the rest of it.
+- An action NinjaOne rejects for every device is no longer announced as dispatched; the message
+  says how many devices were rejected.
+- An update whose download stalls now fails after a while instead of leaving the app stuck on
+  "Updating…".
+- A crash is now written to the log file.
+- An export that fails, or is interrupted, no longer destroys the file it was replacing.
+- An export no longer fails when a very long cell contains an emoji.
+- An action no longer times out because this computer's clock runs ahead of NinjaOne's.
+- The action bar now follows your saved settings, not edits left unsaved in the Settings dialog.
+- In an action's confirmation, the lists of targeted and skipped devices can be opened from the
+  keyboard.
+- With auto-refresh on, the Trend tab no longer fills with identical runs: a run that changed
+  nothing is recorded at most once an hour.
+- Clicking **Re-authorize** twice no longer makes the sign-in you then complete fail.
+- The action audit trail now records whether NinjaOne accepted each request, and closes the
+  entries of actions still running when you quit the app.
 
 ## [0.22.0] - 2026-10-27
 

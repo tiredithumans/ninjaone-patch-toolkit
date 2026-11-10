@@ -1041,6 +1041,48 @@ fn library_script(id: i64, name: &str, variables: &[&str]) -> crate::model::Auto
 /// Settings, a built-in action has no `dryRun` at all, and a typed string is
 /// refused before the library is even consulted — it is sent verbatim, so the
 /// toolkit cannot add the flag to it.
+/// A live run names the script it will run and refuses one the library does not
+/// hold: a remediation id mistyped in Settings used to run whatever had that number.
+#[test]
+fn a_live_script_is_checked_against_the_library_and_named() {
+    use super::plan::check_script;
+    let mut off = library_script(44, "Retired", &[]);
+    off.active = Some(false);
+    let scripts = [
+        library_script(42, "Install-Selected", &["kbAllowList"]),
+        off,
+    ];
+    let lib = || Some(Ok(&scripts[..]));
+
+    let ok = check_script(Some(&ScriptRef::Script { id: 42 }), lib());
+    assert_eq!(ok.label.as_deref(), Some("Install-Selected (#42)"));
+    assert_eq!((ok.blocker, ok.warning), (None, None));
+
+    let missing = check_script(Some(&ScriptRef::Script { id: 24 }), lib());
+    assert_eq!(missing.label.as_deref(), Some("Script #24"));
+    assert!(
+        missing
+            .blocker
+            .expect("blocked")
+            .contains("not in the NinjaOne")
+    );
+
+    let inactive = check_script(Some(&ScriptRef::Script { id: 44 }), lib());
+    assert!(inactive.blocker.expect("blocked").contains("deactivated"));
+
+    // A listing outage warns; it does not stop a script NinjaOne would still run.
+    let unread = check_script(Some(&ScriptRef::Script { id: 42 }), Some(Err("HTTP 503")));
+    assert_eq!(unread.blocker, None);
+    assert!(unread.warning.expect("warned").contains("HTTP 503"));
+
+    let action = check_script(Some(&ScriptRef::Action { uid: "abc".into() }), None);
+    assert_eq!(action.label.as_deref(), Some("Built-in action abc"));
+    assert_eq!(
+        check_script(None, None),
+        super::plan::ScriptCheck::default()
+    );
+}
+
 #[test]
 fn dry_run_support_follows_the_resolved_script() {
     use crate::actions::DryRunSupport;
@@ -1523,12 +1565,12 @@ fn feed_reads_group_by_device_and_narrow_only_to_a_confirmed_series() {
             poller::FeedRead {
                 device_id: 7,
                 series_uid: None,
-                since_ts: 895,
+                since_ts: 900 - super::poller::FEED_READ_SLACK_SECS,
             },
             poller::FeedRead {
                 device_id: 8,
                 series_uid: None,
-                since_ts: 1_995,
+                since_ts: 2_000 - super::poller::FEED_READ_SLACK_SECS,
             },
         ]
     );

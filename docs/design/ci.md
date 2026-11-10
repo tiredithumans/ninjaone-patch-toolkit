@@ -6,7 +6,9 @@ Workflows: `.github/workflows/{ci,codeql,release,screenshot,pages}.yml`; recipes
 `just verify` is the local gate and runs every Rust step `ci.yml`'s backend and frontend jobs run,
 in the same order. **Keep it that way** — a CI sequence that quietly differs from the documented
 one is how the two drift. The one step those jobs add is the frontend's Trunk build
-(`just web-build`, the `before*Command` path Tauri uses). The gates below run only on GitHub (or
+(`just web-build-desktop`: `tauri.conf.json`'s `beforeBuildCommand` verbatim — release profile,
+wasm-opt, `--locked`, the `desktop` feature — so the build a release ships first runs on a PR,
+not after the tag). The gates below run only on GitHub (or
 are measurement-only), so a green local `verify` can still fail CI in exactly these ways.
 
 ## Which jobs an event runs (`changes` job)
@@ -52,7 +54,8 @@ crates are ignored so the file does not churn on a version bump. The job first r
 `allow` lists disagree, then re-runs the recipe, which fails on a license about.toml does not
 accept. A diff fails only a `release/*` PR; on any other PR it is a notice. The notice matters
 in what ships, and failing every dependency bump on it kept Dependabot PRs from auto-merging
-(`dependabot-automerge.yml`, minor and patch only). The release skill regenerates the file, and
+(`dependabot-automerge.yml`, grouped minor and patch only — a 0.x "minor" is a breaking bump for
+Cargo, arrives ungrouped and waits for a person). The release skill regenerates the file, and
 `release.yml`'s `verify` job refuses a tag whose copy is stale. The recipe is `[unix]`: PowerShell redirection would
 rewrite encoding and line endings.
 
@@ -148,7 +151,9 @@ compiles or installs holds only the permissions it must:
 - The bundle `build` job in `release.yml` signs with `TAURI_SIGNING_PRIVATE_KEY` in the same
   step that compiles (tauri-action does both), so it restores **no** rust-cache (a cache is
   state other runs wrote) and builds only from the committed lockfiles (`trunk build --locked`
-  in `beforeBuildCommand`, a `cargo fetch --locked` preflight). The job declares
+  in `beforeBuildCommand`, a `cargo fetch --locked` preflight). The Tauri CLI is pinned to an
+  exact version through `tauriScript`; left unset, tauri-action installs the newest 2.x from npm
+  inside this step. It is not lockfile-pinned and Dependabot does not see it: bump it by hand. The job declares
   `environment: release`; the key's secrets belong to that environment, whose deployment rule
   admits only `v*` tags. Moving the secrets there is a repo setting — see
   [RELEASING.md](../RELEASING.md).

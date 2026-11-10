@@ -372,7 +372,11 @@ impl AppState {
             fleet_current_os: TenantCache::default(),
             fleet_current_sw: TenantCache::default(),
             jobs: Mutex::new(None),
-            job_seq: AtomicU64::new(1),
+            // Seeded from the clock, not 1: the audit log joins a job's records by
+            // these ids and outlives the process, so ids that restarted every
+            // launch let one launch's close read as another's. Milliseconds stay
+            // well inside what a JS number holds exactly.
+            job_seq: AtomicU64::new(Utc::now().timestamp_millis().max(1) as u64),
             job_epoch: AtomicU64::new(0),
             query_generation: AtomicU64::new(0),
             result_epoch: AtomicU64::new(0),

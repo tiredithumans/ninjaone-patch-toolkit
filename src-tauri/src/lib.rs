@@ -138,9 +138,24 @@ mod tests {
     }
 }
 
+/// Sends a panic to the log before the default hook prints it. A release build has
+/// no console (`windows_subsystem = "windows"`), so that print went nowhere and a
+/// crash left no line in the one file a field report can attach. The message
+/// carries the source location; the backtrace is captured only when
+/// `RUST_BACKTRACE` asks for one.
+fn log_panics() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::capture();
+        tracing::error!(panic = %info, %backtrace, "panicked");
+        previous(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
+    log_panics();
 
     let app_state = AppState::new().expect("failed to initialize application state");
     let window_saver = Arc::new(window_state::WindowStateSaver::default());
@@ -205,6 +220,14 @@ pub fn run() {
             commands::actions::list_scripts,
             commands::actions::list_run_as_options,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // Jobs still awaiting a verdict lose their poller with the process.
+            // Synchronous, like the window geometry: nothing runs after this.
+            if let tauri::RunEvent::Exit = event {
+                let unresolved = app.state::<AppState>().clear_jobs();
+                actions::audit::record_all(&unresolved);
+            }
+        });
 }

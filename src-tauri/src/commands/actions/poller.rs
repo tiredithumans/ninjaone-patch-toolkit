@@ -271,11 +271,19 @@ pub(super) fn feed_reads(
             FeedRead {
                 device_id,
                 series_uid,
-                since_ts: earliest - 5,
+                since_ts: earliest - FEED_READ_SLACK_SECS,
             }
         })
         .collect()
 }
+
+/// How far before the earliest dispatch a device's feed is read.
+///
+/// Wider than the heuristic tier's own 5 s floor (`match_activity`), which still
+/// applies per job. This bound is applied before *any* tier runs, so at 5 s a
+/// workstation clock a little ahead of NinjaOne's hid a job's activity even from
+/// the exact activity-id match its dispatch returned, and the job timed out.
+pub(super) const FEED_READ_SLACK_SECS: i64 = 10 * 60;
 
 /// Reads each device's feed once and advances every pending job against it.
 ///

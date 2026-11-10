@@ -52,6 +52,10 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **Guardrails go in `actions::plan` (`blockers`/`warnings`), not in a dialog.** The `dry_run`
   check is also asserted at the dispatch site. The org cap counts organization ids, never names;
   a scan is held to `MAX_DEVICES_PER_ACTION_CEILING`. → `docs/design/actions.md#guardrails-live-in-actionsplan`
+- **A library script is checked against the library on every plan, live or dry**
+  (`plan::check_script`): absent or deactivated is a blocker, an unreadable library a warning.
+  `ActionPlan.script` / `.run_as` name what the token binds and the dialog shows them. Test:
+  `a_live_script_is_checked_against_the_library_and_named`. → `docs/design/actions.md`
 - **Dry run requires a script declaring `dryRun`** (`DryRunSupport::Declared`); the window
   override is per dispatch and audited; the "Apply all" preview reads only cached patches (cold =
   "unknown"). → `docs/design/actions.md`
@@ -81,6 +85,10 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **Opening audit records are written once per batch, before any task is spawned, and a
   dispatch task that panics still yields an `Unknown` job** (`dispatch::fill_unreported`, dated
   from the batch start) so the poller resolves it and its opening record gets its close.
+  → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
+- **Every job NinjaOne accepted or may have gets an `AuditEntry::sent` record when the batch
+  returns, and the app's exit closes whatever is unsettled** (`RunEvent::Exit` → `clear_jobs`);
+  job ids are clock-seeded so they do not repeat across launches.
   → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 - **Audit `parameters` are `audit::Redacted`**, constructible only through `Redacted::of`, which
   runs the redaction; never add a raw-string path into the log.

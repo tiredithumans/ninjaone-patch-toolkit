@@ -734,6 +734,8 @@
       ],
       "parametersPreview": "kbAllowList=KB5040434",
       "rebootExpected": true,
+      "runAs": "system",
+      "script": "Install-SelectedWindowsUpdates (#142)",
       "skipped": [
         {
           "deviceId": 2,

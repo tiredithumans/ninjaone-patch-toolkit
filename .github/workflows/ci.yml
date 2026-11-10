@@ -190,15 +190,17 @@ jobs:
           tool: just,trunk
       # web-rs is a separate wasm32 crate the backend `rust` job's clippy never
       # reaches — run the same gates `just verify` runs, in the same order, then
-      # additionally prove it builds through Trunk (the `before*Command` path Tauri
-      # uses, which `just verify` does not cover). There is no separate `web-check`
+      # additionally prove it builds through Trunk (the `beforeBuildCommand` Tauri
+      # runs for a release, which `just verify` does not cover). It used to be the
+      # debug build, so the release profile, wasm-opt, `--locked` and the `desktop`
+      # feature were first exercised inside the release run, after the tag. There is no separate `web-check`
       # step: clippy performs the same type-check first, so a type error surfaces
       # here just as early, and keeping the sequence identical to `just verify` is
       # what stops the two from drifting.
       - name: clippy
         run: just web-clippy
       - name: build
-        run: just web-build
+        run: just web-build-desktop
       # Pure-helper unit tests run on the host target (the wasm build excludes the
       # #[cfg(test)] module); the helpers under test are JS-free.
       - name: test

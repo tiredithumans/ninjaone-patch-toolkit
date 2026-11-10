@@ -41,7 +41,11 @@ pub(super) fn RebootTable() -> impl IntoView {
         fetched.set(None);
         spawn_local(async move {
             let outcome = api::get_reboot_devices(offset, limit).await;
-            if util::is_superseded(stamp.get_untracked(), mine) {
+            // The tab may have closed during the read, which disposes `stamp`.
+            let Some(current) = stamp.try_get_untracked() else {
+                return;
+            };
+            if util::is_superseded(current, mine) {
                 return;
             }
             match outcome {

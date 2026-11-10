@@ -9,7 +9,7 @@ impl AppState {
     /// family. Advisory — the backend re-reads the same setting and blocks without
     /// one; this is what lets the button explain itself instead of failing on click.
     pub(in crate::app) fn remediation_script_configured(self, kind: ActionKind) -> bool {
-        self.settings.f_actions.with(|a| {
+        self.settings.saved_actions.with(|a| {
             if kind.is_os_family() {
                 a.os_patch_script_id.is_some()
             } else {
@@ -22,7 +22,7 @@ impl AppState {
     /// its family, or the one picked in the script picker. Tracked.
     fn dispatched_script_id(self, kind: ActionKind) -> Option<i64> {
         if kind.is_remediation() {
-            self.settings.f_actions.with(|a| {
+            self.settings.saved_actions.with(|a| {
                 if kind.is_os_family() {
                     a.os_patch_script_id
                 } else {
@@ -179,14 +179,14 @@ impl AppState {
             include_offline: self.actions.include_offline.get_untracked()
                 && self
                     .settings
-                    .f_actions
+                    .saved_actions
                     .with_untracked(util::offline_targets_offered),
             // Only while the checkbox is on screen: a tick left behind after the
             // window stopped being enforced (or overridable) must not ride along.
             override_window: self.actions.override_window.get_untracked()
                 && self
                     .settings
-                    .f_actions
+                    .saved_actions
                     .with_untracked(util::window_override_offered),
             dry_run: self.actions.dry_run.get_untracked(),
             script_reboot: self.actions.script_reboot.get_untracked(),
@@ -388,14 +388,19 @@ impl AppState {
                     // to switch to Jobs, so every follow-up was a round trip. The
                     // toast offers Jobs, the tab counts what is in flight, and the
                     // batch is announced when it settles.
-                    self.notify(
-                        Toast::ok(util::dispatch_toast(
-                            batch.dispatched,
-                            batch.skipped,
-                            dry_run,
-                        ))
-                        .with_action(ToastAction::ViewJobs),
-                    );
+                    let failed = batch
+                        .jobs
+                        .iter()
+                        .filter(|j| matches!(j.state, JobState::Failed(_)))
+                        .count();
+                    let msg =
+                        util::dispatch_toast(batch.dispatched, failed, batch.skipped, dry_run);
+                    let toast = if failed > 0 {
+                        Toast::err(msg)
+                    } else {
+                        Toast::ok(msg)
+                    };
+                    self.notify(toast.with_action(ToastAction::ViewJobs));
                     // A batch already settled as it returned (every device skipped,
                     // say) is said by the toast above; watching it would only announce
                     // it later, on some unrelated job's update.

@@ -538,6 +538,8 @@ fn ipc_fixture_is_current() {
         reboot_expected: true,
         dry_run: false,
         parameters_preview: Some("kbAllowList=KB5040434".into()),
+        script: Some("Install-SelectedWindowsUpdates (#142)".into()),
+        run_as: Some("system".into()),
         window_overridden: true,
         confirm_token: Some("fixture-confirm-token".into()),
     };

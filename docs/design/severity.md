@@ -1,6 +1,6 @@
 # Severity: two vocabularies on one field
 
-Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
+Contract lines: [AGENTS.md → Domain rules](../../AGENTS.md#domain-rules--read-the-file-before-you-change-the-domain).
 Code: `src-tauri/src/model.rs` (`Severity`), `src-tauri/src/rows/rollups.rs` (`SeverityCounts`),
 `src-tauri/src/report.rs`, `web-rs/src/types.rs`, `web-rs/src/app/charts.rs`,
 `web-rs/src/app/util/`, `web-rs/src/app.rs` (`SEVERITY_OPTIONS`), `web-rs/styles.css`,

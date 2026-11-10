@@ -1,6 +1,6 @@
 # What a compliance number means
 
-Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
+Contract lines: [AGENTS.md → Domain rules](../../AGENTS.md#domain-rules--read-the-file-before-you-change-the-domain).
 Code: `src-tauri/src/rows/` (`compliance.rs`, `rollups.rs`, `backlog.rs`, `install_time.rs`,
 `scope.rs`, `join.rs`), `src-tauri/src/settings.rs` (`SlaPolicy`),
 `src-tauri/src/export.rs`, `src-tauri/src/report.rs`, `src-tauri/src/commands/patches.rs`,

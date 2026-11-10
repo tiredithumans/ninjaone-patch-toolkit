@@ -38,6 +38,12 @@ web-build:
 web-build-release:
     trunk build --release --locked --config web-rs/Trunk.toml
 
+# The frontend exactly as a release ships it: tauri.conf.json's beforeBuildCommand
+# (release profile, wasm-opt, committed lockfile, the `desktop` feature). CI's `web`
+# job runs this, so a toolchain or wasm-opt break fails a PR instead of a tag.
+web-build-desktop:
+    trunk build --release --locked --features desktop --config web-rs/Trunk.toml
+
 # Release frontend build for GitHub Pages. Sets the base href to the repo subpath
 # so assets resolve under https://<user>.github.io/<repo>/. The desktop build keeps
 # the default "/" base — never set public_url in Trunk.toml or Tauri's webview (which
@@ -61,9 +67,12 @@ fmt-check:
 clippy:
     cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-# Lint the frontend (wasm target) with warnings denied.
+# Lint the frontend (wasm target) with warnings denied, then its test code on the
+# host target: the wasm build compiles no `#[cfg(test)]` module, so the suites that
+# hold the IPC mirrors to the backend fixture were never linted.
 web-clippy:
     cargo clippy --manifest-path web-rs/Cargo.toml --target {{wasm}} -- -D warnings
+    cargo clippy --manifest-path web-rs/Cargo.toml --tests -- -D warnings
 
 # Backend unit + integration tests.
 test:

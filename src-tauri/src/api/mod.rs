@@ -709,9 +709,30 @@ fn parse_text_body(text: &str) -> Result<Value> {
 /// [`RawValue`](serde_json::value::RawValue)s — the array is scanned, not built into
 /// a tree — and each is parsed once, straight into its final type.
 fn lenient_rows<T: DeserializeOwned>(rows: Vec<&serde_json::value::RawValue>) -> Vec<T> {
-    rows.into_iter()
-        .filter_map(|row| serde_json::from_str(row.get()).ok())
-        .collect()
+    let total = rows.len();
+    let mut first_error = None;
+    let kept: Vec<T> = rows
+        .into_iter()
+        .filter_map(|row| match serde_json::from_str(row.get()) {
+            Ok(row) => Some(row),
+            Err(err) => {
+                first_error.get_or_insert(err);
+                None
+            }
+        })
+        .collect();
+    // One line, not one per row. Silent, a vendor change to a single field type
+    // dropped every row and each dispatched job then resolved by timeout with
+    // nothing in the log to say why.
+    if let Some(err) = first_error {
+        warn!(
+            dropped = total - kept.len(),
+            total,
+            %err,
+            "rows that did not decode were dropped"
+        );
+    }
+    kept
 }
 
 /// Exponential backoff for a retryable *transport* or 5xx failure: 2s, 4s, 8s,

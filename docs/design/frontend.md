@@ -1,6 +1,6 @@
 # Frontend, IPC boundary, and the testing rule
 
-Contract lines: [AGENTS.md → Conventions & gotchas](../../AGENTS.md#conventions--gotchas).
+Contract lines: [AGENTS.md → Domain rules](../../AGENTS.md#domain-rules--read-the-file-before-you-change-the-domain).
 Code: `src-tauri/src/lib.rs`, `src-tauri/src/commands/`, `src-tauri/src/error.rs`,
 `web-rs/src/api.rs`, `web-rs/src/types.rs`, `web-rs/src/app/`, `web-rs/src/demo.rs`,
 `src-tauri/tauri.conf.json`.
@@ -16,8 +16,8 @@ The codes today are `ERR_PARTIAL_DISPATCH` (see [actions.md](./actions.md)) and 
 wrapper in `web-rs/src/api.rs`.
 
 **`async` is the default, not a requirement.** A handler that only reads or writes in-process
-state and never `.await`s anything — `auth_status`, `list_jobs`, `clear_jobs`, the settings
-getters, `list_node_classes` — is a plain `pub fn`, and 8 of the 26 handlers are. Making one
+state and never `.await`s anything — `list_jobs`, `clear_jobs`, `get_settings`,
+`get_reboot_devices`, `list_node_classes` — is a plain `pub fn`. Making one
 `async` to satisfy the shape buys nothing; making a handler that *does* I/O synchronous blocks a
 runtime worker (see [concurrency.md](./concurrency.md)). The contract that always holds is the
 argument order, the `Result<T, UiError>` return, and the two registrations.
@@ -117,6 +117,8 @@ that only *looks* like this app. The one form (the CVE search) prevents its defa
 
 `commands::update::{check_for_update, install_update}` wrap `tauri-plugin-updater`; the
 frontend's `UpdateSplash` shows the release notes (changelog) and the install relaunches the app.
+Both requests carry a timeout (`CHECK_TIMEOUT`, `DOWNLOAD_TIMEOUT`): the plugin sets none, and the
+splash cannot be dismissed mid-install, so a stalled download used to hold the app.
 The updater fetches the signed `latest.json` from the GitHub releases endpoint
 (`tauri.conf.json` → `plugins.updater`) — **backend egress, not subject to the CSP**. The launch
 check is gated by the `auto_check_updates` setting. Packaging and signing:

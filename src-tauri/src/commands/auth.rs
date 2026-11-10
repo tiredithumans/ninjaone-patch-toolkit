@@ -62,10 +62,14 @@ pub async fn sign_in(state: State<'_, AppState>) -> Result<(), UiError> {
 #[tauri::command]
 pub async fn reauthorize(state: State<'_, AppState>) -> Result<(), UiError> {
     // Same reason as `sign_in`: re-consent runs the full browser flow, so the
-    // operator who comes back may not be the one who left.
-    clear_session_state(&state).await;
-    state.auth.logout_async().await.map_err(UiError::from)?;
-    state.auth.login_pkce().await.map_err(UiError::from)
+    // operator who comes back may not be the one who left. Cleared only once the
+    // login gate is held, so a second click neither clears nor signs out under
+    // the consent the first one is waiting on.
+    state
+        .auth
+        .reauthorize(clear_session_state(&state))
+        .await
+        .map_err(UiError::from)
 }
 
 #[tauri::command]

@@ -19,7 +19,7 @@ use wasm_bindgen::JsCast;
 
 /// What Tab can land on inside a dialog. `tabindex="-1"` is excluded so the dialog
 /// container itself (which carries it to be focusable on open) is not a stop.
-const FOCUSABLE: &str = "button:not([disabled]), input:not([disabled]), \
+const FOCUSABLE: &str = "button:not([disabled]), summary, input:not([disabled]), \
                          select:not([disabled]), textarea:not([disabled]), \
                          a[href], [tabindex]:not([tabindex='-1'])";
 
