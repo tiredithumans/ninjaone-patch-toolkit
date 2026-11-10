@@ -4716,3 +4716,38 @@ fn every_window_listener_is_removed_or_lives_as_long_as_the_app() {
     }
     assert!(problems.is_empty(), "{problems:#?}");
 }
+
+/// Reset is offered only when the controls have moved off the starting query.
+#[test]
+fn reset_is_offered_only_off_the_starting_query() {
+    assert!(filters_at_default(&query(&["PENDING"])));
+    assert!(!filters_at_default(&query(&["PENDING", "FAILED"])));
+    let mut scoped = query(&["PENDING"]);
+    scoped.filter.organization_ids = vec![7];
+    assert!(!filters_at_default(&scoped));
+    let mut typed = query(&["PENDING"]);
+    typed.patch_type = "OS".into();
+    assert!(!filters_at_default(&typed));
+    let mut window = query(&["PENDING"]);
+    window.install_after_days = Some(90);
+    assert!(
+        filters_at_default(&window),
+        "the install window is not reset"
+    );
+}
+
+#[test]
+fn first_seen_range_only_refuses_a_reversed_one() {
+    assert_eq!(date_order_problem("", "2026-03-01"), None);
+    assert_eq!(date_order_problem("2026-03-01", ""), None);
+    assert_eq!(date_order_problem("2026-03-01", "2026-03-01"), None);
+    assert!(date_order_problem("2026-03-02", "2026-03-01").is_some());
+}
+
+#[test]
+fn a_preset_name_is_taken_on_an_exact_trimmed_match() {
+    let names = ["Servers", "Tier 1"];
+    assert!(preset_name_taken(" Servers ", names.iter().copied()));
+    assert!(!preset_name_taken("servers", names.iter().copied()));
+    assert!(!preset_name_taken("  ", names.iter().copied()));
+}
