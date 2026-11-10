@@ -474,7 +474,8 @@ pub fn build_compliance(
             approved_not_installed: a.approved_not_installed,
         })
         .collect();
-    buckets.sort_by_cached_key(|b| b.organization.to_lowercase());
+    // The original spelling breaks a case-only tie: the buckets come out of a map.
+    buckets.sort_by_cached_key(|b| (b.organization.to_lowercase(), b.organization.clone()));
     buckets
 }
 
@@ -522,7 +523,7 @@ pub fn uncounted_orgs(summaries: &[DeviceSummary]) -> Vec<String> {
         .filter(|(_, any)| !any)
         .map(|(org, _)| org.to_string())
         .collect();
-    out.sort_by(|a, b| cmp_ci(a, b));
+    out.sort_by(|a, b| cmp_ci_total(a, b));
     out
 }
 
@@ -578,7 +579,7 @@ pub fn build_compliance_by_os(
             approved_not_installed: a.approved_not_installed,
         })
         .collect();
-    buckets.sort_by_cached_key(|b| b.os.to_lowercase());
+    buckets.sort_by_cached_key(|b| (b.os.to_lowercase(), b.os.clone()));
     buckets
 }
 

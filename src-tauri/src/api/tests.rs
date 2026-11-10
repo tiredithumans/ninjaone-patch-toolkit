@@ -543,11 +543,8 @@ async fn a_stable_cursor_name_with_an_advancing_offset_is_progress_not_a_stall()
     );
     assert_eq!(patches[0].status.as_deref(), Some("APPROVED"));
     assert_eq!(patches[0].device_id, Some(1));
-    // Third-party records carry no KB, and no product version or vendor field
-    // exists on the schema at all — the display name is the title alone.
+    // Third-party records carry no KB — the display name is the title alone.
     assert!(patches[0].kb_number.is_none());
-    assert!(patches[0].version.is_none());
-    assert!(patches[0].product_vendor.is_none());
 }
 
 /// The guard still has to stop a genuinely stalled scan, or an endpoint that

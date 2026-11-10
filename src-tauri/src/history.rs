@@ -10,10 +10,11 @@
 //! row set would answer more questions (which patch regressed on which machine last
 //! Tuesday) and cost about a thousand times more: a normalized row snapshot of a
 //! large fleet measures ~16 MB, and the app's own auto-refresh offers a 1-minute
-//! cadence. One rollup line is ~400 bytes — the whole [`MAX_LINES`] cap is under
-//! 2 MB — and it answers both questions above directly. Per-device history is a real capability
-//! and a real database's job; it is not what this file is for, and the cheap version
-//! should not pretend otherwise.
+//! cadence. One rollup line is ~400 bytes for a single-org tenant — the whole
+//! [`MAX_LINES`] cap is then under 2 MB; an MSP's per-org detail makes a line a few
+//! KB and the cap up to ~27 MB — and it answers both questions above directly.
+//! Per-device history is a real capability and a real database's job; it is not
+//! what this file is for, and the cheap version should not pretend otherwise.
 //!
 //! Best-effort throughout, on the same reasoning as `actions::audit`: a failed
 //! history write must never be able to stop an operator from seeing their fleet.

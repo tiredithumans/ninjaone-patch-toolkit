@@ -35,7 +35,7 @@ pub enum RowSortKey {
 }
 
 /// `PartialEq` so the cache can tell whether its memoized order still answers the
-/// sort being asked for — the same check `with_grouped_result` makes on [`GroupBy`].
+/// sort being asked for — the same check `AppState::group_memo` makes on [`GroupBy`].
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RowSort {
@@ -631,11 +631,50 @@ impl<'a> GroupKeyMatcher<'a> {
 ///
 /// The cached rows themselves are never reordered; their canonical order is
 /// load-bearing for the export and for the summary's inline first page.
+///
+/// The text columns sort by precomputed rank, like [`sort_canonical`]: comparing
+/// interned strings case-insensitively on every comparison of an `O(n log n)` sweep
+/// is what cost the canonical sort 1.3–1.6 s at 1M rows. Each distinct value is
+/// ranked once under [`cmp_ci`] and the sweep compares integers; the row index
+/// breaks ties, so the unstable sort reproduces [`compare_rows`]' stable order
+/// exactly (`ranked_sort_matches_the_comparator`).
 pub fn sort_order(rows: &[PatchRow], sort: RowSort) -> Vec<u32> {
-    let mut order: Vec<u32> = (0..rows.len() as u32).collect();
-    // Stable sort: rows that tie keep the canonical cache order.
-    order.sort_by(|a, b| compare_rows(&rows[*a as usize], &rows[*b as usize], sort));
-    order
+    use RowSortKey::*;
+    let text: Option<fn(&PatchRow) -> Option<&str>> = match sort.key {
+        Organization => Some(|r| Some(&r.organization)),
+        Device => Some(|r| Some(&r.device_name)),
+        Name => Some(|r| Some(&r.name)),
+        Location => Some(|r| r.location.as_deref()),
+        Role => Some(|r| r.device_role.as_deref()),
+        Os => Some(|r| r.os_name.as_deref()),
+        Kb => Some(|r| r.kb.as_deref()),
+        PatchType | Severity | Cves | Status | FirstSeenDate | InstalledDate => None,
+    };
+    let Some(text) = text else {
+        let mut order: Vec<u32> = (0..rows.len() as u32).collect();
+        // Stable sort: rows that tie keep the canonical cache order.
+        order.sort_by(|a, b| compare_rows(&rows[*a as usize], &rows[*b as usize], sort));
+        return order;
+    };
+    let ranks = ci_ranks(rows.iter().filter_map(text));
+    // A missing value sorts last in either direction, as `cmp_opt_last` does; the
+    // required columns never produce one. Ranks are dense, so they stay below
+    // `u32::MAX - 1` and the direction flip cannot reach the missing sentinel.
+    let mut keys: Vec<(u32, u32)> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let key = match text(r) {
+                Some(v) if sort.desc => u32::MAX - 1 - ranks[v],
+                Some(v) => ranks[v],
+                None => u32::MAX,
+            };
+            (key, i as u32)
+        })
+        .collect();
+    drop(ranks);
+    keys.sort_unstable();
+    keys.into_iter().map(|(_, i)| i).collect()
 }
 
 /// Puts freshly joined rows in the canonical cache order: highest severity first,
@@ -785,6 +824,13 @@ pub fn cmp_ci(a: &str, b: &str) -> Ordering {
     a.bytes()
         .map(|c| c.to_ascii_lowercase())
         .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+}
+
+/// [`cmp_ci`], with ties ("Acme" / "ACME") broken byte-wise — a total order, for
+/// sorting a `HashMap`'s output, whose iteration order is random per process. With
+/// `cmp_ci` alone two such names swapped places between identical runs.
+pub fn cmp_ci_total(a: &str, b: &str) -> Ordering {
+    cmp_ci(a, b).then_with(|| a.cmp(b))
 }
 
 /// Missing values sort last regardless of direction, so a descending sort by

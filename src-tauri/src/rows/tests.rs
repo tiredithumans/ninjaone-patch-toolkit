@@ -210,11 +210,8 @@ fn patch(device_id: i64, status: &str, sev: &str, first_seen_days_ago: Option<i6
         device_id: Some(device_id),
         kb_number: Some("KB5040434".into()),
         name: Some("Cumulative Update".into()),
-        version: None,
-        product_vendor: None,
         severity: Some(sev.into()),
         status: Some(status.into()),
-        patch_type: None,
         collected_timestamp: first_seen_days_ago
             .map(|d| (Utc::now() - Duration::days(d)).timestamp() as f64),
         installed_timestamp: None,
@@ -277,13 +274,63 @@ fn row_timestamps_are_normalised_like_the_dates_beside_them() {
         "a millisecond value must be normalised, not stored raw"
     );
     assert_eq!(r.installed_ts, Some(seconds as i64));
-    // And the timestamp must agree with the date rendered next to it.
+    // And the date the wire renders beside it is derived from that timestamp, in
+    // the format the frontend has always shown.
     let from_ts = DateTime::<Utc>::from_timestamp(r.first_seen_ts.unwrap(), 0).unwrap();
+    let wire = serde_json::to_value(r).expect("serialize row");
     assert_eq!(
-        r.first_seen_date,
+        wire["firstSeenDate"].as_str().map(str::to_owned),
         fmt_dt(Some(from_ts)),
         "the sort timestamp and the displayed date must describe the same instant"
     );
+    assert_eq!(wire["installedDate"], wire["firstSeenDate"]);
+    assert_eq!(wire["firstSeenTs"], serde_json::json!(seconds as i64));
+}
+
+/// A current-feed status the crate does not know is counted pending by the
+/// rollups (`is_pending`), so it must also be a row under the Pending selection —
+/// it used to fall through the status filter, leaving a patch the Compliance sheet
+/// counted and the Patches tab could not show. Its raw text is still displayed.
+#[test]
+fn an_unmapped_current_status_is_selected_as_pending_and_shown_raw() {
+    let devices = [device(1, 10, "Windows Server 2022")];
+    let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+    let patches: Vec<Patch> = ["DEFERRED", "manual", "MANUAL", "REJECTED"]
+        .iter()
+        .enumerate()
+        .map(|(i, status)| Patch {
+            kb_number: Some(format!("KB{i}")),
+            ..patch(1, status, "CRITICAL", None)
+        })
+        .collect();
+    let rows_for = |statuses: &[&'static str]| -> Vec<String> {
+        let allowed: HashSet<&'static str> = statuses.iter().copied().collect();
+        let mut shown: Vec<String> = build_rows(
+            &by_id,
+            &maps(),
+            &[PatchSource {
+                records: &refs(&patches),
+                type_label: "OS",
+                status_override: Some(PatchStatus::Pending.api_value()),
+                status_filter: Some(&allowed),
+            }],
+            &FilterParams::default().prepare(),
+        )
+        .iter()
+        .map(|r| r.status.to_string())
+        .collect();
+        shown.sort();
+        shown
+    };
+
+    assert_eq!(rows_for(&["MANUAL"]), ["DEFERRED", "PENDING", "manual"]);
+    assert_eq!(rows_for(&["REJECTED"]), ["REJECTED"]);
+    // The rows agree with the rollups' verdict, record for record.
+    let pending = patches
+        .iter()
+        .filter(|p| is_pending(p.status.as_deref()))
+        .count();
+    assert_eq!(pending, rows_for(&["MANUAL"]).len());
 }
 
 #[test]
@@ -842,7 +889,7 @@ fn a_current_patch_with_no_status_still_counts_as_pending() {
     let d = device(1, 10, "Windows Server 2022");
     let by_id = HashMap::from([(1, &d)]);
     let maps = maps();
-    let mut untyped = patch(1, "MANUAL", "CRITICAL", Some(90));
+    let mut untyped = patch(1, "MANUAL", "CRITICAL", Some(75));
     untyped.status = None;
     let current = vec![untyped];
     let summaries = summaries_for(&[&d], &refs(&current), &sla30(), &maps);
@@ -850,7 +897,7 @@ fn a_current_patch_with_no_status_still_counts_as_pending() {
     let buckets = build_compliance(&summaries, &refs(&current), &by_id, &maps, &sla30());
     assert_eq!(buckets[0].devices_fully_patched, 0);
     assert_eq!(buckets[0].urgent_pending, 1);
-    // 90 days old → the "61-90 days" bucket.
+    // 75 days old → the "61-90 days" bucket.
     assert_eq!(
         build_age_buckets(&refs(&current), &by_id, Utc::now())[2].count,
         1
@@ -1953,6 +2000,61 @@ fn patch_type_and_status_sort_by_byte_order() {
     );
 }
 
+/// The org-keyed rollups sort a `HashMap`'s output; with a case-insensitive key
+/// alone, "Acme" and "ACME" landed in whichever order the map's random seed gave
+/// them, so identical runs listed them differently.
+#[test]
+fn case_only_ties_sort_the_same_way_every_run() {
+    let mut a = vec!["acme", "Beta", "ACME", "Acme", "beta"];
+    let mut b = vec!["beta", "Acme", "ACME", "Beta", "acme"];
+    a.sort_by(|x, y| cmp_ci_total(x, y));
+    b.sort_by(|x, y| cmp_ci_total(x, y));
+    assert_eq!(a, b);
+    assert_eq!(a, ["ACME", "Acme", "acme", "Beta", "beta"]);
+}
+
+/// `sort_order` ranks the text columns once instead of comparing strings on every
+/// comparison; the order must be exactly the stable comparator's, ties, case
+/// folding, missing values and direction included.
+#[test]
+fn ranked_sort_matches_the_comparator() {
+    let words = [
+        "acme", "ACME", "Acme", "beta", "Beta", "alpha", "a", "", "Zulu", "zulu",
+    ];
+    let pick = |i: usize, salt: usize| words[(i * 7 + salt) % words.len()];
+    let rows: Vec<PatchRow> = (0..60)
+        .map(|i| {
+            let opt = |salt: usize| (i % 4 != salt % 4).then(|| pick(i, salt).into());
+            PatchRow {
+                organization: pick(i, 1).into(),
+                device_name: pick(i, 2).into(),
+                name: pick(i, 3).into(),
+                location: opt(4),
+                device_role: opt(5),
+                os_name: opt(6),
+                kb: opt(7),
+                ..failed_row(i as i64, "dev", "KB1", None)
+            }
+        })
+        .collect();
+    for key in [
+        RowSortKey::Organization,
+        RowSortKey::Device,
+        RowSortKey::Name,
+        RowSortKey::Location,
+        RowSortKey::Role,
+        RowSortKey::Os,
+        RowSortKey::Kb,
+    ] {
+        for desc in [false, true] {
+            let sort = RowSort { key, desc };
+            let mut expected: Vec<u32> = (0..rows.len() as u32).collect();
+            expected.sort_by(|a, b| compare_rows(&rows[*a as usize], &rows[*b as usize], sort));
+            assert_eq!(sort_order(&rows, sort), expected, "{key:?} desc={desc}");
+        }
+    }
+}
+
 #[test]
 fn page_rows_sorts_case_insensitively_then_slices() {
     let rows = vec![
@@ -2035,8 +2137,6 @@ fn failed_row(device_id: i64, device: &str, kb: &str, installed_ts: Option<i64>)
         severity: "Critical",
         severity_rank: 5,
         status: "FAILED".into(),
-        first_seen_date: None,
-        installed_date: installed_ts.map(|_| "2026-01-01 00:00 UTC".into()),
         first_seen_ts: None,
         installed_ts,
         product_identifier: None,
@@ -2785,18 +2885,42 @@ fn build_age_buckets_separate_undated_patches_from_genuinely_old_ones() {
 }
 
 /// Each label claims exactly the days its arm matches: 180 days is "91-180", and
-/// the open-ended bucket starts at 181. The labels once read "91-180" / "180+",
-/// assigning day 180 to both.
+/// the open-ended bucket starts past 180. The labels once read "91-180" / "180+",
+/// assigning day 180 to both. A bound is compared on the exact age, as the SLA is:
+/// 30.5 days old used to floor into "0-30 days" while a 30-day SLA counted it past.
 #[test]
 fn age_bucket_labels_match_their_boundaries() {
     let d = device(1, 10, "Windows Server 2022");
     let by_id = HashMap::from([(1, &d)]);
-    let now = Utc::now();
-    let aged = |days: i64| {
+    // Whole seconds, so a record stamped exactly N days back is exactly N days old.
+    let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
+    let aged_secs = |secs: i64| {
         let mut p = patch(1, "MANUAL", "CRITICAL", None);
-        p.collected_timestamp = Some((now - Duration::days(days)).timestamp() as f64);
+        p.collected_timestamp = Some((now - Duration::seconds(secs)).timestamp() as f64);
         p
     };
+    let aged = |days: i64| aged_secs(days * 86_400);
+    let sla = SlaCutoffs::new(
+        &SlaPolicy {
+            exempt: SlaExempt::NONE,
+            ..SlaPolicy::default()
+        },
+        now,
+    );
+    for (secs, label, past_sla) in [
+        (30 * 86_400, "0-30 days", false),
+        (30 * 86_400 + 43_200, "31-60 days", true),
+    ] {
+        let current = [aged_secs(secs)];
+        let buckets = build_age_buckets(&refs(&current), &by_id, now);
+        let hit: Vec<&str> = buckets
+            .iter()
+            .filter(|b| b.count > 0)
+            .map(|b| b.label.as_str())
+            .collect();
+        assert_eq!(hit, [label], "a patch first seen {secs}s ago");
+        assert_eq!(sla.is_aged(&refs(&current)[0]), past_sla, "{secs}s");
+    }
     for (days, label) in [
         (30, "0-30 days"),
         (31, "31-60 days"),

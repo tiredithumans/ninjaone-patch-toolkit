@@ -753,15 +753,14 @@ fn scoped_age_buckets(rows: &[PatchRow]) -> Vec<AgeBucket> {
     let mut counts = [0usize; LABELS.len()];
     for r in rows.iter().filter(|r| r.status == "PENDING") {
         let idx = match r.first_seen_date.as_deref().and_then(date_to_epoch) {
+            // On the exact age, not whole days, like the backend: a patch 30.5
+            // days old is past a 30-day SLA, so it is not in "0-30 days".
             Some(seen) => {
-                let days = (SAMPLE_NOW_EPOCH - seen) / 86_400;
-                match days {
-                    d if d <= 30 => 0,
-                    d if d <= 60 => 1,
-                    d if d <= 90 => 2,
-                    d if d <= 180 => 3,
-                    _ => 4,
-                }
+                let age = SAMPLE_NOW_EPOCH - seen;
+                [30, 60, 90, 180]
+                    .iter()
+                    .position(|&days| age <= days * 86_400)
+                    .unwrap_or(4)
             }
             None => 5,
         };

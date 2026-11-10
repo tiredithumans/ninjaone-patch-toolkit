@@ -942,8 +942,6 @@ mod tests {
             severity: "Critical",
             severity_rank: 5,
             status: "PENDING".into(),
-            first_seen_date: Some("2026-05-01 00:00 UTC".into()),
-            installed_date: None,
             first_seen_ts: Some(1_777_000_000),
             installed_ts: None,
             product_identifier: None,

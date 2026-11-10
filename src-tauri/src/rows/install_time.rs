@@ -83,7 +83,7 @@ pub fn build_time_to_install(rows: &[PatchRow], installs_queried: bool) -> TimeT
         .into_iter()
         .map(|(org, secs)| latency("Organization", org.to_string(), secs))
         .collect();
-    by_organization.sort_by(|a, b| cmp_ci(&a.label, &b.label));
+    by_organization.sort_by(|a, b| cmp_ci_total(&a.label, &b.label));
 
     let mut by_severity: Vec<(u8, InstallLatency)> = by_sev
         .into_iter()

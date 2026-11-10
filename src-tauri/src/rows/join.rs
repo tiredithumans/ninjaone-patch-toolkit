@@ -111,8 +111,17 @@ pub struct PatchSource<'a> {
     pub status_filter: Option<&'a HashSet<&'static str>>,
 }
 
+impl PatchSource<'_> {
+    /// A current-feed source: one whose missing status means pending (its
+    /// `status_override` is the Pending wire value), as `rows::is_pending` assumes
+    /// of every current record.
+    fn is_current(&self) -> bool {
+        self.status_override == Some(PatchStatus::Pending.api_value())
+    }
+}
+
 pub(super) fn fmt_dt(ts: Option<DateTime<Utc>>) -> Option<String> {
-    ts.map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+    ts.map(|t| t.format(crate::model::ROW_DATE_FORMAT).to_string())
 }
 
 /// Hands out one shared [`Arc<str>`] per distinct string.
@@ -224,6 +233,9 @@ pub fn build_rows(
     // reported after the loop, so a six-figure fleet logs one line per distinct
     // value rather than one per row.
     let mut unmapped_severities: BTreeSet<String> = BTreeSet::new();
+    // Likewise current-feed statuses this build does not know ("DEFERRED", or a
+    // known one in another case).
+    let mut unmapped_statuses: BTreeSet<String> = BTreeSet::new();
     // The reboot estimate, once per distinct title per OS family: one cumulative
     // update recurs on every Windows device missing it.
     let mut reboot_memo: [HashMap<Arc<str>, bool>; 3] = Default::default();
@@ -231,16 +243,32 @@ pub fn build_rows(
         let os_source = source.type_label == OS_TYPE_LABEL;
         for record in source.records {
             let patch = record.patch;
+            // A current-feed status this crate does not know is selected as Pending:
+            // `rows::is_pending` counts it pending (only REJECTED and INSTALLED are
+            // excluded), so filtering it out left the rollups counting a patch no
+            // row could show. The row still displays the raw text.
+            let unmapped_current = source.is_current()
+                && patch
+                    .status
+                    .as_deref()
+                    .is_some_and(|s| PatchStatus::from_api_value(s).is_none());
+            if unmapped_current && let Some(raw) = patch.status.as_deref() {
+                // Before the filter, so the warning names every unknown value the
+                // feed sent, not only those under a selected status.
+                if !unmapped_statuses.contains(raw) {
+                    unmapped_statuses.insert(raw.to_string());
+                }
+            }
             if let Some(allowed) = source.status_filter {
                 // Fall back to the source's status_override when a record omits its
                 // own status, so an install record with no status still matches the
                 // label (e.g. INSTALLED) it would be displayed under.
-                let keep = patch
-                    .status
-                    .as_deref()
-                    .or(source.status_override)
-                    .map(|s| allowed.contains(s))
-                    .unwrap_or(false);
+                let selected_as = if unmapped_current {
+                    source.status_override
+                } else {
+                    patch.status.as_deref().or(source.status_override)
+                };
+                let keep = selected_as.map(|s| allowed.contains(s)).unwrap_or(false);
                 if !keep {
                     continue;
                 }
@@ -336,10 +364,8 @@ pub fn build_rows(
                 severity: severity.label(),
                 severity_rank: severity.rank(),
                 status: pool.intern(status),
-                first_seen_date: fmt_dt(first_seen),
-                installed_date: fmt_dt(installed),
-                // Normalised through `collected_at`/`installed_at` like the dates
-                // beside them, NOT read raw off the patch. NinjaOne returns
+                // Normalised through `collected_at`/`installed_at`, NOT read raw off
+                // the patch. NinjaOne returns
                 // milliseconds for these on some endpoints, and taking the raw value
                 // made a row disagree with itself: it displayed the correct date
                 // (which goes through `unix_to_datetime`) while sorting as a
@@ -364,6 +390,13 @@ pub fn build_rows(
             "NinjaOne returned severity values this build has no mapping for; \
              those patches sort as Unknown and are excluded whenever the severity \
              facet is active"
+        );
+    }
+    if !unmapped_statuses.is_empty() {
+        tracing::warn!(
+            values = ?unmapped_statuses,
+            "NinjaOne returned current-patch status values this build has no mapping \
+             for; those patches count as pending and are listed under the Pending status"
         );
     }
 

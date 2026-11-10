@@ -438,7 +438,10 @@ selected status (it only narrows the rows built from the current feed; the rollu
 unnarrowed feed), so a FAILED current record shows under the Failed selection; and
 `assemble_result` gives both current sources `status_override = MANUAL`, so an untyped record
 matches the Pending selection and renders as PENDING instead of being counted by the Compliance
-sheet and missing from the Patches sheet.
+sheet and missing from the Patches sheet. A third closes the last gap: a current-feed status this
+crate does not know (`DEFERRED`, or `manual` in another case) is counted pending, so `build_rows`
+selects it as Pending too (`PatchSource::is_current`) while the row keeps the raw text, and the
+distinct values are logged once per query beside the unmapped severities.
 
 ## A percentage never rounds up to 100
 
@@ -532,7 +535,7 @@ data was collected/updated"); the non-`Device` `OSPatch`/`SoftwarePatch` variant
 `Patch::collected_timestamp` (alias `timestamp`, read via `collected_at()` into
 `rows::PatchRecord::first_seen`) is therefore
 **detection time, not publication time**, and everything derived from it —
-`PatchRow.first_seen_ts`/`first_seen_date`, the SLA `urgent_past_sla` rollup, `build_age_buckets`,
+`PatchRow.first_seen_ts` (and the `firstSeenDate` it serializes as), the SLA `urgent_past_sla` rollup, `build_age_buckets`,
 and the `detected_within_days`/`detected_after`/`detected_before` filter window — measures *how
 long we have known about the patch*. The UI says so ("First seen", "Pending past SLA", "Pending
 patch age (since first seen)"); keep the naming honest if you touch these.
@@ -542,7 +545,9 @@ SLA rollup compared *now* against an always-recent timestamp and reported ~0 bre
 fleet — and the wiremock fixtures fed `releaseDate`, so CI proved only that the aliasing worked.
 **Fixtures must emit `timestamp`.** Undated pending patches get their own `Unknown` age bucket
 rather than inflating `181+ days`; they still count as aged in the SLA rollup (`unwrap_or(true)`
-— can't prove recent).
+— can't prove recent). The bucket bounds compare the exact age, as `SlaCutoffs::is_aged` does
+(`first_seen < now − N days`): flooring to whole days put a patch 30.5 days old in "0-30 days"
+while a 30-day SLA already counted it past due. "31-60 days" therefore holds (30, 60] days.
 
 ## There is no per-patch reboot field in the NinjaOne API
 
@@ -618,6 +623,13 @@ bumps. All of it serializes to plain JSON strings, so `web-rs/src/types.rs` stil
 `String` — and because the two crates share no code, the IPC fixture (`web-rs/tests/backend-ipc.json`)
 decodes the backend's real rows through those mirrors, so a field that stopped serializing as a
 string fails `just web-test`.
+
+The two display dates are not stored at all. `firstSeenDate` / `installedDate` are formatted from
+`first_seen_ts` / `installed_ts` when a row is serialized (`PatchRow`'s hand-written `Serialize`,
+`model::ROW_DATE_FORMAT`), so the wire shape is unchanged. A row used to own both as
+`Option<String>`s, formatted for every row of the fleet and held for the life of the cached result,
+when only an IPC page read them — the exports, the CSV and the sort all use the timestamps. The
+impl destructures the row without `..`, so a new field does not compile until it is on the wire.
 
 ## Installed/Failed vs current patches (status routing)
 

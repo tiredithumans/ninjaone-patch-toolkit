@@ -541,15 +541,26 @@ impl AppState {
         &self,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Arc<Vec<Device>>> {
+        Ok(self.fleet_devices_with_time(on_progress).await?.0)
+    }
+
+    /// [`Self::fleet_devices`] with the time the inventory was fetched. The query
+    /// folds it into its "data as of" time: the inventory carries Needs Reboot and
+    /// the offline exclusion, and it is cached for [`DEVICE_TTL`] — longer than the
+    /// patch families, and a forced refresh does not shorten it — so a label that
+    /// only took the patch families' time over-promised by up to that much.
+    pub async fn fleet_devices_with_time(
+        &self,
+        on_progress: Option<&ProgressFn<'_>>,
+    ) -> Result<(Arc<Vec<Device>>, DateTime<Utc>)> {
         let key = self.tenant_key();
-        let (devices, _) = self
-            .fleet_devices_cache
+        self.fleet_devices_cache
             .get_or_fetch(&key, DEVICE_TTL, "device inventory", || async {
                 // Fetched with the inventory so the reboot reasons share its TTL and
                 // its invalidation after a reboot. Only the inventory is required: a
                 // health feed the token cannot read costs the reasons, not the query
-                // — and only until FORCE_MIN_INTERVAL, since the entry is stored as
-                // degraded rather than hiding every reason for the full DEVICE_TTL.
+                // — and only until the degraded cap (a minute at first, backing off if
+                // the feed keeps failing), not for the full DEVICE_TTL.
                 let (devices, health) = tokio::join!(
                     self.api.devices(None, on_progress),
                     self.api.device_health()
@@ -570,8 +581,7 @@ impl AppState {
                     degraded,
                 })
             })
-            .await?;
-        Ok(devices)
+            .await
     }
 
     /// Whole-fleet current patches (no `df`) for the requested families, cached so a

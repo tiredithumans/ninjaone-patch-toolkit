@@ -10,7 +10,8 @@ use chrono::{DateTime, Utc};
 use super::{FORCE_MIN_INTERVAL, TenantKey};
 
 /// How long a degraded [`Fetched`] entry may be served, whatever TTL the caller
-/// asks for.
+/// asks for — the first time. Each consecutive degraded store for the same tenant
+/// doubles it (see [`degraded_cap`]), and the caller's TTL still bounds it.
 ///
 /// Not zero ("don't store"): a token that permanently cannot list `/groups` would
 /// then refetch the organizations and roles on every query, and a health feed it
@@ -18,6 +19,15 @@ use super::{FORCE_MIN_INTERVAL, TenantKey};
 /// refresh gets is the right bound — a minute of a blank picker, not five, and not
 /// fifteen minutes of reboot reasons silently missing.
 const DEGRADED_TTL: Duration = FORCE_MIN_INTERVAL;
+
+/// The cap for the `streak`-th consecutive degraded store (1-based): one
+/// [`DEGRADED_TTL`], then doubling. An optional feed that fails every time — a
+/// token that cannot read the health feed — used to throw the whole slot away every
+/// minute, re-paging the entire device inventory with it; a blip still costs one
+/// minute, a permanent failure backs off towards the slot's own TTL.
+fn degraded_cap(streak: u32) -> Duration {
+    DEGRADED_TTL.saturating_mul(1u32 << streak.saturating_sub(1).min(16))
+}
 
 /// What a fetch closure hands [`TenantCache::get_or_fetch`]: the value, and whether
 /// it is only partial because an optional sub-feed failed and was replaced by an
@@ -49,7 +59,7 @@ impl<T> Fetched<T> {
 ///    six-figure feed a second time;
 /// 4. re-probe under the gate — this is what turns that wait into a cache hit;
 /// 5. store only if the epoch is unchanged when the slot lock is retaken, and only
-///    under a capped TTL ([`DEGRADED_TTL`]) if the fetch was degraded.
+///    under a capped TTL ([`degraded_cap`]) if the fetch was degraded.
 ///
 /// The epoch check is the subtle part and it is not optional: without it, a fetch
 /// already in flight when an invalidation lands writes its pre-invalidation rows
@@ -88,8 +98,22 @@ pub(crate) struct TenantCache<T> {
     /// one that stores before the clear is wiped by it, one that stores after sees
     /// the new epoch and declines.
     epoch: AtomicU64,
-    /// Held across `.await`, so a `tokio` mutex rather than a `std` one.
-    fetch_lock: tokio::sync::Mutex<()>,
+    /// The single-flight gate. Held across `.await`, so a `tokio` mutex rather than
+    /// a `std` one. It also holds the last failed fetch, so callers that queued
+    /// behind it return that error instead of re-running the fetch one after
+    /// another — the same shape as auth's `refresh_lock`.
+    fetch_lock: tokio::sync::Mutex<Option<FetchFailure>>,
+    /// Counts the failures recorded under `fetch_lock`. Readable without the gate,
+    /// so a caller notes it on entry and can tell, once it holds the gate, whether a
+    /// fetch failed while it was parked.
+    failures: AtomicU64,
+}
+
+/// The last failed fetch, shared with the callers parked behind it.
+struct FetchFailure {
+    /// A failure under one tenant says nothing about another.
+    tenant: TenantKey,
+    message: String,
 }
 
 struct CacheEntry<T> {
@@ -97,8 +121,12 @@ struct CacheEntry<T> {
     /// `fetched_at` because a wall clock can move backwards.
     at: Instant,
     /// The longest this entry may be served regardless of the caller's TTL:
-    /// [`DEGRADED_TTL`] for a degraded fetch, unbounded otherwise.
+    /// [`degraded_cap`] for a degraded fetch, unbounded otherwise.
     cap: Duration,
+    /// How many degraded stores in a row this entry ends (0 for a clean one). Read
+    /// off the entry it displaces, so an invalidation — which empties the slot —
+    /// or a tenant change starts the backoff over.
+    degraded_streak: u32,
     tenant: TenantKey,
     /// Behind an `Arc` so a hit is a refcount bump rather than a deep copy of a
     /// whole-fleet `Vec`.
@@ -112,7 +140,8 @@ impl<T> Default for TenantCache<T> {
         Self {
             slot: Mutex::new(None),
             epoch: AtomicU64::new(0),
-            fetch_lock: tokio::sync::Mutex::new(()),
+            fetch_lock: tokio::sync::Mutex::new(None),
+            failures: AtomicU64::new(0),
         }
     }
 }
@@ -140,6 +169,13 @@ impl<T> TenantCache<T> {
     /// refresh drops to `FORCE_MIN_INTERVAL` so a fast auto-refresh cadence cannot
     /// become a refetch loop.
     ///
+    /// A failed fetch is shared, like a successful one: a caller that was parked at
+    /// the gate while the leader's fetch failed returns that error rather than
+    /// running the whole fetch again. Without it each waiter took the gate in turn
+    /// and re-ran the fetch serially, so four lookups against an unreachable
+    /// instance took about five minutes to fail. A caller that arrives after the
+    /// failure fetches afresh.
+    ///
     /// The slot lock is never held across the fetch.
     pub(super) async fn get_or_fetch<F, Fut>(
         &self,
@@ -158,28 +194,52 @@ impl<T> TenantCache<T> {
         if let Some(hit) = self.peek(tenant, ttl) {
             return Ok(hit);
         }
-        let _fetching = self.fetch_lock.lock().await;
+        let failures_before = self.failures.load(Ordering::Acquire);
+        let mut last_failure = self.fetch_lock.lock().await;
         // Re-probe under the gate: the winner of the race has usually stored by now,
         // which is what makes waiting cheaper than fetching.
         if let Some(hit) = self.peek(tenant, ttl) {
             return Ok(hit);
         }
-        let Fetched { value, degraded } = fetch().await?;
+        if self.failures.load(Ordering::Acquire) != failures_before
+            && let Some(failure) = last_failure.as_ref()
+            && failure.tenant == *tenant
+        {
+            anyhow::bail!("{}", failure.message);
+        }
+        let Fetched { value, degraded } = match fetch().await {
+            Ok(fetched) => fetched,
+            Err(e) => {
+                *last_failure = Some(FetchFailure {
+                    tenant: tenant.clone(),
+                    message: format!("{e:#}"),
+                });
+                self.failures.fetch_add(1, Ordering::AcqRel);
+                return Err(e);
+            }
+        };
         let value = Arc::new(value);
         let fetched_at = Utc::now();
-        if degraded {
-            tracing::debug!("{label} fetched degraded; caching for {DEGRADED_TTL:?} only");
-        }
         let mut displaced = None;
         if let Ok(mut guard) = self.slot.lock() {
             if self.epoch.load(Ordering::SeqCst) == epoch {
+                let degraded_streak = match (degraded, guard.as_ref()) {
+                    (false, _) => 0,
+                    (true, Some(prev)) if prev.tenant == *tenant => prev.degraded_streak + 1,
+                    (true, _) => 1,
+                };
+                let cap = if degraded {
+                    degraded_cap(degraded_streak)
+                } else {
+                    Duration::MAX
+                };
+                if degraded {
+                    tracing::debug!("{label} fetched degraded; caching for {cap:?} only");
+                }
                 displaced = guard.replace(CacheEntry {
                     at: Instant::now(),
-                    cap: if degraded {
-                        DEGRADED_TTL
-                    } else {
-                        Duration::MAX
-                    },
+                    cap,
+                    degraded_streak,
                     tenant: tenant.clone(),
                     value: value.clone(),
                     fetched_at,
@@ -329,6 +389,118 @@ mod tests {
         assert!(
             cache.peek(&tenant(), Duration::MAX).is_none(),
             "neither fetch may store across the invalidation"
+        );
+    }
+
+    /// The leader's failure used to be private: each waiter took the gate in turn
+    /// and re-ran the whole fetch, so N callers against an unreachable instance
+    /// failed N fetches in series.
+    #[tokio::test]
+    async fn waiters_parked_behind_a_failed_fetch_share_its_error() {
+        use std::sync::atomic::AtomicUsize;
+
+        let cache: Arc<TenantCache<u32>> = Arc::new(TenantCache::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (release, hold) = tokio::sync::oneshot::channel::<()>();
+
+        let leader = {
+            let (cache, calls) = (cache.clone(), calls.clone());
+            tokio::spawn(async move {
+                cache
+                    .get_or_fetch(&tenant(), Duration::MAX, "leader", || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        hold.await.ok();
+                        anyhow::bail!("instance unreachable")
+                    })
+                    .await
+            })
+        };
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let waiters: Vec<_> = (0..3)
+            .map(|_| {
+                let (cache, calls) = (cache.clone(), calls.clone());
+                tokio::spawn(async move {
+                    cache
+                        .get_or_fetch(&tenant(), Duration::MAX, "waiter", || async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Ok(Fetched::complete(2))
+                        })
+                        .await
+                })
+            })
+            .collect();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        release.send(()).expect("release the leader");
+        assert!(leader.await.expect("join leader").is_err());
+        for waiter in waiters {
+            let err = waiter
+                .await
+                .expect("join waiter")
+                .expect_err("a parked waiter returns the leader's failure");
+            assert!(err.to_string().contains("instance unreachable"), "{err:#}");
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one fetch for four callers"
+        );
+
+        // A caller arriving after the failure is not handed a stale error.
+        let (value, _) = cache
+            .get_or_fetch(&tenant(), Duration::MAX, "later", || async {
+                Ok(Fetched::complete(3))
+            })
+            .await
+            .expect("a later caller fetches afresh");
+        assert_eq!(*value, 3);
+    }
+
+    /// A sub-feed that fails every time backs off instead of discarding the slot
+    /// every minute; a clean fetch, or an invalidation, starts it over.
+    #[tokio::test]
+    async fn repeated_degraded_fetches_back_off_and_a_clean_one_resets() {
+        let ttl = Duration::from_secs(15 * 60);
+        let cache: TenantCache<u32> = TenantCache::default();
+        let key = tenant();
+        let store = |degraded: bool| {
+            cache.get_or_fetch(&key, Duration::ZERO, "test", move || async move {
+                Ok(Fetched { value: 1, degraded })
+            })
+        };
+        let cap_now = || {
+            let guard = cache.slot.lock().expect("slot");
+            guard.as_ref().map(|e| e.cap)
+        };
+
+        for expected in [1, 2, 4, 8, 16] {
+            store(true).await.expect("degraded fetch");
+            assert_eq!(cap_now(), Some(DEGRADED_TTL * expected));
+        }
+        // Bounded by the caller's TTL: past it the entry is stale whatever the cap.
+        cache.age(ttl + Duration::from_secs(1));
+        assert!(cache.peek(&tenant(), ttl).is_none());
+
+        store(false).await.expect("clean fetch");
+        assert_eq!(cap_now(), Some(Duration::MAX));
+        store(true).await.expect("degraded after clean");
+        assert_eq!(
+            cap_now(),
+            Some(DEGRADED_TTL),
+            "a clean fetch resets the backoff"
+        );
+
+        store(true).await.expect("second degraded");
+        cache.invalidate();
+        store(true).await.expect("degraded after invalidate");
+        assert_eq!(
+            cap_now(),
+            Some(DEGRADED_TTL),
+            "an invalidation resets the backoff"
         );
     }
 }
