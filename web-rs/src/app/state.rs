@@ -33,9 +33,10 @@ pub(crate) enum Tab {
 }
 
 /// A snapshot of the filters that produced the currently displayed result, captured
-/// at Run time (ids resolved to display names, raw values to labels) so the chip row
-/// always describes the on-screen data — even after the user edits a control but has
-/// not re-run. Frontend-only; never crosses IPC, so it is not mirrored in `types.rs`.
+/// at Run time (ids resolved to display names, raw values to labels) so what the UI
+/// says the results were filtered by — the "Filters changed" tooltip, the "Patch
+/// filters on these results" notes — describes the on-screen data, even after the
+/// user edits a control but has not re-run. Frontend-only; never crosses IPC, so it is not mirrored in `types.rs`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct AppliedFilters {
     /// Names of the selected organizations (empty = every organization). Plural for
@@ -285,7 +286,7 @@ impl FilterState {
         });
     }
 
-    /// [`toggle_in`](Self::toggle_in) for an id facet. Kept sorted so the chip row,
+    /// [`toggle_in`](Self::toggle_in) for an id facet. Kept sorted so the filter labels,
     /// the `df` clause and preset equality all see one canonical order regardless of
     /// the order the operator ticked things.
     pub(super) fn toggle_id(self, sig: RwSignal<Vec<i64>>, id: i64) {
@@ -363,8 +364,8 @@ impl FilterState {
 pub(crate) struct QueryState {
     pub(super) result: RwSignal<Option<QueryResult>>,
     /// Filters that produced `result`, snapshotted on the last successful run. Drives
-    /// the read-only applied-filter chip row (kept in sync with the displayed result,
-    /// not the live controls).
+    /// the labels naming what the results on screen were filtered by (kept in sync
+    /// with the displayed result, not the live controls).
     pub(super) applied_filters: RwSignal<Option<AppliedFilters>>,
     /// The query that produced `result`, as sent. "Filters changed" compares the
     /// controls with it (`util::filters_changed`), and auto-refresh re-runs it.

@@ -5,7 +5,7 @@
 use super::*;
 
 impl AppState {
-    /// Snapshots the active filters for the applied-filter chips, resolving org/loc/role
+    /// Snapshots the active filters for the applied-filter labels, resolving org/loc/role
     /// ids to display names and severity raw values to labels. All reads are untracked
     /// (this runs imperatively at Run time, not inside a reactive scope).
     pub(in crate::app) fn snapshot_filters(self) -> AppliedFilters {
@@ -360,9 +360,8 @@ impl AppState {
     /// Shared tail of every drill-down: re-run and land the operator on the rows.
     ///
     /// Flat view on purpose — a drill-down is a request to see *the rows behind this
-    /// number*, and a grouped view would re-collapse them behind headers. Filters are
-    /// left expanded/collapsed as the operator had them; the chip row already reports
-    /// what the drill-down applied.
+    /// number*, and a grouped view would re-collapse them behind headers. The scope
+    /// bar's pickers and the patch filter bar show what the drill-down applied.
     fn drill_run(self) {
         self.query.patches_page.set(0);
         self.set_group_by(None);
@@ -525,7 +524,9 @@ impl AppState {
     pub(in crate::app) fn tick_auto_refresh(self) {
         let secs = self.run.refresh_secs.get_untracked();
         let now = js_sys::Date::now();
-        if secs == 0 || !self.is_authed() {
+        // Untracked: this runs from a timer, outside any reactive context, and
+        // `is_authed` / `refresh_hold` read tracked for the label's sake.
+        if secs == 0 || !untrack(|| self.is_authed()) {
             self.run
                 .refresh_clock
                 .set(util::RefreshClock::start(secs, now));
@@ -535,7 +536,7 @@ impl AppState {
             self.run.refresh_clock.get_untracked(),
             secs,
             now,
-            self.refresh_hold(),
+            untrack(|| self.refresh_hold()),
         );
         self.run.refresh_clock.set(clock);
         if fire {
@@ -564,7 +565,7 @@ impl AppState {
     }
 
     /// Drops everything derived from the last query: the summary, the current page,
-    /// grouping state, the applied-filter chips and any device selection made
+    /// grouping state, the applied-filter snapshot and any device selection made
     /// against those rows.
     pub(in crate::app) fn clear_results(self) {
         self.query.result.set(None);

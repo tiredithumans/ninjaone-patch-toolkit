@@ -166,8 +166,8 @@ pub(super) fn TimeToInstallSection() -> impl IntoView {
         <section class="compliance-os" id="cmp-tti">
             <h3 class="chart-title">"First seen \u{2192} installed"</h3>
             // The one section on this tab built from the detail rows, so it is the
-            // one the patch filters *do* reach — the banner above says otherwise
-            // for everything else here.
+            // one the patch filters *do* reach — the tab summary's scope note
+            // (`util::tab_scope`) says otherwise for everything else here.
             <p class="scope-note">
                 "Unlike the sections above, this follows every patch filter (Status, Severity, Search, First-seen, Installed-within): it measures the installed rows this query returned."
             </p>

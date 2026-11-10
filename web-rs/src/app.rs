@@ -272,7 +272,9 @@ pub fn App() -> impl IntoView {
                 <SettingsDialog/>
             </Show>
             <UpdateSplash/>
-            // Before the confirm dialog, which its "Run script…" opens over it.
+            // Before the confirm dialog. Its "Run script…" closes it before planning,
+            // but a plan already in flight from the action bar can land while it is
+            // open, and the confirmation must then stack above it.
             <ScriptDialog/>
             <ConfirmActionModal/>
             <KeyboardShortcuts/>

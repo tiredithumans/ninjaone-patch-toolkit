@@ -607,7 +607,7 @@ pub(crate) fn disambiguate_locations(
 ///
 /// Names the selection while it is short enough to read, and falls back to a count
 /// once it isn't — a scope of eleven sites is not legible as a comma list, and the
-/// chip row below the results carries the full list anyway.
+/// open picker ticks every pick anyway.
 pub(crate) fn selection_label(selected_names: &[String], all_label: &str) -> String {
     match selected_names.len() {
         0 => all_label.to_string(),
