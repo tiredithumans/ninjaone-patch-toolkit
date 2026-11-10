@@ -50,7 +50,9 @@ paths:
 - **Each attempt's token is bound to the URL's tenant (`access_token_for(&tenant_stamp)`); a moved
   tenant aborts with `TenantMoved` — no retry, no token invalidation.**
   → `docs/design/api-client.md#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant`
-- **reqwest has `default-features = false`; keep `gzip`, `http2`, `system-proxy`, `charset`.**
+- **reqwest has `default-features = false`; keep `gzip`, `http2`, `system-proxy`, `charset`. Its
+  TLS is `rustls-no-provider` with ring installed once by `run()` (`install_crypto_provider`) —
+  never build a client before it; aws-lc-rs is linked only by the dev-dependencies.**
   → `docs/design/api-client.md#reqwests-default-features-are-off-so-every-one-it-drops-must-be-re-added-explicitly`
 - **Verify endpoint shapes/params/enums against the spec, never from memory:**
   `docs/api/ninjaone-surface.md` is the committed digest; the weekly `ninjaone-contract` CI job

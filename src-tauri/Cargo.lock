@@ -2653,6 +2653,7 @@ dependencies = [
  "rand",
  "reqwest",
  "rust_xlsxwriter",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.1",

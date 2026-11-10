@@ -340,3 +340,13 @@ drops `charset`, `http2`, and `system-proxy` — and `gzip` was never on. Uncomp
 JSON feeds and a fresh TLS handshake per concurrent fetch were both silent consequences of that
 one line. If you touch the feature list, keep `gzip`, `http2`, `system-proxy`, `charset`. The
 manifest comment explains each.
+
+**One TLS crypto provider: ring, installed by `run()`.** reqwest's `rustls` feature compiles in
+aws-lc-rs as its fallback, while tauri-plugin-updater's `rustls-tls` brings ring and installs it as
+the process default on its first update check. Both were linked, and which one a reqwest client
+used depended on whether a check had run before the client was built. reqwest now takes
+`rustls-no-provider`, `rustls` is a direct dependency with only `ring` (and `std`), and
+`install_crypto_provider` makes ring the default at the top of `run()`, before `AppState` builds
+the shared client; a client built without a default panics, so nothing may build one earlier. The
+unit tests build clients without `run()`, so the dev-dependencies alone re-enable reqwest's
+`rustls` fallback: `cargo tree -e normal -i aws-lc-rs` is empty, and only the test build links it.
