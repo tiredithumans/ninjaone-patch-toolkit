@@ -4774,3 +4774,12 @@ fn data_age_reads_the_backend_stamp_against_the_clock() {
     );
     assert_eq!(data_age_label("yesterday", at), None);
 }
+
+#[test]
+fn instance_url_hint_catches_only_the_plain_mistakes() {
+    assert!(instance_url_hint("  ").is_some());
+    assert!(instance_url_hint("app.ninjarmm.com").is_some());
+    assert!(instance_url_hint("http://app.ninjarmm.com").is_some());
+    assert_eq!(instance_url_hint("https://app.ninjarmm.com"), None);
+    assert_eq!(instance_url_hint("http://127.0.0.1:8443"), None);
+}

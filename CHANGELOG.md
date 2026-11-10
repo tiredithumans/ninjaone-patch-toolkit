@@ -16,9 +16,13 @@ version and start a fresh `[Unreleased]`.
 - **Reset filters** in the scope bar puts every filter back to the starting query, including after a drill-down replaced your scope.
 - Pressing Enter in Search or "OS name contains…" runs the query.
 - "Data as of…" also shows how old the data is ("12 min ago").
+- Settings shows the redirect URI to register in NinjaOne, with a Copy link, and a short hint under each connection field.
+- Settings marks unsaved changes beside the Save button.
 
 ### Changed
 
+- Sign-in errors are written in plain sentences that say what to do next.
+- Sign out asks for a second click while jobs you dispatched are still running.
 - An error notification no longer disappears when a success message arrives, and a notification stays up while the pointer is on it.
 - The Export menu says what an export contains and shows when a save is in progress.
 

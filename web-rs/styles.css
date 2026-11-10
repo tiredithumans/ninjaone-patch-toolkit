@@ -1610,7 +1610,24 @@ tbody tr:hover {
 }
 
 .settings-footer .app-version {
-  margin: 0 0 0 auto;
+  margin: 0;
+}
+
+.settings-footer__util {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* The redirect URI to register, selectable, with its Copy link. */
+.redirect-uri {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  user-select: text;
 }
 
 /* --- First run: what to do before there is anything to show ----------------- */
