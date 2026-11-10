@@ -12,7 +12,7 @@ serializes to `{ message }`, which the frontend renders in a toast (map errors w
 `.map_err(UiError::from)`). An error the frontend must *branch* on adds a `code` with
 `UiError::coded(error::ERR_*, …)`, mirrored as a `types.rs` constant. Its wrapper is declared
 `coded` in `ipc!` and returns `api::IpcError { message, code }`. Never match on message text.
-The one code today is `ERR_PARTIAL_DISPATCH` (see [actions.md](./actions.md)). Must be in `generate_handler![]` **and** have an `invoke(...)`
+The codes today are `ERR_PARTIAL_DISPATCH` (see [actions.md](./actions.md)) and `ERR_TENANT_CHANGED` (a settings save that failed after switching tenants, so the frontend clears the previous tenant's view as on success). Must be in `generate_handler![]` **and** have an `invoke(...)`
 wrapper in `web-rs/src/api.rs`.
 
 **`async` is the default, not a requirement.** A handler that only reads or writes in-process

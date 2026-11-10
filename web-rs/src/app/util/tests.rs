@@ -76,6 +76,19 @@ fn only_a_partial_or_unreadable_dispatch_leaves_the_confirmation_dialog() {
     );
 }
 
+/// A save that failed after switching tenants must clear the screen like a
+/// successful switch; any other failure changed nothing.
+#[test]
+fn only_a_tenant_changed_save_error_switches_tenant() {
+    assert!(save_switched_tenant(Some(crate::types::ERR_TENANT_CHANGED)));
+    assert!(!save_switched_tenant(None));
+    assert!(!save_switched_tenant(Some(
+        crate::types::ERR_PARTIAL_DISPATCH
+    )));
+    // The wire value the backend's `error::ERR_TENANT_CHANGED` sends.
+    assert_eq!(crate::types::ERR_TENANT_CHANGED, "tenantChanged");
+}
+
 #[test]
 fn confirm_is_refused_until_the_device_count_is_typed_exactly() {
     // No typed count required: a click is enough.

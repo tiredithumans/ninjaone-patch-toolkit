@@ -76,7 +76,14 @@ fn Account() -> impl IntoView {
                     state.session.refresh_auth();
                     state.notify(Toast::ok("Signed out"));
                 }
-                Err(e) => state.notify(Toast::err(e)),
+                Err(e) => {
+                    // The backend dropped the result and jobs before the step that
+                    // failed, so the table on screen can no longer be paged or
+                    // exported. The status says whether the sign-in survived.
+                    state.clear_session();
+                    state.session.refresh_auth();
+                    state.notify(Toast::err(e));
+                }
             }
         });
     };
@@ -136,7 +143,13 @@ pub(crate) fn SignInButton() -> impl IntoView {
                             state.session.refresh_auth();
                             state.notify(Toast::ok("Signed in"));
                         }
-                        Err(e) => state.notify(Toast::err(e)),
+                        Err(e) => {
+                            // A cancelled or failed browser sign-in: the backend
+                            // already dropped the previous session's result and jobs.
+                            state.clear_session_and_reload();
+                            state.session.refresh_auth();
+                            state.notify(Toast::err(e));
+                        }
                     }
                     state.session.signing_in.set(false);
                 });

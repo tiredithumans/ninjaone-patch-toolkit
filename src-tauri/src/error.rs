@@ -17,6 +17,11 @@ pub struct UiError {
 /// a re-plan would send to them again.
 pub const ERR_PARTIAL_DISPATCH: &str = "partialDispatch";
 
+/// `save_settings` failed *after* it switched tenants (storing the client secret
+/// failed): the new tenant is saved and the previous one's result, jobs and grant
+/// are already gone, so the frontend must drop what it shows of them too.
+pub const ERR_TENANT_CHANGED: &str = "tenantChanged";
+
 impl UiError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {

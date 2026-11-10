@@ -54,7 +54,13 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                     state.session.refresh_auth();
                     state.notify(Toast::ok("Settings saved"));
                 }
-                Err(e) => state.notify(Toast::err(e)),
+                Err(e) => {
+                    if util::save_switched_tenant(e.code.as_deref()) {
+                        state.clear_tenant_scope();
+                        state.session.refresh_auth();
+                    }
+                    state.notify(Toast::err(e.message));
+                }
             }
             saving.set(false);
         });
@@ -67,7 +73,13 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                     state.apply_settings_view(v);
                     state.notify(Toast::ok("Cleared stored secret"));
                 }
-                Err(e) => state.notify(Toast::err(e)),
+                Err(e) => {
+                    if util::save_switched_tenant(e.code.as_deref()) {
+                        state.clear_tenant_scope();
+                        state.session.refresh_auth();
+                    }
+                    state.notify(Toast::err(e.message));
+                }
             }
         });
     };

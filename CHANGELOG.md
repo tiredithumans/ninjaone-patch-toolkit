@@ -49,6 +49,11 @@ version and start a fresh `[Unreleased]`.
 
 ### Fixed
 
+- A failed or cancelled sign-in, sign-out or re-authorization no longer leaves the previous
+  session's results on screen.
+- Switching to another instance no longer leaves the previous instance's results on screen when
+  saving the client secret fails.
+- An action's confirmation no longer reopens after you sign out or switch instances.
 - Pressing Escape after visiting the Patches tab no longer causes errors in the app.
 - An export no longer fails because the exploit data's status is unusually long.
 - A damaged line in the run history or audit trail no longer hides the rest of it.
