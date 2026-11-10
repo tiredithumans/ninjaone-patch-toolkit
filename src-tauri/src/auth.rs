@@ -166,9 +166,39 @@ struct GrantStamp {
 struct RefreshGrant {
     stamp: GrantStamp,
     client_id: String,
-    client_secret: Option<String>,
+    client_secret: ClientSecret,
     /// The in-memory refresh token, when this session already has one.
     refresh_token: Option<String>,
+}
+
+/// The client secret as this process knows it.
+///
+/// A keyring fault reading it used to become "no secret" for the rest of the
+/// process (`unwrap_or_default`), error dropped and never re-read: a keychain that
+/// was locked at launch and unlocked a minute later still refreshed and signed in
+/// as a public client, which a Web (confidential) client's token endpoint refuses.
+/// Kept apart from "absent", the fault is logged and the secret re-read on the
+/// blocking path just before it is next needed.
+#[derive(Clone)]
+enum ClientSecret {
+    /// Read from the keyring or set in Settings; `None` is a Native client's.
+    Known(Option<String>),
+    /// The keyring could not be read; never sent as "no secret".
+    Unreadable,
+}
+
+impl ClientSecret {
+    /// This tenant's secret from the keyring, a fault logged rather than dropped.
+    /// **Blocking** keyring I/O.
+    fn read(base_url: &str, client_id: Option<&str>) -> Self {
+        match load_tenant_secret(base_url, client_id) {
+            Ok(secret) => Self::Known(secret),
+            Err(e) => {
+                warn!(error = %e, "could not read the client secret from the OS keyring; will retry");
+                Self::Unreadable
+            }
+        }
+    }
 }
 
 /// A request's tenant was switched away while it was waiting — out a backoff, a
@@ -363,7 +393,7 @@ struct Inner {
     client_id: Option<String>,
     /// Optional: a NinjaOne *Native* app registration is a public client with no
     /// secret (pure PKCE). A *Web* app registration is confidential and supplies one.
-    client_secret: Option<String>,
+    client_secret: ClientSecret,
     tokens: Option<TokenSet>,
     /// Whether the next interactive sign-in should ask for `management`. Mirrors
     /// `settings.actions.enabled`; it does not describe the *current* grant.
@@ -396,7 +426,7 @@ impl AuthState {
         client_id: Option<String>,
         request_management: bool,
     ) -> Self {
-        let client_secret = load_tenant_secret(&base_url, client_id.as_deref()).unwrap_or_default();
+        let client_secret = ClientSecret::read(&base_url, client_id.as_deref());
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 base_url,
@@ -452,7 +482,7 @@ impl AuthState {
     pub fn has_client_secret(&self) -> bool {
         self.inner
             .read()
-            .map(|g| g.client_secret.is_some())
+            .map(|g| matches!(g.client_secret, ClientSecret::Known(Some(_))))
             .unwrap_or(false)
     }
 
@@ -497,8 +527,8 @@ impl AuthState {
         // taken; nothing else can be mid-`apply_settings` (the caller holds the
         // settings write gate), so re-reading here cannot race a competing switch.
         // This is a synchronous keyring read: callers run it on a blocking thread.
-        let fresh_secret = tenant_changed
-            .then(|| load_tenant_secret(&base_url, client_id.as_deref()).unwrap_or_default());
+        let fresh_secret =
+            tenant_changed.then(|| ClientSecret::read(&base_url, client_id.as_deref()));
 
         let Ok(mut inner) = self.inner.write() else {
             return false;
@@ -552,7 +582,7 @@ impl AuthState {
         self.inner
             .write()
             .map_err(|_| anyhow!("auth state poisoned"))?
-            .client_secret = secret;
+            .client_secret = ClientSecret::Known(secret);
         Ok(())
     }
 
@@ -652,6 +682,15 @@ impl AuthState {
         {
             bail!("{}", failure.message);
         }
+        // A secret the keyring could not produce is read again now, and a refresh
+        // never goes out without it: sent as a public client, a Web client's grant
+        // is refused, and nothing about that may cost the saved sign-in.
+        if matches!(grant.client_secret, ClientSecret::Unreadable) {
+            match self.reload_secret(&grant.stamp).await {
+                Ok(secret) => grant.client_secret = ClientSecret::Known(secret),
+                Err(e) => return Err(self.share_failure(&mut last_failure, &grant.stamp, e)),
+            }
+        }
         let refresh_token = match grant.refresh_token.take() {
             Some(token) => token,
             None => match self.load_saved_refresh(&grant.stamp).await {
@@ -662,14 +701,7 @@ impl AuthState {
                 // plain "not signed in" was re-read once per queued request — each a
                 // blocking keyring round trip, so one fault stalled a query's whole
                 // fan-out N times over.
-                Err(e) => {
-                    *last_failure = Some(RefreshFailure {
-                        stamp: grant.stamp.clone(),
-                        message: format!("{e:#}"),
-                    });
-                    self.refresh_failures.fetch_add(1, Ordering::AcqRel);
-                    return Err(e);
-                }
+                Err(e) => return Err(self.share_failure(&mut last_failure, &grant.stamp, e)),
             },
         };
         let stamp = grant.stamp.clone();
@@ -686,6 +718,48 @@ impl AuthState {
                 }
                 RefreshError::Other(e) => e,
             })
+    }
+
+    /// Records `e` as the failure of the grant `stamp` names, for the callers queued
+    /// behind this one under `refresh_lock`, and hands it back.
+    fn share_failure(
+        &self,
+        last_failure: &mut Option<RefreshFailure>,
+        stamp: &GrantStamp,
+        e: anyhow::Error,
+    ) -> anyhow::Error {
+        *last_failure = Some(RefreshFailure {
+            stamp: stamp.clone(),
+            message: format!("{e:#}"),
+        });
+        self.refresh_failures.fetch_add(1, Ordering::AcqRel);
+        e
+    }
+
+    /// Re-reads the client secret of the tenant `stamp` names, on a blocking
+    /// thread, after an earlier read failed ([`ClientSecret::Unreadable`]). A
+    /// success is kept for the rest of the session — unless the tenant moved, or
+    /// Settings stored a secret meanwhile — so a keychain unlocked after launch
+    /// works without a restart.
+    async fn reload_secret(&self, stamp: &GrantStamp) -> Result<Option<String>> {
+        let this = self.clone();
+        let tenant = stamp.tenant.clone();
+        let loaded = tauri::async_runtime::spawn_blocking(move || {
+            load_tenant_secret(&tenant.base_url, tenant.client_id.as_deref()).inspect(|secret| {
+                if let Ok(mut inner) = this.inner.write()
+                    && inner.tenant() == tenant
+                    && matches!(inner.client_secret, ClientSecret::Unreadable)
+                {
+                    inner.client_secret = ClientSecret::Known(secret.clone());
+                }
+            })
+        })
+        .await
+        .context("keyring read task failed")?;
+        loaded.context(
+            "could not read the client secret from the OS keyring; it may be locked. \
+             Unlock it and try again",
+        )
     }
 
     /// One consistent read of everything a refresh needs. Sampling the host, the
@@ -813,8 +887,17 @@ impl AuthState {
             ("refresh_token", refresh_token.to_string()),
             ("client_id", client_id),
         ];
-        if let Some(secret) = client_secret {
-            body.push(("client_secret", secret));
+        match client_secret {
+            ClientSecret::Known(Some(secret)) => body.push(("client_secret", secret)),
+            ClientSecret::Known(None) => {}
+            // `token_for` re-reads it first. Refused here as well, before anything
+            // is sent, so a keyring fault can never reach `refresh_grant_is_dead`
+            // and cost the saved sign-in.
+            ClientSecret::Unreadable => {
+                return Err(RefreshError::Transient(anyhow!(
+                    "the client secret could not be read from the OS keyring"
+                )));
+            }
         }
 
         let resp = self
@@ -1220,6 +1303,12 @@ impl AuthState {
         if let Some(problem) = instance_url_problem(&base_url) {
             bail!("{problem}; correct the instance in Settings, then sign in again");
         }
+        // Before the browser too: a secret the keyring could not produce at launch
+        // is read again, and the exchange never goes out without it.
+        let client_secret = match client_secret {
+            ClientSecret::Known(secret) => secret,
+            ClientSecret::Unreadable => self.reload_secret(&started).await?,
+        };
         let scope = scope_for(request_management);
 
         let pkce = PkceChallenge::new();
@@ -1364,7 +1453,7 @@ impl AuthState {
             base_url,
             callback_port: 0,
             client_id: None,
-            client_secret: None,
+            client_secret: ClientSecret::Known(None),
             tokens: Some(TokenSet {
                 access_token: access_token.to_string(),
                 refresh_token: None,
@@ -1399,7 +1488,7 @@ impl AuthState {
             base_url,
             callback_port: 0,
             client_id: Some(client_id.to_string()),
-            client_secret: None,
+            client_secret: ClientSecret::Known(None),
             tokens: Some(TokenSet {
                 access_token: access_token.to_string(),
                 refresh_token: Some(refresh_token.to_string()),
@@ -1950,6 +2039,21 @@ mod test_keyring {
     pub(super) fn slow_reads_of(user: &str, delay: std::time::Duration) {
         slow().lock().unwrap().insert(user.to_string(), delay);
     }
+
+    /// Entries whose reads fail, standing in for a locked keychain on the read side.
+    pub(super) fn unreadable() -> &'static Mutex<HashSet<String>> {
+        static UNREADABLE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+        UNREADABLE.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    pub(super) fn refuse_reads_of(user: &str) {
+        unreadable().lock().unwrap().insert(user.to_string());
+    }
+
+    /// The keychain unlocked: `user` reads again.
+    pub(super) fn allow_reads_of(user: &str) {
+        unreadable().lock().unwrap().remove(user);
+    }
 }
 
 #[cfg(test)]
@@ -1984,6 +2088,13 @@ fn load_keyring(user: &str) -> Result<Option<String>> {
         .copied();
     if let Some(delay) = stall {
         std::thread::sleep(delay);
+    }
+    if test_keyring::unreadable()
+        .lock()
+        .map_err(|_| anyhow!("test keyring poisoned"))?
+        .contains(user)
+    {
+        bail!("test keyring refuses to read {user}");
     }
     Ok(test_keyring::store()
         .lock()
