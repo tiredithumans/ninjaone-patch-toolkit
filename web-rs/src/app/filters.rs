@@ -78,6 +78,7 @@ pub(crate) fn ScopeBar() -> impl IntoView {
                 disabled=Signal::derive(move || {
                     loading.get() || state.lookups.locations.with(Vec::is_empty)
                 })
+                disabled_why="No locations to pick from yet — sign in, or widen the organizations"
                 searchable=true
             />
             <Picker
@@ -106,6 +107,7 @@ pub(crate) fn ScopeBar() -> impl IntoView {
                 disabled=Signal::derive(move || {
                     loading.get() || state.lookups.device_groups.with(Vec::is_empty)
                 })
+                disabled_why="No device groups — sign in first, or this NinjaOne account has none it can list"
                 searchable=true
             />
             <Picker
@@ -125,6 +127,7 @@ pub(crate) fn ScopeBar() -> impl IntoView {
                 placeholder="OS name contains…"
                 prop:value=move || state.filters.os_name.get()
                 on:input=move |ev| state.filters.os_name.set(event_target_value(&ev))
+                on:keydown=move |ev| run_on_enter(state, &ev)
             />
             // Type is a scope facet, not a row filter: only the families the query
             // fetched are in the compliance, severity, age and reboot rollups, so an
@@ -156,8 +159,40 @@ pub(crate) fn ScopeBar() -> impl IntoView {
             <Show when=move || loading.get()>
                 <span class="chips-label">"Loading…"</span>
             </Show>
+            <ResetFilters/>
             <FiltersChanged/>
         </section>
+    }
+}
+
+/// Enter in a filter's text box runs the query, as typing a search and pressing
+/// Enter does everywhere else; it used to do nothing.
+fn run_on_enter(state: AppState, ev: &leptos::ev::KeyboardEvent) {
+    if ev.key() == "Enter" {
+        state.run_query();
+    }
+}
+
+/// "Reset filters", while the controls are off the starting query. The one way
+/// back after a drill-down has replaced a scope the operator built by hand.
+#[component]
+fn ResetFilters() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let at_default = Memo::new(move |_| {
+        state.filters.track();
+        util::filters_at_default(&state.filters.query_args())
+    });
+    view! {
+        <Show when=move || !at_default.get()>
+            <button
+                type="button"
+                class="link-btn"
+                title="Back to the whole fleet, every patch type, Pending"
+                on:click=move |_| state.reset_filters()
+            >
+                "Reset filters"
+            </button>
+        </Show>
     }
 }
 
@@ -257,6 +292,7 @@ pub(crate) fn PatchFilterBar() -> impl IntoView {
                 placeholder="Search KB or name"
                 prop:value=move || state.filters.search.get()
                 on:input=move |ev| state.filters.search.set(event_target_value(&ev))
+                on:keydown=move |ev| run_on_enter(state, &ev)
             />
             <label class="inline" title=util::EXPLOITED_HELP>
                 <input
@@ -299,6 +335,14 @@ pub(crate) fn PatchFilterBar() -> impl IntoView {
                         on:change=move |ev| state.filters.detected_before_date.set(event_target_value(&ev))
                     />
                 </label>
+                <span class="chips-label">"UTC days"</span>
+                {move || {
+                    util::date_order_problem(
+                        &state.filters.detected_after_date.get(),
+                        &state.filters.detected_before_date.get(),
+                    )
+                        .map(|msg| view! { <span class="field-hint" role="alert">{msg}</span> })
+                }}
             </Show>
             // Only while an install status is picked: the window bounds the whole
             // install-history pull, so it is meaningless otherwise.
@@ -358,6 +402,7 @@ pub(crate) fn PatchFilterBar() -> impl IntoView {
                             on:change=move |ev| state.filters.install_before_date.set(event_target_value(&ev))
                         />
                     </label>
+                    <span class="chips-label">"UTC days"</span>
                     {move || {
                         util::install_range_problem(
                             &state.filters.install_after_date.get(),
@@ -397,6 +442,10 @@ fn Picker<T>(
     #[prop(optional)]
     on_clear: Option<Callback<()>>,
     #[prop(into)] disabled: Signal<bool>,
+    /// Why the picker is disabled, for its tooltip, when the reason is not just
+    /// "still loading".
+    #[prop(optional)]
+    disabled_why: Option<&'static str>,
     /// A search box over the options, for the tenant-sized lookups.
     #[prop(optional)]
     searchable: bool,
@@ -420,6 +469,9 @@ where
     // always names all of it.
     let summary = move || util::selection_label(&names(), all_label);
     let full = move || {
+        if let Some(why) = disabled_why.filter(|_| disabled.get()) {
+            return why.to_string();
+        }
         let n = names();
         if n.is_empty() {
             format!("{label}: {all_label}")
@@ -516,6 +568,15 @@ where
 fn PresetsMenu() -> impl IntoView {
     let state = expect_context::<AppState>();
     let saving = RwSignal::new(false);
+    // Saving under an existing name replaces that preset; the button says so
+    // before the click rather than overwriting without a word.
+    let replaces = move || {
+        let name = state.settings.preset_name.get();
+        state
+            .settings
+            .presets
+            .with(|p| util::preset_name_taken(&name, p.iter().map(|p| p.name.as_str())))
+    };
 
     let save_preset = move |_| {
         if saving.get_untracked() {
@@ -635,9 +696,12 @@ fn PresetsMenu() -> impl IntoView {
                     class="btn"
                     data-keep-open=""
                     prop:disabled=move || saving.get()
+                    title=move || {
+                        if replaces() { "Replaces the preset with this name" } else { "" }
+                    }
                     on:click=save_preset
                 >
-                    "Save"
+                    {move || if replaces() { "Replace" } else { "Save" }}
                 </button>
             </div>
         </MenuButton>

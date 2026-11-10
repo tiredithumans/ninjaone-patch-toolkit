@@ -284,6 +284,32 @@ pub(crate) fn install_range_problem(after: &str, before: &str) -> Option<&'stati
     }
 }
 
+/// A custom First-seen range typed back to front. Either bound alone is a valid
+/// open range here, unlike the install range, so order is the only thing to check.
+pub(crate) fn date_order_problem(after: &str, before: &str) -> Option<&'static str> {
+    let (a, b) = (after.trim(), before.trim());
+    (!a.is_empty() && !b.is_empty() && a > b).then_some("The start date is after the end date.")
+}
+
+/// Whether the controls describe the query the app starts on: whole fleet, every
+/// patch type, Pending. "Reset filters" shows only when they do not. The install
+/// window is left out — it is a Settings default, and Reset does not touch it.
+pub(crate) fn filters_at_default(live: &PatchQueryArgs) -> bool {
+    live.filter == FilterParams::default()
+        && live.patch_type == "ALL"
+        && live.statuses == ["PENDING"]
+}
+
+/// Whether saving under `name` would replace a preset. Exact match after the same
+/// trim the save applies, as the backend upserts (`commands::settings::save_preset`).
+pub(crate) fn preset_name_taken<'a>(
+    name: &str,
+    mut existing: impl Iterator<Item = &'a str>,
+) -> bool {
+    let name = name.trim();
+    !name.is_empty() && existing.any(|n| n == name)
+}
+
 /// The install-history control's `(custom, after, before)` fields for a saved
 /// filter's bounds — the inverse of the mapping `filter_params` applies. The saved
 /// `before` carries the +86 399 s end-of-day, which `epoch_to_date` floors back to
@@ -607,7 +633,7 @@ pub(crate) fn disambiguate_locations(
 ///
 /// Names the selection while it is short enough to read, and falls back to a count
 /// once it isn't — a scope of eleven sites is not legible as a comma list, and the
-/// chip row below the results carries the full list anyway.
+/// button's tooltip carries the full list anyway.
 pub(crate) fn selection_label(selected_names: &[String], all_label: &str) -> String {
     match selected_names.len() {
         0 => all_label.to_string(),

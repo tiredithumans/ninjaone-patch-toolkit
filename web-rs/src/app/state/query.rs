@@ -393,12 +393,19 @@ impl AppState {
         self.drill_run();
     }
 
+    /// "Reset filters": the controls back on the starting query, the location list
+    /// re-derived for the now-empty org scope. Not run — "Filters changed · Apply"
+    /// says so, like any other edit.
+    pub(in crate::app) fn reset_filters(self) {
+        self.filters.reset();
+        self.reload_locations();
+    }
+
     /// Shared tail of every drill-down: re-run and land the operator on the rows.
     ///
     /// Flat view on purpose — a drill-down is a request to see *the rows behind this
-    /// number*, and a grouped view would re-collapse them behind headers. Filters are
-    /// left expanded/collapsed as the operator had them; the chip row already reports
-    /// what the drill-down applied.
+    /// number*, and a grouped view would re-collapse them behind headers. The pickers
+    /// show what the drill-down applied, and "Reset filters" is the way back out.
     fn drill_run(self) {
         self.query.patches_page.set(0);
         self.set_group_by(None);

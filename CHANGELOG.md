@@ -11,7 +11,16 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **Reset filters** in the scope bar puts every filter back to the starting query, including after a drill-down replaced your scope.
+- Pressing Enter in Search or "OS name contains…" runs the query.
+
 ### Fixed
+
+- Custom date ranges say they are UTC days, and a reversed First seen range is flagged beside the dates.
+- Saving a preset under an existing name shows **Replace** instead of overwriting silently.
+- A disabled Locations or Groups picker says why in its tooltip.
 
 - The "Sign in" card and button no longer flash at launch when you are already signed in.
 - Needs Reboot and Failures say "Run a query…" before the first run instead of reporting nothing found.

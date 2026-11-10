@@ -268,6 +268,28 @@ impl FilterState {
         }
     }
 
+    /// Puts every control back on the starting query (`util::filters_at_default`).
+    /// The install window stays: it is the Settings default, not a filter edit.
+    pub(super) fn reset(self) {
+        self.org_ids.set(Vec::new());
+        self.loc_ids.set(Vec::new());
+        self.role_ids.set(Vec::new());
+        self.group_ids.set(Vec::new());
+        self.selected_classes.set(Vec::new());
+        self.selected_severities.set(Vec::new());
+        self.os_name.set(String::new());
+        self.search.set(String::new());
+        self.exploited_only.set(false);
+        self.detected_window.set(String::new());
+        self.detected_after_date.set(String::new());
+        self.detected_before_date.set(String::new());
+        self.patch_type.set("ALL".to_string());
+        self.statuses.set(vec!["PENDING".to_string()]);
+        self.install_custom.set(false);
+        self.install_after_date.set(String::new());
+        self.install_before_date.set(String::new());
+    }
+
     pub(super) fn toggle_in(self, sig: RwSignal<Vec<String>>, value: String) {
         sig.update(|v| {
             if let Some(pos) = v.iter().position(|x| x == &value) {
