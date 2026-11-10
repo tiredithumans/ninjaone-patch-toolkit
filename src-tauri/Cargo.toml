@@ -31,6 +31,9 @@ tauri-plugin-dialog = "2"
 # was dead code that pinned zip 4.x and its extraction advisories.
 tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 anyhow = "1.0"
+# Already in the tree through reqwest; named only for `bytes::Bytes`, the type a
+# response body is read into (`api::Fetched`).
+bytes = "1"
 # `simd-unsafe` is on by default in 0.23 and is the crate's *only* source of
 # `unsafe`; without it base64 is `#![forbid(unsafe_code)]`. It only accelerates the
 # `Simd`/`Avx2`/`Neon` engines, and we exclusively use the scalar

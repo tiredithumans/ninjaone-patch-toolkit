@@ -10,8 +10,9 @@ from endpoint names or memory.**
 
 ## Reuse the shared retry + pagination
 
-Every call goes through `NinjaApiClient`: `{base}/api/v2{path}`, bearer auth, retry on timeout
-and **5xx** (`Idempotent` requests only, after a 2/4/8 s `backoff` stretched by up to 25% jitter)
+Every call goes through `NinjaApiClient`: `{base}/api/v2{path}`, bearer auth, retry on any
+transport failure — a timeout, a reset before the headers, a body cut off partway — and **5xx**
+(`Idempotent` requests only, after a 2/4/8 s `backoff` stretched by up to 25% jitter)
 / connect failure (anything but `ActOnce`; connecting has its own 15 s budget inside the 45 s
 total, see `build_http_client`) / 429 (honors `Retry-After` in seconds or as an HTTP-date, capped
 at `MAX_RETRY_AFTER_SECS` = 60 s — the header is server-controlled, and an uncapped value parked a
@@ -34,9 +35,20 @@ guard below rightly reports as a stall.
 
 ## Paginated bodies and row lists are deserialized straight into `T`; everything else goes through `Value`
 
-`send_with_retry` owns the request/retry loop and returns the raw `reqwest::Response`;
-`request_raw` decodes it as a `Value` (single-shot GETs, acting POSTs — all small bodies) and
-`request_page` decodes it as a `PageBody<T>` (`api::paging::parse_page`). The paginated path exists
+`send_with_retry` owns the request/retry loop and returns the raw `reqwest::Response`; `fetch`
+reads its body whole under the same retry budget and tenant stamp; `request_raw` decodes it as a
+`Value` (single-shot GETs, acting POSTs — all small bodies) and `request_page` decodes it as a
+`PageBody<T>` (`api::paging::parse_page`).
+
+**An `Idempotent` body cut off in transit is read again.** Each caller used to read the body
+itself, outside the retry loop, and the loop retried only a timeout or a connect failure before
+the headers. A connection reset mid-body, or the 45 s total timeout running out while the bytes
+arrived, therefore failed the opening page of every `/queries/*` scan, a `/devices-detailed` page,
+the lookups, `/jobs` and `/activities` outright. `fetch` now re-sends an `Idempotent` request on
+any transport failure, before the headers or during the body, within the one `MAX_RETRIES`
+(`an_idempotent_read_cut_off_in_flight_is_retried`). A cut-off body on an acting POST is an
+`OutcomeUnknown`, sent once (`an_acting_post_cut_off_mid_body_is_unknown_and_not_replayed`), and
+on a cursor page a served `CursorReplayUnsafe`: neither is ever re-sent there. The paginated path exists
 because a whole-fleet third-party feed runs to six figures, and a `Value` intermediate allocates a
 `String` for every JSON key on every row and then walks the tree again to build the `Patch` — the
 rows are parsed twice. `parse_page` dispatches on the body's first non-whitespace byte and reads
@@ -56,7 +68,9 @@ re-read every 30 s and at its largest during a patch window.
 not parse as a `Value::String`, whole; a proxy's sign-in page answering 200 then reached the toast
 and the log in full through serde's "invalid type: string …", past the `truncate_body` cap every
 other server text goes through, and on `script/run` it became the job's series uid. Now a blank
-body is `Null`, JSON is JSON, a short token without spaces or markup (`MAX_BARE_TOKEN`) is kept
+body is `Null` whatever its label (one labelled JSON used to fail as "EOF while parsing", an
+`OutcomeUnknown` on an accepted acting POST: `a_blank_body_labelled_json_is_nothing_not_an_error`),
+JSON is JSON, a short token without spaces or markup (`MAX_BARE_TOKEN`) is kept
 because some tenants answer `script/run` with the bare series uid, and anything else is an error
 quoting at most `truncate_body` of it (`a_body_not_labelled_json_is_json_a_token_or_an_error`,
 `a_2xx_page_that_is_not_json_is_a_capped_error_but_a_bare_uid_is_kept`). On an acting POST that
@@ -160,7 +174,15 @@ been the second page, within a few hundred milliseconds of the open.
 empty page while `all.len() < count`, **starts the scan over** after a short fixed pause
 (`SCAN_RESTARTS` × `SCAN_RESTART_DELAY`, via `restart_scan`): no `cursor` parameter, the rows
 already paged dropped (nothing says which of them the new cursor would serve again), and the count
-re-read from the new cursor. A scan that keeps breaking is reported like the other stalls.
+re-read from the new cursor. A scan that keeps breaking is reported like the other stalls. An
+empty 2xx body in the same place is the same empty page and restarts the same way
+(`an_empty_body_short_of_the_announced_count_restarts_the_scan`); it used to end the scan short
+of the count as a success.
+
+So does a `400` on a cursor page (`CursorRefused`), not only on a re-read: the field has seen
+NinjaOne cursors break on their own and be refused with `400 Invalid cursor.`, and that used to
+fail the fetch on a first read (`a_cursor_refused_on_a_first_read_restarts_the_scan`). The request
+that opens a scan carries no cursor, so a 400 there — a filter NinjaOne rejects — still fails.
 
 A **lost cursor page** — a request carrying a cursor that timed out, drew a 5xx, or came back as
 a 2xx whose body could not be read — fails with the `CursorReplayUnsafe` type (see
@@ -254,12 +276,16 @@ with no usable `name`, a number, an array). It is only consulted after a page th
 rows* — the caller checks `page_len == 0` first — so treating an unknown shape as "finished" ends
 the fetch mid-fleet and hands back a partial result that looks complete, understating every
 compliance number derived from it. The `results`-not-an-array arm refuses to read a malformed
-envelope as zero rows for the same reason, but on a cursor page it restarts the scan first and
-fails only once `SCAN_RESTARTS` is spent: it is part of decoding the body, and a body that will
-not decode cannot cheaply be told apart from one truncated in transit — a page the server already
-counts as delivered. A cursor of an unknown shape arrived in a body that decoded whole, so it is
-the server's deliberate answer, would come back the same from every fresh scan, and fails at once
-rather than spending two full re-pages to reach the same error.
+envelope as zero rows for the same reason. Neither restarts a cursor scan. `parse_page` decodes
+an envelope in two stages: stage 1 reads the body as complete JSON (`RawValue` validates what it
+borrows), and stage 2 reads that JSON as a page — `results` present and an array, every row a `T`,
+the cursor. A body truncated in transit fails reading the bytes or at stage 1, a page the server
+already counts as delivered, and restarts the scan under `SCAN_RESTARTS`, as does a body that is
+not JSON at all. A stage-2 failure is a `MalformedPage`, which `request_page` does not wrap in
+`CursorReplayUnsafe`: the body arrived whole, so it is the server's deliberate answer, would come
+back the same from every fresh scan, and fails at once rather than spending two full re-pages to
+reach the same error (`a_cursor_page_that_is_whole_but_not_a_page_fails_without_a_restart`,
+`an_unreadable_cursor_page_restarts_the_scan`). A cursor of an unknown shape is the same case.
 
 ## The timeout and 5xx arms are `Idempotent`-only
 
