@@ -117,6 +117,8 @@ that only *looks* like this app. The one form (the CVE search) prevents its defa
 
 `commands::update::{check_for_update, install_update}` wrap `tauri-plugin-updater`; the
 frontend's `UpdateSplash` shows the release notes (changelog) and the install relaunches the app.
+Both requests carry a timeout (`CHECK_TIMEOUT`, `DOWNLOAD_TIMEOUT`): the plugin sets none, and the
+splash cannot be dismissed mid-install, so a stalled download used to hold the app.
 The updater fetches the signed `latest.json` from the GitHub releases endpoint
 (`tauri.conf.json` → `plugins.updater`) — **backend egress, not subject to the CSP**. The launch
 check is gated by the `auto_check_updates` setting. Packaging and signing:
