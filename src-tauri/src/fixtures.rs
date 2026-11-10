@@ -741,6 +741,7 @@ fn ipc_fixture_is_current() {
             },
             "read_action_audit": [AuditRecord {
                 timestamp: fmt_ts(FIXTURE_NOW - Duration::minutes(10)),
+                instance: INSTANCE.into(),
                 kind: "OS_PATCH_REMEDIATE".into(),
                 device_name: "web-01".into(),
                 organization: "Contoso".into(),

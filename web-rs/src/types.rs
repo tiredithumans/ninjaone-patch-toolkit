@@ -1501,6 +1501,8 @@ pub struct ActionProgressEvent {
 #[serde(rename_all = "camelCase", default)]
 pub struct AuditRecord {
     pub timestamp: String,
+    /// The NinjaOne instance the dispatch went to (empty on records that predate it).
+    pub instance: String,
     pub kind: String,
     pub device_name: String,
     pub organization: String,

@@ -4,7 +4,7 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, ActionRequest, ActionSettings, AuthStatus, CveExposure, DeviceSummary,
+    ActionKind, ActionRequest, ActionSettings, AuditRecord, AuthStatus, CveExposure, DeviceSummary,
     ExploitDataStatus, FilterParams, GroupBy, JobReport, JobRequest, JobState, KevEntry, Location,
     Organization, PatchFamilies, PatchGroup, PatchQueryArgs, PatchRow, PlannedTarget, RebootChoice,
     RebootMode, RowSort, RowSortKey, RunRecord,
@@ -3342,6 +3342,25 @@ fn the_confirm_dialog_says_how_current_online_status_is() {
         "Online/offline status as of yesterday.",
         "an unexpected shape is shown whole"
     );
+}
+
+#[test]
+fn the_audit_trail_names_the_instance_only_when_it_spans_several() {
+    let at = |instance: &str| AuditRecord {
+        instance: instance.into(),
+        ..AuditRecord::default()
+    };
+    assert!(!audit_spans_instances(&[]));
+    assert!(!audit_spans_instances(&[
+        at("https://a"),
+        at("https://a"),
+        at("")
+    ]));
+    assert!(audit_spans_instances(&[
+        at("https://a"),
+        at(""),
+        at("https://b")
+    ]));
 }
 
 #[test]

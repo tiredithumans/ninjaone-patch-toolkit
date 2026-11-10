@@ -712,6 +712,11 @@ the file.
 first, and stops as soon as it holds the tail. Rotation is by time, so an older generation can't
 hold a newer record. The legacy file is read last, and only while the tail is still short.
 
+Each record carries the `instance` it was sent to, and `AuditRecord` reads it back. The Jobs
+tab's audit trail adds an Instance column only when its records name more than one
+(`util::audit_spans_instances`): one log serves every tenant an MSP operator switches between,
+and without it two tenants' dispatches read as one history.
+
 A torn append (a crash, a full disk) used to cost more than its own record:
 
 - The reader read each file as one `String`, so one byte cut inside a multi-byte character (a

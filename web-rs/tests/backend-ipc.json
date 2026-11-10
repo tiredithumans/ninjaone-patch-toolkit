@@ -1348,6 +1348,7 @@
         "deviceName": "web-01",
         "dryRun": false,
         "exitCode": 0,
+        "instance": "https://app.ninjarmm.com",
         "kind": "OS_PATCH_REMEDIATE",
         "legacy": false,
         "organization": "Contoso",

@@ -43,6 +43,9 @@ const AUDIT_TAIL: usize = 500;
 #[serde(rename_all = "camelCase")]
 pub struct AuditRecord {
     pub timestamp: String,
+    /// The NinjaOne instance the dispatch went to. An MSP operator who switches
+    /// tenants keeps one log, so without it two tenants' dispatches read as one.
+    pub instance: String,
     pub kind: String,
     pub device_name: String,
     pub organization: String,
@@ -155,6 +158,7 @@ fn parse_line(line: &str, legacy: bool) -> Option<AuditRecord> {
     };
     Some(AuditRecord {
         timestamp: get("timestamp"),
+        instance: get("instance"),
         kind: get("kind"),
         device_name: get("deviceName"),
         organization: get("organization"),
@@ -262,6 +266,24 @@ mod tests {
     fn a_maintenance_window_override_is_read_back() {
         let line = r#"{"timestamp":"2026-09-02T23:00:00Z","kind":"OS_PATCH_APPLY","deviceName":"srv-01","windowOverride":true}"#;
         assert!(parse_line(line, false).expect("parses").window_override);
+    }
+
+    /// Each record names the instance it was sent to, so two tenants' dispatches in
+    /// one log can be told apart; a record without one reads as empty.
+    #[test]
+    fn the_instance_is_read_back() {
+        let line =
+            r#"{"timestamp":"t","instance":"https://eu.ninjarmm.com","deviceName":"srv-01"}"#;
+        assert_eq!(
+            parse_line(line, false).expect("parses").instance,
+            "https://eu.ninjarmm.com"
+        );
+        assert_eq!(
+            parse_line(r#"{"timestamp":"t"}"#, false)
+                .expect("parses")
+                .instance,
+            ""
+        );
     }
 
     #[test]
