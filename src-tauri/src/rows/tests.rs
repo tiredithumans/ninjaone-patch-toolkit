@@ -287,6 +287,52 @@ fn row_timestamps_are_normalised_like_the_dates_beside_them() {
     assert_eq!(wire["firstSeenTs"], serde_json::json!(seconds as i64));
 }
 
+/// A current-feed status the crate does not know is counted pending by the
+/// rollups (`is_pending`), so it must also be a row under the Pending selection —
+/// it used to fall through the status filter, leaving a patch the Compliance sheet
+/// counted and the Patches tab could not show. Its raw text is still displayed.
+#[test]
+fn an_unmapped_current_status_is_selected_as_pending_and_shown_raw() {
+    let devices = [device(1, 10, "Windows Server 2022")];
+    let by_id: HashMap<i64, &Device> = devices.iter().map(|d| (d.id, d)).collect();
+    let patches: Vec<Patch> = ["DEFERRED", "manual", "MANUAL", "REJECTED"]
+        .iter()
+        .enumerate()
+        .map(|(i, status)| Patch {
+            kb_number: Some(format!("KB{i}")),
+            ..patch(1, status, "CRITICAL", None)
+        })
+        .collect();
+    let rows_for = |statuses: &[&'static str]| -> Vec<String> {
+        let allowed: HashSet<&'static str> = statuses.iter().copied().collect();
+        let mut shown: Vec<String> = build_rows(
+            &by_id,
+            &maps(),
+            &[PatchSource {
+                records: &refs(&patches),
+                type_label: "OS",
+                status_override: Some(PatchStatus::Pending.api_value()),
+                status_filter: Some(&allowed),
+            }],
+            &FilterParams::default().prepare(),
+        )
+        .iter()
+        .map(|r| r.status.to_string())
+        .collect();
+        shown.sort();
+        shown
+    };
+
+    assert_eq!(rows_for(&["MANUAL"]), ["DEFERRED", "PENDING", "manual"]);
+    assert_eq!(rows_for(&["REJECTED"]), ["REJECTED"]);
+    // The rows agree with the rollups' verdict, record for record.
+    let pending = patches
+        .iter()
+        .filter(|p| is_pending(p.status.as_deref()))
+        .count();
+    assert_eq!(pending, rows_for(&["MANUAL"]).len());
+}
+
 #[test]
 fn build_rows_resolves_names_and_applies_os_filter() {
     let d1 = device(1, 10, "Windows Server 2022");

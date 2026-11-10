@@ -33,7 +33,7 @@ Violating these silently misreports a fleet.
 - **`Type` is a device-tier chip** — rollups cover only the fetched families.
   → `docs/design/compliance.md#the-fleet-health-rollups-do-depend-on-the-patch-type-facet`
 - **`is_pending` is an exclude list** (not `REJECTED`/`INSTALLED`); current sources get
-  `status_override = MANUAL`; `current_status_set` carries every selected status. The approval
+  `status_override = MANUAL` and an unknown status is selected as Pending (raw text shown); `current_status_set` carries every selected status. The approval
   split (`approval_state`) reads the vendor status, never that override.
   → `docs/design/compliance.md#rowsis_pending-is-an-exclude-list`
 - **`Installed` and `Failed` route to the install-history endpoints; current patches are always

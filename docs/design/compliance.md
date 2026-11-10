@@ -438,7 +438,10 @@ selected status (it only narrows the rows built from the current feed; the rollu
 unnarrowed feed), so a FAILED current record shows under the Failed selection; and
 `assemble_result` gives both current sources `status_override = MANUAL`, so an untyped record
 matches the Pending selection and renders as PENDING instead of being counted by the Compliance
-sheet and missing from the Patches sheet.
+sheet and missing from the Patches sheet. A third closes the last gap: a current-feed status this
+crate does not know (`DEFERRED`, or `manual` in another case) is counted pending, so `build_rows`
+selects it as Pending too (`PatchSource::is_current`) while the row keeps the raw text, and the
+distinct values are logged once per query beside the unmapped severities.
 
 ## A percentage never rounds up to 100
 
