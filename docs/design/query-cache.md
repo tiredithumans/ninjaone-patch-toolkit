@@ -13,7 +13,9 @@ Code: `src-tauri/src/state.rs` (`AppState`), `src-tauri/src/state/cache.rs` (`Te
 2. probe the slot — tenant match **and** within the TTL — and return a hit;
 3. take the single-flight gate, so the loser of a race waits instead of paging a
    six-figure feed a second time;
-4. re-probe under the gate, which is what turns that wait into a cache hit;
+4. re-probe under the gate, which is what turns that wait into a cache hit — and if the
+   fetch it waited on *failed* (the gate's failure count moved while it was parked, same
+   tenant), return that error instead of fetching again;
 5. store only if the epoch is unchanged when the slot lock is retaken;
 6. a degraded fetch (an optional sub-feed failed and fell back to empty) stores under a
    capped TTL, `FORCE_MIN_INTERVAL`, never the slot's full TTL.
@@ -29,6 +31,12 @@ went unseen, and the store went ahead under the departed tenant's key. Sampled a
 entry, any invalidation during the wait declines the store. The cost is that a caller
 which waited across a same-tenant invalidation does not cache its fresh fetch; the next
 caller does.
+
+Step 4's failure half mirrors auth's `refresh_lock`. Only successes used to be shared:
+when the leader's fetch failed, each waiter took the gate in turn and re-ran the whole
+fetch serially, so four lookups against an unreachable instance took about five minutes
+to fail. The gate now holds the last failure (tenant + message) beside a counter read on
+entry; a caller that arrives after the failure did not wait on it and fetches afresh.
 
 Step 6 exists because the fallbacks were cached exactly like a clean fetch: a `/groups`
 or `/locations` failure left the Group filter or the location names blank for the full
