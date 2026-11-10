@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::Path;
@@ -57,54 +56,12 @@ fn write_export(
     path: &Path,
     write: impl FnOnce(&mut File) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    // Written beside the target and renamed over it. Writing in place truncated
-    // the file the operator chose to overwrite before the new one existed, so a
-    // failed write deleted last week's export, and a crash mid-write left a
-    // shorter CSV that looked whole.
-    let mut name = std::ffi::OsString::from(".");
-    name.push(path.file_name().unwrap_or_default());
-    name.push(format!(".tmp-{}", std::process::id()));
-    let tmp = path.with_file_name(name);
-    let mut file = create_owner_only(&tmp)?;
-    let written = write(&mut file)
-        .and_then(|()| file.sync_all().context("flushing the export to disk"))
-        .and_then(|()| {
-            drop(file);
-            std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
-        });
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
-}
-
-/// Opens `path` for writing, truncated, readable by its owner only.
-///
-/// `mode` applies only to a file this call creates. One the operator chose to
-/// overwrite keeps its old mode, so it is narrowed through the handle, still before
-/// anything is written — best-effort, like the narrowing this replaced: a file
-/// another user owns cannot be, and refusing the export over its mode would be the
-/// wrong trade. Non-unix targets have no equivalent; Windows inherits the parent
-/// directory's ACL, which is already per-user under the profile.
-fn create_owner_only(path: &Path) -> std::io::Result<File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        options.mode(0o600);
-        let file = options.open(path)?;
-        if let Err(err) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(
-                ?err,
-                path = %path.display(),
-                "could not restrict the exported file to its owner"
-            );
-        }
-        Ok(file)
-    }
-    #[cfg(not(unix))]
-    options.open(path)
+    // Written beside the target and renamed over it (`paths::write_atomic_with`).
+    // Writing in place truncated the file the operator chose to overwrite before the
+    // new one existed, so a failed write deleted last week's export, and a crash
+    // mid-write left a shorter CSV that looked whole. The rename also replaces an
+    // overwritten file's old mode with the temp's 0600.
+    crate::paths::write_atomic_with(path, true, write)
 }
 
 /// The default file name for an export, stamped so successive exports don't

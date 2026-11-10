@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::Write as _,
     path::{Path, PathBuf},
 };
 
@@ -559,41 +558,17 @@ impl Settings {
         self.save_to(&settings_path()?)
     }
 
-    /// Atomic: the new contents go to a temporary file beside the real one and are
-    /// renamed over it. A plain `fs::write` truncates first, so a crash, a full disk
-    /// or a power cut mid-write left a half-written file — which the next launch
-    /// could not parse.
+    /// Atomic ([`crate::paths::write_atomic`]), so a crash mid-write never leaves a
+    /// half-written file the next launch cannot parse; owner-only, like the audit log
+    /// and run history.
     fn save_to(&self, path: &Path) -> Result<()> {
         let dir = path
             .parent()
             .context("settings path has no parent directory")?;
         fs::create_dir_all(dir).context("create settings dir")?;
         let text = serde_json::to_string_pretty(self).context("serialize settings")?;
-        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-        let written = write_owner_only(&tmp, text.as_bytes())
-            .and_then(|()| fs::rename(&tmp, path).context("replace settings"));
-        if written.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        written
+        crate::paths::write_atomic(path, text.as_bytes(), true).context("write settings")
     }
-}
-
-/// Creates (or truncates) `path` readable by the owner only, like the audit log and
-/// run history, writes `bytes` and syncs them to disk before the caller renames it
-/// into place.
-fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(path).context("create temporary settings file")?;
-    file.write_all(bytes).context("write settings")?;
-    file.sync_all().context("flush settings")?;
-    Ok(())
 }
 
 /// Where an unparseable `settings.json` is moved: beside it, stamped so a second

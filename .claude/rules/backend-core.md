@@ -17,5 +17,9 @@ paths:
   save on a blocking thread, publish after the disk write; keep its guard across any follow-up
   effects); only an instance/client-id change clears caches on save.
   → `docs/design/concurrency.md`
+- **A file that is rewritten goes through `paths::write_atomic`/`write_atomic_with`** (pid +
+  counter temp, sync, rename; `owner_only` for anything naming devices) — never a hand-rolled
+  temp-and-rename. Tests: `paths::tests::*atomic*`.
+  → `docs/design/concurrency.md#every-rewritten-file-goes-through-pathswrite_atomic`
 - **Windows links an 8 MiB main-thread stack** (`src-tauri/.cargo/config.toml`, never
   `RUSTFLAGS`). → `docs/design/concurrency.md`

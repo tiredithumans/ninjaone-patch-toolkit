@@ -48,6 +48,18 @@ switch re-pointing auth and clearing caches) keeps later writers out until those
 The lock and `replace_settings` are private precisely so no second writer can hand-roll the
 sequence without them.
 
+## Every rewritten file goes through `paths::write_atomic`
+
+Settings, window state, the exploit data, the run snapshots, the first-seen ledger, the run-history
+trim and every export replace their file through `paths::write_atomic` (or `write_atomic_with`,
+which hands the caller the `File` to stream into): a hidden temp beside the file, synced, renamed
+over it, removed on failure, 0600 when `owner_only`. They used to be six hand-rolled copies with
+three behaviours — a fixed `.tmp` name in three, so two app instances writing one file could
+interleave into one temp and rename the mixture; no `sync_all` in two, so a power cut after the
+rename could leave an empty file. The temp is `.name.tmp-<pid>-<n>`: the pid separates processes,
+the counter separates threads, and the leading dot keeps a directory scan by extension from
+reading one as data.
+
 ## The Windows main thread has a 1 MiB stack
 
 Windows MSVC gives the main thread 1 MiB; macOS and Linux give 8 MiB. v0.15.0's optimized build

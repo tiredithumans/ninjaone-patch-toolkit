@@ -8,7 +8,7 @@ in [`.claude/rules/`](../.claude/rules/); rationale is in [design notes](./desig
 ```
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
-├── src/paths.rs                 # app_dir() (settings, audit, history, window state) and local_dir()/local_subdir() (logs, ledger, snapshots, exploit data; moved there once)
+├── src/paths.rs                 # app_dir() (settings, audit, history, window state) and local_dir()/local_subdir() (logs, ledger, snapshots, exploit data; moved there once); write_atomic(_with), the one temp-and-rename writer
 ├── src/state.rs                 # AppState: auth, api client, settings, result cache + memos, fleet/lookup accessors, invalidation
 ├── src/state/cache.rs           # TenantCache<T>: tenant-stamped, TTL'd, epoch-gated, single-flight slot
 ├── src/state/jobs.rs            # job store, single-claim poller slot, confirm-token slot
