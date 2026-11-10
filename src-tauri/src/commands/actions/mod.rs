@@ -441,7 +441,14 @@ fn job_request(req: &ActionRequest, run_as: Option<&str>, device_id: i64) -> Job
         reboot_mode: *reboot_mode,
         reason: reason.clone(),
         include_offline: *include_offline,
-        targets: device_targets.get(&device_id).cloned().unwrap_or_default(),
+        // Only what was composed into the device's parameters. A typed string is
+        // sent verbatim and a native endpoint takes none, so targets recorded for
+        // either were never sent, and the Jobs tab listed them as if they had been.
+        targets: if req.kind.runs_a_script() && typed_parameters(req).is_none() {
+            device_targets.get(&device_id).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        },
     }
 }
 

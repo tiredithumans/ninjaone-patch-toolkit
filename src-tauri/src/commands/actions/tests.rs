@@ -8,8 +8,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::confirm::{canonical_parameters, confirm_dispatch, request_hash, targets_changed};
 use super::dispatch::{action_detail, carries_dry_run_flag, invalidate_after, record_dispatch};
 use super::plan::{
-    composed_targets, dry_run_support, parameters_preview, per_device_parameters, resolve_run_as,
-    summarize_names, untargeted_names, untargeted_remediation_blocker,
+    composed_targets, dry_run_support, empty_allow_list_warning, parameters_preview,
+    per_device_parameters, resolve_run_as, summarize_names, untargeted_names,
+    untargeted_remediation_blocker,
 };
 use super::*;
 use crate::actions::{PlannedTarget, RebootChoice, fmt_ts};
@@ -418,6 +419,40 @@ fn effective_parameters_composes_only_for_scripts() {
     // Native endpoints take no parameters at all.
     assert!(per_device_parameters(&request(ActionKind::Reboot, vec![1])).is_empty());
     assert!(per_device_parameters(&request(ActionKind::OsPatchApply, vec![1])).is_empty());
+}
+
+/// A `Script` sent a typed string sends it verbatim: the ticked targets are never
+/// composed, so the job must not record them (the Jobs tab listed them as sent)
+/// and the plan must not warn about an empty allow list nothing will send.
+#[test]
+fn typed_parameters_record_and_warn_about_no_targets() {
+    let eligible: Vec<PlannedTarget> = [1, 2]
+        .into_iter()
+        .map(|id| PlannedTarget {
+            device_id: id,
+            device_name: format!("srv-{id}"),
+            organization: "Contoso".into(),
+            offline: false,
+        })
+        .collect();
+    let mut composed = request(ActionKind::Script, vec![1, 2]);
+    composed.script_id = Some(42);
+    composed.device_targets = HashMap::from([(1, vec!["KB500".to_string()])]);
+    assert_eq!(job_request(&composed, None, 1).targets, vec!["KB500"]);
+    let warning = empty_allow_list_warning(&composed, &eligible).expect("srv-2 gets an empty list");
+    assert!(warning.contains("srv-2"), "{warning}");
+
+    let mut typed = composed.clone();
+    typed.parameters = Some("-Verbose".into());
+    assert!(
+        job_request(&typed, None, 1).targets.is_empty(),
+        "targets that were never sent are not recorded"
+    );
+    assert_eq!(empty_allow_list_warning(&typed, &eligible), None);
+
+    let mut native = request(ActionKind::OsPatchApply, vec![1]);
+    native.device_targets = HashMap::from([(1, vec!["KB500".to_string()])]);
+    assert!(job_request(&native, None, 1).targets.is_empty());
 }
 
 /// The devices a hand-picked script would reach with an empty allow list. They

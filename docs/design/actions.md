@@ -325,7 +325,10 @@ the `remediation/README.md` table).
 
 Every `JobReport` carries a `JobRequest` — what that one device was sent: the script ref, a
 `Script`'s typed parameters, the **resolved** run-as, reboot choice/mode/reason, `include_offline`
-and the device's own targets (`commands::actions::job_request`, which destructures
+and the device's own targets — only when they were composed into its parameters; a `Script`'s
+typed string is sent verbatim and composes none, so neither the job nor `build_plan`'s
+"empty allow list" warning (`plan::empty_allow_list_warning`) speaks of targets never sent
+(`commands::actions::job_request`, which destructures
 `ActionRequest` exhaustively like `request_hash`). The Jobs tab rebuilds an `ActionRequest` from it
 (`util::retry_request`) and sends it through `plan_action`, so a retry gets a fresh payload-bound
 token and every `plan()` guardrail re-runs against current state. Nothing re-sends a POST.
