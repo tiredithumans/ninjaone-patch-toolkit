@@ -488,6 +488,11 @@ ipc!(install_update() -> ());
 // --- Settings + presets ------------------------------------------------------
 
 ipc!(get_settings() -> SettingsView);
-ipc!(save_settings(args: SaveSettingsArgs) -> SettingsView);
+ipc!(
+    /// `coded`: a save that fails after switching tenants has already cleared the
+    /// previous tenant's state on the backend (`ERR_TENANT_CHANGED`).
+    coded
+    save_settings(args: SaveSettingsArgs) -> SettingsView
+);
 ipc!(save_preset(preset: Preset) -> Vec<Preset>);
 ipc!(delete_preset(name: String) -> Vec<Preset>);

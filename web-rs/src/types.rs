@@ -1353,6 +1353,11 @@ impl ActionPlan {
 /// have acted. Re-planning it would send to them again.
 pub const ERR_PARTIAL_DISPATCH: &str = "partialDispatch";
 
+/// Mirror of the backend's `error::ERR_TENANT_CHANGED`: `save_settings` failed after
+/// it had switched tenants, so the previous tenant's result and jobs are gone on the
+/// backend and must go from the screen too.
+pub const ERR_TENANT_CHANGED: &str = "tenantChanged";
+
 /// **Frontend-only**, never sent by the backend: the command *succeeded* but its
 /// reply did not decode into the mirror (`api::invoke_coded` tags it). For
 /// `run_action` that means the batch went out, so the dialog must not offer to send

@@ -276,8 +276,19 @@ impl AppState {
         self.actions.confirm_input.set(String::new());
         self.actions.dispatch_error.set(None);
         self.actions.dispatching.set(true);
+        let epoch = self.session.epoch();
         spawn_local(async move {
-            match api::plan_action(request.clone()).await {
+            let reply = api::plan_action(request.clone()).await;
+            // The flag is this task's to release either way: `clear_session` leaves
+            // it alone because a dispatch in flight owns it too, and nothing else
+            // can plan while it is set.
+            self.actions.dispatching.set(false);
+            // A plan for the ended session (maybe another tenant's) must not reopen
+            // its dialog over the new one; the backend would refuse its token anyway.
+            if self.session.outlived(epoch) {
+                return;
+            }
+            match reply {
                 Ok(plan) => self.actions.pending.set(Some(PendingAction {
                     request,
                     plan,
@@ -285,7 +296,6 @@ impl AppState {
                 })),
                 Err(e) => self.notify(Toast::err(e)),
             }
-            self.actions.dispatching.set(false);
         });
     }
 
@@ -309,8 +319,16 @@ impl AppState {
         request.confirm_token = None;
         let dry_run_shown = pending.dry_run_shown;
         self.actions.dispatching.set(true);
+        let epoch = self.session.epoch();
         spawn_local(async move {
-            match api::plan_action(request.clone()).await {
+            let reply = api::plan_action(request.clone()).await;
+            // As in `plan_request`: release the flag, then drop a reply from an
+            // ended session — `clear_session` already closed this dialog.
+            self.actions.dispatching.set(false);
+            if self.session.outlived(epoch) {
+                return;
+            }
+            match reply {
                 Ok(plan) => {
                     self.actions.dispatch_error.set(None);
                     self.actions.confirm_input.set(String::new());
@@ -325,7 +343,6 @@ impl AppState {
                     .dispatch_error
                     .set(Some(format!("Couldn't re-plan: {e}"))),
             }
-            self.actions.dispatching.set(false);
         });
     }
 

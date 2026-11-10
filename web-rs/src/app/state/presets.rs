@@ -32,22 +32,28 @@ impl AppState {
         // the honest end of the same rule `query_patches` enforces for a query that
         // spans the switch.
         if v.tenant_changed {
-            self.clear_session();
-            // The scope ids belong to the previous tenant's lookups. Left in place
-            // they narrowed the next query to organizations that do not exist here,
-            // and the chips could only name them as "(not found)".
-            self.filters.org_ids.set(Vec::new());
-            self.filters.loc_ids.set(Vec::new());
-            self.filters.role_ids.set(Vec::new());
-            self.filters.group_ids.set(Vec::new());
-            // So are the lists themselves: the switch drops the grant, and until the
-            // next sign-in reloads them the pickers offered the old tenant's names.
-            self.lookups.orgs.set(Vec::new());
-            self.lookups.all_locations.set(None);
-            self.lookups.locations.set(Vec::new());
-            self.lookups.roles.set(Vec::new());
-            self.lookups.device_groups.set(Vec::new());
+            self.clear_tenant_scope();
         }
+    }
+
+    /// What a tenant switch makes meaningless on screen. Also run when a save fails
+    /// *after* switching (`util::save_switched_tenant`): the backend cleared then too.
+    pub(in crate::app) fn clear_tenant_scope(self) {
+        self.clear_session();
+        // The scope ids belong to the previous tenant's lookups. Left in place
+        // they narrowed the next query to organizations that do not exist here,
+        // and the chips could only name them as "(not found)".
+        self.filters.org_ids.set(Vec::new());
+        self.filters.loc_ids.set(Vec::new());
+        self.filters.role_ids.set(Vec::new());
+        self.filters.group_ids.set(Vec::new());
+        // So are the lists themselves: the switch drops the grant, and until the
+        // next sign-in reloads them the pickers offered the old tenant's names.
+        self.lookups.orgs.set(Vec::new());
+        self.lookups.all_locations.set(None);
+        self.lookups.locations.set(Vec::new());
+        self.lookups.roles.set(Vec::new());
+        self.lookups.device_groups.set(Vec::new());
     }
 
     pub(in crate::app) fn apply_preset(self, p: Preset) {

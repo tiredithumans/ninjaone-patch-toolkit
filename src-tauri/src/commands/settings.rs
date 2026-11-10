@@ -267,6 +267,24 @@ async fn blocking<T: Send + 'static>(
         .map_err(UiError::from)
 }
 
+/// The error for a save that failed after its settings were written. A plain
+/// error reads as "nothing changed", which is wrong once the tenant has switched:
+/// the caches and jobs were just cleared, and the frontend must clear its view of
+/// them, so that case carries [`ERR_TENANT_CHANGED`](crate::error::ERR_TENANT_CHANGED).
+fn late_save_error(err: UiError, tenant_changed: bool) -> UiError {
+    if tenant_changed {
+        UiError::coded(
+            crate::error::ERR_TENANT_CHANGED,
+            format!(
+                "Settings saved, but the client secret couldn't be stored: {}",
+                err.message
+            ),
+        )
+    } else {
+        err
+    }
+}
+
 /// Saves the Settings panel.
 ///
 /// Async, with the file and keyring I/O on a blocking thread and no `settings`
@@ -346,7 +364,7 @@ pub async fn save_settings(
         state.clear_last_result();
         crate::actions::audit::record_off_runtime(state.clear_jobs()).await;
     }
-    auth_applied?;
+    auth_applied.map_err(|e| late_save_error(e, effects.tenant_changed))?;
     // Toggling actions changes the OAuth scope the next sign-in requests, but the
     // *current* grant is unchanged — the frontend reads `write_enabled` from
     // auth_status and prompts for re-authorization when the two disagree.
@@ -409,9 +427,28 @@ pub async fn delete_preset(
 mod tests {
     use super::{
         ActionSettings, MAX_WINDOW_DAYS, SaveEffects, SaveSettingsArgs, Settings, SlaBySeverity,
-        SlaExempt, merge_settings, require_https_instance, validate_action_settings,
-        validate_settings_input,
+        SlaExempt, late_save_error, merge_settings, require_https_instance,
+        validate_action_settings, validate_settings_input,
     };
+    use crate::error::{ERR_TENANT_CHANGED, UiError};
+
+    /// A failure after a tenant switch must say so: the backend has already cleared
+    /// the previous tenant's result and jobs, and a plain error would leave the
+    /// frontend showing them. Any other late failure stays a plain error.
+    #[test]
+    fn a_late_failure_after_a_tenant_switch_is_coded() {
+        let switched = late_save_error(UiError::new("keyring locked"), true);
+        assert_eq!(switched.code, Some(ERR_TENANT_CHANGED));
+        assert!(
+            switched.message.contains("keyring locked"),
+            "{}",
+            switched.message
+        );
+
+        let same = late_save_error(UiError::new("keyring locked"), false);
+        assert_eq!(same.code, None);
+        assert_eq!(same.message, "keyring locked");
+    }
 
     #[test]
     fn https_instance_is_required() {

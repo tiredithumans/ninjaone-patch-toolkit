@@ -527,7 +527,13 @@ pub(crate) fn ReauthorizeLink() -> impl IntoView {
                                 state.session.refresh_auth();
                                 state.notify(Toast::ok("Re-authorized"));
                             }
-                            Err(e) => state.notify(Toast::err(e)),
+                            Err(e) => {
+                                // The backend cleared the session (and may have
+                                // signed out) before the consent failed.
+                                state.clear_session_and_reload();
+                                state.session.refresh_auth();
+                                state.notify(Toast::err(e));
+                            }
                         }
                     });
                 }

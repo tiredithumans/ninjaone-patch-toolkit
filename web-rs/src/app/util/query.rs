@@ -83,6 +83,12 @@ pub(crate) fn is_superseded(current_seq: u64, my_seq: u64) -> bool {
 /// while it was in flight. Such a reply describes the previous session (often the
 /// previous tenant) and must not repaint the pickers: an old organization id would
 /// then scope the new tenant's query. Same shape as [`is_superseded`].
+/// Whether a failed settings save still switched tenants — the backend cleared the
+/// previous tenant's result, jobs and grant before the step that failed.
+pub(crate) fn save_switched_tenant(code: Option<&str>) -> bool {
+    code == Some(crate::types::ERR_TENANT_CHANGED)
+}
+
 pub(crate) fn outlived_session(current_epoch: u64, my_epoch: u64) -> bool {
     current_epoch != my_epoch
 }
