@@ -1752,3 +1752,32 @@ async fn an_instance_settings_would_refuse_is_never_contacted() {
         "nothing is sent to it"
     );
 }
+
+/// A second Re-authorize while the first waits on the browser must not sign out
+/// under it: the session generation it was started in has to survive, or
+/// `store_tokens` discards the consent the operator is about to complete.
+#[tokio::test]
+async fn a_second_reauthorize_leaves_the_pending_sign_in_alone() {
+    let auth = launched("https://reauth-twice.example", "client-reauth-twice");
+    let session = || auth.inner.read().unwrap().session;
+    let before = session();
+    let _pending = auth.login_gate.try_lock().expect("the first flow's claim");
+
+    let cleared = std::sync::atomic::AtomicBool::new(false);
+    let err = auth
+        .reauthorize(async {
+            cleared.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await
+        .expect_err("refused while a sign-in is pending");
+
+    assert!(
+        format!("{err:#}").contains("already in progress"),
+        "{err:#}"
+    );
+    assert_eq!(session(), before, "the pending flow's session is untouched");
+    assert!(
+        !cleared.load(std::sync::atomic::Ordering::SeqCst),
+        "and nothing of the session was cleared"
+    );
+}

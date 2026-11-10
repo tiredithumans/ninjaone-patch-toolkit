@@ -511,13 +511,25 @@ pub(crate) fn ReauthorizeLink() -> impl IntoView {
                 .is_some_and(|a| a.authenticated && a.actions_enabled && !a.write_enabled)
         })
     };
+    // The consent waits on the browser for up to three minutes; a second click
+    // during it can only fail.
+    let busy = RwSignal::new(false);
     view! {
         <Show when=needed>
             <button
                 class="link-btn"
+                prop:disabled=move || busy.get()
                 on:click=move |_| {
+                    if busy.get_untracked() {
+                        return;
+                    }
+                    busy.set(true);
                     leptos::task::spawn_local(async move {
-                        match api::reauthorize().await {
+                        let outcome = api::reauthorize().await;
+                        // The link may be gone by now (it hides once write access
+                        // is granted), which disposes `busy`.
+                        let _ = busy.try_set(false);
+                        match outcome {
                             Ok(()) => {
                                 // The backend dropped the session's result and
                                 // jobs for the fresh grant; storing the new status
