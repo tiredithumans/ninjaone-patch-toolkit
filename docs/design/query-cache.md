@@ -18,7 +18,8 @@ Code: `src-tauri/src/state.rs` (`AppState`), `src-tauri/src/state/cache.rs` (`Te
    tenant), return that error instead of fetching again;
 5. store only if the epoch is unchanged when the slot lock is retaken;
 6. a degraded fetch (an optional sub-feed failed and fell back to empty) stores under a
-   capped TTL, `FORCE_MIN_INTERVAL`, never the slot's full TTL.
+   capped TTL, `FORCE_MIN_INTERVAL` doubling with each consecutive degraded store, never
+   (until it backs off that far) the slot's full TTL.
 
 Step 5 is the subtle one. Without it, a fetch already in flight when an invalidation
 lands writes its pre-invalidation rows straight back and restarts the TTL on exactly
@@ -48,6 +49,14 @@ cannot list `/groups` would then refetch the organizations and roles on every qu
 `lookups()` is degraded when locations or groups fell back, `fleet_devices()` when the
 health feed failed; the current-patch families have no optional part and always store
 clean (`Fetched::complete`).
+
+The cap backs off (`degraded_cap`: 1, 2, 4, 8 … minutes, still bounded by the caller's
+TTL). A flat one-minute cap applies to the *whole* entry, so a health feed the token can
+never read threw away the entire device inventory every minute and re-paged it with the
+next query. The streak is read off the entry a store displaces, so a clean fetch, an
+invalidation (which empties the slot) or a tenant change starts it over. Caching the
+health feed in its own slot would also have fixed it, but would split one invalidation
+(after a reboot) into two and add a fifth slot; the backoff is one field on the entry.
 
 A value displaced from a slot (by `invalidate` or by a store) is dropped after the slot
 lock is released, not under it. The slots hold whole-fleet `Vec`s, and freeing six

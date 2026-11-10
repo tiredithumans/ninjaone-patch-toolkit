@@ -559,8 +559,8 @@ impl AppState {
                 // Fetched with the inventory so the reboot reasons share its TTL and
                 // its invalidation after a reboot. Only the inventory is required: a
                 // health feed the token cannot read costs the reasons, not the query
-                // — and only until FORCE_MIN_INTERVAL, since the entry is stored as
-                // degraded rather than hiding every reason for the full DEVICE_TTL.
+                // — and only until the degraded cap (a minute at first, backing off if
+                // the feed keeps failing), not for the full DEVICE_TTL.
                 let (devices, health) = tokio::join!(
                     self.api.devices(None, on_progress),
                     self.api.device_health()

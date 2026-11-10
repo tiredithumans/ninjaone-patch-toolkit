@@ -35,7 +35,8 @@ paths:
 - **Every TTL'd cache slot is a `TenantCache<T>`** — it owns the tenant stamp, TTL,
   single-flight gate (which shares a failed fetch with the callers parked behind it, like a
   success), and the epoch sampled on entry and re-checked at the store. A partial
-  (degraded) fetch is capped at `FORCE_MIN_INTERVAL`, never cached for the full TTL: a fetch
+  (degraded) fetch is capped at `FORCE_MIN_INTERVAL`, doubling per consecutive degraded store
+  (`degraded_cap`), never cached for the full TTL on first failure: a fetch
   closure that falls back on an optional sub-feed returns `Fetched { degraded: true, .. }`.
   Displaced values are dropped outside the slot lock. Never open-code that protocol for a new
   slot; `last_result` is the one exception and is generation-gated instead.
