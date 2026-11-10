@@ -138,9 +138,24 @@ mod tests {
     }
 }
 
+/// Sends a panic to the log before the default hook prints it. A release build has
+/// no console (`windows_subsystem = "windows"`), so that print went nowhere and a
+/// crash left no line in the one file a field report can attach. The message
+/// carries the source location; the backtrace is captured only when
+/// `RUST_BACKTRACE` asks for one.
+fn log_panics() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::capture();
+        tracing::error!(panic = %info, %backtrace, "panicked");
+        previous(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
+    log_panics();
 
     let app_state = AppState::new().expect("failed to initialize application state");
     let window_saver = Arc::new(window_state::WindowStateSaver::default());
