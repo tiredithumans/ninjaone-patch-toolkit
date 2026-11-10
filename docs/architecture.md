@@ -65,7 +65,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
 ├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint); main window starts hidden
 ├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
-└── capabilities/default.json    # webview capabilities: `core:default` only (the save dialog runs in Rust)
+└── capabilities/default.json    # webview capabilities: event listen/unlisten only (window, dialog, updater run in Rust)
 
 web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 crate
 ├── src/app.rs                   # module decls, shared consts (SEVERITY_OPTIONS), App root + startup wiring

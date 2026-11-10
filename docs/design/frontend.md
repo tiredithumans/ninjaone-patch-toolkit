@@ -113,6 +113,18 @@ renders HTML from data (no `inner_html`; every API string reaches a text node or
 that only *looks* like this app. The one form (the CVE search) prevents its default submit, so
 `form-action 'none'` costs nothing.
 
+## The webview's capability grants only event listening
+
+`src-tauri/capabilities/default.json` grants `core:event:allow-listen` / `allow-unlisten` (the
+`api::subscribe` listeners) and `core:webview:allow-internal-toggle-devtools` (the devtools
+shortcut's injected script) — not `core:default`, which also let any script in the webview move,
+resize, close or retitle windows, read app/path metadata and emit events as the app. The frontend
+calls only `core.invoke` and `event.listen`; app commands registered through
+`generate_handler!` need no permission while the app defines no app manifest. The window is shown
+from Rust (`lib.rs` setup), and the save dialog and the updater run in Rust too. A frontend call
+to any other `window.__TAURI__` API fails until its permission is added here; `tauri-build`
+validates every identifier at compile time.
+
 ## Auto-update
 
 `commands::update::{check_for_update, install_update}` wrap `tauri-plugin-updater`; the

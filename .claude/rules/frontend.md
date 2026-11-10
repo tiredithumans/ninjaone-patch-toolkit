@@ -9,6 +9,9 @@ paths:
   → `docs/design/frontend.md#wasm-gating`
 - **CSP governs the webview only; NinjaOne hosts need no `connect-src` change.** The updater is
   backend egress too. → `docs/design/frontend.md#csp-governs-the-webview-not-backend-egress`
+- **The webview capability is event listen/unlisten only** (`capabilities/default.json`, not
+  `core:default`); a new `window.__TAURI__` API call adds its exact permission there.
+  → `docs/design/frontend.md#the-webviews-capability-grants-only-event-listening`
 - **Non-trivial logic does not belong in a `#[component]` body or in `state.rs`** — put it in
   the `util` module as a free function and test it there.
   → `docs/design/frontend.md#non-trivial-logic-does-not-belong-in-a-component-body`
