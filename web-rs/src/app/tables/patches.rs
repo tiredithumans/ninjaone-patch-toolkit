@@ -542,6 +542,14 @@ fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
                             // closures below all share it.
                             let r = Arc::new(r.clone());
                             let (first, second) = (Arc::clone(&r), Arc::clone(&r));
+                            let titled = Arc::clone(&r);
+                            let second_title = move || {
+                                if by_device() {
+                                    titled.name.clone()
+                                } else {
+                                    titled.organization.clone()
+                                }
+                            };
                             view! {
                                 <tr>
                                     <RowCheckbox row=Arc::clone(&r)/>
@@ -557,7 +565,9 @@ fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
                                         }}
                                     </td>
                                     <td class="patch-name">
-                                        <span class="clamp-2">
+                                        // The clamp cuts a long name at two lines;
+                                        // the tooltip has all of it, as in the flat table.
+                                        <span class="clamp-2" title=second_title>
                                             {move || {
                                                 if by_device() {
                                                     second.name.clone()

@@ -237,7 +237,7 @@ fn SeverityBreakdown() -> impl IntoView {
                             .into_iter()
                             .map(|s| {
                                 let swatch = format!("chart-swatch {}", s.class);
-                                let text = format!("{}: {}", s.label, s.count);
+                                let text = format!("{}: {}", s.label, group_thousands(s.count));
                                 // The legend entry, not the <rect>, is the drill-down
                                 // target: a real <button> is keyboard-reachable and
                                 // announced, where a clickable SVG rect is neither.

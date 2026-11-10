@@ -48,7 +48,8 @@ pub(crate) fn Header() -> impl IntoView {
                 <Show when=move || !state.session.web_mode.get()>
                     <button
                         class="btn"
-                        aria-pressed=move || state.ui.show_settings.get().to_string()
+                        // It opens a dialog; it is not a toggle that stays pressed.
+                        aria-haspopup="dialog"
                         on:click=move |_| state.ui.show_settings.update(|s| *s = !*s)
                     >
                         "Settings"
