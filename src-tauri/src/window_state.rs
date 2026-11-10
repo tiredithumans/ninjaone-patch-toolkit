@@ -125,15 +125,9 @@ pub fn load_from(path: &Path) -> Option<WindowGeometry> {
 pub fn save_to(path: &Path, geometry: &WindowGeometry) -> Result<()> {
     let dir = path.parent().context("window-state path has no parent")?;
     fs::create_dir_all(dir).context("create app dir")?;
-    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    let written = serde_json::to_vec(geometry)
-        .context("serialize window state")
-        .and_then(|bytes| fs::write(&tmp, bytes).context("write window state"))
-        .and_then(|()| fs::rename(&tmp, path).context("replace window state"));
-    if written.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    written
+    let bytes = serde_json::to_vec(geometry).context("serialize window state")?;
+    // Not owner-only: a window rectangle says nothing about the fleet.
+    crate::paths::write_atomic(path, &bytes, false).context("write window state")
 }
 
 /// Applies the saved geometry to the (still hidden) main window. Every failure is
@@ -171,10 +165,15 @@ pub fn restore<R: Runtime>(window: &WebviewWindow<R>) {
     let Some(place) = placement(saved, &areas) else {
         return;
     };
-    let _ = window.set_size(PhysicalSize::new(place.width, place.height));
+    // Position first, then size. Moving onto a monitor with a different scale factor
+    // makes Windows send WM_DPICHANGED, and tao rescales the window's *current* size
+    // to the new DPI; sized first, the saved physical size was rescaled, the debounced
+    // save stored the result, and the window grew or shrank on every launch. Sized
+    // after the move, the saved size is what lands.
     if let Some((x, y)) = place.position {
         let _ = window.set_position(PhysicalPosition::new(x, y));
     }
+    let _ = window.set_size(PhysicalSize::new(place.width, place.height));
     if place.maximized {
         let _ = window.maximize();
     }

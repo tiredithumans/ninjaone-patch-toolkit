@@ -446,28 +446,19 @@ fn trim(path: &Path) -> Option<usize> {
         return Some(lines.len());
     }
     let keep = &lines[lines.len() - MAX_LINES..];
-    let tmp = path.with_extension("jsonl.tmp");
-    let written = (|| -> std::io::Result<()> {
-        let mut opts = OpenOptions::new();
-        opts.create(true).write(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
-        let mut file = std::io::BufWriter::new(opts.open(&tmp)?);
+    let written = crate::paths::write_atomic_with(path, true, |file| {
+        let mut out = std::io::BufWriter::new(file);
         for line in keep {
-            file.write_all(line)?;
-            file.write_all(b"\n")?;
+            out.write_all(line)?;
+            out.write_all(b"\n")?;
         }
-        file.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
+        // Explicitly: a flush that fails on drop is silently lost.
+        out.flush()
+    });
     match written {
         Ok(()) => Some(keep.len()),
         Err(err) => {
             warn!(?err, "could not trim the run-history file");
-            let _ = std::fs::remove_file(&tmp);
             None
         }
     }
@@ -681,8 +672,13 @@ mod tests {
         assert_eq!(kept.len(), MAX_LINES);
         assert_eq!(kept[0].at, format!("t{}", over - MAX_LINES));
         assert_eq!(kept[kept.len() - 1].at, format!("t{}", over - 1));
-        assert!(
-            !path.with_extension("jsonl.tmp").exists(),
+        let temps = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(
+            temps, 0,
             "the temp file is renamed into place, not left behind"
         );
         #[cfg(unix)]

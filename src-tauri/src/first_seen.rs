@@ -19,8 +19,6 @@
 //! history, never the operator their fleet.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -513,24 +511,10 @@ fn save_to(dir: &Path, ledger: &TenantLedger) -> bool {
     };
     let name = file_name(&ledger.tenant);
     let path = dir.join(&name);
-    let tmp = dir.join(format!("{name}.tmp"));
-    let written = (|| -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let mut opts = OpenOptions::new();
-        opts.create(true).write(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp)?;
-        f.write_all(&body)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, &path)
-    })();
+    let written =
+        std::fs::create_dir_all(dir).and_then(|()| crate::paths::write_atomic(&path, &body, true));
     if let Err(err) = written {
         warn!(?err, "could not write the first-seen ledger");
-        let _ = std::fs::remove_file(&tmp);
         return false;
     }
     prune(dir, &path);

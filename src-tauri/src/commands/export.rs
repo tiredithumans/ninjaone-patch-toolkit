@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::Path;
@@ -9,7 +8,7 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::error::UiError;
-use crate::export::{BacklogSheets, DETAIL_COLUMNS, WorkbookMeta, write_workbook};
+use crate::export::{DETAIL_COLUMNS, write_result_workbook};
 use crate::rows::QueryResult;
 use crate::state::AppState;
 
@@ -61,54 +60,12 @@ fn write_export(
     path: &Path,
     write: impl FnOnce(&mut File) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    // Written beside the target and renamed over it. Writing in place truncated
-    // the file the operator chose to overwrite before the new one existed, so a
-    // failed write deleted last week's export, and a crash mid-write left a
-    // shorter CSV that looked whole.
-    let mut name = std::ffi::OsString::from(".");
-    name.push(path.file_name().unwrap_or_default());
-    name.push(format!(".tmp-{}", std::process::id()));
-    let tmp = path.with_file_name(name);
-    let mut file = create_owner_only(&tmp)?;
-    let written = write(&mut file)
-        .and_then(|()| file.sync_all().context("flushing the export to disk"))
-        .and_then(|()| {
-            drop(file);
-            std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
-        });
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
-}
-
-/// Opens `path` for writing, truncated, readable by its owner only.
-///
-/// `mode` applies only to a file this call creates. One the operator chose to
-/// overwrite keeps its old mode, so it is narrowed through the handle, still before
-/// anything is written — best-effort, like the narrowing this replaced: a file
-/// another user owns cannot be, and refusing the export over its mode would be the
-/// wrong trade. Non-unix targets have no equivalent; Windows inherits the parent
-/// directory's ACL, which is already per-user under the profile.
-fn create_owner_only(path: &Path) -> std::io::Result<File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        options.mode(0o600);
-        let file = options.open(path)?;
-        if let Err(err) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(
-                ?err,
-                path = %path.display(),
-                "could not restrict the exported file to its owner"
-            );
-        }
-        Ok(file)
-    }
-    #[cfg(not(unix))]
-    options.open(path)
+    // Written beside the target and renamed over it (`paths::write_atomic_with`).
+    // Writing in place truncated the file the operator chose to overwrite before the
+    // new one existed, so a failed write deleted last week's export, and a crash
+    // mid-write left a shorter CSV that looked whole. The rename also replaces an
+    // overwritten file's old mode with the temp's 0600.
+    crate::paths::write_atomic_with(path, true, write)
 }
 
 /// The default file name for an export, stamped so successive exports don't
@@ -157,8 +114,8 @@ async fn save_dialog(
 }
 
 /// Opens a save dialog and writes the most recent query result to an `.xlsx`
-/// workbook (Patches + Compliance + Needs Reboot sheets). Returns the saved path,
-/// or `None` if the operator cancelled the dialog.
+/// workbook (the sheets [`crate::export::write_result_workbook`] writes). Returns
+/// the saved path, or `None` if the operator cancelled the dialog.
 ///
 /// Declared `async` so it runs off the main thread, which `blocking_save_file`
 /// requires (the dialog needs the main thread free to pump its event loop).
@@ -180,48 +137,10 @@ pub async fn export_patches_xlsx(
     require_cached_result(&state)?;
     let path_str = path.to_string_lossy().to_string();
 
-    let scope_note = crate::rows::compliance_scope_note(
-        result.devices_offline,
-        result.devices_unpatchable,
-        result.patch_families,
-    );
-
     // Serializing a six-figure row set into a zipped workbook is seconds of pure CPU
     // plus the file write — both of which would hold a tokio worker for the duration.
     tauri::async_runtime::spawn_blocking(move || {
-        write_export(&path, |file| {
-            write_workbook(
-                file,
-                &result.rows,
-                &result.compliance,
-                &result.compliance_by_os,
-                &result.devices,
-                &result.failures,
-                &BacklogSheets {
-                    worst_devices: &result.worst_devices,
-                    offline_backlog: &result.offline_backlog,
-                    time_to_install: &result.time_to_install,
-                },
-                &result.approvals,
-                &WorkbookMeta {
-                    generated_at: &result.generated_at,
-                    data_fetched_at: &result.data_fetched_at,
-                    devices_total: result.devices_total,
-                    devices_offline: result.devices_offline,
-                    devices_unpatchable: result.devices_unpatchable,
-                    scope: &result.scope,
-                    scope_note: &scope_note,
-                    changes: &result.changes,
-                    instance: &result.instance,
-                    sla_policy: &result.sla_policy,
-                    compliance_total: &result.compliance_total,
-                    uncounted_orgs: &result.uncounted_orgs,
-                    first_seen: &result.first_seen,
-                    patch_families: result.patch_families,
-                    exploit_data: &result.exploit_data.sentence,
-                },
-            )
-        })
+        write_export(&path, |file| write_result_workbook(file, &result))
     })
     .await
     .map_err(|e| UiError::new(format!("export task failed: {e}")))?
@@ -510,40 +429,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let path = export_path("book.xlsx");
         let result = sample_result();
-        write_export(&path, |file| {
-            write_workbook(
-                file,
-                &result.rows,
-                &result.compliance,
-                &result.compliance_by_os,
-                &result.devices,
-                &result.failures,
-                &BacklogSheets {
-                    worst_devices: &result.worst_devices,
-                    offline_backlog: &result.offline_backlog,
-                    time_to_install: &result.time_to_install,
-                },
-                &result.approvals,
-                &WorkbookMeta {
-                    generated_at: &result.generated_at,
-                    data_fetched_at: &result.data_fetched_at,
-                    devices_total: result.devices_total,
-                    devices_offline: result.devices_offline,
-                    devices_unpatchable: result.devices_unpatchable,
-                    scope: &result.scope,
-                    scope_note: "scope",
-                    changes: &result.changes,
-                    instance: &result.instance,
-                    sla_policy: &result.sla_policy,
-                    compliance_total: &result.compliance_total,
-                    uncounted_orgs: &result.uncounted_orgs,
-                    first_seen: &result.first_seen,
-                    patch_families: result.patch_families,
-                    exploit_data: &result.exploit_data.sentence,
-                },
-            )
-        })
-        .expect("written");
+        write_export(&path, |file| write_result_workbook(file, &result)).expect("written");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         let mut wb: Xlsx<_> = open_workbook(&path).expect("a workbook");

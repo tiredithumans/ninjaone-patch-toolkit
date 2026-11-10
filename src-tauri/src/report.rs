@@ -353,20 +353,23 @@ fn write_compliance_chart(
     compliance: &[ComplianceBucket],
     total: &ComplianceBucket,
 ) {
-    let rows: Vec<(String, f64)> = compliance
-        .iter()
-        .map(|b| (b.organization.clone(), b.within_sla_pct))
-        .collect();
-    write_compliance_bars(buf, &rows);
-    if compliance.is_empty() {
-        return;
-    }
-    write_pct_legend(buf);
     // The total takes the last of the table's rows, so it is never the one cut.
     let with_total = compliance.len() >= 2;
     let shown = compliance
         .len()
         .min(MAX_TABLE_ROWS - usize::from(with_total));
+    // The chart draws the organizations the table lists, so the note below covers
+    // both; uncapped, a large tenant's chart ran to thousands of bars.
+    let bars: Vec<(String, f64)> = compliance
+        .iter()
+        .take(shown)
+        .map(|b| (b.organization.clone(), b.within_sla_pct))
+        .collect();
+    write_compliance_bars(buf, &bars);
+    if compliance.is_empty() {
+        return;
+    }
+    write_pct_legend(buf);
     let mut rows: Vec<&ComplianceBucket> = compliance.iter().take(shown).collect();
     if with_total {
         rows.push(total);
@@ -423,8 +426,10 @@ fn write_approvals(buf: &mut String, approvals: &ApprovalBacklog) {
 /// The "Compliance by OS" section: the same bar chart as the per-org view, plus a
 /// detail table carrying the pending/aged counts.
 fn write_os_compliance(buf: &mut String, by_os: &[OsCompliance]) {
+    // The same capped slice the table lists, so the note below covers the chart too.
     let rows: Vec<(String, f64)> = by_os
         .iter()
+        .take(MAX_TABLE_ROWS)
         .map(|b| (b.os.clone(), b.within_sla_pct))
         .collect();
     write_compliance_bars(buf, &rows);
@@ -751,6 +756,42 @@ mod tests {
             crate::export::APP_VERSION
         )));
         assert!(html.contains("SLA policy: 30 days (default); Critical 7 days"));
+    }
+
+    /// The bar charts draw the organizations and OSes their tables list, capped the
+    /// same way and covered by the same "Showing N of M" note — not every one.
+    #[test]
+    fn the_compliance_charts_are_capped_like_their_tables() {
+        let bars = |html: &str| html.matches("class=\"lbl\"").count();
+        let orgs: Vec<ComplianceBucket> = (0..MAX_TABLE_ROWS + 50)
+            .map(|i| ComplianceBucket {
+                organization: format!("org-{i}"),
+                ..ComplianceBucket::default()
+            })
+            .collect();
+        let mut buf = String::new();
+        write_compliance_chart(&mut buf, &orgs, &ComplianceBucket::default());
+        assert_eq!(bars(&buf), MAX_TABLE_ROWS - 1, "one table row is the total");
+        assert!(buf.contains(&format!(
+            "Showing {} of {} organizations",
+            MAX_TABLE_ROWS - 1,
+            orgs.len()
+        )));
+
+        let template = sample_result().compliance_by_os[0].clone();
+        let oses: Vec<OsCompliance> = (0..MAX_TABLE_ROWS + 50)
+            .map(|i| OsCompliance {
+                os: format!("os-{i}"),
+                ..template.clone()
+            })
+            .collect();
+        let mut buf = String::new();
+        write_os_compliance(&mut buf, &oses);
+        assert_eq!(bars(&buf), MAX_TABLE_ROWS);
+        assert!(buf.contains(&format!(
+            "Showing the top {MAX_TABLE_ROWS} of {} operating systems",
+            oses.len()
+        )));
     }
 
     /// The device lists and the install-time table render through their shared

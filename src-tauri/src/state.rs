@@ -413,8 +413,10 @@ impl AppState {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
     }
 
-    /// The one settings write: takes the writer lock, edits a snapshot, saves it on
-    /// a blocking thread and publishes it in memory only once it is on disk.
+    /// The one settings write: takes the writer lock, re-reads `settings.json`
+    /// ([`Settings::rebased_on_disk`], so a second app instance's change is kept),
+    /// edits that, saves it on a blocking thread and publishes it in memory only
+    /// once it is on disk.
     ///
     /// `save_settings` and the preset commands each hand-rolled that sequence
     /// against a `pub` lock, so a third writer that skipped the lock would have
@@ -426,7 +428,13 @@ impl AppState {
         edit: impl FnOnce(&mut Settings) -> R,
     ) -> Result<SettingsWrite<'_, R>> {
         let writer = self.settings_write.lock().await;
-        let mut next = self.settings_snapshot();
+        // From the file, under the writer lock: another app instance may have saved
+        // since this one loaded, and editing the stale snapshot would revert it.
+        let snapshot = self.settings_snapshot();
+        let mut next =
+            tauri::async_runtime::spawn_blocking(move || Settings::rebased_on_disk(snapshot))
+                .await
+                .context("reading settings")?;
         let out = edit(&mut next);
         let to_disk = next.clone();
         tauri::async_runtime::spawn_blocking(move || to_disk.save())

@@ -17,8 +17,11 @@
 //! [`legacy_audit_path`] covers the other direction: audit records written before
 //! this change are still read, so no dispatch history is lost.
 
+use std::fs::File;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Result, anyhow};
 use directories::ProjectDirs;
@@ -94,6 +97,72 @@ fn settle(old: &Path, new: &Path) -> PathBuf {
     }
 }
 
+/// Replaces `path` with `bytes` atomically. See [`write_atomic_with`].
+pub fn write_atomic(path: &Path, bytes: &[u8], owner_only: bool) -> std::io::Result<()> {
+    write_atomic_with(path, owner_only, |file| file.write_all(bytes))
+}
+
+/// Distinguishes two writes of one file from one process (the pid covers two
+/// processes), so neither can rename the other's half-written temp into place.
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Replaces `path` with whatever `write` puts into the handle it is given, atomically:
+/// the bytes go to a temporary file beside `path`, are synced to disk, and the temp is
+/// renamed over `path`. A plain write truncates first, so a crash, a full disk or a
+/// power cut mid-write left half a file — unparseable on the next launch, or, for an
+/// export, a shorter file that looked whole. On any failure the temp is removed and
+/// `path` is untouched. The caller creates the directory.
+///
+/// The temp is hidden (`.name.tmp-<pid>-<n>`): every app instance and every writer
+/// gets its own (a fixed `.tmp` let two instances interleave into one), and a
+/// directory scan by extension never mistakes one for data. `owner_only` makes it
+/// 0600 on unix before the first byte (other targets inherit the per-user profile
+/// ACL), so the file is never readable by others, not even mid-write.
+pub fn write_atomic_with<E: From<std::io::Error>>(
+    path: &Path,
+    owner_only: bool,
+    write: impl FnOnce(&mut File) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(path.file_name().unwrap_or_default());
+    name.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = path.with_file_name(name);
+    let written = (|| {
+        let mut file = open_temp(&tmp, owner_only)?;
+        write(&mut file)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+fn open_temp(tmp: &Path, owner_only: bool) -> std::io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    if owner_only {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        options.mode(0o600);
+        let file = options.open(tmp)?;
+        // `mode` covers only a file the open creates; a stale temp a crashed process
+        // with a recycled pid left behind keeps its own mode unless narrowed here.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        return Ok(file);
+    }
+    #[cfg(not(unix))]
+    let _ = owner_only;
+    options.open(tmp)
+}
+
 /// `logs/`, where the rolling `tracing` file appender writes.
 ///
 /// A subdirectory rather than loose files, so "reveal the diagnostics folder" can
@@ -125,6 +194,87 @@ pub fn legacy_audit_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The temps left in `dir` (the hidden `.name.tmp-…` files).
+    fn temps_in(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-"))
+            .collect()
+    }
+
+    #[test]
+    fn an_atomic_write_replaces_the_file_and_leaves_no_temp() {
+        let root = scratch("atomic");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("state.json");
+        std::fs::write(&path, b"old and much longer contents").unwrap();
+        write_atomic(&path, b"new", false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(temps_in(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A failed write keeps the previous file whole and removes its temp.
+    #[test]
+    fn a_failed_atomic_write_keeps_the_old_file() {
+        let root = scratch("atomic-fail");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("state.json");
+        std::fs::write(&path, b"old").unwrap();
+        let err = write_atomic_with(&path, true, |file| {
+            file.write_all(b"half")?;
+            Err::<(), _>(std::io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "disk full");
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert!(temps_in(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Owner-only before the first byte, and the replaced file ends up 0600 even if
+    /// the old one was world-readable; without the flag the umask decides.
+    #[cfg(unix)]
+    #[test]
+    fn an_owner_only_atomic_write_is_0600_from_its_first_byte() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let root = scratch("atomic-mode");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic_with(&path, true, |file| {
+            assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+            file.write_all(b"{\"a\":1}")
+        })
+        .unwrap();
+        assert_eq!(mode(&path), 0o600);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two writers of one file in one process get different temps, so the file
+    /// ends up as one writer's bytes, whole.
+    #[test]
+    fn concurrent_atomic_writes_never_share_a_temp() {
+        let root = scratch("atomic-race");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("ledger.json");
+        std::thread::scope(|s| {
+            for i in 0..8u8 {
+                let path = &path;
+                s.spawn(move || write_atomic(path, &[b'0' + i; 4096], true).unwrap());
+            }
+        });
+        let body = std::fs::read(&path).unwrap();
+        assert_eq!(body.len(), 4096);
+        assert!(body.iter().all(|b| *b == body[0]));
+        assert!(temps_in(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// The audit trail stays beside `settings.json`: it is the durable record, and
     /// the README sends operators there. (`log_dir` is not called here — on a machine

@@ -57,7 +57,10 @@ in what ships, and failing every dependency bump on it kept Dependabot PRs from 
 (`dependabot-automerge.yml`, grouped minor and patch only — a 0.x "minor" is a breaking bump for
 Cargo, arrives ungrouped and waits for a person). The release skill regenerates the file, and
 `release.yml`'s `verify` job refuses a tag whose copy is stale. The recipe is `[unix]`: PowerShell redirection would
-rewrite encoding and line endings.
+rewrite encoding and line endings. The file ships inside every installer as a bundle resource
+(`bundle.resources` in `tauri.conf.json`, installed beside the executable's resources as
+`THIRD-PARTY-LICENSES.md`): the notices have to reach whoever receives the binary, and a copy
+only in the repository did not.
 
 ## NinjaOne API contract (`ninjaone-contract` job)
 
