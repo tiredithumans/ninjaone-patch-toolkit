@@ -11,6 +11,11 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-10
+
+A usability pass: screens stop saying things that are not true yet, filters can be reset, errors
+stay readable, and Settings explains its connection fields.
+
 ### Added
 
 - **Reset filters** in the scope bar puts every filter back to the starting query, including after a drill-down replaced your scope.
@@ -38,7 +43,6 @@ version and start a fresh `[Unreleased]`.
 - Custom date ranges say they are UTC days, and a reversed First seen range is flagged beside the dates.
 - Saving a preset under an existing name shows **Replace** instead of overwriting silently.
 - A disabled Locations or Groups picker says why in its tooltip.
-
 - The "Sign in" card and button no longer flash at launch when you are already signed in.
 - Needs Reboot and Failures say "Run a query…" before the first run instead of reporting nothing found.
 - A failed Trend or Needs Reboot load shows the error with a way to retry, not an empty view.
