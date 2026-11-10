@@ -14,7 +14,7 @@ use super::{
     is_cursor_refused, is_cursor_replay_unsafe,
 };
 use crate::error::truncate_body;
-use crate::model::{Device, DeviceHealth, Location, Organization, Patch, Role};
+use crate::model::{Device, DeviceHealth, Location, Organization, Patch};
 
 pub(super) const DEFAULT_PAGE_SIZE: u32 = 500;
 /// Page size for the high-volume `/queries/*` reporting endpoints (patches and
@@ -589,12 +589,6 @@ impl PagedRow for Location {
     }
 }
 
-impl PagedRow for Role {
-    fn row_id(&self) -> Option<i64> {
-        Some(self.id)
-    }
-}
-
 impl PagedRow for DeviceHealth {
     /// `/queries/device-health` pages by cursor; `deviceId` is not a row id.
     fn row_id(&self) -> Option<i64> {
@@ -614,7 +608,7 @@ impl PagedRow for Patch {
 #[derive(Debug)]
 pub(super) enum PageBody<T> {
     /// A bare JSON array — the `after`-paginated list endpoints
-    /// (`/devices-detailed`, `/organizations`, `/locations`, `/roles`).
+    /// (`/devices-detailed`, `/organizations`, `/locations`).
     Array(Vec<T>),
     /// The `{ results, cursor }` envelope — the `/queries/*` reporting endpoints.
     /// The cursor stays a [`Value`] because it is one small field per page, so

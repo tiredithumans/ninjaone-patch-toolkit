@@ -1335,13 +1335,15 @@ impl AuthState {
         // the login page, so only a 404 is fatal. Catch it here with an actionable
         // message rather than opening the browser to a bare 404 and then waiting
         // out the 3-minute callback timeout. Best-effort: a probe error (offline,
-        // proxy, …) falls through to the normal flow.
-        let probe = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+        // proxy, …) falls through to the normal flow. The shared client never
+        // follows a redirect (`state::build_http_client`), so the login page's
+        // redirect is seen as itself rather than fetched.
+        if let Ok(resp) = self
+            .http
+            .get(&auth_url)
             .timeout(std::time::Duration::from_secs(10))
-            .build();
-        if let Ok(probe) = probe
-            && let Ok(resp) = probe.get(&auth_url).send().await
+            .send()
+            .await
             && resp.status() == reqwest::StatusCode::NOT_FOUND
         {
             bail!(

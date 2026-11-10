@@ -271,7 +271,7 @@ whole.
 
 ## An unreadable `cursor` is an error, not end-of-pages
 
-`next_cursor` returns `Result<Option<String>>` and bails on a shape it cannot interpret (an object
+`next_cursor` returns `Result<Option<PageCursor>>` and bails on a shape it cannot interpret (an object
 with no usable `name`, a number, an array). It is only consulted after a page that *returned
 rows* — the caller checks `page_len == 0` first — so treating an unknown shape as "finished" ends
 the fetch mid-fleet and hands back a partial result that looks complete, understating every
