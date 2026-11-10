@@ -552,11 +552,12 @@ impl AppState {
         Ok(self.fleet_devices_with_time(on_progress).await?.0)
     }
 
-    /// [`Self::fleet_devices`] with the time the inventory was fetched. The query
-    /// folds it into its "data as of" time: the inventory carries Needs Reboot and
-    /// the offline exclusion, and it is cached for [`DEVICE_TTL`] — longer than the
-    /// patch families, and a forced refresh does not shorten it — so a label that
-    /// only took the patch families' time over-promised by up to that much.
+    /// [`Self::fleet_devices`] with the time the inventory was fetched. The
+    /// inventory carries Needs Reboot and the offline exclusion and is cached for
+    /// [`DEVICE_TTL`] — longer than the patch families, and a forced refresh does
+    /// not shorten it — so both callers that report on it say how old it is: the
+    /// query folds it into its "data as of" time, and the action planner shows how
+    /// current the online/offline status behind its offline guardrail is.
     pub async fn fleet_devices_with_time(
         &self,
         on_progress: Option<&ProgressFn<'_>>,

@@ -51,14 +51,17 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   → `docs/design/actions.md#confirm-tokens-are-payload-bound-and-single-use`
 - **Guardrails go in `actions::plan` (`blockers`/`warnings`), not in a dialog.** The `dry_run`
   check is also asserted at the dispatch site. The org cap counts organization ids, never names;
-  a scan is held to `MAX_DEVICES_PER_ACTION_CEILING`. → `docs/design/actions.md#guardrails-live-in-actionsplan`
+  a scan is held to `MAX_DEVICES_PER_ACTION_CEILING`. The offline check reads a cached
+  inventory; `ActionPlan.devices_fetched_at` carries its age to the dialog.
+  → `docs/design/actions.md#guardrails-live-in-actionsplan`
 - **A library script is checked against the library on every plan, live or dry**
   (`plan::check_script`): absent or deactivated is a blocker, an unreadable library a warning.
   `ActionPlan.script` / `.run_as` name what the token binds and the dialog shows them. Test:
   `a_live_script_is_checked_against_the_library_and_named`. → `docs/design/actions.md`
 - **Dry run requires a script declaring `dryRun`** (`DryRunSupport::Declared`); the window
-  override is per dispatch and audited; the "Apply all" preview reads only cached patches (cold =
-  "unknown"). → `docs/design/actions.md`
+  override is per dispatch and audited; a batch held to the window re-checks it per send
+  (`dispatch::send_window`, test `a_device_whose_turn_comes_after_the_window_closed_is_not_sent`);
+  the "Apply all" preview reads only cached patches (cold = "unknown"). → `docs/design/actions.md`
 - **One dispatch surface (`ActionBar`, on Patches and Needs Reboot); run options render once.**
   A retry is `Failed`-only (never `Unknown`) and re-plans from `JobReport.request`.
   → `docs/design/actions.md#there-is-one-dispatch-surface-and-the-run-options-are-shared`
@@ -75,12 +78,15 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **`/jobs` is display-only** (`commands::live_jobs`, polled by `util::live_jobs_due`), never a
   resolution source. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 - **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`,
-  at most `MAX_FEED_READS_IN_FLIGHT` in flight; the 15 s interval backs off to 60 s after failed
-  reads via `poller::next_poll_interval`): `statusCode` is lifecycle, `activityResult` is
+  at most `MAX_FEED_READS_IN_FLIGHT` in flight; a 50-row read, repeated at 500 only when
+  `window_may_be_cut_short`; `Activity.data` stays raw until `exit_code()`; the 15 s interval
+  backs off to 60 s after failed reads via `poller::next_poll_interval`): `statusCode` is lifecycle, `activityResult` is
   the verdict, exit code from `data`; `newerThan` is an activity **id**, so the time floor is
   applied client-side; `is_action_activity(kind, type)` and `is_run_code(kind, code)` accept only
   the types and codes that kind emits. Native runs write start and end as separate activities
-  with kind-prefixed codes (`model::NATIVE_END_CODES`); fixtures use the vendor's codes.
+  with kind-prefixed codes (`model::NATIVE_END_CODES`); fixtures use the vendor's codes. The
+  third tier is FIFO (earliest unclaimed match; `pending` is oldest first) and claims what it
+  binds even for a job holding an unseen dispatch id.
   → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 - **Opening audit records are written once per batch, before any task is spawned, and a
   dispatch task that panics still yields an `Unknown` job** (`dispatch::fill_unreported`, dated

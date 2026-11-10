@@ -720,6 +720,7 @@
         "The maintenance window is closed."
       ],
       "confirmToken": "fixture-confirm-token",
+      "devicesFetchedAt": "2026-07-01 11:56:00 UTC",
       "dryRun": false,
       "eligible": [
         {
@@ -1347,6 +1348,7 @@
         "deviceName": "web-01",
         "dryRun": false,
         "exitCode": 0,
+        "instance": "https://app.ninjarmm.com",
         "kind": "OS_PATCH_REMEDIATE",
         "legacy": false,
         "organization": "Contoso",

@@ -107,12 +107,7 @@ async fn poll_tick(
     // whole store rather than just `pending`: a job that already settled
     // still owns its activity, and the native endpoints return no
     // correlator at all, so every scan/apply/reboot reaches that tier.
-    let mut claimed: HashSet<i64> = app
-        .state::<AppState>()
-        .jobs_snapshot()
-        .iter()
-        .filter_map(|j| j.activity_id)
-        .collect();
+    let mut claimed = app.state::<AppState>().claimed_activity_ids();
     let (updates, failed_reads) = resolve_pending(
         &api,
         pending,
@@ -183,7 +178,7 @@ pub(super) fn settle_tick(
     session: &JobSession,
     updates: Vec<JobReport>,
 ) -> SettledTick {
-    let applied_ids = state.apply_job_updates(session, updates.clone());
+    let applied_ids = state.apply_job_updates(session, &updates);
     let read_on_this_tenant = state.is_session_tenant(session);
     let mut applied = Vec::with_capacity(applied_ids.len());
     let mut closing = Vec::new();

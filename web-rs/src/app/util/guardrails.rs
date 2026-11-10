@@ -5,7 +5,7 @@
 //! The backend's `actions::plan` enforces every one of these; this only decides
 //! what the UI offers and how it explains itself.
 
-use crate::types::{ActionKind, ActionSettings, ApplyPreview, ApplyPreviewDevice};
+use crate::types::{ActionKind, ActionSettings, ApplyPreview, ApplyPreviewDevice, AuditRecord};
 
 use super::{count_of, group_thousands};
 
@@ -237,6 +237,36 @@ pub(crate) fn apply_preview_summary(p: &ApplyPreview) -> String {
         out.push_str(&format!(" Patch data fetched {at}."));
     }
     out
+}
+
+/// The confirm dialog's note on how current the online/offline status is. The
+/// planner reads a device inventory cached for up to 15 minutes, so a device it
+/// calls online may have dropped off since. `at` is the backend's `fmt_ts`
+/// ("2026-07-29 10:04:00 UTC"); anything else is shown whole rather than guessed at.
+pub(crate) fn device_status_as_of(at: &str) -> String {
+    let hhmm = at
+        .strip_suffix(" UTC")
+        .and_then(|rest| rest.split_once(' '))
+        .map(|(_, time)| time)
+        .filter(|time| time.len() == 8)
+        .and_then(|time| time.get(..5));
+    match hhmm {
+        Some(hhmm) => format!("Online/offline status as of {hhmm} UTC."),
+        None => format!("Online/offline status as of {at}."),
+    }
+}
+
+/// Whether the audit trail needs an Instance column: only when its records name
+/// more than one instance. One tenant's log reads as before; an MSP operator who
+/// switches tenants could not otherwise tell their dispatches apart.
+pub(crate) fn audit_spans_instances(records: &[AuditRecord]) -> bool {
+    let mut named = records
+        .iter()
+        .map(|r| r.instance.as_str())
+        .filter(|i| !i.is_empty());
+    named
+        .next()
+        .is_some_and(|first| named.any(|other| other != first))
 }
 
 /// One device's line in the preview.

@@ -4,7 +4,7 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, ActionRequest, ActionSettings, AuthStatus, CveExposure, DeviceSummary,
+    ActionKind, ActionRequest, ActionSettings, AuditRecord, AuthStatus, CveExposure, DeviceSummary,
     ExploitDataStatus, FilterParams, GroupBy, JobReport, JobRequest, JobState, KevEntry, Location,
     Organization, PatchFamilies, PatchGroup, PatchQueryArgs, PatchRow, PlannedTarget, RebootChoice,
     RebootMode, RowSort, RowSortKey, RunRecord,
@@ -3433,6 +3433,38 @@ fn the_apply_preview_states_what_will_and_will_not_install() {
         "{summary}"
     );
     assert!(!summary.contains(" 0 "), "{summary}");
+}
+
+#[test]
+fn the_confirm_dialog_says_how_current_online_status_is() {
+    assert_eq!(
+        device_status_as_of("2026-07-29 10:04:59 UTC"),
+        "Online/offline status as of 10:04 UTC."
+    );
+    assert_eq!(
+        device_status_as_of("yesterday"),
+        "Online/offline status as of yesterday.",
+        "an unexpected shape is shown whole"
+    );
+}
+
+#[test]
+fn the_audit_trail_names_the_instance_only_when_it_spans_several() {
+    let at = |instance: &str| AuditRecord {
+        instance: instance.into(),
+        ..AuditRecord::default()
+    };
+    assert!(!audit_spans_instances(&[]));
+    assert!(!audit_spans_instances(&[
+        at("https://a"),
+        at("https://a"),
+        at("")
+    ]));
+    assert!(audit_spans_instances(&[
+        at("https://a"),
+        at(""),
+        at("https://b")
+    ]));
 }
 
 #[test]

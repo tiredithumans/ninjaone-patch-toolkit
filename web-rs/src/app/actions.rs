@@ -735,6 +735,14 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                 }
                             })}
 
+                        // The offline check read a cached inventory; say how old.
+                        {plan
+                            .devices_fetched_at
+                            .as_deref()
+                            .map(|at| {
+                                view! { <p class="modal-sub">{util::device_status_as_of(at)}</p> }
+                            })}
+
                         {(!plan.blockers.is_empty())
                             .then(|| {
                                 view! {
@@ -1486,12 +1494,14 @@ fn AuditTrail() -> impl IntoView {
                 }
                     .into_any();
             }
+            let show_instance = util::audit_spans_instances(&rows);
             view! {
                 <div class="table-wrap">
                     <table class="data-table">
                         <thead>
                             <tr>
                                 <th scope="col">"When"</th>
+                                {show_instance.then(|| view! { <th scope="col">"Instance"</th> })}
                                 <th scope="col">"Device"</th>
                                 <th scope="col">"Organization"</th>
                                 <th scope="col">"Action"</th>
@@ -1507,6 +1517,8 @@ fn AuditTrail() -> impl IntoView {
                                     view! {
                                         <tr>
                                             <td>{r.timestamp.clone()}</td>
+                                            {show_instance
+                                                .then(|| view! { <td>{r.instance.clone()}</td> })}
                                             <td>{r.device_name.clone()}</td>
                                             <td>{r.organization.clone()}</td>
                                             <td>{r.detail.clone()}</td>

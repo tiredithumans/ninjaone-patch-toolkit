@@ -207,7 +207,7 @@ impl AppState {
     /// actually applied. Rows the store no longer holds are left out, and nothing
     /// applies when `session` — the one [`Self::pending_jobs`] handed the poller —
     /// has ended since: the caller invalidates and emits only for what is returned.
-    pub fn apply_job_updates(&self, session: &JobSession, updates: Vec<JobReport>) -> HashSet<u64> {
+    pub fn apply_job_updates(&self, session: &JobSession, updates: &[JobReport]) -> HashSet<u64> {
         let mut applied = HashSet::new();
         let Ok(mut guard) = self.jobs.lock() else {
             return applied;
@@ -230,7 +230,7 @@ impl AppState {
         for update in updates {
             if let Some(&i) = position.get(&update.id) {
                 applied.insert(update.id);
-                jobs[i] = update;
+                jobs[i] = update.clone();
             }
         }
         applied
@@ -258,6 +258,23 @@ impl AppState {
             })
             .unwrap_or_default();
         (session, pending)
+    }
+
+    /// The activity ids bound to the current tenant's jobs, collected under the
+    /// lock. The poller seeds its claimed set from this every tick; it used to
+    /// deep-clone the whole store (requests, targets and all) just to read one field.
+    pub fn claimed_activity_ids(&self) -> HashSet<i64> {
+        let key = self.tenant_key();
+        self.jobs
+            .lock()
+            .ok()
+            .and_then(|g| match g.as_ref() {
+                Some((t, jobs)) if *t == key => {
+                    Some(jobs.iter().filter_map(|j| j.activity_id).collect())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     /// All jobs for the current tenant, newest last. Empty after a tenant switch.

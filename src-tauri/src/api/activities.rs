@@ -14,7 +14,14 @@ use super::{NinjaApiClient, lenient_rows};
 use crate::error::truncate_body;
 use crate::model::Activity;
 
-/// Rows requested per activity poll.
+/// Rows requested by the first read of a poll. A device's feed since a dispatch
+/// rarely holds more, and every pending device is read every tick, so this read is
+/// kept small; only one that may have cut the window short is repeated at
+/// [`ACTIVITY_PAGE_SIZE`] ([`window_may_be_cut_short`]). Each read used to ask for
+/// 500 rows, so a 500-device batch moved up to 250 000 activities every 15 s.
+const ACTIVITY_FIRST_PAGE_SIZE: u32 = 50;
+
+/// Rows requested by the wider re-read, the most one poll ever reads.
 ///
 /// This endpoint is deliberately **not** routed through `get_paginated`: that helper
 /// pages a newest-*last* feed by advancing an ascending `after` id over a bare array
@@ -72,19 +79,21 @@ impl NinjaApiClient {
         if let Some(uid) = series_uid {
             query.push(("seriesUid", uid.to_string()));
         }
-        query.push(("pageSize", ACTIVITY_PAGE_SIZE.to_string()));
-
-        let page = self
-            .get_decoded("/activities", &query, parse_activities)
-            .await?;
-
         let floor = since_ts.map(|t| t as f64);
-        let oldest = page
-            .rows
-            .iter()
-            .filter_map(|a| a.activity_time)
-            .reduce(f64::min);
-        if window_may_be_cut_short(page.returned, oldest, floor) {
+        let read = |size: u32| {
+            let mut query = query.clone();
+            query.push(("pageSize", size.to_string()));
+            async move {
+                self.get_decoded("/activities", &query, parse_activities)
+                    .await
+            }
+        };
+
+        let mut page = read(ACTIVITY_FIRST_PAGE_SIZE).await?;
+        if window_may_be_cut_short(ACTIVITY_FIRST_PAGE_SIZE, &page, floor) {
+            page = read(ACTIVITY_PAGE_SIZE).await?;
+        }
+        if window_may_be_cut_short(ACTIVITY_PAGE_SIZE, &page, floor) {
             // A terminal activity could be out of view. Surfaced so a job that then
             // times out has a logged cause instead of looking like the device never
             // answered.
@@ -161,7 +170,7 @@ fn parse_activities(body: &[u8]) -> Result<ActivityPage> {
     })
 }
 
-/// Whether a page of `returned` entries may have cut the time window short: it is
+/// Whether `page`, read at `page_size`, may have cut the time window short: it is
 /// full, and its oldest activity is still at or after the time floor, so entries
 /// inside the window can lie past the page's end.
 ///
@@ -169,8 +178,13 @@ fn parse_activities(body: &[u8]) -> Result<ActivityPage> {
 /// back well before the dispatch, and then it holds the whole window: everything it
 /// left out is older than the floor and would be filtered anyway. Without a floor, or
 /// without a timestamp to compare, a full page cannot be shown to cover the window.
-fn window_may_be_cut_short(returned: usize, oldest: Option<f64>, floor: Option<f64>) -> bool {
-    returned >= ACTIVITY_PAGE_SIZE as usize
+fn window_may_be_cut_short(page_size: u32, page: &ActivityPage, floor: Option<f64>) -> bool {
+    let oldest = page
+        .rows
+        .iter()
+        .filter_map(|a| a.activity_time)
+        .reduce(f64::min);
+    page.returned >= page_size as usize
         && match (oldest, floor) {
             (Some(oldest), Some(floor)) => oldest >= floor,
             _ => true,
@@ -391,26 +405,121 @@ mod tests {
         assert!(format!("{err:#}").chars().count() < 700, "{err:#}");
     }
 
+    /// A page of `returned` entries whose decoded rows carry these timestamps.
+    fn page(returned: usize, times: &[Option<f64>]) -> ActivityPage {
+        ActivityPage {
+            returned,
+            rows: times
+                .iter()
+                .map(|t| serde_json::from_value(json!({ "activityTime": t })).expect("row"))
+                .collect(),
+        }
+    }
+
     /// Only a full page whose oldest activity is still inside the window may have
     /// cut it short; one that reaches back past the floor holds the whole window.
     #[test]
     fn only_a_full_page_still_inside_the_window_is_reported() {
-        let full = ACTIVITY_PAGE_SIZE as usize;
+        let size = ACTIVITY_PAGE_SIZE;
+        let full = size as usize;
+        let floor = Some(1_000.0);
         assert!(!window_may_be_cut_short(
-            full - 1,
-            Some(2_000.0),
-            Some(1_000.0)
+            size,
+            &page(full - 1, &[Some(2_000.0)]),
+            floor
         ));
-        assert!(!window_may_be_cut_short(full, Some(999.0), Some(1_000.0)));
-        assert!(window_may_be_cut_short(full, Some(1_000.0), Some(1_000.0)));
-        assert!(window_may_be_cut_short(full, Some(2_000.0), Some(1_000.0)));
+        assert!(!window_may_be_cut_short(
+            size,
+            &page(full, &[Some(2_000.0), Some(999.0)]),
+            floor
+        ));
+        assert!(window_may_be_cut_short(
+            size,
+            &page(full, &[Some(1_000.0)]),
+            floor
+        ));
+        assert!(window_may_be_cut_short(
+            size,
+            &page(full, &[Some(2_000.0)]),
+            floor
+        ));
         assert!(
-            window_may_be_cut_short(full, None, Some(1_000.0)),
+            window_may_be_cut_short(size, &page(full, &[None]), floor),
             "no timestamp to compare"
         );
         assert!(
-            window_may_be_cut_short(full, Some(2_000.0), None),
+            window_may_be_cut_short(size, &page(full, &[Some(2_000.0)]), None),
             "no floor: any full page may be cut short"
         );
+    }
+
+    /// `n` activities, newest first, one second apart from `newest`.
+    fn feed(n: usize, newest: f64) -> serde_json::Value {
+        json!(
+            (0..n)
+                .map(|i| json!({ "id": i, "activityType": "SCRIPTING",
+                                 "activityTime": newest - i as f64 }))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    /// The first read is small; a full one still inside the window is read again
+    /// at the full size, and the wider page is what the poller gets.
+    #[tokio::test]
+    async fn a_full_small_page_inside_the_window_is_read_again_wider() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/activities"))
+            .and(query_param(
+                "pageSize",
+                ACTIVITY_FIRST_PAGE_SIZE.to_string(),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(feed(ACTIVITY_FIRST_PAGE_SIZE as usize, 10_000.0)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/activities"))
+            .and(query_param("pageSize", ACTIVITY_PAGE_SIZE.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(feed(80, 10_000.0)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let list = client(&server)
+            .activities(Some(42), None, Some(9_000))
+            .await
+            .expect("activities");
+        assert_eq!(list.len(), 80);
+    }
+
+    /// A small page that already reaches back past the floor holds the whole
+    /// window, so it is the only read.
+    #[tokio::test]
+    async fn a_small_page_that_reaches_past_the_floor_is_the_only_read() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/activities"))
+            .and(query_param(
+                "pageSize",
+                ACTIVITY_FIRST_PAGE_SIZE.to_string(),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(feed(ACTIVITY_FIRST_PAGE_SIZE as usize, 10_000.0)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let list = client(&server)
+            .activities(Some(42), None, Some(9_990))
+            .await
+            .expect("activities");
+        assert_eq!(list.len(), 11, "10 000 down to the 9 990 floor");
+        assert_eq!(server.received_requests().await.expect("requests").len(), 1);
     }
 }
