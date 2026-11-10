@@ -8,7 +8,7 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::error::UiError;
-use crate::export::{BacklogSheets, DETAIL_COLUMNS, WorkbookMeta, write_workbook};
+use crate::export::{DETAIL_COLUMNS, write_result_workbook};
 use crate::rows::QueryResult;
 use crate::state::AppState;
 
@@ -134,48 +134,11 @@ pub async fn export_patches_xlsx(
     // A handle on the cached result, not a copy of it. The whole thing moves into the
     // blocking task and the sheets borrow out of it there.
     let result = cached_result(&state)?;
-    let scope_note = crate::rows::compliance_scope_note(
-        result.devices_offline,
-        result.devices_unpatchable,
-        result.patch_families,
-    );
 
     // Serializing a six-figure row set into a zipped workbook is seconds of pure CPU
     // plus the file write — both of which would hold a tokio worker for the duration.
     tauri::async_runtime::spawn_blocking(move || {
-        write_export(&path, |file| {
-            write_workbook(
-                file,
-                &result.rows,
-                &result.compliance,
-                &result.compliance_by_os,
-                &result.devices,
-                &result.failures,
-                &BacklogSheets {
-                    worst_devices: &result.worst_devices,
-                    offline_backlog: &result.offline_backlog,
-                    time_to_install: &result.time_to_install,
-                },
-                &result.approvals,
-                &WorkbookMeta {
-                    generated_at: &result.generated_at,
-                    data_fetched_at: &result.data_fetched_at,
-                    devices_total: result.devices_total,
-                    devices_offline: result.devices_offline,
-                    devices_unpatchable: result.devices_unpatchable,
-                    scope: &result.scope,
-                    scope_note: &scope_note,
-                    changes: &result.changes,
-                    instance: &result.instance,
-                    sla_policy: &result.sla_policy,
-                    compliance_total: &result.compliance_total,
-                    uncounted_orgs: &result.uncounted_orgs,
-                    first_seen: &result.first_seen,
-                    patch_families: result.patch_families,
-                    exploit_data: &result.exploit_data.sentence,
-                },
-            )
-        })
+        write_export(&path, |file| write_result_workbook(file, &result))
     })
     .await
     .map_err(|e| UiError::new(format!("export task failed: {e}")))?
@@ -467,40 +430,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let path = export_path("book.xlsx");
         let result = sample_result();
-        write_export(&path, |file| {
-            write_workbook(
-                file,
-                &result.rows,
-                &result.compliance,
-                &result.compliance_by_os,
-                &result.devices,
-                &result.failures,
-                &BacklogSheets {
-                    worst_devices: &result.worst_devices,
-                    offline_backlog: &result.offline_backlog,
-                    time_to_install: &result.time_to_install,
-                },
-                &result.approvals,
-                &WorkbookMeta {
-                    generated_at: &result.generated_at,
-                    data_fetched_at: &result.data_fetched_at,
-                    devices_total: result.devices_total,
-                    devices_offline: result.devices_offline,
-                    devices_unpatchable: result.devices_unpatchable,
-                    scope: &result.scope,
-                    scope_note: "scope",
-                    changes: &result.changes,
-                    instance: &result.instance,
-                    sla_policy: &result.sla_policy,
-                    compliance_total: &result.compliance_total,
-                    uncounted_orgs: &result.uncounted_orgs,
-                    first_seen: &result.first_seen,
-                    patch_families: result.patch_families,
-                    exploit_data: &result.exploit_data.sentence,
-                },
-            )
-        })
-        .expect("written");
+        write_export(&path, |file| write_result_workbook(file, &result)).expect("written");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         let mut wb: Xlsx<_> = open_workbook(&path).expect("a workbook");
