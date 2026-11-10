@@ -375,9 +375,16 @@ necessary but not sufficient: `build_plan` resolves the script and classifies it
   sent verbatim, so no flag is added; the alternative — appending `dryRun=true` when the string
   lacks it — would rewrite what the operator typed and put a parse of free-form text between them
   and a live run. Clearing the box composes the parameters instead, which always carry the flag.
-- The library is read only for a dry run of a script, on plan **and** on confirm (`run_action`
+- The library is read for a dry run of a script, on plan **and** on confirm (`run_action`
   re-plans), so a script edited to drop `dryRun` between review and confirm is refused. A library
   that cannot be read, or no longer lists the id, is `Unverified` — blocked, fail closed.
+- A **live** run of a library script reads it too (`plan::check_script`). It used not to, to save
+  the round trip, which left the dangerous half unchecked: a remediation id mistyped in Settings
+  ran whatever script held that number. An id the library does not list, or lists as deactivated,
+  is a blocker; a library that cannot be read is a warning, so a listing outage does not stop a
+  script NinjaOne would still run. The plan carries the script as the library names it and the
+  resolved run-as (`ActionPlan.script`, `.run_as`), and the dialog shows both — they are what the
+  token binds. The frontend drops its Run-as choice with the session, like the script id.
 - `ScriptSummary.accepts_dry_run` lets the action bar disable the affected buttons while Dry run is
   on, and name the scripts that cannot preview; it is advisory, the planner decides.
 

@@ -1302,6 +1302,10 @@ pub struct ActionPlan {
     pub reboot_expected: bool,
     pub dry_run: bool,
     pub parameters_preview: Option<String>,
+    /// The script this dispatch runs and the identity it runs as; absent for the
+    /// native endpoints.
+    pub script: Option<String>,
+    pub run_as: Option<String>,
     /// What a native "Apply all" will install, per device. Absent for every other
     /// kind (and from a backend that predates it).
     #[serde(default)]

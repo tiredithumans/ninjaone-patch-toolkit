@@ -236,6 +236,76 @@ pub(super) fn dry_run_support(
     }
 }
 
+/// What the library says about the script a request resolved to.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct ScriptCheck {
+    /// How the confirmation dialog names it.
+    pub(super) label: Option<String>,
+    pub(super) blocker: Option<String>,
+    pub(super) warning: Option<String>,
+}
+
+/// Holds a library script to the library before it is dispatched: one that is not
+/// there, or is deactivated, is a blocker. `library` is `None` when it was not read
+/// (a built-in action, or no script at all) and `Err` when the read failed — a
+/// warning, not a blocker, so a listing outage does not stop a script NinjaOne
+/// would still run.
+pub(super) fn check_script(
+    script: Option<&ScriptRef>,
+    library: Option<Result<&[AutomationScript], &str>>,
+) -> ScriptCheck {
+    let id = match script {
+        Some(ScriptRef::Script { id }) => *id,
+        Some(ScriptRef::Action { uid }) => {
+            return ScriptCheck {
+                label: Some(format!("Built-in action {uid}")),
+                ..ScriptCheck::default()
+            };
+        }
+        None => return ScriptCheck::default(),
+    };
+    let unnamed = format!("Script #{id}");
+    let found = match library {
+        Some(Ok(list)) => list.iter().find(|s| s.id == id),
+        Some(Err(why)) => {
+            return ScriptCheck {
+                warning: Some(format!(
+                    "Could not read the automation library to confirm script #{id} ({why}). \
+                     Check the id before running."
+                )),
+                label: Some(unnamed),
+                blocker: None,
+            };
+        }
+        None => {
+            return ScriptCheck {
+                label: Some(unnamed),
+                ..ScriptCheck::default()
+            };
+        }
+    };
+    let Some(found) = found else {
+        return ScriptCheck {
+            blocker: Some(format!(
+                "Script #{id} is not in the NinjaOne automation library. Check the script id \
+                 in Settings."
+            )),
+            label: Some(unnamed),
+            warning: None,
+        };
+    };
+    let label = match found.name.as_deref() {
+        Some(name) => format!("{name} (#{id})"),
+        None => unnamed,
+    };
+    ScriptCheck {
+        blocker: (found.active == Some(false))
+            .then(|| format!("{label} is deactivated in the NinjaOne automation library.")),
+        label: Some(label),
+        warning: None,
+    }
+}
+
 /// The patch family whose cached current patches a plan reads: the backlog a native
 /// apply installs (the Apply-all preview) or the records a remediation's targets are
 /// checked against (the REJECTED warning). `None` for every other kind.
@@ -304,14 +374,32 @@ pub(super) async fn build_plan(
     // Only a dry run of a script needs the library, so nothing else pays for the
     // round trip. It is re-read on confirm too (`run_action` re-plans), so a script
     // edited to drop `dryRun` between review and confirm is refused rather than run.
-    let dry_run_support = if req.dry_run && req.kind.runs_a_script() {
-        match state.api.automation_scripts().await {
-            Ok(list) => dry_run_support(req, script.as_ref(), Ok(&list)),
-            Err(e) => dry_run_support(req, script.as_ref(), Err(&format!("{e:#}"))),
-        }
+    //
+    // A live run of a library script reads it too. It used not to ("nothing else
+    // pays for the round trip"), which left the dangerous half unchecked: a
+    // remediation id mistyped in Settings ran whatever script held that number,
+    // as SYSTEM, and the dialog named only the kind.
+    let library = if req.kind.runs_a_script()
+        && (req.dry_run || matches!(script, Some(ScriptRef::Script { .. })))
+    {
+        Some(
+            state
+                .api
+                .automation_scripts()
+                .await
+                .map_err(|e| format!("{e:#}")),
+        )
     } else {
-        DryRunSupport::NotChecked
+        None
     };
+    let library = library
+        .as_ref()
+        .map(|l| l.as_deref().map_err(String::as_str));
+    let dry_run_support = match library {
+        Some(library) if req.dry_run => dry_run_support(req, script.as_ref(), library),
+        _ => DryRunSupport::NotChecked,
+    };
+    let script_check = check_script(script.as_ref(), library);
     // Read-only peek at the whole-fleet cache: neither the preview nor the REJECTED
     // check ever triggers a fetch.
     let cached = cached_family(req.kind).and_then(|f| state.cached_current_patches(f));
@@ -338,6 +426,10 @@ pub(super) async fn build_plan(
     let parameters = per_device_parameters(req);
     p.parameters_preview = parameters_preview(&parameters, &p.eligible);
     let run_as = resolve_run_as(req, &settings);
+    p.script = script_check.label;
+    p.run_as = run_as.clone();
+    p.blockers.extend(script_check.blocker);
+    p.warnings.extend(script_check.warning);
 
     // Request-shape problems the pure planner can't see, since they depend on
     // settings and on which script was picked.

@@ -47,6 +47,12 @@ pub struct ActionPlan {
     /// in the confirmation dialog — the toolkit never sends a string the operator
     /// has not seen.
     pub parameters_preview: Option<String>,
+    /// The script this dispatch runs, as the library names it ("Name (#142)"), and
+    /// the identity it runs as. Both are bound into the confirmation; shown so the
+    /// operator approves what the token binds, not just a kind label. `None` for
+    /// the native endpoints.
+    pub script: Option<String>,
+    pub run_as: Option<String>,
     /// What a native "Apply all" will install, per device, from the cached current
     /// patches. `None` for every other kind.
     pub apply_preview: Option<ApplyPreview>,
@@ -699,6 +705,8 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
         reboot_expected,
         dry_run,
         parameters_preview: None,
+        script: None,
+        run_as: None,
         apply_preview,
         window_overridden,
         confirm_token: None,

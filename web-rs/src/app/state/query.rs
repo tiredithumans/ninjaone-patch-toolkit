@@ -502,6 +502,9 @@ impl AppState {
         self.actions.script_id.set(None);
         self.actions.script_params.set(String::new());
         self.actions.scripts.set(Vec::new());
+        // A stored credential's id belongs to the tenant that issued it, like the
+        // script id above: carried over it named another tenant's credential.
+        self.actions.run_as.set(String::new());
         self.live_jobs.clear();
         // A run queued behind one from the old session would fire into the new
         // one (or, signed out, just to say "Sign in first").

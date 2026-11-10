@@ -761,6 +761,20 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                 }
                             })}
 
+                        // Which script, as whom: both are bound into the approval.
+                        {plan
+                            .script
+                            .clone()
+                            .map(|script| {
+                                let run_as = plan.run_as.as_deref().map(util::run_as_label);
+                                view! {
+                                    <p class="modal-label">
+                                        "Runs " <strong>{script}</strong>
+                                        {run_as.map(|r| view! { " as " <strong>{r}</strong> })}
+                                    </p>
+                                }
+                            })}
+
                         // The toolkit never sends a string the operator hasn't seen.
                         {plan
                             .parameters_preview

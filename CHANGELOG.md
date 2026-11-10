@@ -17,6 +17,9 @@ version and start a fresh `[Unreleased]`.
   when Microsoft signed it, calls `shutdown.exe` by full path in both scripts, and loads the
   WinGet module only when Microsoft signed it. Re-import both scripts from `remediation/` into
   the NinjaOne library to pick this up.
+- An action's confirmation now names the script it runs and the identity it runs as, and refuses
+  a script id that is not in your NinjaOne library or is deactivated there.
+- The Run-as choice no longer carries over when you sign out or switch instances.
 - Confirming an action no longer runs it on devices that changed since you reviewed it — for
   example an offline device that came back online. Review the plan again instead.
 - **Sign out** now removes the saved sign-in of every instance and client id this install has

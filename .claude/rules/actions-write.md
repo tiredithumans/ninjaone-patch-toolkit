@@ -52,6 +52,10 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
 - **Guardrails go in `actions::plan` (`blockers`/`warnings`), not in a dialog.** The `dry_run`
   check is also asserted at the dispatch site. The org cap counts organization ids, never names;
   a scan is held to `MAX_DEVICES_PER_ACTION_CEILING`. → `docs/design/actions.md#guardrails-live-in-actionsplan`
+- **A library script is checked against the library on every plan, live or dry**
+  (`plan::check_script`): absent or deactivated is a blocker, an unreadable library a warning.
+  `ActionPlan.script` / `.run_as` name what the token binds and the dialog shows them. Test:
+  `a_live_script_is_checked_against_the_library_and_named`. → `docs/design/actions.md`
 - **Dry run requires a script declaring `dryRun`** (`DryRunSupport::Declared`); the window
   override is per dispatch and audited; the "Apply all" preview reads only cached patches (cold =
   "unknown"). → `docs/design/actions.md`
