@@ -532,7 +532,7 @@ data was collected/updated"); the non-`Device` `OSPatch`/`SoftwarePatch` variant
 `Patch::collected_timestamp` (alias `timestamp`, read via `collected_at()` into
 `rows::PatchRecord::first_seen`) is therefore
 **detection time, not publication time**, and everything derived from it —
-`PatchRow.first_seen_ts`/`first_seen_date`, the SLA `urgent_past_sla` rollup, `build_age_buckets`,
+`PatchRow.first_seen_ts` (and the `firstSeenDate` it serializes as), the SLA `urgent_past_sla` rollup, `build_age_buckets`,
 and the `detected_within_days`/`detected_after`/`detected_before` filter window — measures *how
 long we have known about the patch*. The UI says so ("First seen", "Pending past SLA", "Pending
 patch age (since first seen)"); keep the naming honest if you touch these.
@@ -618,6 +618,13 @@ bumps. All of it serializes to plain JSON strings, so `web-rs/src/types.rs` stil
 `String` — and because the two crates share no code, the IPC fixture (`web-rs/tests/backend-ipc.json`)
 decodes the backend's real rows through those mirrors, so a field that stopped serializing as a
 string fails `just web-test`.
+
+The two display dates are not stored at all. `firstSeenDate` / `installedDate` are formatted from
+`first_seen_ts` / `installed_ts` when a row is serialized (`PatchRow`'s hand-written `Serialize`,
+`model::ROW_DATE_FORMAT`), so the wire shape is unchanged. A row used to own both as
+`Option<String>`s, formatted for every row of the fleet and held for the life of the cached result,
+when only an IPC page read them — the exports, the CSV and the sort all use the timestamps. The
+impl destructures the row without `..`, so a new field does not compile until it is on the wire.
 
 ## Installed/Failed vs current patches (status routing)
 

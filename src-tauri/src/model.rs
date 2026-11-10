@@ -693,10 +693,9 @@ pub mod row_status {
 /// device's organization/location/role/OS names. This is the export unit and the
 /// table row shown in the UI.
 ///
-/// Serialized to the frontend over IPC: field names MUST be camelCase to match
-/// `web-rs/src/types.rs` (which deserializes with `rename_all = "camelCase"`).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Serialized to the frontend over IPC by the hand-written [`Serialize`] impl below:
+/// field names MUST be camelCase to match `web-rs/src/types.rs`.
+#[derive(Debug, Clone)]
 pub struct PatchRow {
     pub device_id: i64,
     pub device_name: Arc<str>,
@@ -726,11 +725,11 @@ pub struct PatchRow {
     pub severity: &'static str,
     pub severity_rank: u8,
     pub status: Arc<str>,
-    /// Formatted [`Patch::collected_timestamp`] — when NinjaOne first reported the
-    /// patch, not when it was published. See that field for why.
-    pub first_seen_date: Option<String>,
-    pub installed_date: Option<String>,
+    /// When the patch was first seen (NinjaOne's report or this app's own record,
+    /// whichever is earlier) — not when it was published. Unix seconds; the wire
+    /// also carries it formatted as `firstSeenDate` (see the `Serialize` impl).
     pub first_seen_ts: Option<i64>,
+    /// Unix seconds; the wire also carries it formatted as `installedDate`.
     pub installed_ts: Option<i64>,
     /// [`Patch::product_identifier`], shared across the row set like the other
     /// repeated strings. `None` on every OS row.
@@ -743,6 +742,86 @@ pub struct PatchRow {
     /// Those CVEs that are being exploited in the wild, per Microsoft or CISA's
     /// catalog, comma-joined and shared by every row of the KB. `None` when none are.
     pub exploited_cves: Option<Arc<str>>,
+}
+
+/// The one format a row date is shown in, on the wire and in the rollups.
+pub const ROW_DATE_FORMAT: &str = "%Y-%m-%d %H:%M UTC";
+
+/// `ts` (Unix seconds) in [`ROW_DATE_FORMAT`], or `None` when it is out of range.
+pub fn format_row_ts(ts: i64) -> Option<String> {
+    DateTime::from_timestamp(ts, 0).map(|t| t.format(ROW_DATE_FORMAT).to_string())
+}
+
+/// A row timestamp serialized as its [`ROW_DATE_FORMAT`] text, straight into the
+/// output with no intermediate `String`.
+struct RowDate(Option<i64>);
+
+impl Serialize for RowDate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0.and_then(|ts| DateTime::from_timestamp(ts, 0)) {
+            Some(t) => serializer.collect_str(&t.format(ROW_DATE_FORMAT)),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+/// Hand-written so `firstSeenDate` / `installedDate` are derived from the `*_ts`
+/// fields at the edge. A row used to own both strings, formatted for every row of a
+/// six-figure fleet and held for the life of the cached result, when only an IPC
+/// page reads them — export, CSV and sort use the timestamps. The destructuring has
+/// no `..`, so a new field fails to compile until it is put on the wire here.
+impl Serialize for PatchRow {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let PatchRow {
+            device_id,
+            device_name,
+            organization,
+            location,
+            device_role,
+            os_name,
+            node_class,
+            needs_reboot,
+            reboot_likely,
+            offline,
+            patch_type,
+            kb,
+            name,
+            severity,
+            severity_rank,
+            status,
+            first_seen_ts,
+            installed_ts,
+            product_identifier,
+            cve_count,
+            exploited_cves,
+        } = self;
+        let mut row = serializer.serialize_struct("PatchRow", 23)?;
+        row.serialize_field("deviceId", device_id)?;
+        row.serialize_field("deviceName", device_name)?;
+        row.serialize_field("organization", organization)?;
+        row.serialize_field("location", location)?;
+        row.serialize_field("deviceRole", device_role)?;
+        row.serialize_field("osName", os_name)?;
+        row.serialize_field("nodeClass", node_class)?;
+        row.serialize_field("needsReboot", needs_reboot)?;
+        row.serialize_field("rebootLikely", reboot_likely)?;
+        row.serialize_field("offline", offline)?;
+        row.serialize_field("patchType", patch_type)?;
+        row.serialize_field("kb", kb)?;
+        row.serialize_field("name", name)?;
+        row.serialize_field("severity", severity)?;
+        row.serialize_field("severityRank", severity_rank)?;
+        row.serialize_field("status", status)?;
+        row.serialize_field("firstSeenDate", &RowDate(*first_seen_ts))?;
+        row.serialize_field("installedDate", &RowDate(*installed_ts))?;
+        row.serialize_field("firstSeenTs", first_seen_ts)?;
+        row.serialize_field("installedTs", installed_ts)?;
+        row.serialize_field("productIdentifier", product_identifier)?;
+        row.serialize_field("cveCount", cve_count)?;
+        row.serialize_field("exploitedCves", exploited_cves)?;
+        row.end()
+    }
 }
 
 /// How `POST /v2/device/{id}/reboot/{mode}` is addressed. `Forced` skips the

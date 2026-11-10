@@ -112,7 +112,7 @@ pub struct PatchSource<'a> {
 }
 
 pub(super) fn fmt_dt(ts: Option<DateTime<Utc>>) -> Option<String> {
-    ts.map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+    ts.map(|t| t.format(crate::model::ROW_DATE_FORMAT).to_string())
 }
 
 /// Hands out one shared [`Arc<str>`] per distinct string.
@@ -336,10 +336,8 @@ pub fn build_rows(
                 severity: severity.label(),
                 severity_rank: severity.rank(),
                 status: pool.intern(status),
-                first_seen_date: fmt_dt(first_seen),
-                installed_date: fmt_dt(installed),
-                // Normalised through `collected_at`/`installed_at` like the dates
-                // beside them, NOT read raw off the patch. NinjaOne returns
+                // Normalised through `collected_at`/`installed_at`, NOT read raw off
+                // the patch. NinjaOne returns
                 // milliseconds for these on some endpoints, and taking the raw value
                 // made a row disagree with itself: it displayed the correct date
                 // (which goes through `unix_to_datetime`) while sorting as a

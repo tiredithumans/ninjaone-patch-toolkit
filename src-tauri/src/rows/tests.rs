@@ -274,13 +274,17 @@ fn row_timestamps_are_normalised_like_the_dates_beside_them() {
         "a millisecond value must be normalised, not stored raw"
     );
     assert_eq!(r.installed_ts, Some(seconds as i64));
-    // And the timestamp must agree with the date rendered next to it.
+    // And the date the wire renders beside it is derived from that timestamp, in
+    // the format the frontend has always shown.
     let from_ts = DateTime::<Utc>::from_timestamp(r.first_seen_ts.unwrap(), 0).unwrap();
+    let wire = serde_json::to_value(r).expect("serialize row");
     assert_eq!(
-        r.first_seen_date,
+        wire["firstSeenDate"].as_str().map(str::to_owned),
         fmt_dt(Some(from_ts)),
         "the sort timestamp and the displayed date must describe the same instant"
     );
+    assert_eq!(wire["installedDate"], wire["firstSeenDate"]);
+    assert_eq!(wire["firstSeenTs"], serde_json::json!(seconds as i64));
 }
 
 #[test]
@@ -2074,8 +2078,6 @@ fn failed_row(device_id: i64, device: &str, kb: &str, installed_ts: Option<i64>)
         severity: "Critical",
         severity_rank: 5,
         status: "FAILED".into(),
-        first_seen_date: None,
-        installed_date: installed_ts.map(|_| "2026-01-01 00:00 UTC".into()),
         first_seen_ts: None,
         installed_ts,
         product_identifier: None,

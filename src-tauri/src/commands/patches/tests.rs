@@ -722,7 +722,7 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
     let row = &result.rows[0];
     assert_eq!(row.kb.as_deref(), Some("KBOK"));
     assert_eq!(&*row.status, "INSTALLED");
-    assert!(row.installed_date.is_some());
+    assert!(row.installed_ts.is_some());
 
     // No FAILED status was requested, so the failure rollup is empty.
     assert!(result.failures.is_empty());

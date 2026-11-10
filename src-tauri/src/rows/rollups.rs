@@ -260,7 +260,6 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
         devices: HashSet<i64>,
         device_names: Vec<Arc<str>>,
         latest_ts: Option<i64>,
-        latest_date: Option<String>,
     }
     /// patch type + KB + name — the rows' own shared strings, so grouping the
     /// failure set is refcount bumps rather than three `String` copies per row.
@@ -283,7 +282,6 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
                 devices: HashSet::new(),
                 device_names: Vec::new(),
                 latest_ts: None,
-                latest_date: None,
             });
         // Count distinct devices by id, but only add a name the first time we see
         // that device, so the name list has no duplicates. A record with no device
@@ -301,7 +299,6 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
             && acc.latest_ts.map(|cur| ts > cur).unwrap_or(true)
         {
             acc.latest_ts = Some(ts);
-            acc.latest_date = r.installed_date.clone();
         }
     }
     // `HashMap` iteration order is randomized per process, so without a total order
@@ -320,7 +317,7 @@ pub fn build_failures(rows: &[PatchRow]) -> Vec<FailureGroup> {
             severity_rank: a.severity_rank,
             affected_devices: a.devices.len(),
             device_names: a.device_names,
-            latest_failure: a.latest_date,
+            latest_failure: a.latest_ts.and_then(crate::model::format_row_ts),
             latest_failure_ts: a.latest_ts,
         })
         .collect();
