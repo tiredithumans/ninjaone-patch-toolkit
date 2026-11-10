@@ -1504,8 +1504,9 @@ async fn a_tick_that_spans_an_instance_switch_writes_no_verdict() {
     assert!(tick.closing.is_empty(), "no second record for the same job");
 }
 
-/// Two jobs of the *same* kind on one device share one read, and the claimed-id
-/// exclusion still hands each its own activity rather than both the newest.
+/// Two jobs of the same family on one device share one read, and the claimed-id
+/// exclusion still hands each its own activity: first-in, first-out, so the older
+/// scan takes the earlier activity and the apply the later one.
 #[tokio::test]
 async fn two_same_kind_jobs_on_one_device_share_a_read_but_not_an_activity() {
     let server = MockServer::start().await;
@@ -1539,11 +1540,15 @@ async fn two_same_kind_jobs_on_one_device_share_a_read_but_not_an_activity() {
     .await;
 
     assert_eq!(server.received_requests().await.expect("requests").len(), 1);
-    assert_ne!(
-        updates[0].activity_id, updates[1].activity_id,
-        "two jobs must never bind the same activity"
+    assert_eq!(updates[0].id, 1);
+    assert_eq!(
+        updates[0].activity_id,
+        Some(11),
+        "the older scan, the earlier run"
     );
-    assert!(updates.iter().all(|j| j.state.is_terminal()));
+    assert_eq!(updates[0].state, JobState::Completed);
+    assert_eq!(updates[1].activity_id, Some(12), "the apply, the later run");
+    assert!(matches!(updates[1].state, JobState::Failed(_)));
 }
 
 /// The shared read is floored at the device's *earliest* dispatch, so no job on

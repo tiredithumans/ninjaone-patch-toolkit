@@ -560,7 +560,13 @@ pending dispatch on it (less the 5 s skew allowance), and `resolve_pending` hand
 that device the same list. It used to be one read per *job*, so a device carrying a scan, an
 apply and a reboot was asked for the same feed three times a tick. Correlation still runs in
 `pending` order with `claimed` threaded through, so two jobs on one device never bind the same
-activity; `commands::actions::tests` pins both with wiremock. The reads themselves are bounded:
+activity; `commands::actions::tests` pins both with wiremock. The third tier is first-in,
+first-out: the earliest unclaimed match at or after the job's own floor. `pending` is oldest
+first, so it used to pair the oldest job with the *newest* activity, and an OS then a Software
+remediation sent seconds apart (both `SCRIPTING`) each reported the other's verdict
+(`actions::tests::two_remediations_on_one_device_each_take_their_own_verdict`). What a job binds
+in that tier is claimed even when the job keeps an id its dispatch returned and the feed does not
+show; that id is not overwritten, so tier 1 still wins once the feed catches up. The reads themselves are bounded:
 at most `MAX_FEED_READS_IN_FLIGHT` (8) are in flight per tick. They used to be spawned all at
 once, so a 500-device batch put 500 GETs on the wire every 15 s and a 429 parked them all on
 the same `Retry-After`. The bound is a constant, not the "Dispatch concurrency" setting, so

@@ -1707,9 +1707,10 @@ fn a_running_activity_inside_the_window_stays_running() {
 }
 
 /// The native endpoints (scan/apply/reboot) return no correlator, so every one of
-/// those jobs reaches the third-tier "newest matching activity on this device"
-/// heuristic. Without an exclusion set, two actions dispatched to the same device
-/// close together both select the newest activity and swap exit codes.
+/// those jobs reaches the third-tier heuristic. Without an exclusion set, two
+/// actions dispatched to the same device close together both select the same
+/// activity and swap exit codes; and the tier is first-in, first-out, so the job
+/// the poller reaches first (the older one) takes the earlier activity.
 #[test]
 fn two_jobs_on_one_device_cannot_claim_the_same_activity() {
     let now = Utc::now();
@@ -1733,18 +1734,81 @@ fn two_jobs_on_one_device_cannot_claim_the_same_activity() {
     advance_job(&mut second, &list, now, &mut claimed);
 
     assert_eq!(
-        first.activity_id,
-        Some(200),
-        "newest wins for the first job"
+        (first.activity_id, first.exit_code),
+        (Some(199), Some(3)),
+        "the job reached first takes the earliest matching activity"
     );
     assert_eq!(
-        second.activity_id,
-        Some(199),
-        "the second must fall to the next unclaimed activity, not re-take 200"
+        (second.activity_id, second.exit_code),
+        (Some(200), Some(0)),
+        "the second falls to the next unclaimed activity, not 199 again"
     );
-    assert_ne!(
-        first.exit_code, second.exit_code,
-        "distinct activities carry their own exit codes"
+}
+
+/// The case FIFO exists for: an OS remediation and then a Software remediation
+/// sent to one device 8 s apart, both emitting `SCRIPTING` with no correlator. The
+/// poller walks them oldest first; newest-wins handed the OS job the Software
+/// run's failure and the Software job the OS run's success.
+#[test]
+fn two_remediations_on_one_device_each_take_their_own_verdict() {
+    let now = Utc::now();
+    let ts = now.timestamp();
+    let list = vec![
+        // Newest first, as the feed returns it.
+        activity(json!({
+            "id": 302, "activityType": "SCRIPTING", "statusCode": "COMPLETED",
+            "activityResult": "FAILURE", "activityTime": (ts - 52) as f64,
+            "data": { "exitCode": 1 },
+        })),
+        activity(json!({
+            "id": 301, "activityType": "SCRIPTING", "statusCode": "COMPLETED",
+            "activityResult": "SUCCESS", "activityTime": (ts - 58) as f64,
+            "data": { "exitCode": 0 },
+        })),
+    ];
+    let mut os = job(None, None, ts - 60);
+    os.kind = ActionKind::OsPatchRemediate;
+    let mut software = job(None, None, ts - 52);
+    software.id = 2;
+    software.kind = ActionKind::SoftwarePatchRemediate;
+
+    let mut claimed = HashSet::new();
+    advance_job(&mut os, &list, now, &mut claimed);
+    advance_job(&mut software, &list, now, &mut claimed);
+
+    assert_eq!(os.activity_id, Some(301));
+    assert_eq!(os.state, JobState::Completed);
+    assert_eq!(software.activity_id, Some(302));
+    assert!(matches!(software.state, JobState::Failed(_)));
+}
+
+/// A job whose dispatch returned an id the feed does not show reaches the third
+/// tier. What it bound there is claimed, so a later job in the same pass cannot
+/// take it too; its own id is kept, so tier 1 still wins once the feed shows it.
+#[test]
+fn a_third_tier_match_is_claimed_even_when_the_job_has_an_id() {
+    let now = Utc::now();
+    let ts = now.timestamp();
+    let list = vec![activity(json!({
+        "id": 400, "activityType": "SCRIPTING", "statusCode": "IN_PROCESS",
+        "activityTime": (ts - 5) as f64,
+    }))];
+    let mut owned = job(Some(9_999), None, ts - 30);
+    let mut later = job(None, None, ts - 20);
+    later.id = 2;
+
+    let mut claimed = HashSet::new();
+    advance_job(&mut owned, &list, now, &mut claimed);
+    advance_job(&mut later, &list, now, &mut claimed);
+
+    assert_eq!(owned.state, JobState::Running);
+    assert_eq!(owned.activity_id, Some(9_999), "the dispatch's id is kept");
+    assert!(claimed.contains(&400));
+    assert_eq!(later.activity_id, None, "400 is already bound");
+    assert_eq!(
+        later.state,
+        JobState::Running,
+        "unchanged until its own shows"
     );
 }
 

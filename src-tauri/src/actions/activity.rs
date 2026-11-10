@@ -141,9 +141,9 @@ fn end_of_run<'a>(
 /// Finds the activity that corresponds to a dispatched job.
 ///
 /// Three tiers, most to least certain: the exact activity id the dispatch returned,
-/// the activity series uid, then the newest activity on that device since dispatch
-/// of a type and code the job's kind emits (see [`is_action_activity`],
-/// [`is_run_code`]). The middle tier is what makes an id-less dispatch response
+/// the activity series uid, then the *earliest* unclaimed activity on that device at
+/// or after the job's own dispatch floor, of a type and code the job's kind emits
+/// (see [`is_action_activity`], [`is_run_code`]). The middle tier is what makes an id-less dispatch response
 /// usable — several tenants return only a `jobUid`. A first or middle tier match
 /// that has not ended yields the run's end once the feed has it ([`end_of_run`]).
 ///
@@ -151,8 +151,14 @@ fn end_of_run<'a>(
 /// third tier consults it. That tier is pure heuristic — device + activity type +
 /// a timestamp floor — and the native endpoints (`scan`/`apply`/`reboot`) return no
 /// correlator at all, so every one of those jobs reaches it. Without the exclusion,
-/// two actions dispatched to the same device close together both select the newest
-/// matching activity and swap each other's `exit_code`/`activity_id`. The first two
+/// two actions dispatched to the same device close together both select the same
+/// matching activity and swap each other's `exit_code`/`activity_id`.
+///
+/// The third tier is first-in, first-out. The poller walks pending jobs oldest
+/// first, so the oldest job takes the earliest matching activity and the next job
+/// the one after it. It used to take the *newest*, which paired the oldest job with
+/// the newest activity: an OS remediation and a Software remediation sent 8 s apart
+/// both emit `SCRIPTING`, and each reported the other's verdict. The first two
 /// tiers are exact bindings and are deliberately *not* filtered: a job that already
 /// owns an id must keep resolving to it on every later poll.
 pub fn match_activity<'a>(
@@ -192,7 +198,7 @@ pub fn match_activity<'a>(
         // An activity with no id cannot be tracked, so it cannot be excluded either;
         // it stays eligible exactly as before.
         .filter(|a| a.id.is_none_or(|id| !claimed.contains(&id)))
-        .max_by(|a, b| {
+        .min_by(|a, b| {
             a.activity_time
                 .unwrap_or(0.0)
                 .total_cmp(&b.activity_time.unwrap_or(0.0))
@@ -238,6 +244,15 @@ pub fn advance_job(
         Some(a) => {
             if job.activity_id.is_none() {
                 job.activity_id = a.id;
+            }
+            // Claim what matched even when the job keeps an id of its own. A job whose
+            // dispatch returned an id the feed does not show (yet) reaches the third
+            // tier, and claiming only `job.activity_id` left the activity it actually
+            // bound free for a later job in the same pass to take as well. The
+            // dispatch's id is kept rather than overwritten: it may be a real activity
+            // the feed has not caught up to, and tier 1 must win once it appears.
+            if let Some(id) = a.id {
+                claimed.insert(id);
             }
             if job.series_uid.is_none() {
                 job.series_uid = a.series_uid.clone();
