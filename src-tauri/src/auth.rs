@@ -927,7 +927,12 @@ impl AuthState {
                 tauri::async_runtime::spawn_blocking(move || this.discard_dead_grant(&stamp))
                     .await
                     .context("keyring delete task failed")?;
-                return Err(anyhow!("refresh failed ({status}): {text}").into());
+                // Said for the operator: this text is the toast and the banner.
+                debug!(%status, "refresh grant is dead; credential cleared");
+                return Err(anyhow!(
+                    "Your NinjaOne sign-in has expired. Sign in again to continue."
+                )
+                .into());
             }
             debug!(%status, "refresh failed transiently; keeping stored credential");
             return Err(RefreshError::Transient(anyhow!(
@@ -1287,10 +1292,12 @@ impl AuthState {
                 .read()
                 .map_err(|_| anyhow!("auth state poisoned"))?;
             (
-                inner
-                    .client_id
-                    .clone()
-                    .ok_or_else(|| anyhow!("client ID not configured"))?,
+                inner.client_id.clone().ok_or_else(|| {
+                    anyhow!(
+                        "No Client ID is saved. Open Settings and enter the Client ID of your \
+                         NinjaOne API app."
+                    )
+                })?,
                 inner.client_secret.clone(),
                 inner.callback_port,
                 inner.request_management,
@@ -1385,7 +1392,12 @@ impl AuthState {
             wait_for_callback(listener, &state),
         )
         .await
-        .map_err(|_| anyhow!("login timed out — no callback received within 3 minutes"))??;
+        .map_err(|_| {
+            anyhow!(
+                "Sign-in timed out: nothing came back from the browser within 3 minutes. \
+                 Try again and finish the sign-in in the browser window."
+            )
+        })??;
 
         // Defense in depth. `wait_for_callback` only returns a redirect whose state
         // already matched, so this is unreachable — kept deliberately, in the same
@@ -1393,7 +1405,10 @@ impl AuthState {
         // dispatch site: a future change to the listener's filter must not silently
         // remove the state check from the flow.
         if callback.state != state {
-            bail!("state mismatch — possible CSRF");
+            bail!(
+                "The sign-in reply did not match this request, so it was ignored. \
+                 Sign in again."
+            );
         }
         if let Some(err) = callback.error {
             // The one authorization error with a specific, actionable fix: the app
@@ -1406,11 +1421,11 @@ impl AuthState {
                      turn off Patch actions in Settings."
                 );
             }
-            bail!("authorization error: {err}");
+            bail!("NinjaOne refused the sign-in: {err}");
         }
-        let code = callback
-            .code
-            .ok_or_else(|| anyhow!("no authorization code in callback"))?;
+        let code = callback.code.ok_or_else(|| {
+            anyhow!("NinjaOne's sign-in reply carried no authorization code. Sign in again.")
+        })?;
 
         let mut body = vec![
             ("grant_type", "authorization_code".to_string()),

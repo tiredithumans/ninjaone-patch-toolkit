@@ -72,6 +72,11 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
     view! {
         <div class="action-bar">
             <div class="action-bar-summary">
+                // Planning asks NinjaOne about the script and the devices; until it
+                // answers, every button below is disabled and this says why.
+                <Show when=move || state.actions.planning.get()>
+                    <span class="chips-label" role="status">"Checking the plan…"</span>
+                </Show>
                 {move || {
                     let (devices, rows, offline) = counts();
                     let summary = if rows_source {
@@ -177,10 +182,24 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                                             // so a screen reader says what the button
                                             // reaches instead of just "OS", and the
                                             // tooltip agrees.
-                                            aria-label=move || full_label(kind)
+                                            // …and, when it is unavailable, why: the
+                                            // reason was only a tooltip on a button
+                                            // the keyboard could not reach.
+                                            aria-label=move || match why.get() {
+                                                Some(why) => format!("{}. Unavailable: {why}", kind.label()),
+                                                None => full_label(kind),
+                                            }
                                             title=title
-                                            prop:disabled=move || why.with(Option::is_some)
-                                            on:click=move |_| state.open_plan(kind, source)
+                                            // `aria-disabled`, not `disabled`: it
+                                            // stays focusable so the reason can be
+                                            // read. The click is refused here, and
+                                            // `plan()` re-checks everything anyway.
+                                            aria-disabled=move || why.with(Option::is_some).to_string()
+                                            on:click=move |_| {
+                                                if why.with_untracked(Option::is_none) {
+                                                    state.open_plan(kind, source);
+                                                }
+                                            }
                                         >
                                             {label}
                                         </button>
@@ -200,7 +219,14 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                 <button
                     type="button"
                     class="btn btn-sm btn-ghost"
-                    prop:disabled=move || blocked().is_some()
+                    prop:disabled=move || blocked().is_some() || !any()
+                    title=move || {
+                        if blocked().is_none() && !any() {
+                            "Select patch rows first — the script runs on their devices"
+                        } else {
+                            ""
+                        }
+                    }
                     on:click=move |_| state.actions.script_dialog.set(true)
                 >
                     "Run a script…"
@@ -885,7 +911,9 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                     })
                                     .collect_view();
                                 view! {
-                                    <details class="modal-targets">
+                                    // A short list is shown outright: which devices
+                                    // is the question the dialog exists to answer.
+                                    <details class="modal-targets" open=device_count <= 10>
                                         <summary>
                                             {format!("{} targeted", util::count_of(device_count, "device", "devices"))}
                                         </summary>
@@ -973,7 +1001,13 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                             </Show>
                             <Show when=move || !blocked && !failed()>
                                 <button
-                                    class="btn btn-primary"
+                                    // A live run that changes devices does not
+                                    // look like the preview of one.
+                                    class=if !dry_run && kind.is_mutating() {
+                                        "btn btn-danger"
+                                    } else {
+                                        "btn btn-primary"
+                                    }
                                     prop:disabled=move || !can_confirm.get()
                                     on:click=move |_| state.confirm_plan()
                                 >
@@ -1217,7 +1251,13 @@ pub(crate) fn ScriptPicker() -> impl IntoView {
             </Show>
             <button
                 class="btn btn-primary btn-sm"
-                title=move || state.dry_run_reason(ActionKind::Script).unwrap_or_default()
+                title=move || {
+                    if state.actions.script_id.with(Option::is_none) {
+                        "Pick a script first".to_string()
+                    } else {
+                        state.dry_run_reason(ActionKind::Script).unwrap_or_default()
+                    }
+                }
                 prop:disabled=move || {
                     state.actions.script_id.with(|s| s.is_none())
                         || state.actions.dispatching.get()

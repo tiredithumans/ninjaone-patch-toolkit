@@ -123,7 +123,7 @@ impl AppState {
             }
             util::RunDecision::NotSignedIn => {
                 if !silent {
-                    self.notify(Toast::err("Sign in first"));
+                    self.notify(Toast::err("Sign in to run a query"));
                 }
                 return;
             }
@@ -274,8 +274,12 @@ impl AppState {
                 // The toast announces the failure (aria-live); the banner keeps it
                 // visible after the toast auto-dismisses.
                 Err(e) => {
+                    self.query.error_is_paging.set(false);
                     self.query.query_error.set(Some(e.clone()));
                     self.notify(Toast::err(e));
+                    // A dead sign-in fails the query and signs the backend out;
+                    // re-read the status so the top bar stops saying Connected.
+                    self.session.refresh_auth();
                 }
             }
             // Record the round-trip so the next run can show "Last run took Ns"
@@ -357,11 +361,20 @@ impl AppState {
         self.drill_run();
     }
 
+    /// "Reset filters": the controls back on the starting query, the location list
+    /// re-derived for the now-empty org scope. Not run — "Filters changed · Apply"
+    /// says so, like any other edit.
+    pub(in crate::app) fn reset_filters(self) {
+        self.filters.reset();
+        self.reload_locations();
+    }
+
     /// Shared tail of every drill-down: re-run and land the operator on the rows.
     ///
     /// Flat view on purpose — a drill-down is a request to see *the rows behind this
     /// number*, and a grouped view would re-collapse them behind headers. The scope
-    /// bar's pickers and the patch filter bar show what the drill-down applied.
+    /// bar's pickers and the patch filter bar show what the drill-down applied, and
+    /// "Reset filters" is the way back out.
     fn drill_run(self) {
         self.query.patches_page.set(0);
         self.set_group_by(None);

@@ -120,6 +120,10 @@ impl Progress {
 #[derive(Clone, Copy)]
 pub(crate) struct SessionState {
     pub(super) auth: RwSignal<Option<AuthStatus>>,
+    /// The first sign-in check has come back (it may refresh a token over the
+    /// network). Until then "not signed in" is not known, and saying it flashed
+    /// the Sign in card at every launch of an already signed-in app.
+    pub(super) auth_checked: RwSignal<bool>,
     pub(super) signing_in: RwSignal<bool>,
     /// Sample data is loaded (drives the "sample data" banner). Set by `enter_demo`.
     /// Read only through [`is_demo`](Self::is_demo), never directly.
@@ -141,6 +145,7 @@ impl SessionState {
     pub(super) fn new() -> Self {
         Self {
             auth: RwSignal::new(None),
+            auth_checked: RwSignal::new(false),
             signing_in: RwSignal::new(false),
             demo: RwSignal::new(false),
             web_mode: RwSignal::new(false),
@@ -181,6 +186,8 @@ impl SessionState {
             if let Ok(a) = api::auth_status().await {
                 self.auth.set(Some(a));
             }
+            // Answered either way: a failed check must not hide Sign in for good.
+            self.auth_checked.set(true);
         });
     }
 }
@@ -274,6 +281,28 @@ impl FilterState {
             install_after_date: RwSignal::new(String::new()),
             install_before_date: RwSignal::new(String::new()),
         }
+    }
+
+    /// Puts every control back on the starting query (`util::filters_at_default`).
+    /// The install window stays: it is the Settings default, not a filter edit.
+    pub(super) fn reset(self) {
+        self.org_ids.set(Vec::new());
+        self.loc_ids.set(Vec::new());
+        self.role_ids.set(Vec::new());
+        self.group_ids.set(Vec::new());
+        self.selected_classes.set(Vec::new());
+        self.selected_severities.set(Vec::new());
+        self.os_name.set(String::new());
+        self.search.set(String::new());
+        self.exploited_only.set(false);
+        self.detected_window.set(String::new());
+        self.detected_after_date.set(String::new());
+        self.detected_before_date.set(String::new());
+        self.patch_type.set("ALL".to_string());
+        self.statuses.set(vec!["PENDING".to_string()]);
+        self.install_custom.set(false);
+        self.install_after_date.set(String::new());
+        self.install_before_date.set(String::new());
     }
 
     pub(super) fn toggle_in(self, sig: RwSignal<Vec<String>>, value: String) {
@@ -381,6 +410,13 @@ pub(crate) struct QueryState {
     /// results area after the announcing toast auto-dismisses. Cleared by the next
     /// successful run/page fetch or an explicit dismiss.
     pub(super) query_error: RwSignal<Option<String>>,
+    /// `query_error` came from loading a page, a sort or group headers of a result
+    /// that is still good, not from the query — the banner must not call that a
+    /// failed query (`util::query_error_banner`).
+    pub(super) error_is_paging: RwSignal<bool>,
+    /// A page, sort or group-header request is in flight, so the rows on screen
+    /// are the previous ones. Cleared by whichever request owns the view.
+    pub(super) view_loading: RwSignal<bool>,
     /// Active sort for the Patches detail table; pages re-fetch with it. `None` is
     /// the backend's canonical order. Reset by each manual run.
     pub(super) patches_sort: RwSignal<Option<RowSort>>,
@@ -449,6 +485,8 @@ impl QueryState {
     pub(super) fn next_view_seq(self) -> u64 {
         let seq = util::next_query_seq(self.view_seq.get_untracked());
         self.view_seq.set(seq);
+        // The request this supersedes will never clear the flag itself.
+        self.view_loading.set(false);
         seq
     }
 
@@ -489,6 +527,8 @@ impl QueryState {
             patches_page: RwSignal::new(0),
             page_rows: RwSignal::new(Vec::new()),
             query_error: RwSignal::new(None),
+            error_is_paging: RwSignal::new(false),
+            view_loading: RwSignal::new(false),
             patches_sort: RwSignal::new(None),
             group_by: RwSignal::new(util::group_by_from_pref(
                 api::ui_pref_str(api::PREF_PATCH_VIEW).as_deref(),
@@ -517,6 +557,9 @@ pub(crate) struct RunState {
     /// `elapsed_tick` is bumped by a timer to re-evaluate the elapsed label.
     pub(super) query_started_ms: RwSignal<f64>,
     pub(super) elapsed_tick: RwSignal<u32>,
+    /// The wall clock in whole minutes, moved by the one-second ticker, so "data
+    /// as of … (12 min ago)" re-renders once a minute and not once a second.
+    pub(super) now_min: RwSignal<i64>,
     pub(super) last_duration_ms: RwSignal<Option<f64>>,
     /// Live record counts from backend `query:progress` events, plus a sequence
     /// number stamped on each run so stale events from a superseded run are dropped.
@@ -540,6 +583,7 @@ impl RunState {
             refreshing: RwSignal::new(false),
             query_started_ms: RwSignal::new(0.0),
             elapsed_tick: RwSignal::new(0),
+            now_min: RwSignal::new((js_sys::Date::now() / 60_000.0) as i64),
             last_duration_ms: RwSignal::new(None),
             progress: RwSignal::new(Progress::default()),
             query_seq: RwSignal::new(0),
@@ -606,6 +650,12 @@ pub(crate) struct SettingsState {
     /// Whether the *saved* settings carry a client id — not the form field, which
     /// moves as the operator types.
     pub(super) has_client_id: RwSignal<bool>,
+    /// Why the saved settings could not be read at launch. Nothing else on screen
+    /// says so: the onboarding card waits for `loaded`, which then never comes.
+    pub(super) load_error: RwSignal<Option<String>>,
+    /// Something in the Settings form was edited since it last matched what is
+    /// saved. Close keeps the edits, so without this nothing said they were unsaved.
+    pub(super) dirty: RwSignal<bool>,
 }
 
 impl SettingsState {
@@ -628,6 +678,8 @@ impl SettingsState {
             preset_name: RwSignal::new(String::new()),
             loaded: RwSignal::new(false),
             has_client_id: RwSignal::new(false),
+            load_error: RwSignal::new(None),
+            dirty: RwSignal::new(false),
         }
     }
 }
@@ -652,8 +704,12 @@ impl UpdateState {
 /// App-chrome state: the toast, panel visibility, and the active results tab.
 #[derive(Clone, Copy)]
 pub(crate) struct UiState {
+    /// The success/notice toast and the error toast: one slot each, so a routine
+    /// "Preset saved" cannot replace an error nobody has read yet.
     pub(super) toast: RwSignal<Option<Toast>>,
+    pub(super) toast_err: RwSignal<Option<Toast>>,
     pub(super) toast_gen: RwSignal<u64>,
+    pub(super) toast_err_gen: RwSignal<u64>,
     pub(super) show_settings: RwSignal<bool>,
     pub(super) active_tab: RwSignal<Tab>,
     /// The keyboard-shortcuts help dialog.
@@ -683,7 +739,9 @@ impl UiState {
     pub(super) fn new() -> Self {
         Self {
             toast: RwSignal::new(None),
+            toast_err: RwSignal::new(None),
             toast_gen: RwSignal::new(0),
+            toast_err_gen: RwSignal::new(0),
             show_settings: RwSignal::new(false),
             // Remembered per machine: an operator who lives on Compliance should
             // not land on Patches every launch.
@@ -719,20 +777,46 @@ impl UiState {
     }
 
     pub(super) fn notify(self, t: Toast) {
-        // Auto-dismiss after a few seconds; a newer toast supersedes this one via
-        // the generation guard. An error stays three times as long: it usually
-        // carries a backend message worth reading in full, and 7s was not enough
-        // to read one — let alone act on it — before it vanished.
-        let ms = if t.error { 12_000 } else { 4000 };
-        let generation = self.toast_gen.get_untracked().wrapping_add(1);
-        self.toast_gen.set(generation);
-        self.toast.set(Some(t));
+        let error = t.error;
+        self.toast_slot(error).0.set(Some(t));
+        self.arm_toast(error);
+    }
+
+    /// The toast of a kind and the stamp of its dismiss timer.
+    fn toast_slot(self, error: bool) -> (RwSignal<Option<Toast>>, RwSignal<u64>) {
+        if error {
+            (self.toast_err, self.toast_err_gen)
+        } else {
+            (self.toast, self.toast_gen)
+        }
+    }
+
+    /// Starts (or restarts) the auto-dismiss. A newer toast, a hold or a dismiss
+    /// moves the stamp, which retires this timer. An error stays three times as
+    /// long: it usually carries a backend message worth reading in full, and 7s
+    /// was not enough to read one — let alone act on it — before it vanished.
+    pub(super) fn arm_toast(self, error: bool) {
+        let (slot, stamp) = self.toast_slot(error);
+        let ms = if error { 12_000 } else { 4000 };
+        let generation = stamp.get_untracked().wrapping_add(1);
+        stamp.set(generation);
         gloo_timers::callback::Timeout::new(ms, move || {
-            if self.toast_gen.get_untracked() == generation {
-                self.toast.set(None);
+            if stamp.get_untracked() == generation {
+                slot.set(None);
             }
         })
         .forget();
+    }
+
+    /// Keeps a toast up while the pointer or keyboard focus is on it; leaving
+    /// re-arms it (`arm_toast`). It used to vanish mid-read and mid-reach.
+    pub(super) fn hold_toast(self, error: bool) {
+        self.toast_slot(error).1.update(|g| *g = g.wrapping_add(1));
+    }
+
+    pub(super) fn dismiss_toast(self, error: bool) {
+        self.hold_toast(error);
+        self.toast_slot(error).0.set(None);
     }
 }
 
@@ -805,6 +889,9 @@ pub(crate) struct ActionState {
     /// Type-to-confirm text for the forced-reboot tier.
     pub(super) confirm_input: RwSignal<String>,
     pub(super) dispatching: RwSignal<bool>,
+    /// A plan is being fetched for the confirm dialog. `dispatching` is set too
+    /// (it is what disables the bar); this only lets the bar say which it is.
+    pub(super) planning: RwSignal<bool>,
     /// Why the last `run_action` from the open dialog failed. Shown inside the
     /// dialog, and it disables Run: the confirm token is single-use and already
     /// spent, so the only way forward is a fresh plan (or Cancel).
@@ -866,6 +953,7 @@ impl ActionState {
             pending: RwSignal::new(None),
             confirm_input: RwSignal::new(String::new()),
             dispatching: RwSignal::new(false),
+            planning: RwSignal::new(false),
             dispatch_error: RwSignal::new(None),
             dispatch_progress: RwSignal::new(None),
             jobs: RwSignal::new(Vec::new()),

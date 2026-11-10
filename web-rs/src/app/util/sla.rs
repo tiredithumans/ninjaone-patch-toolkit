@@ -60,8 +60,8 @@ pub(crate) fn device_list_caption(list: &DeviceBacklogList) -> Option<String> {
     (list.devices_total > list.devices.len()).then(|| {
         format!(
             "Showing the top {} of {} devices.",
-            list.devices.len(),
-            list.devices_total
+            super::group_thousands(list.devices.len()),
+            super::group_thousands(list.devices_total)
         )
     })
 }

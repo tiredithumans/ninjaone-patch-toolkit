@@ -4501,21 +4501,43 @@ fn the_within_sla_bands_match_their_colours() {
 #[test]
 fn onboarding_names_the_missing_step_once_settings_have_loaded() {
     assert_eq!(
-        onboarding(false, false, false, false),
+        onboarding(false, false, true, false, false),
         None,
         "settings not loaded yet"
     );
-    assert_eq!(onboarding(true, true, false, false), None, "web demo");
-    assert_eq!(onboarding(false, true, true, true), None, "signed in");
-    assert_eq!(onboarding(false, true, false, true), None, "signed in");
     assert_eq!(
-        onboarding(false, true, false, false),
+        onboarding(false, true, false, true, false),
+        None,
+        "the sign-in check has not answered: signed out is not known yet"
+    );
+    assert_eq!(onboarding(true, true, true, false, false), None, "web demo");
+    assert_eq!(onboarding(false, true, true, true, true), None, "signed in");
+    assert_eq!(
+        onboarding(false, true, true, false, true),
+        None,
+        "signed in"
+    );
+    assert_eq!(
+        onboarding(false, true, true, false, false),
         Some(Onboarding::Connect)
     );
     assert_eq!(
-        onboarding(false, true, true, false),
+        onboarding(false, true, true, true, false),
         Some(Onboarding::SignIn)
     );
+}
+
+/// A page that failed to load is not a failed query.
+#[test]
+fn error_banner_tells_a_failed_page_from_a_failed_query() {
+    assert_eq!(
+        query_error_banner("boom", false, false),
+        "Last query failed: boom"
+    );
+    assert!(query_error_banner("boom", true, false).contains("previous run"));
+    let paging = query_error_banner("boom", true, true);
+    assert!(!paging.contains("query failed"), "{paging}");
+    assert!(paging.ends_with("boom"));
 }
 
 fn query(statuses: &[&str]) -> PatchQueryArgs {
@@ -4829,4 +4851,71 @@ fn every_window_listener_is_removed_or_lives_as_long_as_the_app() {
         }
     }
     assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// Reset is offered only when the controls have moved off the starting query.
+#[test]
+fn reset_is_offered_only_off_the_starting_query() {
+    assert!(filters_at_default(&query(&["PENDING"])));
+    assert!(!filters_at_default(&query(&["PENDING", "FAILED"])));
+    let mut scoped = query(&["PENDING"]);
+    scoped.filter.organization_ids = vec![7];
+    assert!(!filters_at_default(&scoped));
+    let mut typed = query(&["PENDING"]);
+    typed.patch_type = "OS".into();
+    assert!(!filters_at_default(&typed));
+    let mut window = query(&["PENDING"]);
+    window.install_after_days = Some(90);
+    assert!(
+        filters_at_default(&window),
+        "the install window is not reset"
+    );
+}
+
+#[test]
+fn first_seen_range_only_refuses_a_reversed_one() {
+    assert_eq!(date_order_problem("", "2026-03-01"), None);
+    assert_eq!(date_order_problem("2026-03-01", ""), None);
+    assert_eq!(date_order_problem("2026-03-01", "2026-03-01"), None);
+    assert!(date_order_problem("2026-03-02", "2026-03-01").is_some());
+}
+
+#[test]
+fn a_preset_name_is_taken_on_an_exact_trimmed_match() {
+    let names = ["Servers", "Tier 1"];
+    assert!(preset_name_taken(" Servers ", names.iter().copied()));
+    assert!(!preset_name_taken("servers", names.iter().copied()));
+    assert!(!preset_name_taken("  ", names.iter().copied()));
+}
+
+#[test]
+fn data_age_reads_the_backend_stamp_against_the_clock() {
+    // 2026-03-01 12:00 UTC, in minutes since the epoch.
+    let at = date_to_epoch("2026-03-01").unwrap() / 60 + 12 * 60;
+    let stamp = "2026-03-01 12:00 UTC";
+    assert_eq!(data_age_label(stamp, at).as_deref(), Some("just now"));
+    assert_eq!(
+        data_age_label(stamp, at + 12).as_deref(),
+        Some("12 min ago")
+    );
+    assert_eq!(data_age_label(stamp, at + 185).as_deref(), Some("3 h ago"));
+    assert_eq!(
+        data_age_label(stamp, at + 2 * 1440 + 5).as_deref(),
+        Some("2 days ago")
+    );
+    assert_eq!(
+        data_age_label(stamp, at - 3),
+        None,
+        "a clock behind the data"
+    );
+    assert_eq!(data_age_label("yesterday", at), None);
+}
+
+#[test]
+fn instance_url_hint_catches_only_the_plain_mistakes() {
+    assert!(instance_url_hint("  ").is_some());
+    assert!(instance_url_hint("app.ninjarmm.com").is_some());
+    assert!(instance_url_hint("http://app.ninjarmm.com").is_some());
+    assert_eq!(instance_url_hint("https://app.ninjarmm.com"), None);
+    assert_eq!(instance_url_hint("http://127.0.0.1:8443"), None);
 }

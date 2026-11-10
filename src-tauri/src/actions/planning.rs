@@ -700,7 +700,16 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
     }
 
     ActionPlan {
-        summary: format!("{} on {} device(s)", input.kind.label(), eligible.len()),
+        summary: format!(
+            "{} on {} {}",
+            input.kind.label(),
+            eligible.len(),
+            if eligible.len() == 1 {
+                "device"
+            } else {
+                "devices"
+            }
+        ),
         organizations,
         eligible,
         skipped,

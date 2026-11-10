@@ -329,13 +329,21 @@ label.inline {
 }
 
 input,
-select {
+select,
+textarea {
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
   color: var(--text);
   padding: 8px 10px;
   font-size: 13px;
+  font-family: inherit;
+}
+
+/* Ticks and radios in the app's teal, not the operating system's accent. */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
 }
 
 /* Text fields show focus through their border, which is why the default ring is
@@ -346,6 +354,8 @@ input:not([type="checkbox"]):not([type="radio"]):focus,
 select:focus,
 textarea:focus {
   border-color: var(--accent);
+  /* A 1px colour change alone was easy to miss on a dense form. */
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
   outline: none;
 }
 
@@ -429,13 +439,29 @@ select:disabled {
   cursor: pointer;
 }
 
-.btn:hover {
+/* Not on a button that cannot be pressed, and not over the warn border that marks
+   the wide-reaching applies and a Live run: hover used to repaint both as ordinary. */
+.btn:hover:not(:disabled):not([aria-disabled="true"]):not(.btn-wide-radius):not(.options-live) {
   border-color: var(--accent);
 }
 
-.btn:disabled {
+.btn-primary:hover:not(:disabled),
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.btn:disabled,
+.btn[aria-disabled="true"] {
   opacity: 0.5;
   cursor: default;
+}
+
+/* The confirm button of a live run that changes devices. */
+.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--on-accent);
+  font-weight: 600;
 }
 
 .btn-primary {
@@ -447,15 +473,6 @@ select:disabled {
 
 .btn-ghost {
   background: transparent;
-}
-
-.link {
-  background: none;
-  border: none;
-  color: var(--accent-2);
-  cursor: pointer;
-  padding: 4px 6px;
-  font-size: 13px;
 }
 
 .x {
@@ -582,6 +599,12 @@ select:disabled {
   align-self: stretch;
   background: var(--border);
   margin: 0 6px;
+}
+
+/* A page, sort or grouping is on its way: these are still the previous rows. */
+.is-loading {
+  opacity: 0.55;
+  transition: opacity 0.15s;
 }
 
 .table-wrap {
@@ -729,16 +752,19 @@ tbody tr:hover {
   color: var(--danger-fg);
 }
 
-/* The two live regions hold only fixed-position toasts. Fixed themselves, they
-   leave the page's flex column, whose gap they used to widen while empty. */
-.toaster {
-  position: fixed;
-}
-
-.toast {
+/* The two live regions stack in one fixed corner, the error above the notice.
+   Fixed, they leave the page's flex column, whose gap they used to widen. */
+.toasts {
   position: fixed;
   bottom: 18px;
   right: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.toast {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1323,7 +1349,7 @@ tbody tr:hover {
 
 .picker__button:disabled {
   opacity: 0.55;
-  cursor: not-allowed;
+  cursor: default;
 }
 
 .picker__label {
@@ -1588,7 +1614,24 @@ tbody tr:hover {
 }
 
 .settings-footer .app-version {
-  margin: 0 0 0 auto;
+  margin: 0;
+}
+
+.settings-footer__util {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* The redirect URI to register, selectable, with its Copy link. */
+.redirect-uri {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  user-select: text;
 }
 
 /* --- First run: what to do before there is anything to show ----------------- */
@@ -2393,7 +2436,8 @@ td.patch-name .chip-note {
   border-color: var(--warn);
   color: var(--warn);
 }
-.btn-wide-radius:disabled {
+.btn-wide-radius:disabled,
+.btn-wide-radius[aria-disabled="true"] {
   border-color: var(--border);
   color: var(--muted);
 }

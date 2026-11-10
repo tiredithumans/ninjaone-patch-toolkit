@@ -127,7 +127,11 @@ pub(super) fn PatchesTable() -> impl IntoView {
                     <GroupedPatches/>
                 </Show>
                 <Show when=move || state.query.group_by.get().is_none()>
-                <div class="table-wrap table-wrap--fill">
+                <div
+                    class="table-wrap table-wrap--fill"
+                    class:is-loading=move || state.query.view_loading.get()
+                    aria-busy=move || state.query.view_loading.get().to_string()
+                >
                 // Hides the chosen columns by position; see `util::columns`.
                 <style>
                     {move || {
@@ -344,7 +348,11 @@ fn GroupedPatches() -> impl IntoView {
             when=move || !groups().is_empty()
             fallback=|| view! { <p class="empty">"No groups to show."</p> }
         >
-            <ul class="groups">
+            <ul
+                class="groups"
+                class:is-loading=move || state.query.view_loading.get()
+                aria-busy=move || state.query.view_loading.get().to_string()
+            >
                 {move || {
                     groups()
                         .into_iter()
@@ -549,6 +557,7 @@ fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
                                 reboot_pending_chip(r.needs_reboot).into_any()
                             };
                             let r = Arc::new(r.clone());
+                            let second_title = second.clone();
                             view! {
                                 <tr>
                                     <RowCheckbox row=Arc::clone(&r)/>
@@ -556,7 +565,9 @@ fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
                                     // patch group they are the devices it's missing on.
                                     <td>{first}</td>
                                     <td class="patch-name">
-                                        <span class="clamp-2">{second}</span>
+                                        // The clamp cuts a long name at two lines;
+                                        // the tooltip has all of it, as in the flat table.
+                                        <span class="clamp-2" title=second_title>{second}</span>
                                         // The member is a patch in a device group and a
                                         // device in a patch group; each chip names the
                                         // half the header does not already state.

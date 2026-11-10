@@ -248,3 +248,36 @@ pub(crate) fn settle_open_groups(
         .collect();
     OpenGroups { open, refetch }
 }
+
+/// The results area's error banner. A failed page, sort or group-header load is
+/// not a failed query: the result is still good, only that view of it did not
+/// arrive, and calling it "Last query failed" sent operators to re-run a query
+/// that had worked.
+pub(crate) fn query_error_banner(error: &str, has_result: bool, paging: bool) -> String {
+    if paging {
+        format!("Couldn't load those rows — what is below is the last view that loaded: {error}")
+    } else if has_result {
+        format!("Last query failed — the results below are from the previous run: {error}")
+    } else {
+        format!("Last query failed: {error}")
+    }
+}
+
+/// How old the data on screen is, from the backend's `YYYY-MM-DD HH:MM UTC` stamp
+/// and the wall clock in whole minutes: "just now", "12 min ago", "3 h ago",
+/// "2 days ago". `None` for a stamp in another shape or one in the future (a
+/// skewed clock), where the absolute time alone is the honest answer.
+pub(crate) fn data_age_label(fetched_at: &str, now_min: i64) -> Option<String> {
+    let (date, rest) = fetched_at.split_once(' ')?;
+    let (hh, mm) = rest.strip_suffix(" UTC")?.split_once(':')?;
+    let (hh, mm): (i64, i64) = (hh.parse().ok()?, mm.parse().ok()?);
+    let at_min = super::date_to_epoch(date)? / 60 + hh * 60 + mm;
+    let age = now_min - at_min;
+    Some(match age {
+        i64::MIN..=-1 => return None,
+        0 => "just now".to_string(),
+        1..=59 => format!("{age} min ago"),
+        60..=2879 => format!("{} h ago", age / 60),
+        _ => format!("{} days ago", age / 1440),
+    })
+}

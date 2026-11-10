@@ -128,7 +128,7 @@ impl AppState {
         spawn_local(async move {
             match api::copy_to_clipboard(&text).await {
                 Ok(()) => self.notify(Toast::ok("View link copied")),
-                Err(_) => self.notify(Toast::ok(
+                Err(_) => self.notify(Toast::err(
                     "Couldn't reach the clipboard — select the link below and copy it",
                 )),
             }

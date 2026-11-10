@@ -30,7 +30,13 @@ pub(super) fn RebootTable() -> impl IntoView {
     // newer result overtook, as the Patches pager's view stamp does.
     let fetched = RwSignal::new(None::<(usize, Vec<DeviceSummary>)>);
     let stamp = RwSignal::new(0u64);
+    // A page that failed to load, and the Retry that re-runs the fetch below. Shown
+    // in place: with only a toast, the empty table read as "nothing on this page".
+    let failed = RwSignal::new(None::<String>);
+    let retry = RwSignal::new(0u32);
     Effect::new(move |_| {
+        retry.track();
+        failed.set(None);
         // Re-runs when the result or the page changes; either retires the last page.
         let util::RebootPage::Fetch { offset, limit } = source() else {
             return;
@@ -50,7 +56,7 @@ pub(super) fn RebootTable() -> impl IntoView {
             }
             match outcome {
                 Ok(devices) => fetched.set(Some((at, devices))),
-                Err(e) => state.notify(Toast::err(e)),
+                Err(e) => failed.set(Some(e)),
             }
         });
     });
@@ -73,7 +79,15 @@ pub(super) fn RebootTable() -> impl IntoView {
     view! {
         <Show
             when=has_devices
-            fallback=|| view! { <p class="empty">"No devices flagged for reboot."</p> }
+            fallback=move || {
+                // Before the first run nothing is known, which is not "none".
+                let text = if state.query.result.with(Option::is_none) {
+                    "Run a query to see which devices need a reboot."
+                } else {
+                    "No devices flagged for reboot."
+                };
+                view! { <p class="empty">{text}</p> }
+            }
         >
             <Pager
                 page=Signal::derive(current)
@@ -88,6 +102,21 @@ pub(super) fn RebootTable() -> impl IntoView {
             // devices need one.
             <Show when=move || state.action_surface_visible()>
                 <ActionBar source=SelectionSource::Devices/>
+            </Show>
+            <Show when=move || failed.with(Option::is_some)>
+                <div class="error-banner" role="alert">
+                    <span>
+                        {move || {
+                            format!(
+                                "Couldn't load this page of devices: {}",
+                                failed.get().unwrap_or_default(),
+                            )
+                        }}
+                    </span>
+                    <button class="link-btn" on:click=move |_| retry.update(|n| *n += 1)>
+                        "Retry"
+                    </button>
+                </div>
             </Show>
             <div class="table-wrap table-wrap--fill">
                 <table>

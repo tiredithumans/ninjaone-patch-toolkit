@@ -139,12 +139,12 @@ fn validate_settings_input(args: &SaveSettingsArgs) -> Result<(), UiError> {
     }
     if args.install_window_days < 1 || args.install_window_days > MAX_WINDOW_DAYS {
         return Err(UiError::new(format!(
-            "Install window (days) must be between 1 and {MAX_WINDOW_DAYS}."
+            "Install history window (days) must be between 1 and {MAX_WINDOW_DAYS}."
         )));
     }
     if args.sla_days < 1 || args.sla_days > MAX_WINDOW_DAYS {
         return Err(UiError::new(format!(
-            "SLA (days) must be between 1 and {MAX_WINDOW_DAYS}."
+            "Default SLA (days) must be between 1 and {MAX_WINDOW_DAYS}."
         )));
     }
     if let Some(band) = args.sla_by_severity.first_out_of_range() {
