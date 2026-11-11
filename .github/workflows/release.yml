@@ -121,7 +121,7 @@ jobs:
           # none was ever restored.
           save-if: false
 
-      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: just,cargo-about
 
@@ -270,7 +270,7 @@ jobs:
       # poisoned artifact in it would be linked straight into a signed bundle. A
       # release is rare enough that a cold build is the right price.
 
-      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: trunk
 
