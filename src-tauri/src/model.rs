@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +73,7 @@ pub struct Device {
     #[serde(default)]
     pub last_contact: Option<f64>,
     /// NinjaOne's free-form `pendingRebootReason` for this device, merged in from
-    /// `/queries/device-health` ([`apply_reboot_reasons`]) — `devices-detailed` does
+    /// `/queries/device-health` ([`apply_health`]) — `devices-detailed` does
     /// not carry it. Shown verbatim beside the reboot flag; `None` when the device
     /// reports none or the health feed could not be read.
     #[serde(skip)]
@@ -435,18 +436,13 @@ pub struct Patch {
     #[serde(default)]
     pub kb_number: Option<String>,
     /// `name` on `DeviceOSPatch`, `title` on `DeviceSoftwarePatch`. Those are the
-    /// only two keys either schema declares for it.
+    /// only two keys either schema declares for it. Neither schema declares a
+    /// version or a vendor: the third-party feed folds the version into `title`
+    /// ("Google Chrome 141.0.7390.55"), which is why a software row's display name
+    /// is its title alone. The schemas' `type` is not bound either — the family is
+    /// known from the endpoint, and nothing read it.
     #[serde(default, alias = "title")]
     pub name: Option<String>,
-    /// Always `None` in practice: **neither** patch schema declares a version. The
-    /// third-party feed folds the version into `title` ("Google Chrome 141.0.7390.55"),
-    /// which is why a software row's display name is its title alone.
-    #[serde(default)]
-    pub version: Option<String>,
-    /// Always `None` in practice, for the same reason as [`Patch::version`] —
-    /// no vendor or publisher field exists on either patch schema.
-    #[serde(default)]
-    pub product_vendor: Option<String>,
     /// `severity` on `DeviceOSPatch`, `impact` on `DeviceSoftwarePatch` — the
     /// software schema declares no `severity` property at all, so this alias is the
     /// only path by which a third-party patch is ever graded.
@@ -454,8 +450,6 @@ pub struct Patch {
     pub severity: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
-    #[serde(default, rename = "type")]
-    pub patch_type: Option<String>,
     /// When NinjaOne last collected/updated this patch record — **not** a patch
     /// release date.
     ///
@@ -504,8 +498,8 @@ impl Patch {
         self.installed_timestamp.and_then(unix_to_datetime)
     }
 
-    /// The operator-facing patch title — KB, vendor, name and version, joined — into
-    /// a caller-owned buffer, which it clears first.
+    /// The operator-facing patch title — KB and name, joined — into a caller-owned
+    /// buffer, which it clears first.
     ///
     /// Buffered rather than returning a `String` because the join calls it once per
     /// patch across the whole fleet purely to produce a key for the row interner, and
@@ -513,14 +507,9 @@ impl Patch {
     /// `String` allocated and dropped per row" into one allocation for the whole join.
     pub fn write_display_name(&self, buf: &mut String) {
         buf.clear();
-        for field in [
-            self.kb_number.as_deref(),
-            self.product_vendor.as_deref(),
-            self.name.as_deref(),
-            self.version.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
+        for field in [self.kb_number.as_deref(), self.name.as_deref()]
+            .into_iter()
+            .flatten()
         {
             if field.is_empty() {
                 continue;
@@ -705,10 +694,9 @@ pub mod row_status {
 /// device's organization/location/role/OS names. This is the export unit and the
 /// table row shown in the UI.
 ///
-/// Serialized to the frontend over IPC: field names MUST be camelCase to match
-/// `web-rs/src/types.rs` (which deserializes with `rename_all = "camelCase"`).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Serialized to the frontend over IPC by the hand-written [`Serialize`] impl below:
+/// field names MUST be camelCase to match `web-rs/src/types.rs`.
+#[derive(Debug, Clone)]
 pub struct PatchRow {
     pub device_id: i64,
     pub device_name: Arc<str>,
@@ -738,11 +726,11 @@ pub struct PatchRow {
     pub severity: &'static str,
     pub severity_rank: u8,
     pub status: Arc<str>,
-    /// Formatted [`Patch::collected_timestamp`] — when NinjaOne first reported the
-    /// patch, not when it was published. See that field for why.
-    pub first_seen_date: Option<String>,
-    pub installed_date: Option<String>,
+    /// When the patch was first seen (NinjaOne's report or this app's own record,
+    /// whichever is earlier) — not when it was published. Unix seconds; the wire
+    /// also carries it formatted as `firstSeenDate` (see the `Serialize` impl).
     pub first_seen_ts: Option<i64>,
+    /// Unix seconds; the wire also carries it formatted as `installedDate`.
     pub installed_ts: Option<i64>,
     /// [`Patch::product_identifier`], shared across the row set like the other
     /// repeated strings. `None` on every OS row.
@@ -755,6 +743,86 @@ pub struct PatchRow {
     /// Those CVEs that are being exploited in the wild, per Microsoft or CISA's
     /// catalog, comma-joined and shared by every row of the KB. `None` when none are.
     pub exploited_cves: Option<Arc<str>>,
+}
+
+/// The one format a row date is shown in, on the wire and in the rollups.
+pub const ROW_DATE_FORMAT: &str = "%Y-%m-%d %H:%M UTC";
+
+/// `ts` (Unix seconds) in [`ROW_DATE_FORMAT`], or `None` when it is out of range.
+pub fn format_row_ts(ts: i64) -> Option<String> {
+    DateTime::from_timestamp(ts, 0).map(|t| t.format(ROW_DATE_FORMAT).to_string())
+}
+
+/// A row timestamp serialized as its [`ROW_DATE_FORMAT`] text, straight into the
+/// output with no intermediate `String`.
+struct RowDate(Option<i64>);
+
+impl Serialize for RowDate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0.and_then(|ts| DateTime::from_timestamp(ts, 0)) {
+            Some(t) => serializer.collect_str(&t.format(ROW_DATE_FORMAT)),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+/// Hand-written so `firstSeenDate` / `installedDate` are derived from the `*_ts`
+/// fields at the edge. A row used to own both strings, formatted for every row of a
+/// six-figure fleet and held for the life of the cached result, when only an IPC
+/// page reads them — export, CSV and sort use the timestamps. The destructuring has
+/// no `..`, so a new field fails to compile until it is put on the wire here.
+impl Serialize for PatchRow {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let PatchRow {
+            device_id,
+            device_name,
+            organization,
+            location,
+            device_role,
+            os_name,
+            node_class,
+            needs_reboot,
+            reboot_likely,
+            offline,
+            patch_type,
+            kb,
+            name,
+            severity,
+            severity_rank,
+            status,
+            first_seen_ts,
+            installed_ts,
+            product_identifier,
+            cve_count,
+            exploited_cves,
+        } = self;
+        let mut row = serializer.serialize_struct("PatchRow", 23)?;
+        row.serialize_field("deviceId", device_id)?;
+        row.serialize_field("deviceName", device_name)?;
+        row.serialize_field("organization", organization)?;
+        row.serialize_field("location", location)?;
+        row.serialize_field("deviceRole", device_role)?;
+        row.serialize_field("osName", os_name)?;
+        row.serialize_field("nodeClass", node_class)?;
+        row.serialize_field("needsReboot", needs_reboot)?;
+        row.serialize_field("rebootLikely", reboot_likely)?;
+        row.serialize_field("offline", offline)?;
+        row.serialize_field("patchType", patch_type)?;
+        row.serialize_field("kb", kb)?;
+        row.serialize_field("name", name)?;
+        row.serialize_field("severity", severity)?;
+        row.serialize_field("severityRank", severity_rank)?;
+        row.serialize_field("status", status)?;
+        row.serialize_field("firstSeenDate", &RowDate(*first_seen_ts))?;
+        row.serialize_field("installedDate", &RowDate(*installed_ts))?;
+        row.serialize_field("firstSeenTs", first_seen_ts)?;
+        row.serialize_field("installedTs", installed_ts)?;
+        row.serialize_field("productIdentifier", product_identifier)?;
+        row.serialize_field("cveCount", cve_count)?;
+        row.serialize_field("exploitedCves", exploited_cves)?;
+        row.end()
+    }
 }
 
 /// How `POST /v2/device/{id}/reboot/{mode}` is addressed. `Forced` skips the
@@ -786,8 +854,8 @@ impl RebootMode {
 ///   `COMPLETED`, `CANCELLED`, `BLOCKED`, … for scripts; kind-prefixed codes such as
 ///   `PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED` for the native actions).
 /// * `status` — "Status description", free text, with no enum at all.
-/// * `activityResult` — `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED` /
-///   `AGENT_OFFLINE`.
+/// * `activityResult` — `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED`, the
+///   spec's enum (`docs/api/ninjaone-surface.md`); any other value reads as a failure.
 ///
 /// This modelled only `status` and matched the *code* vocabulary against it, so on a
 /// tenant where `status` really is a description, no job ever reached a terminal
@@ -808,7 +876,7 @@ pub struct Activity {
     /// version relied on exclusively.
     #[serde(default)]
     pub status: Option<String>,
-    /// `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED` / `AGENT_OFFLINE`.
+    /// `SUCCESS` / `FAILURE` / `UNSUPPORTED` / `UNCOMPLETED` (the spec's enum).
     #[serde(default, rename = "activityResult")]
     pub activity_result: Option<String>,
     #[serde(default, rename = "activityTime")]
@@ -822,8 +890,13 @@ pub struct Activity {
     /// a key the schema does not define meant `exit_code()` silently returned `None`
     /// for every job, which surfaced as "Completed, no exit code" rather than as an
     /// error.
+    ///
+    /// Kept as raw JSON and parsed only by [`exit_code`](Self::exit_code): a poll
+    /// tick reads up to a page of activities per pending device, and almost none of
+    /// them is the one a job settles on, so building a `Value` tree of every row's
+    /// bag was work thrown away.
     #[serde(default, alias = "result")]
-    pub data: Option<Value>,
+    pub data: Option<Box<RawValue>>,
 }
 
 /// The `statusCode`s that end a native scan, apply or reboot successfully.
@@ -920,7 +993,8 @@ impl Activity {
     }
 
     pub fn exit_code(&self) -> Option<i32> {
-        let v = self.data.as_ref()?;
+        let data: Value = serde_json::from_str(self.data.as_ref()?.get()).ok()?;
+        let v = &data;
         // Checked at the top level and one nesting down: `data` is an untyped bag
         // (`additionalProperties: true`), and tenants have been seen putting the
         // script result under `data.result` as well as directly on `data`.
@@ -1403,11 +1477,8 @@ mod tests {
             device_id: None,
             kb_number: None,
             name: None,
-            version: None,
-            product_vendor: None,
             severity: None,
             status: None,
-            patch_type: None,
             collected_timestamp: Some(ts),
             installed_timestamp: None,
             product_identifier: None,

@@ -18,8 +18,6 @@
 //! its diff, never the operator their fleet.
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -728,25 +726,11 @@ fn save_to(dir: &Path, snapshot: &RunSnapshot) -> bool {
     };
     let name = file_name(&snapshot.tenant, &snapshot.scope);
     let path = dir.join(&name);
-    let tmp = dir.join(format!("{name}.tmp"));
-    let written = (|| -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let mut opts = OpenOptions::new();
-        opts.create(true).write(true).truncate(true);
-        // Owner-only: device names and the operator's unpatched backlog.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
-        let mut file = opts.open(&tmp)?;
-        file.write_all(&body)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, &path)
-    })();
+    // Owner-only: device names and the operator's unpatched backlog.
+    let written =
+        std::fs::create_dir_all(dir).and_then(|()| crate::paths::write_atomic(&path, &body, true));
     if let Err(err) = written {
         warn!(?err, "could not write the run snapshot");
-        let _ = std::fs::remove_file(&tmp);
         return false;
     }
     prune(dir, &path);

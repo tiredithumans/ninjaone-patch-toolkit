@@ -761,6 +761,14 @@ pub(crate) fn ConfirmActionModal() -> impl IntoView {
                                 }
                             })}
 
+                        // The offline check read a cached inventory; say how old.
+                        {plan
+                            .devices_fetched_at
+                            .as_deref()
+                            .map(|at| {
+                                view! { <p class="modal-sub">{util::device_status_as_of(at)}</p> }
+                            })}
+
                         {(!plan.blockers.is_empty())
                             .then(|| {
                                 view! {
@@ -1124,7 +1132,8 @@ fn RunAsSelect() -> impl IntoView {
 ///
 /// Deliberately *not* a self-contained dispatch surface. Run-as, the reboot behavior
 /// and the dry-run flag are shared with the "Install only the selected patches"
-/// actions and rendered once above it — they mean the same thing for any
+/// actions and rendered once, on the action bar (the script dialog names them
+/// rather than repeating them) — they mean the same thing for any
 /// script-driven dispatch, and duplicating them here is what let the two disagree.
 #[component]
 pub(crate) fn ScriptPicker() -> impl IntoView {
@@ -1289,7 +1298,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
             // to talk to in the browser demo, so they are not offered there.
             // No Refresh: `action:progress` already pushes every job change here, so
             // re-reading the store showed the same rows and looked broken.
-            <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
+            <Show when=move || !state.session.web_mode.get() && !state.session.is_demo()>
             <div class="jobs-toolbar">
                 <button
                     class="btn btn-sm"
@@ -1525,12 +1534,14 @@ fn AuditTrail() -> impl IntoView {
                 }
                     .into_any();
             }
+            let show_instance = util::audit_spans_instances(&rows);
             view! {
                 <div class="table-wrap">
                     <table class="data-table">
                         <thead>
                             <tr>
                                 <th scope="col">"When"</th>
+                                {show_instance.then(|| view! { <th scope="col">"Instance"</th> })}
                                 <th scope="col">"Device"</th>
                                 <th scope="col">"Organization"</th>
                                 <th scope="col">"Action"</th>
@@ -1546,6 +1557,8 @@ fn AuditTrail() -> impl IntoView {
                                     view! {
                                         <tr>
                                             <td>{r.timestamp.clone()}</td>
+                                            {show_instance
+                                                .then(|| view! { <td>{r.instance.clone()}</td> })}
                                             <td>{r.device_name.clone()}</td>
                                             <td>{r.organization.clone()}</td>
                                             <td>{r.detail.clone()}</td>

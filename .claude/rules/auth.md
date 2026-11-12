@@ -44,4 +44,8 @@ paths:
   credential** (`refresh_grant_is_dead`). Not "any 4xx": 429 is retry-later. Callers queued
   behind a failure for the same `GrantStamp` — transient from the endpoint, an unreadable token
   body, or a keyring read fault — return it rather than re-POSTing or re-reading.
+- **A client secret the keyring could not read is `ClientSecret::Unreadable`, never "no secret":
+  logged, re-read before a refresh (`reload_secret`) or a sign-in, and never sent missing.** Test:
+  `a_client_secret_the_keyring_could_not_read_is_read_again_never_sent_missing`.
+  → `docs/design/auth.md#pkce-lazy-token-native-or-web-client`
   → `docs/design/auth.md#the-refresh-is-single-flight-and-only-invalid_grant-clears-the-credential`

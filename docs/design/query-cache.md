@@ -13,10 +13,13 @@ Code: `src-tauri/src/state.rs` (`AppState`), `src-tauri/src/state/cache.rs` (`Te
 2. probe the slot — tenant match **and** within the TTL — and return a hit;
 3. take the single-flight gate, so the loser of a race waits instead of paging a
    six-figure feed a second time;
-4. re-probe under the gate, which is what turns that wait into a cache hit;
+4. re-probe under the gate, which is what turns that wait into a cache hit — and if the
+   fetch it waited on *failed* (the gate's failure count moved while it was parked, same
+   tenant), return that error instead of fetching again;
 5. store only if the epoch is unchanged when the slot lock is retaken;
 6. a degraded fetch (an optional sub-feed failed and fell back to empty) stores under a
-   capped TTL, `FORCE_MIN_INTERVAL`, never the slot's full TTL.
+   capped TTL, `FORCE_MIN_INTERVAL` doubling with each consecutive degraded store, never
+   (until it backs off that far) the slot's full TTL.
 
 Step 5 is the subtle one. Without it, a fetch already in flight when an invalidation
 lands writes its pre-invalidation rows straight back and restarts the TTL on exactly
@@ -30,6 +33,12 @@ entry, any invalidation during the wait declines the store. The cost is that a c
 which waited across a same-tenant invalidation does not cache its fresh fetch; the next
 caller does.
 
+Step 4's failure half mirrors auth's `refresh_lock`. Only successes used to be shared:
+when the leader's fetch failed, each waiter took the gate in turn and re-ran the whole
+fetch serially, so four lookups against an unreachable instance took about five minutes
+to fail. The gate now holds the last failure (tenant + message) beside a counter read on
+entry; a caller that arrives after the failure did not wait on it and fetches afresh.
+
 Step 6 exists because the fallbacks were cached exactly like a clean fetch: a `/groups`
 or `/locations` failure left the Group filter or the location names blank for the full
 five-minute `LOOKUP_TTL`, a `/queries/device-health` failure hid every reboot reason for
@@ -40,6 +49,14 @@ cannot list `/groups` would then refetch the organizations and roles on every qu
 `lookups()` is degraded when locations or groups fell back, `fleet_devices()` when the
 health feed failed; the current-patch families have no optional part and always store
 clean (`Fetched::complete`).
+
+The cap backs off (`degraded_cap`: 1, 2, 4, 8 … minutes, still bounded by the caller's
+TTL). A flat one-minute cap applies to the *whole* entry, so a health feed the token can
+never read threw away the entire device inventory every minute and re-paged it with the
+next query. The streak is read off the entry a store displaces, so a clean fetch, an
+invalidation (which empties the slot) or a tenant change starts it over. Caching the
+health feed in its own slot would also have fixed it, but would split one invalidation
+(after a reboot) into two and add a fifth slot; the backoff is one field on the entry.
 
 A value displaced from a slot (by `invalidate` or by a store) is dropped after the slot
 lock is released, not under it. The slots hold whole-fleet `Vec`s, and freeing six
@@ -57,7 +74,9 @@ the protocol, because the protocol *is* the type.
 
 `AppState` went from 18 hand-managed synchronization primitives (8 `std` mutexes,
 3 `tokio` mutexes, 6 `AtomicU64`, 1 `AtomicBool`) to 8 plus four `TenantCache`
-fields.
+fields. It has since grown back to 10 (4 `std` mutexes, 1 `tokio` mutex, 4 `AtomicU64`,
+1 `AtomicBool`) — the settings writer lock and the result cache's `result_epoch` among
+them — beside the same four `TenantCache`s.
 
 **`last_result` deliberately stays outside it.** Its protocol is *generation*-gated,
 not TTL-gated: `begin_query` issues a `QueryToken` claimed before any fetch and
@@ -80,7 +99,8 @@ a second source of truth for the rows.
 ## Tenant-keyed, method-gated access
 
 `last_result` is **private** and stamped with the tenant
-(`Mutex<Option<(TenantKey, QueryResult)>>`, `TenantKey` = instance URL + client id). Never touch
+(`Mutex<Option<CachedResult>>` — the `TenantKey`, an `Arc<QueryResult>` and the sort/group
+memos; `TenantKey` = instance URL + client id). Never touch
 it directly — write via `state.store_last_result_if_current(token, result)` and read via
 `state.with_current_result(|r| …)`, which compare the stamp at read time, so a result from a
 different tenant reads as a miss. The whole-fleet input caches (devices/current/lookups) carry the
@@ -99,9 +119,10 @@ was *fetched* under; a whole-fleet fetch runs for minutes, so stamping at write 
 the old tenant's rows under the new one — the one way the tenant check can be *wrong* rather than
 merely miss. A superseded or tenant-drifted result is dropped, not stored.
 
-## The three drop reasons are distinct, and the caller must treat them differently
+## The four drop reasons are distinct, and the caller must treat them differently
 
-`store_last_result_if_current` returns a `StoreOutcome`, not a bool. `Superseded` is invisible to
+`store_last_result_if_current` returns a `StoreOutcome`, not a bool: `Stored`, or one of
+`Superseded`, `TenantChanged`, `SessionCleared` and `Poisoned`. `Superseded` is invisible to
 the operator and the frontend already discards the response itself (`run_query` compares
 `query_seq` after the await and drops a superseded one, while still clearing its own busy flag),
 so the summary is still returned. `TenantChanged` and `Poisoned` are **errors**:
@@ -110,6 +131,14 @@ guard can arrive too late — `clear_session()` bumps `query_seq` only once the 
 command replies, and the query's reply can land first, so returning the summary painted the
 previous tenant's rows over the new tenant's empty cache while paging and export read the miss.
 The rule: return a summary only when the rows behind it are readable.
+
+`SessionCleared` covers what the tenant stamp cannot: a sign-out, sign-in or re-authorization
+while a query is in flight leaves the tenant unchanged, but the rows belong to the session that
+just ended. `QueryToken` carries the `result_epoch` sampled at `begin_query`;
+`clear_last_result` bumps it *before* it empties the slot, and the store re-reads it under the
+slot lock — the same bump-then-clear the `TenantCache` epochs use, so either interleaving loses
+the write. `summary_for` makes it an error ("The session ended while this query was running"),
+like `TenantChanged`.
 
 ## A tenant switch, a sign-out, a sign-in and a re-authorization all clear the frontend
 
@@ -270,7 +299,7 @@ the third-party feed as location slices that must add up to it, see
 and cached in `AppState` (`fleet_devices_cache`, `DEVICE_TTL` ~15 min since devices change rarely;
 the current patches in `fleet_current_os` / `fleet_current_sw`, refreshed on `force_refresh` or
 past `CURRENT_PATCHES_TTL`). `run_query` then scopes them to the selected identity facets
-(org/location/role/group/class) **client-side** via `FilterParams::device_allowed` — so changing
+(org/location/role/group/class) **client-side** via `PreparedFilter::device_allowed` — so changing
 org/location/role/type/severity re-filters the cache with **no** round trip. A device group is the
 exception: its membership is one small read per selected group per query (see
 [filter.md](./filter.md#device-groups-are-read-per-query-and-fail-closed)). This is why
@@ -320,11 +349,19 @@ is a hint, and unbounded `force` makes the whole cache decorative on the one pat
 unattended for hours. The frontend also skips a tick while `document.hidden`
 (`api::document_hidden`).
 
+`force` does **not** reach the device inventory, which keeps its `DEVICE_TTL`: honoring it would
+re-page the whole inventory (and the health feed) on every auto-refresh tick, roughly doubling the
+unattended path's cost for the two fields that move mid-patching (Needs Reboot, offline). What
+the label says is honest instead: `data_fetched_at` is the oldest of the fetched patch families'
+times **and** the inventory's (`AppState::fleet_devices_with_time`), so after ↻ it still names an
+inventory fetched up to fifteen minutes earlier rather than claiming the refresh time.
+
 ### Install history is not prefetched
 
 Install history is fetched fresh per query, scoped server-side by `patch_filter` +
-status-pushed-down (too large to cache). The summary carries `data_fetched_at` (when the patch
-data was last fetched, distinct from `generated_at`) for the UI's "patch data as of …" label. The
+status-pushed-down (too large to cache). The summary carries `data_fetched_at` (when the oldest
+cached input — a patch family or the device inventory — was fetched, distinct from
+`generated_at`) for the UI's "patch data as of …" label. The
 whole-fleet caches are tenant-scoped, so `clear_lookups_cache` drops them too.
 
 The pull runs in the same `join!` as the cache legs, which all finish even when one fails so the
@@ -341,7 +378,7 @@ per scoped record (the `&Patch`, its parsed severity, its pending verdict and it
 seen), OS first — and the rollups (`build_device_summaries`, `build_compliance`,
 `build_compliance_by_os`, `build_severity_by_org`, `build_age_buckets`, `build_device_backlogs`,
 `build_approval_backlog`) plus `PatchSource.records` all take `&[PatchRecord]`. A whole-fleet
-third-party feed runs to six figures and each `Patch` owns **eight** `Option<String>`s, so cloning
+third-party feed runs to six figures and each `Patch` owns **five** `Option<String>`s, so cloning
 the scoped subset costs millions of allocations per query for data the cache already owns and
 outlives. Keep new rollups on `&[PatchRecord]`; don't reintroduce an owned `Vec<Patch>` to make a
 signature more convenient, and don't read `Patch::collected_at` for an age — the view's

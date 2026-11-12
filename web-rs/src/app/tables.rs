@@ -1,5 +1,6 @@
-//! The results panel: the tab bar, the stale/error banners, the applied-filter
-//! chips and the shared scope banner. Each tab's view lives in its own submodule.
+//! The results panel: the tab bar, the stale/error banners and the result summary
+//! with its scope tooltip (`util::tab_scope`). Each tab's view lives in its own
+//! submodule.
 
 use leptos::web_sys::HtmlElement;
 use wasm_bindgen::JsCast;

@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::Write as _,
     path::{Path, PathBuf},
 };
 
@@ -559,41 +558,48 @@ impl Settings {
         self.save_to(&settings_path()?)
     }
 
-    /// Atomic: the new contents go to a temporary file beside the real one and are
-    /// renamed over it. A plain `fs::write` truncates first, so a crash, a full disk
-    /// or a power cut mid-write left a half-written file — which the next launch
-    /// could not parse.
+    /// What a settings write starts from: `settings.json` as it is now, rather than
+    /// this process's snapshot. **Blocking** file I/O.
+    ///
+    /// A second instance of the app shares the file. Editing the in-memory snapshot
+    /// meant instance A's next preset save wrote back everything A had loaded at
+    /// launch, silently reverting instance B's change in between — a guardrail such
+    /// as actions being switched off included. The connection fields (instance,
+    /// client id, callback port) stay this process's own: they are bound to its
+    /// signed-in session and its caches, and only `save_settings` re-points those. A
+    /// file that is missing, unreadable or unparseable yields `snapshot` unchanged,
+    /// and the write proceeds as it did before.
+    pub fn rebased_on_disk(snapshot: Self) -> Self {
+        match settings_path() {
+            Ok(path) => Self::rebased_on(&path, snapshot),
+            Err(_) => snapshot,
+        }
+    }
+
+    fn rebased_on(path: &Path, snapshot: Self) -> Self {
+        let Some(mut on_disk) = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| Self::parse(&text).ok())
+        else {
+            return snapshot;
+        };
+        on_disk.instance_base_url = snapshot.instance_base_url;
+        on_disk.client_id = snapshot.client_id;
+        on_disk.callback_port = snapshot.callback_port;
+        on_disk
+    }
+
+    /// Atomic ([`crate::paths::write_atomic`]), so a crash mid-write never leaves a
+    /// half-written file the next launch cannot parse; owner-only, like the audit log
+    /// and run history.
     fn save_to(&self, path: &Path) -> Result<()> {
         let dir = path
             .parent()
             .context("settings path has no parent directory")?;
         fs::create_dir_all(dir).context("create settings dir")?;
         let text = serde_json::to_string_pretty(self).context("serialize settings")?;
-        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-        let written = write_owner_only(&tmp, text.as_bytes())
-            .and_then(|()| fs::rename(&tmp, path).context("replace settings"));
-        if written.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        written
+        crate::paths::write_atomic(path, text.as_bytes(), true).context("write settings")
     }
-}
-
-/// Creates (or truncates) `path` readable by the owner only, like the audit log and
-/// run history, writes `bytes` and syncs them to disk before the caller renames it
-/// into place.
-fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(path).context("create temporary settings file")?;
-    file.write_all(bytes).context("write settings")?;
-    file.sync_all().context("flush settings")?;
-    Ok(())
 }
 
 /// Where an unparseable `settings.json` is moved: beside it, stamped so a second
@@ -1092,6 +1098,45 @@ mod tests {
         let _ = fs::remove_file(&path);
         let loaded = Settings::load_or_quarantine(&path, chrono::Utc::now());
         assert_eq!(loaded.callback_port, DEFAULT_CALLBACK_PORT);
+    }
+
+    /// A second app instance's change on disk survives this instance's next write:
+    /// the write starts from the file, not from what was loaded at launch. Only the
+    /// connection fields stay this process's own.
+    #[test]
+    fn a_write_starts_from_the_file_so_another_instances_change_survives() {
+        let path = temp_path("rebase");
+        let ours = Settings {
+            instance_base_url: "https://eu.ninjarmm.com".into(),
+            client_id: Some("ours".into()),
+            actions: ActionSettings {
+                enabled: true,
+                ..ActionSettings::default()
+            },
+            ..Settings::default()
+        };
+        // Instance B, sharing the file, switched actions off and changed tenant.
+        let theirs = Settings {
+            instance_base_url: "https://app.ninjarmm.com".into(),
+            client_id: Some("theirs".into()),
+            callback_port: ours.callback_port + 1,
+            sla_days: 3,
+            ..Settings::default()
+        };
+        theirs.save_to(&path).expect("save");
+
+        let next = Settings::rebased_on(&path, ours.clone());
+        assert!(!next.actions.enabled, "B's guardrail is not reverted");
+        assert_eq!(next.sla_days, 3);
+        assert_eq!(next.instance_base_url, ours.instance_base_url);
+        assert_eq!(next.client_id, ours.client_id);
+        assert_eq!(next.callback_port, ours.callback_port);
+
+        // Unparseable or missing: the snapshot, as before.
+        fs::write(&path, b"{ not json").unwrap();
+        assert!(Settings::rebased_on(&path, ours.clone()).actions.enabled);
+        let _ = fs::remove_file(&path);
+        assert!(Settings::rebased_on(&path, ours).actions.enabled);
     }
 
     /// The save goes through a temporary file and a rename, leaves no temporary

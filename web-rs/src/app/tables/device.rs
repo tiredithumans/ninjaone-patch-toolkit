@@ -113,6 +113,8 @@ fn DrillBody(detail: DeviceDetail, sort: RwSignal<Option<RowSort>>) -> impl Into
     let summary = detail.device.map(|d| view! { <DeviceHealth device=d/> });
     let note = util::device_rows_note(detail.rows.len(), detail.rows_total);
     let rows = detail.rows;
+    // Sorting never changes how many rows there are.
+    let empty = rows.is_empty();
     let sorted = move || {
         let mut rows = rows.clone();
         if let Some(s) = sort.get() {
@@ -129,10 +131,7 @@ fn DrillBody(detail: DeviceDetail, sort: RwSignal<Option<RowSort>>) -> impl Into
         </p>
         {note.map(|n| view! { <p class="scope-note">{n}</p> })}
         <Show
-            when={
-                let sorted = sorted.clone();
-                move || !sorted().is_empty()
-            }
+            when=move || !empty
             fallback=|| view! { <p class="empty">"No patch rows match the current filters."</p> }
         >
             <div class="table-wrap">

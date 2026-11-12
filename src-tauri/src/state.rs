@@ -413,8 +413,10 @@ impl AppState {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
     }
 
-    /// The one settings write: takes the writer lock, edits a snapshot, saves it on
-    /// a blocking thread and publishes it in memory only once it is on disk.
+    /// The one settings write: takes the writer lock, re-reads `settings.json`
+    /// ([`Settings::rebased_on_disk`], so a second app instance's change is kept),
+    /// edits that, saves it on a blocking thread and publishes it in memory only
+    /// once it is on disk.
     ///
     /// `save_settings` and the preset commands each hand-rolled that sequence
     /// against a `pub` lock, so a third writer that skipped the lock would have
@@ -426,7 +428,13 @@ impl AppState {
         edit: impl FnOnce(&mut Settings) -> R,
     ) -> Result<SettingsWrite<'_, R>> {
         let writer = self.settings_write.lock().await;
-        let mut next = self.settings_snapshot();
+        // From the file, under the writer lock: another app instance may have saved
+        // since this one loaded, and editing the stale snapshot would revert it.
+        let snapshot = self.settings_snapshot();
+        let mut next =
+            tauri::async_runtime::spawn_blocking(move || Settings::rebased_on_disk(snapshot))
+                .await
+                .context("reading settings")?;
         let out = edit(&mut next);
         let to_disk = next.clone();
         tauri::async_runtime::spawn_blocking(move || to_disk.save())
@@ -541,15 +549,27 @@ impl AppState {
         &self,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Arc<Vec<Device>>> {
+        Ok(self.fleet_devices_with_time(on_progress).await?.0)
+    }
+
+    /// [`Self::fleet_devices`] with the time the inventory was fetched. The
+    /// inventory carries Needs Reboot and the offline exclusion and is cached for
+    /// [`DEVICE_TTL`] — longer than the patch families, and a forced refresh does
+    /// not shorten it — so both callers that report on it say how old it is: the
+    /// query folds it into its "data as of" time, and the action planner shows how
+    /// current the online/offline status behind its offline guardrail is.
+    pub async fn fleet_devices_with_time(
+        &self,
+        on_progress: Option<&ProgressFn<'_>>,
+    ) -> Result<(Arc<Vec<Device>>, DateTime<Utc>)> {
         let key = self.tenant_key();
-        let (devices, _) = self
-            .fleet_devices_cache
+        self.fleet_devices_cache
             .get_or_fetch(&key, DEVICE_TTL, "device inventory", || async {
                 // Fetched with the inventory so the reboot reasons share its TTL and
                 // its invalidation after a reboot. Only the inventory is required: a
                 // health feed the token cannot read costs the reasons, not the query
-                // — and only until FORCE_MIN_INTERVAL, since the entry is stored as
-                // degraded rather than hiding every reason for the full DEVICE_TTL.
+                // — and only until the degraded cap (a minute at first, backing off if
+                // the feed keeps failing), not for the full DEVICE_TTL.
                 let (devices, health) = tokio::join!(
                     self.api.devices(None, on_progress),
                     self.api.device_health()
@@ -570,8 +590,7 @@ impl AppState {
                     degraded,
                 })
             })
-            .await?;
-        Ok(devices)
+            .await
     }
 
     /// Whole-fleet current patches (no `df`) for the requested families, cached so a

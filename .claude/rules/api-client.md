@@ -17,14 +17,18 @@ paths:
   → `docs/design/api-client.md#paginated-bodies-and-row-lists-are-deserialized-straight-into-t-everything-else-goes-through-value`
 - **Both pagination branches require forward progress, measured against the *whole* cursor** —
   (`name` is a stable handle; the position rides in `offset`). **A stall is an error, not a short
-  read; an unreadable cursor is an error, not end-of-pages; timeout/5xx retries are
-  `Idempotent`-only (a cursor page is `CursorPage`); connect retries are never `ActOnce`.**
+  read; an unreadable cursor is an error, not end-of-pages; transport (a body cut off included)
+  and 5xx retries are `Idempotent`-only, through `fetch` under one `MAX_RETRIES` (a cursor page is
+  `CursorPage`); connect retries are never `ActOnce`. A blank 2xx body is `Null` whatever its
+  label.** Test: `an_idempotent_read_cut_off_in_flight_is_retried`.
   → `docs/design/api-client.md#both-pagination-branches-require-forward-progress--and-neither-may-stop-quietly`
 - **A cursor page lost to a timeout or 5xx under an announced `count` is re-read once (at most
   `PAGE_REREADS` per fetch), and a scan that re-read stands only if it ends at exactly its
-  count. Otherwise — an empty page short of the count, an unreadable 2xx, a failed re-read, a
-  re-read scan off its count, no count to check — the scan restarts without a cursor under the
-  shared `SCAN_RESTARTS` budget, then an error. Never re-send a cursor without that count check;
+  count. Otherwise — an empty page or empty body short of the count, a `400` on a cursor page
+  (`CursorRefused`), an unreadable 2xx (cut off or not JSON; a whole body that is not a page is a
+  `MalformedPage` and fails at once), a failed re-read, a re-read scan off its count, no count to
+  check — the scan restarts without a cursor under the shared `SCAN_RESTARTS` budget, then an
+  error. Never re-send a cursor without that count check;
   a terminal cursor short of the count is otherwise a warning.** NinjaOne's normal end is a
   non-empty last page.
   → `docs/design/api-client.md#a-lost-cursor-page-is-re-read-against-the-count-or-the-scan-restarts`
@@ -46,7 +50,9 @@ paths:
 - **Each attempt's token is bound to the URL's tenant (`access_token_for(&tenant_stamp)`); a moved
   tenant aborts with `TenantMoved` — no retry, no token invalidation.**
   → `docs/design/api-client.md#a-429-pauses-the-whole-client-and-each-attempts-token-is-bound-to-the-urls-tenant`
-- **reqwest has `default-features = false`; keep `gzip`, `http2`, `system-proxy`, `charset`.**
+- **reqwest has `default-features = false`; keep `gzip`, `http2`, `system-proxy`, `charset`. Its
+  TLS is `rustls-no-provider` with ring installed once by `run()` (`install_crypto_provider`) —
+  never build a client before it; aws-lc-rs is linked only by the dev-dependencies.**
   → `docs/design/api-client.md#reqwests-default-features-are-off-so-every-one-it-drops-must-be-re-added-explicitly`
 - **Verify endpoint shapes/params/enums against the spec, never from memory:**
   `docs/api/ninjaone-surface.md` is the committed digest; the weekly `ninjaone-contract` CI job

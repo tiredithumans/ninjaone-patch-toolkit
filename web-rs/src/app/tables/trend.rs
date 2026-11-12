@@ -36,9 +36,20 @@ pub(super) fn TrendTab() -> impl IntoView {
     };
     // Read on mount, and again whenever a new session starts (a tenant switch, a
     // sign-out or sign-in): the backend returns only the signed-in tenant's runs, so
-    // what is on screen belongs to the session it was read in.
+    // what is on screen belongs to the session it was read in. And whenever a new
+    // result is stored: each completed query appends a line, so an auto-refresh
+    // landing while this tab is open is a point the chart should show. Keyed on
+    // the result's stamp, not the result, so a page fetch or a regroup does not
+    // reread the file.
+    let generated_at = Memo::new(move |_| {
+        state
+            .query
+            .result
+            .with(|r| r.as_ref().map(|r| r.generated_at.clone()))
+    });
     Effect::new(move |_| {
         state.session.epoch.track();
+        generated_at.track();
         load();
     });
 

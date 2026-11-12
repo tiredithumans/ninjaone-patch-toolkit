@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::Path;
@@ -9,14 +8,17 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::error::UiError;
-use crate::export::{BacklogSheets, DETAIL_COLUMNS, WorkbookMeta, write_workbook};
+use crate::export::{DETAIL_COLUMNS, write_result_workbook};
 use crate::rows::QueryResult;
 use crate::state::AppState;
 
 /// Errors unless a query result is cached for the current tenant. The probe returns
-/// `()` from inside the lock, so it costs nothing — the previous version cloned the
-/// entire `QueryResult` just to discover it existed, which on a 10k-row fleet meant
-/// two full deep copies per export (one thrown away immediately).
+/// `()` from inside the lock, so it costs nothing.
+///
+/// The exports take their handle *before* the save dialog and write that one result,
+/// so the file holds the rows its proposed name describes. This runs after the
+/// dialog: a sign-out or tenant switch while it was open empties the slot, and the
+/// export is then refused rather than writing the departed session's rows.
 fn require_cached_result(state: &AppState) -> Result<(), UiError> {
     state
         .with_current_result(|_| ())
@@ -32,7 +34,8 @@ fn require_cached_result(state: &AppState) -> Result<(), UiError> {
 /// mutex, which is the same mutex the three paging commands take. A six-figure fleet
 /// therefore froze the table for the length of a full deep copy on every export. The
 /// lock is still taken and released synchronously here, never held across the
-/// blocking save dialogs below.
+/// blocking save dialogs below (the `Arc` is, which keeps that one result alive
+/// until the export finishes).
 fn cached_result(state: &AppState) -> Result<Arc<QueryResult>, UiError> {
     state
         .current_result_handle()
@@ -57,54 +60,12 @@ fn write_export(
     path: &Path,
     write: impl FnOnce(&mut File) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    // Written beside the target and renamed over it. Writing in place truncated
-    // the file the operator chose to overwrite before the new one existed, so a
-    // failed write deleted last week's export, and a crash mid-write left a
-    // shorter CSV that looked whole.
-    let mut name = std::ffi::OsString::from(".");
-    name.push(path.file_name().unwrap_or_default());
-    name.push(format!(".tmp-{}", std::process::id()));
-    let tmp = path.with_file_name(name);
-    let mut file = create_owner_only(&tmp)?;
-    let written = write(&mut file)
-        .and_then(|()| file.sync_all().context("flushing the export to disk"))
-        .and_then(|()| {
-            drop(file);
-            std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
-        });
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
-}
-
-/// Opens `path` for writing, truncated, readable by its owner only.
-///
-/// `mode` applies only to a file this call creates. One the operator chose to
-/// overwrite keeps its old mode, so it is narrowed through the handle, still before
-/// anything is written — best-effort, like the narrowing this replaced: a file
-/// another user owns cannot be, and refusing the export over its mode would be the
-/// wrong trade. Non-unix targets have no equivalent; Windows inherits the parent
-/// directory's ACL, which is already per-user under the profile.
-fn create_owner_only(path: &Path) -> std::io::Result<File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        options.mode(0o600);
-        let file = options.open(path)?;
-        if let Err(err) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(
-                ?err,
-                path = %path.display(),
-                "could not restrict the exported file to its owner"
-            );
-        }
-        Ok(file)
-    }
-    #[cfg(not(unix))]
-    options.open(path)
+    // Written beside the target and renamed over it (`paths::write_atomic_with`).
+    // Writing in place truncated the file the operator chose to overwrite before the
+    // new one existed, so a failed write deleted last week's export, and a crash
+    // mid-write left a shorter CSV that looked whole. The rename also replaces an
+    // overwritten file's old mode with the temp's 0600.
+    crate::paths::write_atomic_with(path, true, write)
 }
 
 /// The default file name for an export, stamped so successive exports don't
@@ -153,8 +114,8 @@ async fn save_dialog(
 }
 
 /// Opens a save dialog and writes the most recent query result to an `.xlsx`
-/// workbook (Patches + Compliance + Needs Reboot sheets). Returns the saved path,
-/// or `None` if the operator cancelled the dialog.
+/// workbook (the sheets [`crate::export::write_result_workbook`] writes). Returns
+/// the saved path, or `None` if the operator cancelled the dialog.
 ///
 /// Declared `async` so it runs off the main thread, which `blocking_save_file`
 /// requires (the dialog needs the main thread free to pump its event loop).
@@ -164,61 +125,22 @@ pub async fn export_patches_xlsx(
     state: State<'_, AppState>,
 ) -> Result<Option<String>, UiError> {
     // Fail before opening the dialog rather than after the operator picks a path.
-    // This only probes for presence; the one clone happens below, once the save is
-    // committed (a cancelled dialog copies nothing).
-    require_cached_result(&state)?;
+    // A handle on the cached result, not a copy of it, taken now so the file holds
+    // the result the export was asked for even if a re-query lands during the
+    // dialog. It moves into the blocking task and the sheets borrow out of it there.
+    let result = cached_result(&state)?;
 
     let name = default_name("ninjaone-patches", "xlsx");
     let Some(path) = save_dialog(&app, "Excel Workbook", "xlsx", name).await? else {
         return Ok(None);
     };
+    require_cached_result(&state)?;
     let path_str = path.to_string_lossy().to_string();
-
-    // A handle on the cached result, not a copy of it. The whole thing moves into the
-    // blocking task and the sheets borrow out of it there.
-    let result = cached_result(&state)?;
-    let scope_note = crate::rows::compliance_scope_note(
-        result.devices_offline,
-        result.devices_unpatchable,
-        result.patch_families,
-    );
 
     // Serializing a six-figure row set into a zipped workbook is seconds of pure CPU
     // plus the file write — both of which would hold a tokio worker for the duration.
     tauri::async_runtime::spawn_blocking(move || {
-        write_export(&path, |file| {
-            write_workbook(
-                file,
-                &result.rows,
-                &result.compliance,
-                &result.compliance_by_os,
-                &result.devices,
-                &result.failures,
-                &BacklogSheets {
-                    worst_devices: &result.worst_devices,
-                    offline_backlog: &result.offline_backlog,
-                    time_to_install: &result.time_to_install,
-                },
-                &result.approvals,
-                &WorkbookMeta {
-                    generated_at: &result.generated_at,
-                    data_fetched_at: &result.data_fetched_at,
-                    devices_total: result.devices_total,
-                    devices_offline: result.devices_offline,
-                    devices_unpatchable: result.devices_unpatchable,
-                    scope: &result.scope,
-                    scope_note: &scope_note,
-                    changes: &result.changes,
-                    instance: &result.instance,
-                    sla_policy: &result.sla_policy,
-                    compliance_total: &result.compliance_total,
-                    uncounted_orgs: &result.uncounted_orgs,
-                    first_seen: &result.first_seen,
-                    patch_families: result.patch_families,
-                    exploit_data: &result.exploit_data.sentence,
-                },
-            )
-        })
+        write_export(&path, |file| write_result_workbook(file, &result))
     })
     .await
     .map_err(|e| UiError::new(format!("export task failed: {e}")))?
@@ -239,16 +161,16 @@ pub async fn export_report_html(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, UiError> {
-    // Same probe-then-clone-after-dialog flow as the Excel export above.
-    require_cached_result(&state)?;
+    // Same handle → dialog → re-probe flow as the Excel export above.
+    let result = cached_result(&state)?;
 
     let name = default_name("ninjaone-report", "html");
     let Some(path) = save_dialog(&app, "HTML Report", "html", name).await? else {
         return Ok(None);
     };
+    require_cached_result(&state)?;
     let path_str = path.to_string_lossy().to_string();
 
-    let result = cached_result(&state)?;
     // Same reason as the workbook: rendering the report walks every rollup and
     // builds one large string, then writes it — CPU and file I/O, not async work.
     tauri::async_runtime::spawn_blocking(move || {
@@ -267,7 +189,7 @@ pub async fn export_report_html(
 /// columns, every row, no row limit — as CSV (see [`crate::csv_export`]). Returns
 /// the saved path, or `None` if the operator cancelled.
 ///
-/// Same probe → dialog → handle → blocking-write shape as the other two exports.
+/// Same handle → dialog → re-probe → blocking-write shape as the other two exports.
 /// A CSV cannot carry the About sheet's provenance, so the proposed file name
 /// states the device scope, the status selection and both clocks
 /// ([`csv_file_name`]).
@@ -276,21 +198,18 @@ pub async fn export_csv(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, UiError> {
-    require_cached_result(&state)?;
-    // The name is read off the result the probe just found. A re-query landing
-    // between here and the write below is the same race the other exports accept:
-    // the file then holds the newer rows under a name stamped with the older clocks.
-    let name = state
-        .with_current_result(csv_file_name)
-        .map_err(UiError::from)?
-        .ok_or_else(|| UiError::new("Run a query before exporting."))?;
+    // The name and the rows come from one handle. They used to be read separately,
+    // before and after the dialog, so a re-query landing in between wrote the newer
+    // rows under a name stamped with the older scope and clocks.
+    let result = cached_result(&state)?;
+    let name = csv_file_name(&result);
 
     let Some(path) = save_dialog(&app, "CSV (comma-separated)", "csv", name).await? else {
         return Ok(None);
     };
+    require_cached_result(&state)?;
     let path_str = path.to_string_lossy().to_string();
 
-    let result = cached_result(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
         write_export(&path, |file| {
             let mut out = std::io::BufWriter::new(file);
@@ -510,40 +429,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let path = export_path("book.xlsx");
         let result = sample_result();
-        write_export(&path, |file| {
-            write_workbook(
-                file,
-                &result.rows,
-                &result.compliance,
-                &result.compliance_by_os,
-                &result.devices,
-                &result.failures,
-                &BacklogSheets {
-                    worst_devices: &result.worst_devices,
-                    offline_backlog: &result.offline_backlog,
-                    time_to_install: &result.time_to_install,
-                },
-                &result.approvals,
-                &WorkbookMeta {
-                    generated_at: &result.generated_at,
-                    data_fetched_at: &result.data_fetched_at,
-                    devices_total: result.devices_total,
-                    devices_offline: result.devices_offline,
-                    devices_unpatchable: result.devices_unpatchable,
-                    scope: &result.scope,
-                    scope_note: "scope",
-                    changes: &result.changes,
-                    instance: &result.instance,
-                    sla_policy: &result.sla_policy,
-                    compliance_total: &result.compliance_total,
-                    uncounted_orgs: &result.uncounted_orgs,
-                    first_seen: &result.first_seen,
-                    patch_families: result.patch_families,
-                    exploit_data: &result.exploit_data.sentence,
-                },
-            )
-        })
-        .expect("written");
+        write_export(&path, |file| write_result_workbook(file, &result)).expect("written");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         let mut wb: Xlsx<_> = open_workbook(&path).expect("a workbook");
@@ -552,9 +438,9 @@ mod tests {
     }
 
     /// Both exports read the same cache, and both must refuse rather than write an
-    /// empty file when no query has run. `require_cached_result` is the probe that
-    /// runs *before* the save dialog, so the operator is not asked to pick a
-    /// destination for a file that cannot be produced.
+    /// empty file when no query has run. `cached_result` runs *before* the save
+    /// dialog, so the operator is not asked to pick a destination for a file that
+    /// cannot be produced, and `require_cached_result` re-checks after it.
     #[test]
     fn exporting_before_any_query_is_refused() {
         let state = AppState::new().expect("build state");

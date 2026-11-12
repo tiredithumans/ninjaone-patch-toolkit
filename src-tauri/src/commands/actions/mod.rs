@@ -271,17 +271,8 @@ pub async fn run_action(
         });
     }
 
-    emit_progress(
-        &app,
-        ActionProgressEvent {
-            batch_id,
-            stage: "dispatching",
-            dispatched: 0,
-            total: p.eligible.len(),
-            jobs: Vec::new(),
-        },
-    );
-
+    // `dispatch_batch` announces the batch ("dispatching 0/total") itself; this
+    // emitted the identical event just before it.
     // Everything that does not vary per device is built once and shared, so a
     // 25-device batch stops re-cloning the script ref, run-as identity, parameter
     // string, detail line, instance URL and client id 25 times over.
@@ -300,6 +291,7 @@ pub async fn run_action(
         reboot_mode: request.reboot_mode.unwrap_or(RebootMode::Normal),
         dry_run: request.dry_run,
         window_overridden: p.window_overridden,
+        window: dispatch::send_window(request.kind, p.window_overridden, &settings.actions),
         detail: detail.clone(),
         instance: settings.instance_base_url.clone(),
         client_id: settings.client_id.clone(),
@@ -440,7 +432,14 @@ fn job_request(req: &ActionRequest, run_as: Option<&str>, device_id: i64) -> Job
         reboot_mode: *reboot_mode,
         reason: reason.clone(),
         include_offline: *include_offline,
-        targets: device_targets.get(&device_id).cloned().unwrap_or_default(),
+        // Only what was composed into the device's parameters. A typed string is
+        // sent verbatim and a native endpoint takes none, so targets recorded for
+        // either were never sent, and the Jobs tab listed them as if they had been.
+        targets: if req.kind.runs_a_script() && typed_parameters(req).is_none() {
+            device_targets.get(&device_id).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        },
     }
 }
 

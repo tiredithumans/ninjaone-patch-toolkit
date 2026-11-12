@@ -6,6 +6,8 @@
 # Env:
 #   SCAN_MODE=warn|block   (default warn)  warn = print and exit 0; block = exit 2
 #   SCAN_SCOPE=diff|all    (default diff)  diff = changed/staged/untracked; all = whole tree
+#   SCAN_NO_GITLEAKS=1     use the regex fallback even where gitleaks is installed
+#                          (test.sh, so its assertions hold on every machine)
 
 mode="${SCAN_MODE:-warn}"
 scope="${SCAN_SCOPE:-diff}"
@@ -23,7 +25,7 @@ emit_and_exit() {
   exit 0
 }
 
-if command -v gitleaks >/dev/null 2>&1; then
+if [ "${SCAN_NO_GITLEAKS:-0}" != "1" ] && command -v gitleaks >/dev/null 2>&1; then
   if ! output=$(gitleaks detect --no-banner --redact 2>&1); then
     emit_and_exit "$output"
   fi
@@ -52,6 +54,12 @@ pattern="$pattern"'|glpat-[A-Za-z0-9_-]{20}'                # GitLab PAT
 pattern="$pattern"'|xox[baprs]-[A-Za-z0-9-]+'               # Slack token
 pattern="$pattern"'|sk-[A-Za-z0-9]{32,}'                    # OpenAI / Anthropic-style key
 pattern="$pattern"'|-----BEGIN [A-Z ]*PRIVATE KEY-----'     # PEM private key
+# The Tauri updater's minisign signing key, as `tauri signer generate` writes it:
+# base64 of "untrusted comment: rsign encrypted secret key". docs/RELEASING.md
+# calls losing it the one unrecoverable failure, and leaking it lets anyone sign
+# an update every install accepts. The public key's framing differs ("minisign
+# public key"), so tauri.conf.json does not match.
+pattern="$pattern"'|dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V5' 
 
 hits=""
 while IFS= read -r f; do

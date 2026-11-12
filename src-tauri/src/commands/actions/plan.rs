@@ -9,7 +9,7 @@ use super::ActionRequest;
 use super::confirm::{canonical_parameters, request_hash};
 use crate::actions::{
     ActionKind, ActionPlan, CachedFamily, ConfirmBinding, DryRunSupport, PlanInput, PlannedTarget,
-    plan,
+    fmt_ts, plan,
 };
 use crate::api::actions::ScriptRef;
 use crate::error::UiError;
@@ -87,6 +87,36 @@ pub(super) fn composed_targets(req: &ActionRequest) -> Vec<&str> {
         .flatten()
         .map(String::as_str)
         .collect()
+}
+
+/// A hand-picked script with KB targeting on, dispatched to a device that has
+/// nothing ticked, receives an empty allow list. Not a blocker — the operator chose
+/// those devices and the script may do something useful without a list — but a
+/// remediation script would install nothing on them, and the per-device preview
+/// alone is easy to skim past when it runs to 25 lines.
+///
+/// Only when the list is composed: a typed parameter string is sent verbatim and
+/// composes nothing, so warning that some devices "would be sent an empty allow
+/// list" described a string the dispatch never sends.
+pub(super) fn empty_allow_list_warning(
+    req: &ActionRequest,
+    eligible: &[PlannedTarget],
+) -> Option<String> {
+    if req.kind != ActionKind::Script
+        || req.device_targets.is_empty()
+        || typed_parameters(req).is_some()
+    {
+        return None;
+    }
+    let empty = untargeted_names(eligible, &req.device_targets);
+    (!empty.is_empty()).then(|| {
+        format!(
+            "{} device(s) have no selected patches and would be sent an empty allow list ({}). \
+             A script that only installs from that list will do nothing on them.",
+            empty.len(),
+            summarize_names(&empty)
+        )
+    })
 }
 
 /// The execution identity a script-running request is dispatched with, `None` for
@@ -366,7 +396,10 @@ pub(super) async fn build_plan(
     let settings = state.settings_snapshot().actions;
     // Borrowed out of the warm caches: this runs on every plan *and* every confirm,
     // and used to deep-clone the whole fleet (and all three lookup lists) to read it.
-    let devices = state.fleet_devices(None).await.map_err(UiError::from)?;
+    let (devices, devices_fetched_at) = state
+        .fleet_devices_with_time(None)
+        .await
+        .map_err(UiError::from)?;
     let org_names = state.org_names().await.map_err(UiError::from)?;
 
     let targets = composed_targets(req);
@@ -425,6 +458,7 @@ pub(super) async fn build_plan(
 
     let parameters = per_device_parameters(req);
     p.parameters_preview = parameters_preview(&parameters, &p.eligible);
+    p.devices_fetched_at = Some(fmt_ts(devices_fetched_at));
     let run_as = resolve_run_as(req, &settings);
     p.script = script_check.label;
     p.run_as = run_as.clone();
@@ -457,22 +491,8 @@ pub(super) async fn build_plan(
     {
         p.warnings.push(warning);
     }
-    // A hand-picked script with KB targeting on, dispatched to a device that has
-    // nothing ticked, receives an empty allow list. Not a blocker — the operator
-    // chose those devices and the script may do something useful without a list —
-    // but a remediation script would install nothing on them, and the per-device
-    // preview alone is easy to skim past when it runs to 25 lines.
-    if req.kind == ActionKind::Script && !req.device_targets.is_empty() {
-        let empty = untargeted_names(&p.eligible, &req.device_targets);
-        if !empty.is_empty() {
-            p.warnings.push(format!(
-                "{} device(s) have no selected patches and would be sent an empty allow list ({}). \
-                 A script that only installs from that list will do nothing on them.",
-                empty.len(),
-                summarize_names(&empty)
-            ));
-        }
-    }
+    p.warnings
+        .extend(empty_allow_list_warning(req, &p.eligible));
     if req.kind == ActionKind::Reboot
         && req
             .reason

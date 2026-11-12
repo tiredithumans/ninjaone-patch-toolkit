@@ -1781,3 +1781,66 @@ async fn a_second_reauthorize_leaves_the_pending_sign_in_alone() {
         "and nothing of the session was cleared"
     );
 }
+
+/// A keyring fault reading the client secret used to become "no secret" for the
+/// whole process: a keychain locked at launch and unlocked later still refreshed as
+/// a public client. It is read again before the refresh, nothing is sent while it
+/// cannot be, and the saved sign-in survives — a Web client's grant presented
+/// without its secret could otherwise be answered `invalid_grant` and deleted.
+#[tokio::test]
+async fn a_client_secret_the_keyring_could_not_read_is_read_again_never_sent_missing() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let server = wiremock::MockServer::start().await;
+    let base = server.uri();
+    let client_id = "client-secret-locked";
+    let secret_entry = tenant_entry(KEYRING_SECRET_PREFIX, &base, Some(client_id));
+    let refresh_entry = saved_refresh_entry(&base, client_id);
+    save_keyring(&secret_entry, "web-secret").unwrap();
+    save_keyring(&refresh_entry, "saved-refresh").unwrap();
+    Mock::given(method("POST"))
+        .and(path("/ws/oauth/token"))
+        .and(body_string_contains("client_secret=web-secret"))
+        .respond_with(granted("unlocked-access", "rotated-refresh"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Anything sent without the secret is answered as a dead grant.
+    Mock::given(method("POST"))
+        .and(path("/ws/oauth/token"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(serde_json::json!({ "error": "invalid_grant" })),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    test_keyring::refuse_reads_of(&secret_entry);
+    let auth = launched(&base, client_id);
+    assert!(
+        !auth.has_client_secret(),
+        "unreadable is not a stored secret"
+    );
+
+    let err = auth
+        .access_token()
+        .await
+        .expect_err("no refresh while the secret cannot be read");
+    assert!(format!("{err:#}").contains("client secret"), "{err:#}");
+    assert_eq!(
+        load_keyring(&refresh_entry).unwrap().as_deref(),
+        Some("saved-refresh"),
+        "a keyring fault never costs the saved sign-in"
+    );
+
+    test_keyring::allow_reads_of(&secret_entry);
+    assert_eq!(
+        auth.access_token()
+            .await
+            .expect("the unlocked keychain is read"),
+        "unlocked-access"
+    );
+    assert!(auth.has_client_secret(), "and kept for the session");
+}

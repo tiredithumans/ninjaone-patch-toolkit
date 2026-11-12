@@ -528,7 +528,9 @@ fn sync_header_box(ev: &web_sys::Event, (all, some): (bool, bool)) {
 #[component]
 fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
     let state = expect_context::<AppState>();
-    let by_device = move || state.query.group_by.get() == Some(GroupBy::Device);
+    // Read once: a regroup drops every member slot (`reset_members`), so this
+    // table never outlives the grouping it was built for.
+    let by_device = state.query.group_by.get_untracked() == Some(GroupBy::Device);
     view! {
         <div class="table-wrap">
             <table class="group-members">
@@ -540,60 +542,36 @@ fn GroupMembers(rows: Arc<Vec<PatchRow>>) -> impl IntoView {
                             let stat = status_class(&r.status);
                             // The one copy of the row: the checkbox and the cell
                             // closures below all share it.
-                            let r = Arc::new(r.clone());
-                            let (first, second) = (Arc::clone(&r), Arc::clone(&r));
-                            let titled = Arc::clone(&r);
-                            let second_title = move || {
-                                if by_device() {
-                                    titled.name.clone()
-                                } else {
-                                    titled.organization.clone()
-                                }
+                            let (first, second) = if by_device {
+                                (r.kb.clone().unwrap_or_default(), r.name.clone())
+                            } else {
+                                (r.device_name.clone(), r.organization.clone())
                             };
+                            let chips = if by_device {
+                                view! {
+                                    {exploited_chip(r.exploited_cves.clone())}
+                                    {reboot_likely_chip(r.reboot_likely)}
+                                }
+                                    .into_any()
+                            } else {
+                                reboot_pending_chip(r.needs_reboot).into_any()
+                            };
+                            let r = Arc::new(r.clone());
+                            let second_title = second.clone();
                             view! {
                                 <tr>
                                     <RowCheckbox row=Arc::clone(&r)/>
                                     // In a device group the members are patches; in a
                                     // patch group they are the devices it's missing on.
-                                    <td>
-                                        {move || {
-                                            if by_device() {
-                                                first.kb.clone().unwrap_or_default()
-                                            } else {
-                                                first.device_name.clone()
-                                            }
-                                        }}
-                                    </td>
+                                    <td>{first}</td>
                                     <td class="patch-name">
                                         // The clamp cuts a long name at two lines;
                                         // the tooltip has all of it, as in the flat table.
-                                        <span class="clamp-2" title=second_title>
-                                            {move || {
-                                                if by_device() {
-                                                    second.name.clone()
-                                                } else {
-                                                    second.organization.clone()
-                                                }
-                                            }}
-                                        </span>
+                                        <span class="clamp-2" title=second_title>{second}</span>
                                         // The member is a patch in a device group and a
                                         // device in a patch group; each chip names the
                                         // half the header does not already state.
-                                        {
-                                            let (pending, likely) = (r.needs_reboot, r.reboot_likely);
-                                            let exploited = r.exploited_cves.clone();
-                                            move || {
-                                                if by_device() {
-                                                    view! {
-                                                        {exploited_chip(exploited.clone())}
-                                                        {reboot_likely_chip(likely)}
-                                                    }
-                                                        .into_any()
-                                                } else {
-                                                    reboot_pending_chip(pending).into_any()
-                                                }
-                                            }
-                                        }
+                                        {chips}
                                     </td>
                                     <td><span class=sev>{r.severity.clone()}</span></td>
                                     <td><span class=stat>{r.status.clone()}</span></td>

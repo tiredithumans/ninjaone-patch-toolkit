@@ -113,6 +113,18 @@ renders HTML from data (no `inner_html`; every API string reaches a text node or
 that only *looks* like this app. The one form (the CVE search) prevents its default submit, so
 `form-action 'none'` costs nothing.
 
+## The webview's capability grants only event listening
+
+`src-tauri/capabilities/default.json` grants `core:event:allow-listen` / `allow-unlisten` (the
+`api::subscribe` listeners) and `core:webview:allow-internal-toggle-devtools` (the devtools
+shortcut's injected script) — not `core:default`, which also let any script in the webview move,
+resize, close or retitle windows, read app/path metadata and emit events as the app. The frontend
+calls only `core.invoke` and `event.listen`; app commands registered through
+`generate_handler!` need no permission while the app defines no app manifest. The window is shown
+from Rust (`lib.rs` setup), and the save dialog and the updater run in Rust too. A frontend call
+to any other `window.__TAURI__` API fails until its permission is added here; `tauri-build`
+validates every identifier at compile time.
+
 ## Auto-update
 
 `commands::update::{check_for_update, install_update}` wrap `tauri-plugin-updater`; the
@@ -159,10 +171,15 @@ nested `.with` reads (`util::rows_selection_state`), never a clone of the rows.
 group-member fetch is stamped (`QueryState.view_seq`, `members_gen`) and dropped on arrival if a
 newer request, a regroup, or a re-query has moved the stamp. Without it a slow sort overwrote a
 newer one, and a late member fetch ticked the previous result's rows into the new selection. A
-silent refresh still drops every member slot, then reopens the groups the operator had open that
-the new header page still lists, each with a fresh member fetch (`util::groups_to_reopen`); a
+silent refresh keeps the open groups open on their old member `Arc`s (marked
+`stale_members`, bumping `members_gen`); once the new header page lands, a group it no longer
+lists closes and each one still listed is refetched, its slot replaced in place
+(`util::settle_open_groups`) — every tick used to collapse them all and flash "Loading…". A
 manual run starts collapsed. What a landed run does to the view — page, sort, which collection
-to fetch, what to keep — is `util::run_plan`'s decision, so it is host-tested. A manual run that
+to fetch, what to keep — is `util::run_plan`'s decision, so it is host-tested. The selection is
+cleared only by a run of a *different* query (`util::same_query`); a manual ↻ Refresh, or Run with
+the controls untouched, prunes it like a silent refresh, so a second dispatch (Software after OS)
+can still go out from the same selection after refreshing in between. A manual run that
 finds another in flight is queued (`util::queue_run`), never silently dropped.
 
 ## Demo mode + browser/Pages guard
@@ -182,7 +199,10 @@ filtering (identity/class/text facets + date windows) over the sample rows so th
 actually filter — Compliance/Reboot stay representative (narrowed only by org; the reboot list and
 the device drill-down share `demo::sample_device_summary`, so their counts agree). Demo mode is
 **web-only**: there is no "load sample data" affordance and the desktop release never enters it
-(no auto-load → `demo` stays false and the normal auth path runs). `web_mode` also disables the
+(no auto-load → `demo` stays false and the normal auth path runs). That holds by construction:
+every read goes through `SessionState::is_demo`, which is `!api::is_desktop_build() && demo`, and
+`enter_demo` returns early in a desktop build — `is_desktop_build` is const, so the desktop bundle's
+demo branches fold away and no runtime flag can bring sample data up. `web_mode` also disables the
 backend-only actions (sign-in, **export**).
 
 The Pages build (`just web-build-pages`, `.github/workflows/pages.yml`) sets the subpath base
@@ -260,7 +280,11 @@ Per-machine view conveniences — none of them configuration, so none go through
 wall-clock countdown (`util::advance_refresh`; ticks are throttled in the background, so counting
 them drifts). `util::refresh_hold` decides, in this order, why it waits: the operator's **Pause**,
 an open dialog (any `aria-modal` element, Settings included through its own signal so the label
-reacts at once), a hidden window, a run in flight. A run restarts the full cadence, so a manual Run also pushes the next automatic one out.
+reacts at once; the action confirmation counts from the click, while its plan is still in flight —
+`util::confirmation_holds`), a hidden window, a run in flight. A run restarts the full cadence, so a manual Run also pushes the next automatic one out.
+A refresh already in flight when the confirmation opens still lands; its selection prune (and
+its toast) waits until the dialog closes (`util::prune_timing`), so rows never untick under a
+dialog that lists them.
 **A selection is deliberately not a hold**: a refresh already prunes the selection to rows still
 listed, and after a dispatch the selection is still there exactly while the operator watches the
 patches land — pausing on it would switch the cadence off when it is most wanted. Picking a
@@ -327,8 +351,9 @@ hover. Hiding is positional CSS generated per table
 **host**. Never the selection, a credential or a client id
 (`the_code_carries_no_selection_or_credentials`). The version sits outside the payload so a
 future format is refused before parsing; decoding drops unknown statuses/severities/tabs/sort keys,
-clamps numbers to what the controls accept, caps text, and `apply_view` prunes org/role/class ids
-against the loaded lookups. A code from another host is held behind an **Apply anyway** banner —
+clamps numbers to what the controls accept, caps text, and `apply_view` prunes org/role/group/class ids
+against the loaded lookups (`util::prune_scope_ids` — a saved preset goes through the same prune,
+and both toast how many picks were dropped). A code from another host is held behind an **Apply anyway** banner —
 its organization ids mean something else there. The web demo keeps the code in the URL fragment
 (`history.replaceState`, so Back is not an undo stack of checkboxes) and applies it on load; the
 desktop copies a bare code via `navigator.clipboard` — a web API, not a Tauri capability, and not

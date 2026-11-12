@@ -87,7 +87,7 @@ pub(super) fn LiveJobsPanel() -> impl IntoView {
                             .with(|j| j.as_ref().map(|j| format!("as of {}", j.fetched_at)))
                     }}
                 </span>
-                <Show when=move || !state.session.demo.get()>
+                <Show when=move || !state.session.is_demo()>
                     <button
                         class="btn btn-sm"
                         title="Ask NinjaOne again now. It is also asked every 30 seconds while this window is open."

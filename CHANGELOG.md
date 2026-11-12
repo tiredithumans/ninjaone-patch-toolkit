@@ -11,6 +11,65 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+### Security
+
+- Two copies of the app running at once no longer let one silently undo the other's settings,
+  such as turning device actions off.
+- The app window can now only receive events from the app, not call its other built-in
+  functions.
+
+### Changed
+
+- The action confirmation says how current each device's online/offline status is.
+- Devices still queued when the maintenance window closes are no longer sent the action; they show
+  as "not sent: maintenance window closed while dispatching".
+- The audit trail names the NinjaOne instance when it holds dispatches from more than one.
+- Refreshing the same query (↻ Refresh, or the stale banner's Refresh link) keeps your selection,
+  so you can send Software after OS without re-ticking.
+- Applying a preset ignores organizations, roles and groups this instance doesn't have, and says
+  how many were dropped.
+- "Patch data as of" also reflects when the device list (reboot and offline status) was last
+  fetched, so it never looks fresher than it is.
+- Pending-patch age buckets agree with the SLA: a patch past a 30-day SLA no longer shows in
+  "0-30 days".
+- The HTML report's compliance charts show the same organizations and operating systems as the
+  tables beneath them.
+- Installers include THIRD-PARTY-LICENSES.md.
+- Large fleets sort faster, and checking dispatched actions loads far less data from NinjaOne.
+
+### Fixed
+
+- Two actions of the same type sent to one device seconds apart no longer report each other's
+  result.
+- A script run with typed parameters no longer lists ticked patches it never sent.
+- Patch actions NinjaOne accepts with an empty response are no longer reported as "outcome
+  unknown".
+- Auto-refresh no longer runs while an action is being planned, and rows are no longer unticked
+  under an open confirmation; anything a refresh removed is deselected once the dialog closes.
+- Rows ticked while a refresh is being checked stay selected.
+- Open groups in the grouped Patches view stay open through auto-refresh.
+- The CVE search no longer shows an answer from earlier results, and the Trend tab picks up each
+  new run.
+- Patches with a status this app doesn't recognise appear under Pending, where they were already
+  counted.
+- Reports no longer fail when a NinjaOne response is cut off partway, and a large report recovers
+  when NinjaOne rejects its paging cursor or sends an empty page early. A page that can never be
+  read fails straight away instead of after two full re-downloads.
+- Queries against an unreachable NinjaOne instance fail promptly instead of retrying one after
+  another for minutes, and a failing device health feed no longer re-downloads the whole device
+  list every minute.
+- If the OS keychain is locked when the app starts, sign-in works once it is unlocked, without
+  restarting, and a locked keychain can no longer cost you your saved sign-in.
+- A CSV export saved while a refresh lands contains the results its file name describes.
+- Saved files can no longer be left half-written by a crash or a second copy of the app.
+- If part of an exploit-data download fails, the app retries it at the next launch instead of
+  waiting up to 12 hours.
+- On a multi-monitor Windows setup with different display scaling, the window no longer changes
+  size each time the app starts.
+- Organizations whose names differ only in capitalization list in the same order every run.
+- After a dialog opened from a menu or the Reboot popover closes, keyboard focus returns to the
+  button that opened it.
+
 ## [0.23.0] - 2026-11-10
 
 A usability pass: screens stop saying things that are not true yet, filters can be reset, errors

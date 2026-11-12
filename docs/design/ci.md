@@ -1,7 +1,7 @@
 # CI-only gates
 
 Contract lines: [AGENTS.md → Verification playbook](../../AGENTS.md#verification-playbook).
-Workflows: `.github/workflows/{ci,codeql,release,screenshot,pages}.yml`; recipes in `/justfile`.
+Workflows: `.github/workflows/{ci,codeql,dependabot-automerge,release,screenshot,pages}.yml`; recipes in `/justfile`.
 
 `just verify` is the local gate and runs every Rust step `ci.yml`'s backend and frontend jobs run,
 in the same order. **Keep it that way** — a CI sequence that quietly differs from the documented
@@ -57,7 +57,10 @@ in what ships, and failing every dependency bump on it kept Dependabot PRs from 
 (`dependabot-automerge.yml`, grouped minor and patch only — a 0.x "minor" is a breaking bump for
 Cargo, arrives ungrouped and waits for a person). The release skill regenerates the file, and
 `release.yml`'s `verify` job refuses a tag whose copy is stale. The recipe is `[unix]`: PowerShell redirection would
-rewrite encoding and line endings.
+rewrite encoding and line endings. The file ships inside every installer as a bundle resource
+(`bundle.resources` in `tauri.conf.json`, installed beside the executable's resources as
+`THIRD-PARTY-LICENSES.md`): the notices have to reach whoever receives the binary, and a copy
+only in the repository did not.
 
 ## NinjaOne API contract (`ninjaone-contract` job)
 
@@ -68,6 +71,12 @@ from `docs/api/ninjaone-surface.md`. A failure is a prompt to read the diff, not
 break. It depends on a URL this repo does not control, so it runs on the weekly cron and on
 manual dispatch, and on a PR or push only when `docs/api/`, `src-tauri/src/api/`, the digest
 script or `ci.yml` changed — a vendor outage cannot block unrelated work.
+
+`Activity.statusCode` is NinjaOne's whole activity vocabulary (700+ values) and is digested as a
+count, which would let a rename of a code the job resolver matches pass unseen. So the codes the
+resolver names (`DEPENDED_STATUS_CODES`, kept in step with `actions::is_run_code`,
+`native_run_codes` and `model::NATIVE_END_CODES`) each get a present/absent line, and the
+`activityType` enum that `actions::is_action_activity` matches is listed in full.
 
 ## Repo-tooling gates (`shellcheck`, `actionlint`, `commits` jobs)
 

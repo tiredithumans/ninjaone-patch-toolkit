@@ -40,7 +40,7 @@ pub(crate) fn ScopeBar() -> impl IntoView {
             // there yet) and the bar reports busy to assistive tech.
             aria-busy=move || loading.get().to_string()
         >
-            <Show when=move || !state.session.web_mode.get() && !state.session.demo.get()>
+            <Show when=move || !state.session.web_mode.get() && !state.session.is_demo()>
                 <PresetsMenu/>
             </Show>
             <Picker

@@ -29,8 +29,6 @@ fn row(device_id: i64, kb: Option<&str>, name: &str, status: &str) -> PatchRow {
         severity: "Critical",
         severity_rank: 5,
         status: status.into(),
-        first_seen_date: None,
-        installed_date: None,
         first_seen_ts: None,
         installed_ts: None,
         cve_count: None,

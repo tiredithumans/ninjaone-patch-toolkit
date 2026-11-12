@@ -151,11 +151,8 @@ fn patch_at(
         device_id: Some(device_id),
         kb_number: kb.map(Into::into),
         name: Some(name.into()),
-        version: None,
-        product_vendor: None,
         severity: Some(severity.into()),
         status: Some(status.into()),
-        patch_type: None,
         collected_timestamp: Some(days_ago(seen_days)),
         installed_timestamp: None,
         product_identifier: None,
@@ -541,6 +538,7 @@ fn ipc_fixture_is_current() {
         script: Some("Install-SelectedWindowsUpdates (#142)".into()),
         run_as: Some("system".into()),
         window_overridden: true,
+        devices_fetched_at: Some(fmt_ts(FIXTURE_NOW - Duration::minutes(4))),
         confirm_token: Some("fixture-confirm-token".into()),
     };
 
@@ -740,6 +738,7 @@ fn ipc_fixture_is_current() {
             },
             "read_action_audit": [AuditRecord {
                 timestamp: fmt_ts(FIXTURE_NOW - Duration::minutes(10)),
+                instance: INSTANCE.into(),
                 kind: "OS_PATCH_REMEDIATE".into(),
                 device_name: "web-01".into(),
                 organization: "Contoso".into(),

@@ -4,7 +4,7 @@ use super::super::state::{DeviceSelection, Progress, SelectedPatch};
 use super::super::{AppliedFilters, Tab};
 use super::*;
 use crate::types::{
-    ActionKind, ActionRequest, ActionSettings, AuthStatus, CveExposure, DeviceSummary,
+    ActionKind, ActionRequest, ActionSettings, AuditRecord, AuthStatus, CveExposure, DeviceSummary,
     ExploitDataStatus, FilterParams, GroupBy, JobReport, JobRequest, JobState, KevEntry, Location,
     Organization, PatchFamilies, PatchGroup, PatchQueryArgs, PatchRow, PlannedTarget, RebootChoice,
     RebootMode, RowSort, RowSortKey, RunRecord,
@@ -435,6 +435,7 @@ fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
     };
     let base = RunContext {
         silent: false,
+        same_query: false,
         grouped: false,
         rows_total: 450,
         groups_total: 0,
@@ -475,6 +476,15 @@ fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
     assert!(silent.keep_selection);
     assert_eq!(silent.fetch, ViewFetch::Rows(3));
 
+    // A manual ↻ Refresh of the query on screen lands like a manual run, but the
+    // selection is pruned rather than dropped.
+    let refreshed = run_plan(RunContext {
+        same_query: true,
+        ..base
+    });
+    assert_eq!(refreshed.page, 0);
+    assert!(refreshed.keep_selection && !refreshed.reopen_groups);
+
     // The result shrank under the refresh: the page is clamped to the last one.
     let shrunk = run_plan(RunContext {
         silent: true,
@@ -490,6 +500,7 @@ fn a_manual_run_resets_the_view_and_a_silent_one_keeps_it() {
 fn a_grouped_run_fetches_headers_and_a_silent_one_reopens_groups() {
     let base = RunContext {
         silent: false,
+        same_query: false,
         grouped: true,
         rows_total: 10_000,
         groups_total: 250,
@@ -524,10 +535,27 @@ fn a_grouped_run_fetches_headers_and_a_silent_one_reopens_groups() {
     );
 }
 
-/// Only the groups still listed on the new header page are reopened, in header
-/// order; one that moved to another page or left the result stays closed.
+/// Only a run of the query already on screen counts as the same query; with no
+/// query on screen there is nothing a selection was made against.
 #[test]
-fn only_groups_still_listed_are_reopened() {
+fn same_query_needs_a_query_on_screen_and_no_change() {
+    let args = query(&["PENDING", "FAILED"]);
+    assert!(!same_query(None, &args));
+    let mut reordered = args.clone();
+    reordered.statuses.reverse();
+    assert!(
+        same_query(Some(&args), &reordered),
+        "tick order is no change"
+    );
+    let mut other = args.clone();
+    other.patch_type = "OS".into();
+    assert!(!same_query(Some(&args), &other));
+}
+
+/// Only the groups still listed on the new header page stay open, and only those
+/// holding the previous result's members are refetched, in header order.
+#[test]
+fn only_groups_still_listed_stay_open() {
     let group = |key: &str| PatchGroup {
         key: key.into(),
         label: String::new(),
@@ -542,21 +570,29 @@ fn only_groups_still_listed_are_reopened() {
         reboot_likely: false,
         exploited: false,
     };
+    let set = |keys: &[&str]| -> BTreeSet<String> { keys.iter().map(|k| k.to_string()).collect() };
     let groups = [group("b"), group("a"), group("c")];
-    let open: BTreeSet<String> = ["a", "c", "gone"].into_iter().map(String::from).collect();
-    let none = BTreeSet::new();
+    // Open when the refresh landed: a, c and one that left the result.
+    let stale = set(&["a", "c", "gone"]);
+    let settled = settle_open_groups(&stale, &stale, &groups);
+    assert_eq!(settled.open, set(&["a", "c"]));
     assert_eq!(
-        groups_to_reopen(&open, &none, &groups),
-        vec!["a".to_string(), "c".to_string()]
+        settled.refetch,
+        vec!["a".to_string(), "c".to_string()],
+        "in header order"
     );
-    assert!(groups_to_reopen(&none, &none, &groups).is_empty());
-    // The operator reopened "a" while the headers loaded: toggling it again would
-    // close it, so it is left alone.
-    let already: BTreeSet<String> = ["a".to_string()].into_iter().collect();
     assert_eq!(
-        groups_to_reopen(&open, &already, &groups),
-        vec!["c".to_string()]
+        settle_open_groups(&BTreeSet::new(), &BTreeSet::new(), &groups),
+        OpenGroups {
+            open: BTreeSet::new(),
+            refetch: Vec::new()
+        }
     );
+    // While the headers loaded the operator closed "c" and opened "b", whose
+    // members came from the new result: "c" stays closed, "b" is not refetched.
+    let settled = settle_open_groups(&stale, &set(&["a", "b"]), &groups);
+    assert_eq!(settled.open, set(&["a", "b"]));
+    assert_eq!(settled.refetch, vec!["a".to_string()]);
 }
 
 /// The load-bearing half of the selection model. Ticking one row must affect
@@ -772,8 +808,9 @@ fn a_device_the_answer_does_not_mention_keeps_its_selection() {
     let mut sel = BTreeMap::new();
     apply_rows_selection(&mut sel, &[a, b, c], true);
 
+    let probes = selection_probes(&sel);
     assert_eq!(
-        prune_selection_from_status(&mut sel, &[]),
+        prune_selection_from_status(&mut sel, &probes, &[]),
         0,
         "a miss prunes nothing"
     );
@@ -786,7 +823,7 @@ fn a_device_the_answer_does_not_mention_keeps_its_selection() {
         needs_reboot: false,
         present: vec![],
     };
-    assert_eq!(prune_selection_from_status(&mut sel, &[gone]), 1);
+    assert_eq!(prune_selection_from_status(&mut sel, &probes, &[gone]), 1);
     assert!(!sel.contains_key(&2), "out of scope drops the device");
     assert_eq!(sel[&1].patches.len(), 2, "device 1 was not mentioned");
 }
@@ -2890,8 +2927,13 @@ fn prune_keeps_only_ticked_rows_the_fresh_result_still_lists() {
         present,
     };
 
+    let probes = selection_probes(&sel);
     // KB2 was installed; KB1 is still pending and the device went offline.
-    let removed = prune_selection_from_status(&mut sel, &[status(10, true, vec![patch_key(&kb1)])]);
+    let removed = prune_selection_from_status(
+        &mut sel,
+        &probes,
+        &[status(10, true, vec![patch_key(&kb1)])],
+    );
     assert_eq!(removed, 1);
     let device = &sel[&10];
     assert_eq!(device.patches.len(), 1);
@@ -2901,15 +2943,77 @@ fn prune_keeps_only_ticked_rows_the_fresh_result_still_lists() {
 
     // A device with nothing left leaves the selection entirely.
     assert_eq!(
-        prune_selection_from_status(&mut sel, &[status(20, false, vec![])]),
+        prune_selection_from_status(&mut sel, &probes, &[status(20, false, vec![])]),
         1
     );
     assert!(!sel.contains_key(&20));
 
     // An unselected device is a no-op.
     assert_eq!(
-        prune_selection_from_status(&mut sel, &[status(99, false, vec![patch_key(&kb1)])]),
+        prune_selection_from_status(
+            &mut sel,
+            &probes,
+            &[status(99, false, vec![patch_key(&kb1)])]
+        ),
         0
+    );
+}
+
+/// The read is async: a row ticked while it was in flight was never asked about,
+/// so its absence from the answer must not untick it — on a device that was
+/// probed, on one that left the scope, and on one that was not probed at all.
+#[test]
+fn prune_spares_rows_ticked_after_the_probe_was_sent() {
+    use crate::types::SelectionStatus;
+    let probed = sel_row(10, "srv-a", Some("KB1"), "Patch 1", "OS");
+    let gone = sel_row(10, "srv-a", Some("KB2"), "Patch 2", "OS");
+    let late = sel_row(10, "srv-a", Some("KB3"), "Patch 3", "OS");
+    let late_new_device = sel_row(30, "srv-c", Some("KB1"), "Patch 1", "OS");
+    let mut sel = BTreeMap::new();
+    apply_rows_selection(&mut sel, &[&probed, &gone], true);
+    let probes = selection_probes(&sel);
+    // Ticked while the read was in flight.
+    apply_rows_selection(&mut sel, &[&late, &late_new_device], true);
+
+    let answer = [
+        SelectionStatus {
+            device_id: 10,
+            in_scope: true,
+            offline: false,
+            needs_reboot: false,
+            present: vec![patch_key(&probed)],
+        },
+        // Answered although not probed (never happens today): still not touched.
+        SelectionStatus {
+            device_id: 30,
+            in_scope: false,
+            offline: false,
+            needs_reboot: false,
+            present: vec![],
+        },
+    ];
+    assert_eq!(prune_selection_from_status(&mut sel, &probes, &answer), 1);
+    let device = &sel[&10];
+    assert!(device.patches.contains_key(&patch_key(&probed)));
+    assert!(!device.patches.contains_key(&patch_key(&gone)));
+    assert!(
+        device.patches.contains_key(&patch_key(&late)),
+        "a key absent from the probe is kept"
+    );
+    assert!(sel.contains_key(&30), "an unprobed device is kept");
+
+    // Out of scope drops only what was probed on the device.
+    let out = SelectionStatus {
+        device_id: 10,
+        in_scope: false,
+        offline: false,
+        needs_reboot: false,
+        present: vec![],
+    };
+    assert_eq!(prune_selection_from_status(&mut sel, &probes, &[out]), 1);
+    assert_eq!(
+        sel[&10].patches.keys().cloned().collect::<Vec<_>>(),
+        vec![patch_key(&late)]
     );
 }
 
@@ -3329,6 +3433,38 @@ fn the_apply_preview_states_what_will_and_will_not_install() {
         "{summary}"
     );
     assert!(!summary.contains(" 0 "), "{summary}");
+}
+
+#[test]
+fn the_confirm_dialog_says_how_current_online_status_is() {
+    assert_eq!(
+        device_status_as_of("2026-07-29 10:04:59 UTC"),
+        "Online/offline status as of 10:04 UTC."
+    );
+    assert_eq!(
+        device_status_as_of("yesterday"),
+        "Online/offline status as of yesterday.",
+        "an unexpected shape is shown whole"
+    );
+}
+
+#[test]
+fn the_audit_trail_names_the_instance_only_when_it_spans_several() {
+    let at = |instance: &str| AuditRecord {
+        instance: instance.into(),
+        ..AuditRecord::default()
+    };
+    assert!(!audit_spans_instances(&[]));
+    assert!(!audit_spans_instances(&[
+        at("https://a"),
+        at("https://a"),
+        at("")
+    ]));
+    assert!(audit_spans_instances(&[
+        at("https://a"),
+        at(""),
+        at("https://b")
+    ]));
 }
 
 #[test]

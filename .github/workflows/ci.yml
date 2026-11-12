@@ -15,6 +15,13 @@ on:
   # Manual re-run of everything, including the live contract check.
   workflow_dispatch:
 
+# Line tables, not full debuginfo, for every dev/test build CI does: backtraces keep
+# file and line, while target/ (cached and restored on every leg) and Windows' PDB
+# link step shrink. Local builds keep the default; nothing here debugs a binary.
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 # A new push to the same branch/PR supersedes the in-flight run — without this
 # every PR update queues a duplicate full 3-OS matrix.
 concurrency:
@@ -454,7 +461,8 @@ jobs:
 
           Read the diff above and decide what it means:
             * a new enum value on a field the code branches on -> check
-              Severity::from_raw, rows::is_pending, actions::is_action_activity
+              Severity::from_raw, rows::is_pending, actions::is_action_activity,
+              actions::is_run_code, model::NATIVE_END_CODES
             * a field that became free-form -> the parser must stay total
             * a removed or renamed endpoint -> a code path is already broken
           Then run:  python3 scripts/ninjaone-spec-digest.py <spec> > docs/api/ninjaone-surface.md

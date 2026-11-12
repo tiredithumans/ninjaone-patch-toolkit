@@ -167,7 +167,7 @@ backlog that tab never shows, so it stays where the patches it reaches are liste
 chosen next to the selection it may target. Those buttons are disabled with
 `util::source_disabled_reason`, and the request goes through the same `build_action_request` so
 the run options reach exactly the kinds they reach from the Patches tab. The device selection is
-cleared with the row selection (`clear_selection`) and pruned on an auto-refresh against the fresh
+cleared with the row selection (`clear_selection`) and pruned on a refresh of the same query against the fresh
 reboot list (`util::prune_device_level_selection`), since a device that just rebooted no longer
 belongs in it.
 
@@ -288,6 +288,12 @@ So does "Include offline devices", which is disabled while Settings forbids offl
 be offered regardless and then ignored. An offline device's skip reason names whichever switch is
 off.
 
+Online or offline is read from the whole-fleet device inventory, which `build_plan` takes from
+the cache (`AppState::fleet_devices_with_time`, up to `DEVICE_TTL`, 15 minutes old) rather than
+refetching per plan. The dialog used to state it as current. The plan now carries the inventory's
+fetch time (`ActionPlan.devices_fetched_at`) and the dialog says "Online/offline status as of
+HH:MM UTC" (`util::device_status_as_of`).
+
 ### Run as is a menu of what NinjaOne reports
 
 The spec types `runAs` only as "Credential role/identifier". It takes a role string (`system`,
@@ -319,7 +325,10 @@ the `remediation/README.md` table).
 
 Every `JobReport` carries a `JobRequest` — what that one device was sent: the script ref, a
 `Script`'s typed parameters, the **resolved** run-as, reboot choice/mode/reason, `include_offline`
-and the device's own targets (`commands::actions::job_request`, which destructures
+and the device's own targets — only when they were composed into its parameters; a `Script`'s
+typed string is sent verbatim and composes none, so neither the job nor `build_plan`'s
+"empty allow list" warning (`plan::empty_allow_list_warning`) speaks of targets never sent
+(`commands::actions::job_request`, which destructures
 `ActionRequest` exhaustively like `request_hash`). The Jobs tab rebuilds an `ActionRequest` from it
 (`util::retry_request`) and sends it through `plan_action`, so a retry gets a fresh payload-bound
 token and every `plan()` guardrail re-runs against current state. Nothing re-sends a POST.
@@ -409,6 +418,16 @@ token, sent only while the checkbox is shown, and **cleared after every dispatch
 dispatch is cut short by a sign-out or tenant switch. When it actually bypasses a closed window, `ActionPlan.window_overridden` is
 set and every opening audit record carries `windowOverride: true` (omitted otherwise, so ordinary
 records keep their shape); the audit trail shows "Live (window override)".
+
+`plan()` reads the window once, but a batch wider than the dispatch semaphore can queue its tail
+for minutes, and those devices used to be sent whenever their permit came, past the window's end.
+So every send re-reads it once its permit is held (`dispatch::send_if_current`, against the
+batch's settings snapshot and this computer's clock, through the same `window_is_open`), and a
+device whose turn comes after the window closed records `Skipped("not sent: maintenance window
+closed while dispatching")`. `dispatch::send_window` exempts what `plan()` exempts — a scan, a
+window not enforced — and a batch sent under an override (`window_overridden`). An override
+requested while the window was open overrode nothing, so it does not exempt the batch. The
+re-check is per device, not per retry attempt: a 429 retry already under way still goes out.
 
 ## After a mutating action, invalidate the current-patch cache
 
@@ -525,7 +544,8 @@ Three fields decide a job's fate and the spec gives them different jobs: `status
 enumerated lifecycle (`STARTED`/`IN_PROCESS`/`COMPLETED`/`CANCELLED`/`BLOCKED` for scripts,
 kind-prefixed codes for the native actions — see below), `status` is
 free-text "Status description" with no enum, and `activityResult` is the outcome
-(`SUCCESS`/`FAILURE`/`UNSUPPORTED`/`UNCOMPLETED`/`AGENT_OFFLINE`). `Activity::lifecycle()`
+(`SUCCESS`/`FAILURE`/`UNSUPPORTED`/`UNCOMPLETED` — the spec's whole enum, per the digest; any
+other value a tenant sends reads as a failure). `Activity::lifecycle()`
 prefers `statusCode` and falls back to `status`; `Activity::outcome()` takes the verdict from
 `activityResult` first, so a `COMPLETED` activity carrying `FAILURE` is a failed job. The exit code
 comes from `data` (the spec's untyped bag), with `result` kept as an alias — reading only `result`
@@ -560,11 +580,24 @@ pending dispatch on it (less the 5 s skew allowance), and `resolve_pending` hand
 that device the same list. It used to be one read per *job*, so a device carrying a scan, an
 apply and a reboot was asked for the same feed three times a tick. Correlation still runs in
 `pending` order with `claimed` threaded through, so two jobs on one device never bind the same
-activity; `commands::actions::tests` pins both with wiremock. The reads themselves are bounded:
+activity; `commands::actions::tests` pins both with wiremock. The third tier is first-in,
+first-out: the earliest unclaimed match at or after the job's own floor. `pending` is oldest
+first, so it used to pair the oldest job with the *newest* activity, and an OS then a Software
+remediation sent seconds apart (both `SCRIPTING`) each reported the other's verdict
+(`actions::tests::two_remediations_on_one_device_each_take_their_own_verdict`). What a job binds
+in that tier is claimed even when the job keeps an id its dispatch returned and the feed does not
+show; that id is not overwritten, so tier 1 still wins once the feed catches up. The reads themselves are bounded:
 at most `MAX_FEED_READS_IN_FLIGHT` (8) are in flight per tick. They used to be spawned all at
 once, so a 500-device batch put 500 GETs on the wire every 15 s and a 429 parked them all on
 the same `Retry-After`. The bound is a constant, not the "Dispatch concurrency" setting, so
 lowering that setting to send cautiously does not also slow every status check.
+
+Each read is also small. It asks for 50 rows (`ACTIVITY_FIRST_PAGE_SIZE`) and repeats at 500
+only when that page is full and its oldest row is still inside the window
+(`api::activities::window_may_be_cut_short`), and every row's `data` bag stays raw JSON until
+`Activity::exit_code` parses the one a job settles on. Every read used to ask for 500 rows and
+build a `Value` tree of each, so a 500-device batch moved up to 250 000 activities every 15 s
+for rows that were almost all discarded.
 
 The tick interval is 15 s and **backs off after failed reads**: `resolve_pending` returns how many
 feed reads failed, and `poller::next_poll_interval` doubles the wait after any failure, up to 60 s,
@@ -679,6 +712,11 @@ the file.
 `commands::diagnostics::read_audit_tail` reads the live file and then the generations, newest
 first, and stops as soon as it holds the tail. Rotation is by time, so an older generation can't
 hold a newer record. The legacy file is read last, and only while the tail is still short.
+
+Each record carries the `instance` it was sent to, and `AuditRecord` reads it back. The Jobs
+tab's audit trail adds an Instance column only when its records name more than one
+(`util::audit_spans_instances`): one log serves every tenant an MSP operator switches between,
+and without it two tenants' dispatches read as one history.
 
 A torn append (a crash, a full disk) used to cost more than its own record:
 

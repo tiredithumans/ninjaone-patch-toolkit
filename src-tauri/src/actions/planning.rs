@@ -59,6 +59,10 @@ pub struct ActionPlan {
     /// True when this dispatch goes out *because* the operator overrode a closed
     /// maintenance window — recorded on the audit trail, so a bypass is never silent.
     pub window_overridden: bool,
+    /// When the device inventory the offline check read was fetched — it is served
+    /// from a cache up to 15 minutes old, so the dialog says how current "online"
+    /// is. Set by `build_plan`; `None` from the pure planner.
+    pub devices_fetched_at: Option<String>,
     pub confirm_token: Option<String>,
 }
 
@@ -718,6 +722,7 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
         run_as: None,
         apply_preview,
         window_overridden,
+        devices_fetched_at: None,
         confirm_token: None,
     }
 }
@@ -803,7 +808,7 @@ fn org_labels(orgs: &BTreeMap<OrgKey, String>) -> Vec<String> {
 /// Whether `now` falls inside the configured window. A start later than the end
 /// means the window wraps past midnight (e.g. 22:00–04:00), in which case the day
 /// check applies to the day the window *opened*.
-pub(super) fn window_is_open(s: &ActionSettings, now: DateTime<Local>) -> bool {
+pub fn window_is_open(s: &ActionSettings, now: DateTime<Local>) -> bool {
     if s.window_days.is_empty() {
         return false;
     }

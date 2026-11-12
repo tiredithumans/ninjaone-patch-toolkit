@@ -12,8 +12,10 @@ paths:
   `with_current_result` / `current_result_handle` (memos via `sort_memo` / `group_memo` +
   `store_*_memo`); never touch the slot directly. → `docs/design/query-cache.md`
 - **Claim the `QueryToken` (`begin_query`) before any fetch and redeem it at the store.** A
-  superseded or tenant-drifted result is dropped. `StoreOutcome::Superseded` still returns the
-  summary; `TenantChanged`/`Poisoned` are errors (`commands::patches::summary_for`).
+  superseded, tenant-drifted or session-cleared result is dropped (the token carries
+  `result_epoch`, which `clear_last_result` bumps before clearing). `StoreOutcome::Superseded`
+  still returns the summary; `TenantChanged`/`SessionCleared`/`Poisoned` are errors
+  (`commands::patches::summary_for`).
   → `docs/design/query-cache.md#the-write-is-generation--and-tenant-gated`
 - **Tenant switch, sign-out, sign-in and re-authorize all call `clear_session()`** on the
   frontend and `clear_session_state` on the backend, and every lookup-like reply is dropped when
@@ -33,8 +35,10 @@ paths:
   `reboot_devices` — paged via `get_reboot_devices`); never ship one whole.
   → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
 - **Every TTL'd cache slot is a `TenantCache<T>`** — it owns the tenant stamp, TTL,
-  single-flight gate, and the epoch sampled on entry and re-checked at the store. A partial
-  (degraded) fetch is capped at `FORCE_MIN_INTERVAL`, never cached for the full TTL: a fetch
+  single-flight gate (which shares a failed fetch with the callers parked behind it, like a
+  success), and the epoch sampled on entry and re-checked at the store. A partial
+  (degraded) fetch is capped at `FORCE_MIN_INTERVAL`, doubling per consecutive degraded store
+  (`degraded_cap`), never cached for the full TTL on first failure: a fetch
   closure that falls back on an optional sub-feed returns `Fetched { degraded: true, .. }`.
   Displaced values are dropped outside the slot lock. Never open-code that protocol for a new
   slot; `last_result` is the one exception and is generation-gated instead.

@@ -543,11 +543,8 @@ async fn a_stable_cursor_name_with_an_advancing_offset_is_progress_not_a_stall()
     );
     assert_eq!(patches[0].status.as_deref(), Some("APPROVED"));
     assert_eq!(patches[0].device_id, Some(1));
-    // Third-party records carry no KB, and no product version or vendor field
-    // exists on the schema at all — the display name is the title alone.
+    // Third-party records carry no KB — the display name is the title alone.
     assert!(patches[0].kb_number.is_none());
-    assert!(patches[0].version.is_none());
-    assert!(patches[0].product_vendor.is_none());
 }
 
 /// The guard still has to stop a genuinely stalled scan, or an endpoint that
@@ -1444,6 +1441,103 @@ async fn get_timeout_is_replayed() {
     );
 }
 
+/// A raw HTTP server that answers its `n`th connection with `responses[n]` (the
+/// last one once they run out) and then closes it, so a test can cut a response
+/// off anywhere — before the headers, or partway through the body. Returns the
+/// base URL and the count of connections accepted.
+async fn raw_server(responses: Vec<&'static str>) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            let response = responses[n.min(responses.len() - 1)];
+            let mut buf = [0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    (format!("http://{addr}"), accepted)
+}
+
+/// Headers that promise more body than the connection then delivers.
+const CUT_OFF_MID_BODY: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+     Content-Length: 500\r\nConnection: close\r\n\r\n[{\"id\": 1, \"na";
+/// The connection closes as soon as the request is read: no status line at all.
+const CUT_OFF_BEFORE_HEADERS: &str = "";
+const ORGANIZATIONS: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+     Content-Length: 26\r\nConnection: close\r\n\r\n[{\"id\": 1, \"name\": \"A\"}]  ";
+
+/// An `Idempotent` read is asked for again when its connection drops in flight —
+/// before the headers, or partway through the body. The body used to be read
+/// outside the retry loop, and only a timeout or a connect failure before the
+/// headers was retried, so a reset mid-body failed the opening page of a scan, a
+/// `/devices-detailed` page, the lookups and the job poll outright.
+#[tokio::test]
+async fn an_idempotent_read_cut_off_in_flight_is_retried() {
+    use std::sync::atomic::Ordering;
+
+    for cut in [CUT_OFF_MID_BODY, CUT_OFF_BEFORE_HEADERS] {
+        let (base, accepted) = raw_server(vec![cut, ORGANIZATIONS]).await;
+        let http = reqwest::Client::new();
+        let auth = AuthState::seeded(http.clone(), base, "test-token");
+        let orgs = NinjaApiClient::new(http, auth)
+            .organizations()
+            .await
+            .expect("the read is retried");
+        assert_eq!(orgs.len(), 1);
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "one retry");
+    }
+}
+
+/// The body retry is `Idempotent`-only: an acting POST whose 2xx body is cut off
+/// was accepted, so it is an unknown outcome and is sent exactly once.
+#[tokio::test]
+async fn an_acting_post_cut_off_mid_body_is_unknown_and_not_replayed() {
+    use std::sync::atomic::Ordering;
+
+    let (base, accepted) = raw_server(vec![CUT_OFF_MID_BODY]).await;
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), base, "test-token");
+    let err = NinjaApiClient::new(http, auth)
+        .device_patch_scan(1, crate::model::PatchType::Os)
+        .await
+        .expect_err("the body never arrives whole");
+    assert!(is_outcome_unknown(&err), "{err:#}");
+    assert_eq!(accepted.load(Ordering::SeqCst), 1, "never replayed");
+}
+
+/// A blank success body is `Null` whatever its label. Labelled JSON it used to fail
+/// as "EOF while parsing", which on an acting POST read as an unknown outcome for a
+/// request NinjaOne had simply accepted.
+#[tokio::test]
+async fn a_blank_body_labelled_json_is_nothing_not_an_error() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/device/1/patch/os/scan"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(" \n", "application/json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    NinjaApiClient::new(http, auth)
+        .device_patch_scan(1, crate::model::PatchType::Os)
+        .await
+        .expect("a blank 200 is an accepted action");
+}
+
 /// The request that opens a scan carries no cursor, so there is no server-side
 /// position for a replay to skip past: a 5xx there is retried in place as before.
 #[tokio::test]
@@ -1773,7 +1867,8 @@ fn assert_redirect_named(err: &str, origin: &str) {
 /// A scripted `/queries/*` server: one response per request, in order, so a test
 /// can state exactly which pages a scan was handed. The row is a software patch
 /// built from the vendor's keys; only its count per page matters here. A bare
-/// number in the script is answered as that status with no body.
+/// number in the script is answered as that status with no body, and a bare string
+/// as a 200 whose body is that text verbatim, labelled JSON.
 struct ScriptedPages {
     pages: Vec<serde_json::Value>,
     served: std::sync::atomic::AtomicUsize,
@@ -1796,6 +1891,9 @@ impl wiremock::Respond for ScriptedPages {
         match self.pages.get(n) {
             Some(serde_json::Value::Number(status)) => {
                 wiremock::ResponseTemplate::new(status.as_u64().expect("a status") as u16)
+            }
+            Some(serde_json::Value::String(raw)) => {
+                wiremock::ResponseTemplate::new(200).set_body_raw(raw.clone(), "application/json")
             }
             Some(body) => wiremock::ResponseTemplate::new(200).set_body_json(body),
             // Past the script: a loop that keeps asking fails loudly here rather
@@ -2196,20 +2294,105 @@ async fn a_re_read_that_skipped_the_lost_page_restarts_the_scan() {
 
 /// A 2xx whose body cannot be read has still moved the scan on server-side, so it
 /// is as lost as a timeout and restarts the scan rather than failing the query.
+/// Here the body is cut off partway — not complete JSON — and so is one that is
+/// not JSON at all.
 #[tokio::test]
 async fn an_unreadable_cursor_page_restarts_the_scan() {
+    for unreadable in [r#"{"results": [{"deviceId": 1"#, "<html>bad gateway</html>"] {
+        let (result, cursors) = scan_software(vec![
+            json!({ "results": rows(2), "cursor": { "name": "broken", "offset": 2, "count": 3 } }),
+            json!(unreadable),
+            json!({ "results": rows(2), "cursor": { "name": "fresh", "offset": 2, "count": 3 } }),
+            json!({ "results": rows(1), "cursor": { "name": "", "offset": 3, "count": 3 } }),
+        ])
+        .await;
+        assert_eq!(
+            result.expect("the restarted scan completes").len(),
+            3,
+            "{unreadable}"
+        );
+        assert_eq!(
+            cursors,
+            [None, Some("broken".into()), None, Some("fresh".into())],
+            "{unreadable}"
+        );
+    }
+}
+
+/// A body that arrived as complete JSON but is not a page — `results` not an array,
+/// missing, or a row the model rejects — is the server's deliberate answer: a fresh
+/// scan would be handed the same one, so it fails at once instead of re-paging the
+/// feed twice to reach the same error.
+#[tokio::test]
+async fn a_cursor_page_that_is_whole_but_not_a_page_fails_without_a_restart() {
+    for not_a_page in [
+        json!({ "results": "truncated", "cursor": { "name": "broken", "offset": 4, "count": 3 } }),
+        json!({ "cursor": { "name": "broken", "offset": 4, "count": 3 } }),
+        json!({ "results": [42], "cursor": null }),
+    ] {
+        let (result, cursors) = scan_software(vec![
+            json!({ "results": rows(2), "cursor": { "name": "broken", "offset": 2, "count": 3 } }),
+            not_a_page.clone(),
+            json!({ "results": rows(3), "cursor": { "name": "", "offset": 3, "count": 3 } }),
+        ])
+        .await;
+        let err = result.expect_err("a malformed page is an error");
+        assert!(!is_cursor_replay_unsafe(&err), "{not_a_page}: {err:#}");
+        assert_eq!(
+            cursors,
+            [None, Some("broken".into())],
+            "{not_a_page}: no restart"
+        );
+    }
+}
+
+/// An empty 2xx body under a cursor is an empty page, and short of the announced
+/// count it restarts the scan exactly as `{"results": []}` does; it used to end the
+/// scan there and report the rows in hand as the whole feed.
+#[tokio::test]
+async fn an_empty_body_short_of_the_announced_count_restarts_the_scan() {
     let (result, cursors) = scan_software(vec![
         json!({ "results": rows(2), "cursor": { "name": "broken", "offset": 2, "count": 3 } }),
-        json!({ "results": "truncated", "cursor": { "name": "broken", "offset": 4, "count": 3 } }),
-        json!({ "results": rows(2), "cursor": { "name": "fresh", "offset": 2, "count": 3 } }),
-        json!({ "results": rows(1), "cursor": { "name": "", "offset": 3, "count": 3 } }),
+        json!(""),
+        json!({ "results": rows(3), "cursor": { "name": "", "offset": 3, "count": 3 } }),
     ])
     .await;
     assert_eq!(result.expect("the restarted scan completes").len(), 3);
-    assert_eq!(
-        cursors,
-        [None, Some("broken".into()), None, Some("fresh".into())]
-    );
+    assert_eq!(cursors, [None, Some("broken".into()), None]);
+
+    // At the count it is the end it always was.
+    let (result, cursors) = scan_software(vec![
+        json!({ "results": rows(2), "cursor": { "name": "scan", "offset": 2, "count": 2 } }),
+        json!(""),
+    ])
+    .await;
+    assert_eq!(result.expect("ends").len(), 2);
+    assert_eq!(cursors.len(), 2);
+}
+
+/// NinjaOne cursors have broken on their own and been refused with
+/// `400 Invalid cursor.`. On a first read that used to fail the fetch, while the
+/// same refusal of a re-read restarted the scan; now both start it over.
+#[tokio::test]
+async fn a_cursor_refused_on_a_first_read_restarts_the_scan() {
+    let (result, cursors) = scan_software(vec![
+        json!({ "results": rows(2), "cursor": { "name": "broken", "offset": 2, "count": 3 } }),
+        json!(400),
+        json!({ "results": rows(3), "cursor": { "name": "", "offset": 3, "count": 3 } }),
+    ])
+    .await;
+    assert_eq!(result.expect("the restarted scan completes").len(), 3);
+    assert_eq!(cursors, [None, Some("broken".into()), None]);
+
+    // Bounded by the shared restart budget like every other broken scan.
+    let first =
+        json!({ "results": rows(2), "cursor": { "name": "scan", "offset": 2, "count": 3 } });
+    let pages = (0..=SCAN_RESTARTS)
+        .flat_map(|_| [first.clone(), json!(400)])
+        .collect();
+    let (result, cursors) = scan_software(pages).await;
+    result.expect_err("a cursor refused on every scan is an error");
+    assert_eq!(cursors.len(), 2 * (1 + SCAN_RESTARTS as usize));
 }
 
 /// A scan that loses a cursor page every time it is opened — and whose re-read

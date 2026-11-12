@@ -118,6 +118,10 @@ impl AppState {
     /// locally. The results stay empty ("Run a query to list patches") until the user
     /// runs a query — exactly like the real app, which lists nothing until queried.
     pub(in crate::app) fn enter_demo(self) {
+        // The desktop build never shows sample data; see `SessionState::is_demo`.
+        if api::is_desktop_build() {
+            return;
+        }
         self.lookups.orgs.set(demo::sample_orgs());
         self.lookups.roles.set(demo::sample_roles());
         self.lookups.device_groups.set(demo::sample_device_groups());

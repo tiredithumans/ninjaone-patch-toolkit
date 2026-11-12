@@ -33,9 +33,10 @@ pub(crate) enum Tab {
 }
 
 /// A snapshot of the filters that produced the currently displayed result, captured
-/// at Run time (ids resolved to display names, raw values to labels) so the chip row
-/// always describes the on-screen data — even after the user edits a control but has
-/// not re-run. Frontend-only; never crosses IPC, so it is not mirrored in `types.rs`.
+/// at Run time (ids resolved to display names, raw values to labels) so what the UI
+/// says the results were filtered by — the "Filters changed" tooltip, the "Patch
+/// filters on these results" notes — describes the on-screen data, even after the
+/// user edits a control but has not re-run. Frontend-only; never crosses IPC, so it is not mirrored in `types.rs`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct AppliedFilters {
     /// Names of the selected organizations (empty = every organization). Plural for
@@ -125,6 +126,7 @@ pub(crate) struct SessionState {
     pub(super) auth_checked: RwSignal<bool>,
     pub(super) signing_in: RwSignal<bool>,
     /// Sample data is loaded (drives the "sample data" banner). Set by `enter_demo`.
+    /// Read only through [`is_demo`](Self::is_demo), never directly.
     pub(super) demo: RwSignal<bool>,
     /// Running in a plain browser with no Tauri backend — the GitHub Pages demo.
     /// Disables the backend-only actions (sign-in, live query, export).
@@ -160,6 +162,19 @@ impl SessionState {
     /// Whether a reply stamped `epoch` belongs to a session that has ended.
     pub(super) fn outlived(self, epoch: u64) -> bool {
         util::outlived_session(self.epoch.get_untracked(), epoch)
+    }
+
+    /// Whether the demo's sample data drives the app. Always false in a desktop
+    /// build, by construction rather than by a flag nobody sets: `is_desktop_build`
+    /// is const, so there every demo branch folds away (and `demo.rs` with it), and
+    /// no path can put invented orgs or patches in front of a patching operator.
+    pub(super) fn is_demo(self) -> bool {
+        !api::is_desktop_build() && self.demo.get()
+    }
+
+    /// [`is_demo`](Self::is_demo), untracked.
+    pub(super) fn is_demo_untracked(self) -> bool {
+        !api::is_desktop_build() && self.demo.get_untracked()
     }
 
     pub(super) fn is_authed(self) -> bool {
@@ -300,7 +315,7 @@ impl FilterState {
         });
     }
 
-    /// [`toggle_in`](Self::toggle_in) for an id facet. Kept sorted so the chip row,
+    /// [`toggle_in`](Self::toggle_in) for an id facet. Kept sorted so the filter labels,
     /// the `df` clause and preset equality all see one canonical order regardless of
     /// the order the operator ticked things.
     pub(super) fn toggle_id(self, sig: RwSignal<Vec<i64>>, id: i64) {
@@ -378,8 +393,8 @@ impl FilterState {
 pub(crate) struct QueryState {
     pub(super) result: RwSignal<Option<QueryResult>>,
     /// Filters that produced `result`, snapshotted on the last successful run. Drives
-    /// the read-only applied-filter chip row (kept in sync with the displayed result,
-    /// not the live controls).
+    /// the labels naming what the results on screen were filtered by (kept in sync
+    /// with the displayed result, not the live controls).
     pub(super) applied_filters: RwSignal<Option<AppliedFilters>>,
     /// The query that produced `result`, as sent. "Filters changed" compares the
     /// controls with it (`util::filters_changed`), and auto-refresh re-runs it.
@@ -431,6 +446,10 @@ pub(crate) struct QueryState {
     /// member fetch started before that is from a result no longer on screen, so
     /// it must neither fill the cache nor tick anything into the selection.
     pub(super) members_gen: RwSignal<u64>,
+    /// Open groups whose `members` entry is from the previous result: a silent
+    /// refresh keeps them on screen until the new header page lands and their
+    /// replacements are fetched (`util::settle_open_groups`).
+    pub(super) stale_members: RwSignal<BTreeSet<String>>,
     /// The sort the next manual run lands on instead of the canonical order —
     /// set by applying a shared view link, consumed (and cleared) by that run.
     pub(super) sort_on_next_run: RwSignal<Option<RowSort>>,
@@ -476,6 +495,18 @@ impl QueryState {
     pub(super) fn reset_members(self) {
         self.expanded.update(|e| e.clear());
         self.members.update(|m| m.clear());
+        self.stale_members.update(|s| s.clear());
+        self.members_gen.update(|g| *g = util::next_query_seq(*g));
+    }
+
+    /// A silent refresh landed: the open groups stay open with their old members
+    /// (marked stale) until the new headers land and each is refetched; a closed
+    /// group's cached members are dropped. Bumps `members_gen`, so a member fetch
+    /// still in flight for the old result is not cached.
+    pub(super) fn keep_open_members(self) {
+        let open = self.expanded.get_untracked();
+        self.members.update(|m| m.retain(|k, _| open.contains(k)));
+        self.stale_members.set(open);
         self.members_gen.update(|g| *g = util::next_query_seq(*g));
     }
 
@@ -508,6 +539,7 @@ impl QueryState {
             members: RwSignal::new(BTreeMap::new()),
             view_seq: RwSignal::new(0),
             members_gen: RwSignal::new(0),
+            stale_members: RwSignal::new(BTreeSet::new()),
             sort_on_next_run: RwSignal::new(None),
             drill: RwSignal::new(None),
             drill_seq: RwSignal::new(0),
@@ -729,6 +761,21 @@ impl UiState {
         }
     }
 
+    /// [`notify`](Self::notify), unless a toast is already showing: then the
+    /// message joins it, so a dispatch toast (and its View jobs button) is not
+    /// replaced by the news that arrives the moment its dialog closes.
+    pub(super) fn notify_or_append(self, t: Toast) {
+        if self.toast.with_untracked(Option::is_some) {
+            self.toast.update(|cur| {
+                if let Some(cur) = cur {
+                    cur.msg = format!("{} {}", cur.msg, t.msg);
+                }
+            });
+        } else {
+            self.notify(t);
+        }
+    }
+
     pub(super) fn notify(self, t: Toast) {
         let error = t.error;
         self.toast_slot(error).0.set(Some(t));
@@ -813,9 +860,9 @@ pub(crate) struct SelectedPatch {
 /// web/demo mode — there is no backend to dispatch to.
 #[derive(Clone, Copy)]
 pub(crate) struct ActionState {
-    /// device id → what was checked. Survives page changes; cleared by every
-    /// manual query (a new scope), pruned by an auto-refresh to the rows it still
-    /// lists.
+    /// device id → what was checked. Survives page changes; cleared by a run of a
+    /// different query (a new scope), pruned by a refresh of the same one — silent
+    /// or ↻ Refresh — to the rows it still lists.
     pub(super) selected: RwSignal<BTreeMap<i64, DeviceSelection>>,
     /// The Needs Reboot tab's **device-level** selection (`util::SelectionSource`).
     /// Its entries carry no patch rows, and it is a separate map from `selected` so
@@ -860,6 +907,19 @@ pub(crate) struct ActionState {
     pub(super) script_dialog: RwSignal<bool>,
     /// A mutating action landed since the displayed result was computed.
     pub(super) results_stale: RwSignal<bool>,
+    /// Post-refresh prunes held while the confirmation is open or planning
+    /// (`util::prune_timing`), applied once it closes.
+    pub(super) deferred_prunes: RwSignal<Vec<SelectionPrune>>,
+}
+
+/// One post-refresh selection prune: what was asked, what the backend answered,
+/// and which run's result it describes.
+#[derive(Clone, Debug)]
+pub(crate) struct SelectionPrune {
+    pub seq: u64,
+    pub source: SelectionSource,
+    pub probes: Vec<SelectionProbe>,
+    pub status: Vec<SelectionStatus>,
 }
 
 /// A planned action held open in the confirmation modal.
@@ -900,6 +960,7 @@ impl ActionState {
             watched: RwSignal::new(Vec::new()),
             script_dialog: RwSignal::new(false),
             results_stale: RwSignal::new(false),
+            deferred_prunes: RwSignal::new(Vec::new()),
         }
     }
 }

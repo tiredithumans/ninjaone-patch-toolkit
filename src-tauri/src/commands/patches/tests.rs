@@ -399,8 +399,10 @@ fn client(server: &MockServer) -> NinjaApiClient {
 /// The whole-fleet device future `run_query` now expects, backed by the test's
 /// `/devices-detailed` mock (the caching itself lives in `AppState` and is
 /// exercised separately). Keeps the existing per-test device mocks in play.
-async fn fleet_devices_via(c: &NinjaApiClient) -> anyhow::Result<Arc<Vec<Device>>> {
-    Ok(Arc::new(c.devices(None, None).await?))
+async fn fleet_devices_via(
+    c: &NinjaApiClient,
+) -> anyhow::Result<(Arc<Vec<Device>>, DateTime<Utc>)> {
+    Ok((Arc::new(c.devices(None, None).await?), fixed_now()))
 }
 
 /// The whole-fleet current-patches future, backed by the test's
@@ -465,11 +467,8 @@ fn cur(device_id: i64, kb: &str, status: &str, severity: &str) -> Patch {
         device_id: Some(device_id),
         kb_number: Some(kb.into()),
         name: None,
-        version: None,
-        product_vendor: None,
         severity: Some(severity.into()),
         status: Some(status.into()),
-        patch_type: None,
         collected_timestamp: Some(fixed_now().timestamp() as f64),
         installed_timestamp: None,
         product_identifier: None,
@@ -725,7 +724,7 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
     let row = &result.rows[0];
     assert_eq!(row.kb.as_deref(), Some("KBOK"));
     assert_eq!(&*row.status, "INSTALLED");
-    assert!(row.installed_date.is_some());
+    assert!(row.installed_ts.is_some());
 
     // No FAILED status was requested, so the failure rollup is empty.
     assert!(result.failures.is_empty());
@@ -1453,7 +1452,7 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
     let result = run_query(
         &api,
         async { Ok::<_, anyhow::Error>(lookups) },
-        async { Ok::<_, anyhow::Error>(devices) },
+        async { Ok::<_, anyhow::Error>((devices, fixed_now())) },
         async {
             Ok::<_, anyhow::Error>(CurrentPatches {
                 os: os_current,
@@ -1536,7 +1535,9 @@ async fn a_device_group_scope_narrows_to_its_members_and_fails_closed() {
             run_query(
                 api,
                 async { Ok::<_, anyhow::Error>(lookups) },
-                async { Ok::<_, anyhow::Error>(Arc::new(vec![dev(10, 1), dev(20, 1)])) },
+                async {
+                    Ok::<_, anyhow::Error>((Arc::new(vec![dev(10, 1), dev(20, 1)]), fixed_now()))
+                },
                 async {
                     Ok::<_, anyhow::Error>(CurrentPatches {
                         os: Arc::new(vec![
@@ -1601,7 +1602,12 @@ async fn group_scoped_query(
     run_query(
         api,
         async { Ok::<_, anyhow::Error>(lookups) },
-        async { Ok::<_, anyhow::Error>(Arc::new(vec![dev(10, 1), dev(20, 1), dev(30, 1)])) },
+        async {
+            Ok::<_, anyhow::Error>((
+                Arc::new(vec![dev(10, 1), dev(20, 1), dev(30, 1)]),
+                fixed_now(),
+            ))
+        },
         async {
             Ok::<_, anyhow::Error>(CurrentPatches {
                 os: Arc::new(vec![
@@ -1625,6 +1631,54 @@ async fn group_scoped_query(
         &|_: &'static str, _: usize| {},
     )
     .await
+}
+
+/// "Patch data as of" took only the patch families' time, while Needs Reboot and the
+/// offline exclusion come from an inventory cached for up to fifteen minutes that a
+/// forced refresh does not touch. The label is now the oldest input's time.
+#[tokio::test]
+async fn data_fetched_at_is_no_newer_than_the_device_inventory() {
+    let server = MockServer::start().await;
+    let api = client(&server);
+    let inventory_at = fixed_now() - chrono::Duration::minutes(14);
+    let lookups = Arc::new(LookupSet {
+        orgs: vec![Organization {
+            id: 1,
+            name: "Alpha".into(),
+        }],
+        locations: vec![],
+        roles: vec![],
+        device_groups: vec![],
+    });
+    let result = run_query(
+        &api,
+        async { Ok::<_, anyhow::Error>(lookups) },
+        async { Ok::<_, anyhow::Error>((Arc::new(vec![dev(10, 1)]), inventory_at)) },
+        async {
+            Ok::<_, anyhow::Error>(CurrentPatches {
+                os: Arc::new(vec![cur(10, "KB1", "MANUAL", "CRITICAL")]),
+                sw: Arc::new(Vec::new()),
+                fetched_at: fixed_now(),
+                os_fetched_at: Some(fixed_now()),
+                sw_fetched_at: None,
+            })
+        },
+        no_ledger(),
+        ExploitSnapshot::default(),
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        args(PatchType::Os, vec![PatchStatus::Pending]),
+        fixed_now(),
+        &|_: &'static str, _: usize| {},
+    )
+    .await
+    .expect("query")
+    .result;
+    assert_eq!(
+        result.data_fetched_at,
+        inventory_at.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+    );
 }
 
 fn group(id: i64, name: &str) -> crate::model::DeviceGroup {
@@ -1777,7 +1831,11 @@ async fn a_failed_fleet_leg_abandons_the_install_history_pull() {
     let query = run_query(
         &api,
         async { Ok::<_, anyhow::Error>(lookups) },
-        async { Err::<Arc<Vec<Device>>, _>(anyhow::anyhow!("device inventory unavailable")) },
+        async {
+            Err::<(Arc<Vec<Device>>, DateTime<Utc>), _>(anyhow::anyhow!(
+                "device inventory unavailable"
+            ))
+        },
         async {
             Ok::<_, anyhow::Error>(CurrentPatches {
                 os: Arc::new(Vec::new()),
@@ -1834,7 +1892,7 @@ async fn a_failed_lookups_leg_abandons_the_install_history_pull() {
     let query = run_query(
         &api,
         async { Err::<Lookups, _>(anyhow::anyhow!("lookups unavailable")) },
-        async { Ok::<_, anyhow::Error>(Arc::new(vec![dev(10, 1)])) },
+        async { Ok::<_, anyhow::Error>((Arc::new(vec![dev(10, 1)]), fixed_now())) },
         async {
             Ok::<_, anyhow::Error>(CurrentPatches {
                 os: Arc::new(Vec::new()),
@@ -1933,7 +1991,7 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
     let run = run_query(
         &api,
         async { Ok::<_, anyhow::Error>(lookups) },
-        async { Ok::<_, anyhow::Error>(devices) },
+        async { Ok::<_, anyhow::Error>((devices, fixed_now())) },
         async {
             Ok::<_, anyhow::Error>(CurrentPatches {
                 os: os_current,
@@ -2010,7 +2068,7 @@ async fn a_scoped_query_observes_the_whole_fleets_feed() {
     let run = run_query(
         &api,
         async { Ok::<_, anyhow::Error>(lookups) },
-        async { Ok::<_, anyhow::Error>(devices) },
+        async { Ok::<_, anyhow::Error>((devices, fixed_now())) },
         async {
             Ok::<_, anyhow::Error>(CurrentPatches {
                 os: os_current,

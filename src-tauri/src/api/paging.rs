@@ -10,11 +10,11 @@ use std::collections::HashSet;
 use tracing::{info, warn};
 
 use super::{
-    CursorReplayUnsafe, NinjaApiClient, ReplaySafety, cursor_page_may_be_unserved,
-    is_cursor_replay_unsafe,
+    CursorReplayUnsafe, Fetched, NinjaApiClient, ReplaySafety, cursor_page_may_be_unserved,
+    is_cursor_refused, is_cursor_replay_unsafe,
 };
 use crate::error::truncate_body;
-use crate::model::{Device, DeviceHealth, Location, Organization, Patch, Role};
+use crate::model::{Device, DeviceHealth, Location, Organization, Patch};
 
 pub(super) const DEFAULT_PAGE_SIZE: u32 = 500;
 /// Page size for the high-volume `/queries/*` reporting endpoints (patches and
@@ -45,7 +45,7 @@ pub(super) const REPORTING_PAGE_SIZE: u32 = 5000;
 const MAX_PAGES: u32 = 10_000;
 
 /// How many times one cursor scan starts over, and how long to wait before each
-/// restart. Two failures share the budget, because they share the one recovery
+/// restart. Every failure below shares the budget, because they share the one recovery
 /// known to be safe: a fresh scan from page 1, with no cursor.
 ///
 /// **An empty page while the cursor's `count` says rows remain.** NinjaOne's normal
@@ -56,7 +56,8 @@ const MAX_PAGES: u32 = 10_000;
 /// does not recover the scan. It used to be re-read, and the field logs show the
 /// cursor is broken once it serves the empty page: the OS feed's re-read was refused
 /// with `400 Invalid cursor.`, failing the query, and a third-party feed's re-read
-/// carried on but ended 6,959 rows short of its count.
+/// carried on but ended 6,959 rows short of its count. An empty 2xx body there is
+/// the same empty page, and so is a cursor NinjaOne refuses with a `400`.
 ///
 /// **A cursor page whose response was lost**, when re-reading it cannot help or did
 /// not: a 2xx whose body could not be read (NinjaOne served that page, so a re-read
@@ -162,23 +163,25 @@ impl NinjaApiClient {
     ///
     /// For a [`ReplaySafety::CursorPage`] request a body that cannot be read is a
     /// [`CursorReplayUnsafe`]: the server answered 2xx, so it has moved the scan past
-    /// the page we failed to read.
+    /// the page we failed to read. A body that decoded as complete JSON but is not a
+    /// page ([`MalformedPage`]) is not: it arrived whole, so it is the server's
+    /// answer, and a fresh scan would only be handed the same one.
     async fn request_page<T: DeserializeOwned + Send + 'static>(
         &self,
         path: &str,
         query: &[(&str, String)],
         replay: ReplaySafety,
     ) -> Result<PageBody<T>> {
-        let resp = self
-            .send_with_retry(Method::GET, path, query, None, replay)
-            .await?;
-        match decode_page(resp).await {
-            Err(err) if replay == ReplaySafety::CursorPage => {
-                Err(err.context(CursorReplayUnsafe {
+        let decoded = match self.fetch(Method::GET, path, query, None, replay).await {
+            Ok(fetched) => decode_page(fetched).await,
+            Err(err) => return Err(err),
+        };
+        match decoded {
+            Err(err) if replay == ReplaySafety::CursorPage && !is_malformed_page(&err) => Err(err
+                .context(CursorReplayUnsafe {
                     why: "NinjaOne answered the cursor page but it could not be read".into(),
                     served: true,
-                }))
-            }
+                })),
             other => other,
         }
     }
@@ -307,9 +310,15 @@ impl NinjaApiClient {
                 }
                 // Any failure of a re-read restarts the scan, a refusal included:
                 // the field has answered a re-sent cursor with `400 Invalid cursor.`
-                Err(err) if rereading || is_cursor_replay_unsafe(&err) => {
+                // So does that refusal on a first read: NinjaOne cursors have broken
+                // on their own, and a fresh scan is the one recovery known to work.
+                Err(err)
+                    if rereading || is_cursor_replay_unsafe(&err) || is_cursor_refused(&err) =>
+                {
                     let reason = if rereading {
                         format!("re-reading the lost cursor page failed: {err:#}")
+                    } else if is_cursor_refused(&err) {
+                        format!("cursor refused: {err:#}")
                     } else {
                         format!("cursor page lost: {err:#}")
                     };
@@ -381,10 +390,14 @@ impl NinjaApiClient {
                         }
                     }
                 }
-                PageBody::Envelope {
-                    results,
-                    cursor: next,
-                } => {
+                // An empty body is an empty page with no cursor, so mid-scan it is
+                // held to the announced count exactly as `{"results": []}` is; it used
+                // to end the scan short of the count, as a success.
+                page => {
+                    let (results, next, empty_exit) = match page {
+                        PageBody::Envelope { results, cursor } => (results, cursor, "empty page"),
+                        _ => (Vec::new(), None, "empty body"),
+                    };
                     let page_len = results.len();
                     all.extend(results);
 
@@ -440,7 +453,7 @@ impl NinjaApiClient {
                                 all.len()
                             );
                         }
-                        "empty page"
+                        empty_exit
                     } else {
                         match next_cursor(next.as_ref())? {
                             // Forward progress is required here for the same reason the
@@ -498,7 +511,6 @@ impl NinjaApiClient {
                         }
                     }
                 }
-                PageBody::Empty => "empty body",
             };
             // Every end of a scan passes here, so a re-read scan cannot slip out short
             // (or long) of its count through any of them. Off by any amount is a
@@ -577,12 +589,6 @@ impl PagedRow for Location {
     }
 }
 
-impl PagedRow for Role {
-    fn row_id(&self) -> Option<i64> {
-        Some(self.id)
-    }
-}
-
 impl PagedRow for DeviceHealth {
     /// `/queries/device-health` pages by cursor; `deviceId` is not a row id.
     fn row_id(&self) -> Option<i64> {
@@ -602,7 +608,7 @@ impl PagedRow for Patch {
 #[derive(Debug)]
 pub(super) enum PageBody<T> {
     /// A bare JSON array — the `after`-paginated list endpoints
-    /// (`/devices-detailed`, `/organizations`, `/locations`, `/roles`).
+    /// (`/devices-detailed`, `/organizations`, `/locations`).
     Array(Vec<T>),
     /// The `{ results, cursor }` envelope — the `/queries/*` reporting endpoints.
     /// The cursor stays a [`Value`] because it is one small field per page, so
@@ -640,12 +646,12 @@ struct RawEnvelope<'a> {
 /// hop costs microseconds against a page's round trip, so even the small lookup
 /// pages take it rather than carry a size cutoff.
 async fn decode_page<T: DeserializeOwned + Send + 'static>(
-    resp: reqwest::Response,
+    fetched: Fetched,
 ) -> Result<PageBody<T>> {
-    if resp.status() == StatusCode::NO_CONTENT {
+    if fetched.status == StatusCode::NO_CONTENT {
         return Ok(PageBody::Empty);
     }
-    let bytes = resp.bytes().await.context("read body")?;
+    let bytes = fetched.bytes;
     tokio::task::spawn_blocking(move || parse_page(&bytes))
         .await
         .context("page decode task failed")?
@@ -665,31 +671,13 @@ pub(super) fn parse_page<T: DeserializeOwned>(bytes: &[u8]) -> Result<PageBody<T
             serde_json::from_slice(trimmed).context("deserialize page item")?,
         )),
         Some(b'{') => {
+            // Stage 1: the whole body is syntactically complete JSON. `RawValue`
+            // validates what it borrows, so a body cut off in transit fails here.
             let env: RawEnvelope =
                 serde_json::from_slice(trimmed).context("decode paginated envelope")?;
-            let Some(results) = env.results else {
-                bail!("paginated response missing `results`");
-            };
-            // `results` must be an array. A non-array (string/object/number) is a
-            // malformed envelope, not an empty page — fail loudly rather than
-            // silently treating it as zero rows and stopping, which would return a
-            // truncated fleet as if it were complete. Checked on the raw slice so the
-            // message names the shape that arrived rather than serde's type error.
-            let raw = results.get();
-            if !raw.trim_start().starts_with('[') {
-                bail!(
-                    "paginated `results` was not an array: {}",
-                    truncate_body(raw)
-                );
-            }
-            Ok(PageBody::Envelope {
-                results: serde_json::from_str(raw).context("deserialize page item")?,
-                cursor: env
-                    .cursor
-                    .map(|c| serde_json::from_str::<Value>(c.get()))
-                    .transpose()
-                    .context("decode cursor")?,
-            })
+            // Stage 2: the complete body is a page. Failing here is the server's
+            // deliberate answer, typed so a cursor page does not restart over it.
+            parse_envelope(env).map_err(|err| anyhow::Error::new(MalformedPage(format!("{err:#}"))))
         }
         Some(b'n') if trimmed == b"null" => Ok(PageBody::Empty),
         _ => bail!(
@@ -697,6 +685,58 @@ pub(super) fn parse_page<T: DeserializeOwned>(bytes: &[u8]) -> Result<PageBody<T
             truncate_body(&String::from_utf8_lossy(trimmed))
         ),
     }
+}
+
+/// Stage 2 of [`parse_page`]: a complete JSON object read as a page.
+fn parse_envelope<T: DeserializeOwned>(env: RawEnvelope<'_>) -> Result<PageBody<T>> {
+    let Some(results) = env.results else {
+        bail!("paginated response missing `results`");
+    };
+    // `results` must be an array. A non-array (string/object/number) is a malformed
+    // envelope, not an empty page — fail loudly rather than silently treating it as
+    // zero rows and stopping, which would return a truncated fleet as if it were
+    // complete. Checked on the raw slice so the message names the shape that
+    // arrived rather than serde's type error.
+    let raw = results.get();
+    if !raw.trim_start().starts_with('[') {
+        bail!(
+            "paginated `results` was not an array: {}",
+            truncate_body(raw)
+        );
+    }
+    Ok(PageBody::Envelope {
+        results: serde_json::from_str(raw).context("deserialize page item")?,
+        cursor: env
+            .cursor
+            .map(|c| serde_json::from_str::<Value>(c.get()))
+            .transpose()
+            .context("decode cursor")?,
+    })
+}
+
+/// A page body that arrived as complete JSON but is not a page: `results` missing
+/// or not an array, or a row the model rejects.
+///
+/// It used to fail a cursor page as an unreadable 2xx, which restarts the scan —
+/// twice, under [`SCAN_RESTARTS`] — before failing the same way, because the note
+/// here held that it could not be told apart from a body truncated in transit. It
+/// can: a truncated body is not complete JSON, and fails reading the bytes or at
+/// stage 1 of [`parse_page`], which still restart. It carries the failure's own
+/// message, so the error reads exactly as it did.
+#[derive(Debug)]
+pub(super) struct MalformedPage(String);
+
+impl std::fmt::Display for MalformedPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MalformedPage {}
+
+/// Whether `err` (or anything it wraps) is a [`MalformedPage`].
+pub(super) fn is_malformed_page(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<MalformedPage>().is_some()
 }
 
 /// The scan's total row count as the cursor announces it, when it does.
@@ -770,11 +810,9 @@ pub(super) struct PageCursor {
 /// one. Reporting a partial fleet as complete understates every compliance number
 /// derived from it. This arm used to return `None` and stop silently.
 ///
-/// It fails at once even on a cursor page, where a malformed `results` restarts
-/// the scan first: that one is a body that would not decode, which cannot cheaply
-/// be told apart from a page truncated in transit, while a cursor of an unknown
-/// shape came in a body that decoded whole — the server's deliberate answer, which
-/// every fresh scan would repeat.
+/// It fails at once even on a cursor page, like a [`MalformedPage`]: a cursor of an
+/// unknown shape came in a body that decoded whole — the server's deliberate
+/// answer, which every fresh scan would repeat.
 pub(super) fn next_cursor(value: Option<&Value>) -> Result<Option<PageCursor>> {
     let Some(value) = value else {
         return Ok(None);

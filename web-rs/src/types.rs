@@ -1313,6 +1313,9 @@ pub struct ActionPlan {
     /// This dispatch goes out only because it overrides a closed maintenance window.
     #[serde(default)]
     pub window_overridden: bool,
+    /// When the device inventory the offline check read was fetched (`fmt_ts`, UTC).
+    #[serde(default)]
+    pub devices_fetched_at: Option<String>,
     /// Absent when the plan is blocked — there is nothing to confirm.
     pub confirm_token: Option<String>,
 }
@@ -1498,6 +1501,8 @@ pub struct ActionProgressEvent {
 #[serde(rename_all = "camelCase", default)]
 pub struct AuditRecord {
     pub timestamp: String,
+    /// The NinjaOne instance the dispatch went to (empty on records that predate it).
+    pub instance: String,
     pub kind: String,
     pub device_name: String,
     pub organization: String,

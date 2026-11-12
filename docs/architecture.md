@@ -8,7 +8,7 @@ in [`.claude/rules/`](../.claude/rules/); rationale is in [design notes](./desig
 ```
 src-tauri/                       # Tauri 2 backend (native target)
 ├── src/lib.rs                   # Tauri builder, tracing init, generate_handler![] registry
-├── src/paths.rs                 # app_dir() (settings, audit, history, window state) and local_dir()/local_subdir() (logs, ledger, snapshots, exploit data; moved there once)
+├── src/paths.rs                 # app_dir() (settings, audit, history, window state) and local_dir()/local_subdir() (logs, ledger, snapshots, exploit data; moved there once); write_atomic(_with), the one temp-and-rename writer
 ├── src/state.rs                 # AppState: auth, api client, settings, result cache + memos, fleet/lookup accessors, invalidation
 ├── src/state/cache.rs           # TenantCache<T>: tenant-stamped, TTL'd, epoch-gated, single-flight slot
 ├── src/state/jobs.rs            # job store, single-claim poller slot, confirm-token slot
@@ -65,7 +65,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 ├── src/commands/diagnostics.rs  # read-only: open the log folder, read back action-audit.jsonl
 ├── tauri.conf.json              # CSP, bundle targets, before{Dev,Build}Command, updater (pubkey/endpoint); main window starts hidden
 ├── updater-build.json           # release-only overlay: createUpdaterArtifacts on (signing required)
-└── capabilities/default.json    # webview capabilities: `core:default` only (the save dialog runs in Rust)
+└── capabilities/default.json    # webview capabilities: event listen/unlisten only (window, dialog, updater run in Rust)
 
 web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 crate
 ├── src/app.rs                   # module decls, shared consts (SEVERITY_OPTIONS), App root + startup wiring
@@ -95,7 +95,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 ```
 
 Supporting surfaces: `.claude/hooks/` (commit-msg rule + command parity + staleness + secrets
-scan, `test.sh` self-tests them), `.github/workflows/` (ci · codeql · dependabot-automerge ·
+scan, `test.sh` self-tests them and `.githooks/commit-msg`), `.github/workflows/` (ci · codeql · dependabot-automerge ·
 pages · release · screenshot), `remediation/` (reference "Apply selected" PowerShell scripts; `tests/fixtures`
 pins `build_parameters`), `scripts/` (screenshot tooling, changelog-notes.sh,
 check-license-lists.sh, ninjaone-spec-digest.py, run-pester.ps1 behind `just pester`), `about.toml` + templates →

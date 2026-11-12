@@ -42,11 +42,7 @@ pub(crate) fn dismiss_on_outside(open: RwSignal<bool>, root: NodeRef<Div>) {
             return;
         }
         open.set(false);
-        if let Some(trigger) = root
-            .get_untracked()
-            .and_then(|r| r.query_selector("button").ok().flatten())
-            .and_then(|b| b.dyn_into::<HtmlElement>().ok())
-        {
+        if let Some(trigger) = trigger_of(root) {
             let _ = trigger.focus();
         }
     });
@@ -54,6 +50,28 @@ pub(crate) fn dismiss_on_outside(open: RwSignal<bool>, root: NodeRef<Div>) {
         press.remove();
         key.remove();
     });
+}
+
+/// The menu's trigger: the first button inside its root.
+fn trigger_of(root: NodeRef<Div>) -> Option<HtmlElement> {
+    root.get_untracked()
+        .and_then(|r| r.query_selector("button").ok().flatten())
+        .and_then(|b| b.dyn_into::<HtmlElement>().ok())
+}
+
+/// A press on a button inside the panel may open a dialog as the panel hides,
+/// which drops focus to `<body>`: point that dialog back at the trigger
+/// (`modal::return_focus_to`). Harmless when no dialog opens — the next trap only
+/// uses it if focus is lost, and takes it either way.
+fn remember_trigger_on_item(ev: &leptos::ev::MouseEvent, root: NodeRef<Div>) {
+    let on_button = ev
+        .target()
+        .and_then(|t| t.dyn_into::<Element>().ok())
+        .and_then(|el| el.closest("button").ok().flatten())
+        .is_some();
+    if on_button && let Some(trigger) = trigger_of(root) {
+        super::modal::return_focus_to(trigger);
+    }
 }
 
 /// A button that opens a panel of actions below it.
@@ -83,6 +101,7 @@ pub(crate) fn MenuButton(
     dismiss_on_outside(open, root);
     let children = StoredValue::new(children);
     let close_on_item = move |ev: leptos::ev::MouseEvent| {
+        remember_trigger_on_item(&ev, root);
         let item = ev
             .target()
             .and_then(|t| t.dyn_into::<Element>().ok())
@@ -186,6 +205,7 @@ pub(crate) fn Popover(
                     }
                 }
                 prop:hidden=move || !open.get()
+                on:click=move |ev| remember_trigger_on_item(&ev, root)
             >
                 {children()}
             </div>

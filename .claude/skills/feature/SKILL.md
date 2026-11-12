@@ -23,8 +23,8 @@ Read the matching rule file **before** writing anything:
 - **New filter facet** → `.claude/rules/filter.md` — device facet vs client-side patch facet.
 - **New UI surface** → `.claude/rules/frontend.md`; any logic worth asserting goes in
   `web-rs/src/app/util/` as a free function with a test.
-- Conventional Commits scope: `desktop`, `web`, `api`, `auth`, `export`, `filter`, `settings`,
-  `ci`, `docs`.
+- Conventional Commits scope: `desktop`, `web`, `api`, `auth`, `actions`, `export`, `filter`,
+  `settings`, `ci`, `docs`, `release`.
 - Branch name: `<type>/<short-slug>` (e.g. `feat/org-compliance-export`).
 
 ## 1. Branch

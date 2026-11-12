@@ -11,7 +11,7 @@ use crate::model::PatchRow;
 use crate::rows::{
     ApprovalBacklog, CVE_COLUMN_NOTES, ComplianceBucket, DeviceBacklog, DeviceBacklogList,
     DeviceSummary, FailureGroup, FirstSeenTracking, InstallLatency, OFFLINE_BACKLOG_NOTE,
-    OsCompliance, PatchFamilies, QueryScope, REBOOT_COLUMN_NOTES, StuckDevice,
+    OsCompliance, PatchFamilies, QueryResult, QueryScope, REBOOT_COLUMN_NOTES, StuckDevice,
     TIME_TO_INSTALL_NOTE, TableCell, TableColumn, TimeToInstall, VULNERABILITY_COUNTS_NOTE,
     WORST_DEVICES_NOTE, calculation_notes, clamp_cell, headline_figures, uncounted_orgs_note,
     utc_text,
@@ -181,7 +181,7 @@ fn header_format() -> Format {
 /// Written to `out` rather than to a path, so the caller decides how the file is
 /// opened — the export command creates it owner-only before the first byte.
 #[allow(clippy::too_many_arguments)]
-pub fn write_workbook<W: Write + Send>(
+fn write_workbook<W: Write + Send>(
     out: W,
     rows: &[PatchRow],
     compliance: &[ComplianceBucket],
@@ -203,6 +203,48 @@ pub fn write_workbook<W: Write + Send>(
         approvals,
         meta,
         MAX_SHEET_DATA_ROWS,
+    )
+}
+
+/// [`write_workbook`] for a query result: the one mapping from a `QueryResult`'s
+/// fields onto the sheets and the About block, shared by the export command and its
+/// test so the two cannot drift (the test used to re-type it).
+pub fn write_result_workbook<W: Write + Send>(out: W, result: &QueryResult) -> Result<()> {
+    let scope_note = crate::rows::compliance_scope_note(
+        result.devices_offline,
+        result.devices_unpatchable,
+        result.patch_families,
+    );
+    write_workbook(
+        out,
+        &result.rows,
+        &result.compliance,
+        &result.compliance_by_os,
+        &result.devices,
+        &result.failures,
+        &BacklogSheets {
+            worst_devices: &result.worst_devices,
+            offline_backlog: &result.offline_backlog,
+            time_to_install: &result.time_to_install,
+        },
+        &result.approvals,
+        &WorkbookMeta {
+            generated_at: &result.generated_at,
+            data_fetched_at: &result.data_fetched_at,
+            devices_total: result.devices_total,
+            devices_offline: result.devices_offline,
+            devices_unpatchable: result.devices_unpatchable,
+            scope: &result.scope,
+            scope_note: &scope_note,
+            changes: &result.changes,
+            instance: &result.instance,
+            sla_policy: &result.sla_policy,
+            compliance_total: &result.compliance_total,
+            uncounted_orgs: &result.uncounted_orgs,
+            first_seen: &result.first_seen,
+            patch_families: result.patch_families,
+            exploit_data: &result.exploit_data.sentence,
+        },
     )
 }
 
@@ -942,8 +984,6 @@ mod tests {
             severity: "Critical",
             severity_rank: 5,
             status: "PENDING".into(),
-            first_seen_date: Some("2026-05-01 00:00 UTC".into()),
-            installed_date: None,
             first_seen_ts: Some(1_777_000_000),
             installed_ts: None,
             product_identifier: None,

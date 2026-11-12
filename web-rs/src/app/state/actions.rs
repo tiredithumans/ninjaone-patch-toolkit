@@ -109,7 +109,7 @@ impl AppState {
         self.session.auth.with(|auth| {
             action_blocked_reason(
                 self.session.web_mode.get(),
-                self.session.demo.get(),
+                self.session.is_demo(),
                 auth.as_ref(),
             )
         })
@@ -121,7 +121,7 @@ impl AppState {
         self.session.auth.with_untracked(|auth| {
             action_blocked_reason(
                 self.session.web_mode.get_untracked(),
-                self.session.demo.get_untracked(),
+                self.session.is_demo_untracked(),
                 auth.as_ref(),
             )
         })
@@ -138,7 +138,7 @@ impl AppState {
     /// make the demo misrepresent the product.
     pub(in crate::app) fn action_surface_visible(self) -> bool {
         self.session.web_mode.get()
-            || self.session.demo.get()
+            || self.session.is_demo()
             || self
                 .session
                 .auth
@@ -486,7 +486,7 @@ impl AppState {
     }
 
     pub(in crate::app) fn refresh_jobs(self) {
-        if self.session.web_mode.get_untracked() || self.session.demo.get_untracked() {
+        if self.session.web_mode.get_untracked() || self.session.is_demo_untracked() {
             return;
         }
         let epoch = self.session.epoch();
