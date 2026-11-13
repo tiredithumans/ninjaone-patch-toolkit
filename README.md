@@ -110,7 +110,7 @@ Copy the generated **Client ID** (and the **Client Secret** only if you chose `W
 
 ## Prerequisites
 
-- Rust **1.98** with the `wasm32-unknown-unknown` target (pinned in `rust-toolchain.toml`;
+- Rust **1.100** with the `wasm32-unknown-unknown` target (pinned in `rust-toolchain.toml`;
   rustup installs both on first build).
 - [`just`](https://just.systems) (`cargo install just`, or brew/winget) — the task runner
   every command below goes through.

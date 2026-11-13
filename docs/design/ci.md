@@ -166,7 +166,7 @@ compiles or installs holds only the permissions it must:
   `environment: release`; the key's secrets belong to that environment, whose deployment rule
   admits only `v*` tags. Moving the secrets there is a repo setting — see
   [RELEASING.md](../RELEASING.md).
-- `rust-toolchain.toml` pins the same patch toolchain (`1.98.1`) the workflows install, so the
+- `rust-toolchain.toml` pins the same patch toolchain (`1.100.0`) the workflows install, so the
   components CI adds land on the toolchain the build actually uses.
 - Dependabot proposes a version only after a 7-day `cooldown` (every ecosystem in
   `dependabot.yml`; security updates are exempt). Minor and patch PRs auto-merge on green CI and

@@ -2,7 +2,7 @@
 name = "ninjaone-patch-toolkit"
 version = "0.23.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.100"
 description = "PKCE-authenticated NinjaOne patching-operations toolkit (Tauri 2 + Leptos)"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -85,7 +85,7 @@ serde = { version = "1.0", features = ["derive"] }
 # See `api::parse_page`.
 serde_json = { version = "1.0", features = ["raw_value"] }
 sha2 = "0.11"
-tokio = { version = "1.53", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
 tracing = "0.1"
 # Rolling daily log files. Used without the `non-blocking` writer on purpose (see
 # `init_tracing`), so this pulls in no extra runtime machinery.

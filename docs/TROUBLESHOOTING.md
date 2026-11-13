@@ -208,7 +208,7 @@ dialog open too long) invalidates the approval. Re-open the action and confirm a
 
 ## Build & run (contributors)
 
-- Needs Rust **1.98** with the `wasm32-unknown-unknown` target (pinned in
+- Needs Rust **1.100** with the `wasm32-unknown-unknown` target (pinned in
   `rust-toolchain.toml`), `just`, `trunk`, and the Tauri CLI. Trunk fetches the
   `wasm-bindgen` CLI matching `web-rs/Cargo.lock` on its own, so no separate
   `wasm-bindgen-cli` install is needed.
