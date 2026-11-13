@@ -107,7 +107,7 @@ jobs:
           # through the API. Don't leave a token in .git/config for build scripts.
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: dtolnay/rust-toolchain@9522411a9bce8484da960823fc2f46e52f981f71 # 1.100.0
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
@@ -121,7 +121,7 @@ jobs:
           # none was ever restored.
           save-if: false
 
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: just,cargo-about
 
@@ -259,7 +259,7 @@ jobs:
           # through the API. Don't leave a token in .git/config for build scripts.
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: dtolnay/rust-toolchain@9522411a9bce8484da960823fc2f46e52f981f71 # 1.100.0
         with:
           targets: wasm32-unknown-unknown
 
@@ -270,7 +270,7 @@ jobs:
       # poisoned artifact in it would be linked straight into a signed bundle. A
       # release is rare enough that a cold build is the right price.
 
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: trunk
 

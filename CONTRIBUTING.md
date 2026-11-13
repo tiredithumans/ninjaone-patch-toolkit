@@ -21,7 +21,7 @@ just dev                # daily dev loop (= cargo tauri dev; auto-starts trunk s
 `just setup` is a step of its own. The `Conventional commits` CI job enforces the
 same rule for anyone who skips it.
 
-You also need Rust 1.98 with the `wasm32-unknown-unknown` target (pinned in
+You also need Rust 1.100 with the `wasm32-unknown-unknown` target (pinned in
 `rust-toolchain.toml`), the Tauri CLI, and `trunk`. No secrets or env vars are
 needed to build — the NinjaOne **Region/Instance**, **Client ID**, and optional
 **Secret** are entered at runtime in the app's **Settings**.
