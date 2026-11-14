@@ -142,6 +142,24 @@ async fn queued_saves_land_in_order_and_a_panic_does_not_wedge_the_gate() {
     );
 }
 
+/// The console link is the configured instance plus a device id and nothing else;
+/// the orphan row's id 0 and an instance that is not an origin open nothing.
+#[test]
+fn the_console_link_is_the_instance_origin_and_a_device_id() {
+    assert_eq!(
+        device_console_url("https://eu.ninjarmm.com", 4217).as_deref(),
+        Ok("https://eu.ninjarmm.com/#/deviceDashboard/4217/overview")
+    );
+    assert_eq!(
+        device_console_url("https://app.ninjarmm.com/", 1).as_deref(),
+        Ok("https://app.ninjarmm.com/#/deviceDashboard/1/overview")
+    );
+    assert!(device_console_url("https://app.ninjarmm.com", 0).is_err());
+    assert!(device_console_url("https://app.ninjarmm.com", -5).is_err());
+    assert!(device_console_url("https://evil.example/x?y", 1).is_err());
+    assert!(device_console_url("not a url", 1).is_err());
+}
+
 /// Cancelling a query drops its work where it stands — which is what aborts the
 /// requests a fetch holds — and ends it with the code the frontend reads as "not a
 /// failure". Work that finishes first is simply returned.

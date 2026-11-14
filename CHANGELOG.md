@@ -45,6 +45,7 @@ version and start a fresh `[Unreleased]`.
 - While the first query runs, the results area shows each data feed's progress against its size
   instead of "Run a query…", and the progress bar reflects records loaded rather than a guess.
 - A running query can be cancelled.
+- The device details window has an "Open in NinjaOne" link to the device's console page.
 - A failed query says what went wrong in plain words (can't reach NinjaOne, rate-limited, a
   NinjaOne error, access refused), keeps the technical message under Details, and has a Retry
   button.

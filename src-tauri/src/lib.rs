@@ -225,6 +225,7 @@ pub fn run() {
             commands::patches::selection_status,
             commands::patches::get_reboot_devices,
             commands::patches::device_detail,
+            commands::patches::open_device_in_ninjaone,
             commands::export::export_patches_xlsx,
             commands::export::export_report_html,
             commands::export::export_csv,

@@ -303,6 +303,13 @@ on a session's first run. Cancel calls `cancel_query`; the backend drops the fet
 run dropped with it). See
 [query-cache.md](./query-cache.md#a-cancelled-query-is-dropped-not-stored).
 
+**The device drill-down opens the console.** "Open in NinjaOne ↗" in the dialog's header calls
+`open_device_in_ninjaone`, which builds `{instance}/#/deviceDashboard/{id}/overview` backend-side
+from the saved instance (an origin, per `settings::instance_url_problem`) and the device id, and
+launches the default browser on a blocking thread, as the sign-in does — the webview's capability
+stays event-only, and nothing the frontend sends becomes part of the address but a number. Desktop
+only; the web demo has no instance.
+
 Per-machine view conveniences — none of them configuration, so none go through
 `settings.json` (see `api::ui_pref_str`) — and the rules each one keeps.
 

@@ -314,6 +314,43 @@ pub async fn query_patches(
     summary_for(outcome, summary, qid)
 }
 
+/// A device's page in the NinjaOne console, for the drill-down's "Open in NinjaOne".
+///
+/// Built from the configured instance — an origin, which a stored value that is not
+/// one never gets contacted as, here included (`settings::instance_url_problem`) —
+/// and the device id alone, so nothing the frontend sends becomes part of an address
+/// beyond a number. `0` is the orphan row's stand-in for "no device".
+fn device_console_url(instance: &str, device_id: i64) -> Result<String, String> {
+    if device_id <= 0 {
+        return Err("That row has no device to open.".into());
+    }
+    if let Some(problem) = crate::settings::instance_url_problem(instance) {
+        return Err(format!("{problem}; correct the instance in Settings"));
+    }
+    Ok(format!(
+        "{}/#/deviceDashboard/{device_id}/overview",
+        instance.trim_end_matches('/')
+    ))
+}
+
+/// Opens a device's NinjaOne console page in the default browser. Read-only: it
+/// navigates, and whatever the operator then does there is under their NinjaOne
+/// sign-in, not this app's grant. On a blocking thread, like the sign-in's browser
+/// launch (`open::that_detached` still watches its launcher briefly).
+#[tauri::command]
+pub async fn open_device_in_ninjaone(
+    state: State<'_, AppState>,
+    device_id: i64,
+) -> Result<(), UiError> {
+    let url = device_console_url(&state.settings_snapshot().instance_base_url, device_id)
+        .map_err(UiError::new)?;
+    tokio::task::spawn_blocking(move || open::that_detached(&url))
+        .await
+        .map_err(|e| UiError::new(format!("opening the browser panicked: {e}")))?
+        // By kind: `open` words its error with the launcher's whole command line.
+        .map_err(|e| UiError::new(format!("Couldn't open the browser ({:?}).", e.kind())))
+}
+
 /// `work`, unless the operator cancels the query first — then `work` is dropped where
 /// it stands and the query ends with [`ERR_CANCELLED`].
 ///

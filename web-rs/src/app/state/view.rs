@@ -351,6 +351,17 @@ impl AppState {
         self.load_device_detail(device_id);
     }
 
+    /// Opens the drilled-into device's page in the NinjaOne console. The backend
+    /// builds the address from the saved instance and launches the browser; only a
+    /// failure comes back worth saying.
+    pub(in crate::app) fn open_device_in_ninjaone(self, device_id: i64) {
+        spawn_local(async move {
+            if let Err(e) = api::open_device_in_ninjaone(device_id).await {
+                self.notify(Toast::err(e));
+            }
+        });
+    }
+
     pub(in crate::app) fn close_device(self) {
         self.query.drill.set(None);
         // A load still in flight must not reopen it.

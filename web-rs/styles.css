@@ -2824,6 +2824,12 @@ kbd {
   margin-bottom: 8px;
 }
 
+/* Beside the close button, not under the title. */
+.device-drill-open {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 .device-facts {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));

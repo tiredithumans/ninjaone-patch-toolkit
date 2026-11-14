@@ -416,6 +416,11 @@ ipc!(
 );
 
 ipc!(
+    /// Opens the device's page in the NinjaOne console, in the default browser.
+    open_device_in_ninjaone(device_id: i64) -> ()
+);
+
+ipc!(
     /// Which devices in the backend's cached result may still be exposed to a CVE,
     /// from the public exploit data. An error when the id is malformed or the data
     /// is off or not downloaded yet.
