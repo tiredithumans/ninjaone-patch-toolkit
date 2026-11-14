@@ -84,7 +84,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   ├── shortcuts.rs             # key handler + help dialog (map: util::shortcut_for)
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
-│       └── one file per concern (query, selection, sla, compliance, column_help, guardrails, changes, shortcuts, view_link, theme, …) + tests.rs
+│       └── one file per concern (query, selection, sla, compliance, column_help, guardrails, changes, shortcuts, view_link, theme, table_sort, …) + tests.rs
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers, event subscribe, is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend (+ types/tests.rs: decodes backend-ipc.json)

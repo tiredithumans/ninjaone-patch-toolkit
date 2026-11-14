@@ -372,8 +372,10 @@ ipc!(
 
 ipc!(
     /// Fetches one page of the devices flagged for reboot from the backend's cached
-    /// result; the summary carries only the first.
-    get_reboot_devices(offset: usize, limit: usize) -> Vec<DeviceSummary>
+    /// result; the summary carries only the first. `sort` orders the whole list
+    /// backend-side before it is paged; `None` is the summary's own order.
+    get_reboot_devices(offset: usize, limit: usize, sort: Option<crate::types::RebootSort>)
+        -> Vec<DeviceSummary>
 );
 
 /// Subscribes to a backend event for the lifetime of the app, decoding each

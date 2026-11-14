@@ -3590,3 +3590,73 @@ fn the_within_sla_bands_split_at_95_and_80() {
     assert_eq!(pct_band(79.9), 2);
     assert_eq!(pct_band(0.0), 2);
 }
+
+/// The Needs Reboot list sorts over every flagged device before it is paged — the
+/// frontend holds one page, so it could not — with ties left in the summary's
+/// order, a blank cell last in either direction, and no sort at all the summary's
+/// order untouched.
+#[test]
+fn the_reboot_list_is_sorted_over_every_flagged_device_then_paged() {
+    let device =
+        |id: i64, name: &str, reason: Option<&str>, pending: usize, flagged: bool| DeviceSummary {
+            device_id: id,
+            device_name: name.into(),
+            organization: "Contoso".into(),
+            location: None,
+            device_role: None,
+            os_name: None,
+            node_class: None,
+            needs_reboot: flagged,
+            reboot_reason: reason.map(str::to_string),
+            offline: false,
+            pending_count: pending,
+            rollup_scope: RollupScope::Included,
+            pending_by_severity: Default::default(),
+            past_sla: 0,
+            urgent_past_sla: 0,
+            failed_installs: None,
+            last_contact: None,
+            last_contact_ts: None,
+            vulnerabilities: None,
+        };
+    let devices = [
+        device(1, "alpha", Some("Windows Update"), 2, true),
+        device(2, "Bravo", None, 9, true),
+        device(3, "charlie", Some("component servicing"), 2, true),
+        device(4, "delta", Some("Windows Update"), 30, false),
+        device(5, "echo", Some(""), 0, true),
+    ];
+    let ids = |sort: Option<RebootSort>, offset, limit| -> Vec<i64> {
+        reboot_page(&devices, sort, offset, limit)
+            .iter()
+            .map(|d| d.device_id)
+            .collect()
+    };
+    let by = |key, desc| Some(RebootSort { key, desc });
+
+    assert_eq!(ids(None, 0, 10), [1, 2, 3, 5], "only the flagged devices");
+    assert_eq!(ids(None, 1, 2), [2, 3], "paged in the summary's order");
+
+    assert_eq!(
+        ids(by(RebootSortKey::PendingPatches, true), 0, 10),
+        [2, 1, 3, 5],
+        "most pending first; the tie keeps the summary's order"
+    );
+    assert_eq!(ids(by(RebootSortKey::PendingPatches, false), 0, 2), [5, 1]);
+    assert_eq!(
+        ids(by(RebootSortKey::Device, true), 0, 10),
+        [5, 3, 2, 1],
+        "names compare without case"
+    );
+    // A blank reason — absent or empty — is last whichever way the column runs.
+    assert_eq!(
+        ids(by(RebootSortKey::RebootReason, false), 0, 10),
+        [3, 1, 2, 5]
+    );
+    assert_eq!(
+        ids(by(RebootSortKey::RebootReason, true), 0, 10),
+        [1, 3, 2, 5]
+    );
+    // The page is cut from the sorted list, not sorted within itself.
+    assert_eq!(ids(by(RebootSortKey::PendingPatches, true), 1, 2), [1, 3]);
+}

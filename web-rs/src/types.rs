@@ -958,6 +958,41 @@ pub struct RowSort {
     pub desc: bool,
 }
 
+/// Sort request for the paged Needs Reboot list (`get_reboot_devices`). Mirrors the
+/// backend `rows::{RebootSort, RebootSortKey}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebootSort {
+    pub key: RebootSortKey,
+    pub desc: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RebootSortKey {
+    Organization,
+    Location,
+    DeviceRole,
+    Device,
+    Os,
+    PendingPatches,
+    RebootReason,
+}
+
+impl RebootSortKey {
+    /// Every key, in the tab's column order: a clicked column's index names its key
+    /// (`util::reboot_sort_request`). Held to the backend's list by the IPC fixture.
+    pub const ALL: [Self; 7] = [
+        Self::Organization,
+        Self::Location,
+        Self::DeviceRole,
+        Self::Device,
+        Self::Os,
+        Self::PendingPatches,
+        Self::RebootReason,
+    ];
+}
+
 // `Deserialize` only so a shared view link can name a sort column by the same
 // spelling the backend uses; see `util::view_link`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

@@ -4,10 +4,10 @@
 //! which does the sorting. A column a function answers `Missing` for on every row
 //! is listed in the table's `*_UNSORTABLE`, and its header is plain text.
 
-use super::{SortValue, sev_ordinal};
+use super::{ColumnSort, SortValue, sev_ordinal};
 use crate::types::{
-    ComplianceBucket, DeviceBacklog, FailureGroup, JobReport, JobState, OsCompliance, RunningJob,
-    StuckDevice,
+    ComplianceBucket, DeviceBacklog, DeviceSummary, FailureGroup, JobReport, JobState,
+    OsCompliance, RebootSort, RebootSortKey, RunningJob, StuckDevice,
 };
 
 /// The Failures table's headers, as `rows::FailureGroup::COLUMNS` spells them.
@@ -34,6 +34,44 @@ pub(crate) fn failure_sort_value(f: &FailureGroup, col: usize) -> SortValue<'_> 
         4 => SortValue::count(f.affected_devices),
         5 => SortValue::text(f.latest_failure.as_deref()),
         _ => SortValue::Missing,
+    }
+}
+
+/// The Needs Reboot table's headers, as `rows::DeviceSummary::COLUMNS` spells them,
+/// in `RebootSortKey::ALL`'s order — a column's index is its key's.
+pub(crate) const REBOOT_HEADERS: [&str; 7] = [
+    "Organization",
+    "Location",
+    "Device Role",
+    "Device",
+    "OS",
+    "Pending Patches",
+    "Reboot Reason",
+];
+
+/// The backend sort a clicked Needs Reboot column asks for. The list is paged, so
+/// unlike the tables above it is sorted backend-side (`get_reboot_devices`) unless
+/// the summary carries all of it.
+pub(crate) fn reboot_sort_request(sort: Option<ColumnSort>) -> Option<RebootSort> {
+    let ColumnSort { col, desc } = sort?;
+    Some(RebootSort {
+        key: *RebootSortKey::ALL.get(col)?,
+        desc,
+    })
+}
+
+/// The same order for a list the summary carries whole (demo mode, a small fleet),
+/// which is sorted here: `rows::reboot_page`'s comparator, column for column.
+pub(crate) fn reboot_sort_value(d: &DeviceSummary, col: usize) -> SortValue<'_> {
+    match RebootSortKey::ALL.get(col) {
+        Some(RebootSortKey::Organization) => SortValue::text(Some(&d.organization)),
+        Some(RebootSortKey::Location) => SortValue::text(d.location.as_deref()),
+        Some(RebootSortKey::DeviceRole) => SortValue::text(d.device_role.as_deref()),
+        Some(RebootSortKey::Device) => SortValue::text(Some(&d.device_name)),
+        Some(RebootSortKey::Os) => SortValue::text(d.os_name.as_deref()),
+        Some(RebootSortKey::PendingPatches) => SortValue::count(d.pending_count),
+        Some(RebootSortKey::RebootReason) => SortValue::text(d.reboot_reason.as_deref()),
+        None => SortValue::Missing,
     }
 }
 

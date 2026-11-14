@@ -19,11 +19,12 @@ use crate::model::{Device, DeviceGroup, Patch, PatchRow, PatchStatus, PatchType}
 use crate::rows::{
     ComplianceBucket, DeviceDetail, DeviceSummary, FirstSeenTracking, GroupBy, GroupPage,
     InstallWindow, LookupMaps, OS_TYPE_LABEL, PatchFamilies, PatchRecord, PatchSource, QueryResult,
-    QuerySummary, RowSort, SOFTWARE_TYPE_LABEL, SelectionProbe, SelectionStatus, SlaCutoffs,
-    build_age_buckets, build_approval_backlog, build_compliance, build_compliance_by_os,
-    build_device_backlogs, build_device_summaries, build_failures, build_groups, build_query_scope,
-    build_rows, build_severity_by_org, build_time_to_install, group_member_page, page_rows,
-    slice_groups, sort_device_summaries, sort_order, uncounted_orgs,
+    QuerySummary, RebootSort, RowSort, SOFTWARE_TYPE_LABEL, SelectionProbe, SelectionStatus,
+    SlaCutoffs, build_age_buckets, build_approval_backlog, build_compliance,
+    build_compliance_by_os, build_device_backlogs, build_device_summaries, build_failures,
+    build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
+    group_member_page, page_rows, reboot_page, slice_groups, sort_device_summaries, sort_order,
+    uncounted_orgs,
 };
 use crate::settings::{MAX_WINDOW_DAYS, SlaPolicy};
 use crate::state::{AppState, CurrentPatches, LookupSet, Memo, PersistGate, StoreOutcome};
@@ -1383,26 +1384,26 @@ pub async fn selection_status(
     .map_err(|e| UiError::new(format!("re-checking the selection panicked: {e}")))
 }
 
-/// One page of the devices flagged for reboot, in the summary's order — the Needs
-/// Reboot tab's pages past the first, which the summary carries. Empty on a cache
+/// One page of the devices flagged for reboot — the Needs Reboot tab's pages past
+/// the first, which the summary carries, and every page once the list is sorted
+/// (`rows::reboot_page`; with no `sort`, the summary's order). Empty on a cache
 /// miss, like the other paging commands.
 #[tauri::command]
 pub fn get_reboot_devices(
     state: State<'_, AppState>,
     offset: usize,
     limit: usize,
+    sort: Option<RebootSort>,
 ) -> Result<Vec<DeviceSummary>, UiError> {
     let Some(result) = state.current_result_handle()? else {
         return Ok(Vec::new());
     };
-    Ok(result
-        .devices
-        .iter()
-        .filter(|d| d.needs_reboot)
-        .skip(offset)
-        .take(clamp_page(limit))
-        .cloned()
-        .collect())
+    Ok(reboot_page(
+        &result.devices,
+        sort,
+        offset,
+        clamp_page(limit),
+    ))
 }
 
 /// Serves the device drill-down — one device's facts, its per-device rollup and up

@@ -3194,34 +3194,79 @@ fn a_capped_failure_list_says_how_many_more() {
 fn a_reboot_page_is_seeded_until_it_runs_past_the_summary() {
     use RebootPage::*;
     assert_eq!(
-        reboot_page_source(0, 100, 100, 450),
+        reboot_page_source(0, 100, 100, 450, false),
         Seeded { start: 0, end: 100 }
     );
     assert_eq!(
-        reboot_page_source(1, 100, 100, 450),
+        reboot_page_source(1, 100, 100, 450, false),
         Fetch {
             offset: 100,
             limit: 100
         }
     );
     assert_eq!(
-        reboot_page_source(4, 100, 100, 450),
+        reboot_page_source(4, 100, 100, 450, false),
         Fetch {
             offset: 400,
             limit: 50
         }
     );
     assert_eq!(
-        reboot_page_source(3, 100, 450, 450),
+        reboot_page_source(3, 100, 450, 450, false),
         Seeded {
             start: 300,
             end: 400
         }
     );
     assert_eq!(
-        reboot_page_source(0, 100, 0, 0),
+        reboot_page_source(0, 100, 0, 0, false),
         Seeded { start: 0, end: 0 }
     );
+}
+
+/// Sorted, even the first page is fetched unless the summary holds the whole list:
+/// its hundred devices are the first hundred of the *unsorted* order, so sorting
+/// them here would show one page of the wrong list. A list held whole is sorted
+/// where it is; and a clicked column names its backend key by position.
+#[test]
+fn a_sorted_reboot_list_is_fetched_unless_the_summary_holds_all_of_it() {
+    use RebootPage::*;
+    assert_eq!(
+        reboot_page_source(0, 100, 100, 450, true),
+        Fetch {
+            offset: 0,
+            limit: 100
+        }
+    );
+    assert_eq!(
+        reboot_page_source(0, 100, 5, 5, true),
+        Seeded { start: 0, end: 5 }
+    );
+    assert_eq!(
+        reboot_page_source(3, 100, 450, 450, true),
+        Seeded {
+            start: 300,
+            end: 400
+        }
+    );
+
+    assert_eq!(reboot_sort_request(None), None);
+    assert_eq!(
+        reboot_sort_request(Some(ColumnSort { col: 5, desc: true })),
+        Some(crate::types::RebootSort {
+            key: crate::types::RebootSortKey::PendingPatches,
+            desc: true
+        })
+    );
+    assert_eq!(
+        reboot_sort_request(Some(ColumnSort {
+            col: REBOOT_HEADERS.len(),
+            desc: false
+        })),
+        None,
+        "a column the table does not have"
+    );
+    assert_eq!(REBOOT_HEADERS.len(), crate::types::RebootSortKey::ALL.len());
 }
 
 #[test]

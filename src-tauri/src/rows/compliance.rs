@@ -195,6 +195,96 @@ pub fn sort_device_summaries(summaries: &mut [DeviceSummary]) {
     });
 }
 
+/// A Needs Reboot column the list can be sorted by: the tab's columns, in the order
+/// it shows them ([`Self::ALL`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RebootSortKey {
+    Organization,
+    Location,
+    DeviceRole,
+    Device,
+    Os,
+    PendingPatches,
+    RebootReason,
+}
+
+impl RebootSortKey {
+    /// Every key, in column order. Read only by the IPC fixture, which holds the
+    /// frontend's mirror — and the column-to-key mapping it indexes — to this list.
+    #[cfg(test)]
+    pub const ALL: [Self; 7] = [
+        Self::Organization,
+        Self::Location,
+        Self::DeviceRole,
+        Self::Device,
+        Self::Os,
+        Self::PendingPatches,
+        Self::RebootReason,
+    ];
+}
+
+/// The sort `get_reboot_devices` pages under.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebootSort {
+    pub key: RebootSortKey,
+    #[serde(default)]
+    pub desc: bool,
+}
+
+/// One page of the devices flagged for reboot, in `sort`'s order — or, with none,
+/// the order the summary lists them in ([`sort_device_summaries`]).
+///
+/// The list is paged because "the devices that need a reboot" is not a small set
+/// mid patch cycle, and it could not be sorted for the same reason: the frontend
+/// holds one page of it. Sorted here, over every flagged device, then sliced — a
+/// stable sort, so ties keep the summary's order, and a blank cell sorts last in
+/// either direction, as on the Patches table.
+pub fn reboot_page(
+    devices: &[DeviceSummary],
+    sort: Option<RebootSort>,
+    offset: usize,
+    limit: usize,
+) -> Vec<DeviceSummary> {
+    let mut flagged: Vec<&DeviceSummary> = devices.iter().filter(|d| d.needs_reboot).collect();
+    if let Some(RebootSort { key, desc }) = sort {
+        let dir = |o: std::cmp::Ordering| if desc { o.reverse() } else { o };
+        flagged.sort_by(|a, b| {
+            if key == RebootSortKey::PendingPatches {
+                return dir(a.pending_count.cmp(&b.pending_count));
+            }
+            match (reboot_text(a, key), reboot_text(b, key)) {
+                (Some(x), Some(y)) => dir(cmp_ci(x, y)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        });
+    }
+    flagged
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+/// The text a Needs Reboot column sorts by; `None` for a blank cell and for the one
+/// numeric column.
+fn reboot_text(d: &DeviceSummary, key: RebootSortKey) -> Option<&str> {
+    let cell = match key {
+        RebootSortKey::Organization => Some(d.organization.as_str()),
+        RebootSortKey::Location => d.location.as_deref(),
+        RebootSortKey::DeviceRole => d.device_role.as_deref(),
+        RebootSortKey::Device => Some(d.device_name.as_str()),
+        RebootSortKey::Os => d.os_name.as_deref(),
+        RebootSortKey::RebootReason => d.reboot_reason.as_deref(),
+        RebootSortKey::PendingPatches => None,
+    };
+    cell.filter(|c| !c.is_empty())
+}
+
 /// Per-organization compliance rollup for the summary view and Excel summary sheet.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

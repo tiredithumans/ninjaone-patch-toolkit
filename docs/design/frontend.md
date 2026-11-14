@@ -378,7 +378,14 @@ the frontend (`util::ColumnSort`, `util::sort_by_column`, one `*_sort_value` per
 table's — ascending, descending, off — and off is the backend's own order; the sort is stable and
 a blank is last in either direction. A Compliance header keeps its definition
 (`HelpHeaderRow`'s optional `sort`); the fleet-total footer is never sorted. The Patches table
-and Needs Reboot are paged from the backend's cache and sort there.
+and Needs Reboot are paged from the backend's cache and sort there. Needs Reboot uses the same
+headers and `ColumnSort`: a clicked column names a `RebootSortKey` by position
+(`util::reboot_sort_request`; the key list rides in the IPC fixture, in order) and
+`get_reboot_devices` sorts every flagged device before it pages (`rows::reboot_page`). A sorted
+view is fetched throughout — the summary's first page is the first hundred of the *unsorted*
+order — unless the summary carries the whole list (demo mode, a small fleet), which is sorted
+where it is by the same comparator (`util::reboot_sort_value`, `util::reboot_page_source`). A new
+order starts from page one.
 
 **Shift-click.** In the flat Patches table and on Needs Reboot, Shift-clicking a row's box ticks
 or clears every row from the last one clicked to it (`util::shift_click_range`), through the

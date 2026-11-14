@@ -288,6 +288,20 @@ fn the_mirrored_enums_spell_exactly_the_backends_variants() {
         .collect();
     assert_eq!(states, backend("jobState"), "JobState");
 
+    // In order, not as a set: the Needs Reboot headers map a column to its key by
+    // index (`util::reboot_sort_request`).
+    let reboot_keys: Vec<String> = RebootSortKey::ALL
+        .iter()
+        .map(|k| spelled(serde_json::to_value(k).expect("serialize a reboot sort key")))
+        .collect();
+    let backend_keys: Vec<String> = fixture["enums"]["rebootSortKey"]
+        .as_array()
+        .expect("the fixture lists `rebootSortKey`")
+        .iter()
+        .map(|v| v.as_str().expect("a key spelling").to_owned())
+        .collect();
+    assert_eq!(reboot_keys, backend_keys, "RebootSortKey");
+
     // Not an enum, but the same promise: every cause the backend can attach to a
     // failed query has words in `util::failure_cause`, and none is spelled apart.
     let causes: BTreeSet<String> = QUERY_ERROR_CODES.iter().map(|c| c.to_string()).collect();

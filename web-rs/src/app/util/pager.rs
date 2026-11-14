@@ -56,14 +56,25 @@ pub(crate) enum RebootPage {
 /// first `seeded` devices out of `total`; a page inside them — every page, when the
 /// summary carries the whole list (demo mode, a small fleet) — is sliced locally,
 /// and any other is fetched from the backend's cached result.
+///
+/// Under a sort the first page is only the summary's when the summary carries the
+/// whole list: sorting the hundred devices it happens to hold would order one page
+/// of an unsorted list. So a `sorted` view of a longer list is fetched throughout,
+/// the backend sorting every flagged device before it pages.
 pub(crate) fn reboot_page_source(
     page: usize,
     page_size: usize,
     seeded: usize,
     total: usize,
+    sorted: bool,
 ) -> RebootPage {
     let (start, end) = page_bounds(page, page_size, total);
-    if end <= seeded {
+    let local = if sorted {
+        seeded >= total
+    } else {
+        end <= seeded
+    };
+    if local {
         RebootPage::Seeded { start, end }
     } else {
         RebootPage::Fetch {

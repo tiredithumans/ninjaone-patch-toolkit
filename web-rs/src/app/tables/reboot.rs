@@ -25,7 +25,19 @@ pub(super) fn RebootTable() -> impl IntoView {
     };
     let page_count = move || util::page_count(total(), PATCHES_PAGE_SIZE);
     let current = move || util::clamp_page(page.get(), page_count());
-    let source = move || util::reboot_page_source(current(), PATCHES_PAGE_SIZE, seeded(), total());
+    // The column the list is sorted by. Sorted backend-side over every flagged
+    // device, since this tab holds one page — or here, when the summary carries the
+    // whole list (`util::reboot_page_source`).
+    let sort = RwSignal::new(None::<util::ColumnSort>);
+    let source = move || {
+        util::reboot_page_source(
+            current(),
+            PATCHES_PAGE_SIZE,
+            seeded(),
+            total(),
+            sort.with(Option::is_some),
+        )
+    };
     // The page last fetched, by index; `stamp` drops a reply that a newer page or a
     // newer result overtook, as the Patches pager's view stamp does.
     let fetched = RwSignal::new(None::<(usize, Vec<DeviceSummary>)>);
@@ -42,11 +54,12 @@ pub(super) fn RebootTable() -> impl IntoView {
             return;
         };
         let at = current();
+        let by = util::reboot_sort_request(sort.get());
         let mine = util::next_query_seq(stamp.get_untracked());
         stamp.set(mine);
         fetched.set(None);
         spawn_local(async move {
-            let outcome = api::get_reboot_devices(offset, limit).await;
+            let outcome = api::get_reboot_devices(offset, limit, by).await;
             // The tab may have closed during the read, which disposes `stamp`.
             let Some(current) = stamp.try_get_untracked() else {
                 return;
@@ -60,13 +73,34 @@ pub(super) fn RebootTable() -> impl IntoView {
             }
         });
     });
-    // Only the visible window is cloned, not the whole subset.
+    // A new order starts from its first page: page 3 of another order is no place.
+    Effect::new(move |was: Option<Option<util::ColumnSort>>| {
+        let now = sort.get();
+        if was.is_some_and(|was| was != now) {
+            page.set(0);
+        }
+        now
+    });
+    // The page on screen.
     let devices = move || match source() {
         util::RebootPage::Seeded { start, end } => state.query.result.with(|r| {
-            r.as_ref()
-                .and_then(|r| r.reboot_devices.get(start..end))
-                .map(<[DeviceSummary]>::to_vec)
-                .unwrap_or_default()
+            let Some(r) = r.as_ref() else {
+                return Vec::new();
+            };
+            match sort.get() {
+                // Unsorted, only the visible window is cloned.
+                None => r
+                    .reboot_devices
+                    .get(start..end)
+                    .map(<[DeviceSummary]>::to_vec)
+                    .unwrap_or_default(),
+                // Sorted locally only when the summary holds the whole list.
+                by => {
+                    let mut all = r.reboot_devices.clone();
+                    util::sort_by_column(&mut all, by, util::reboot_sort_value);
+                    all.get(start..end).map(<[_]>::to_vec).unwrap_or_default()
+                }
+            }
         }),
         util::RebootPage::Fetch { .. } => fetched.with(|f| match f {
             Some((at, devices)) if *at == current() => devices.clone(),
@@ -141,13 +175,11 @@ pub(super) fn RebootTable() -> impl IntoView {
                             // Spelled as `rows::DeviceSummary::COLUMNS` spells them,
                             // so the app, the workbook and the HTML report name the
                             // same column the same way.
-                            <th scope="col">"Organization"</th>
-                            <th scope="col">"Location"</th>
-                            <th scope="col">"Device Role"</th>
-                            <th scope="col">"Device"</th>
-                            <th scope="col">"OS"</th>
-                            <th scope="col">"Pending Patches"</th>
-                            <th scope="col">"Reboot Reason"</th>
+                            {util::REBOOT_HEADERS
+                                .iter()
+                                .enumerate()
+                                .map(|(col, &label)| header_cell(label, "", col, Some(sort)))
+                                .collect_view()}
                         </tr>
                     </thead>
                     <tbody>
