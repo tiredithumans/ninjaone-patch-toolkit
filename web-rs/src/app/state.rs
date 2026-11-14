@@ -694,6 +694,12 @@ impl SettingsState {
 /// install-in-flight flag.
 #[derive(Clone, Copy)]
 pub(crate) struct UpdateState {
+    /// The update the launch check or "Check for updates" found. It stays for the
+    /// session — the top bar's badge — whatever the dialog is doing.
+    pub(super) available: RwSignal<Option<UpdateInfo>>,
+    /// The update whose dialog is open; `None` while it is closed. The launch check
+    /// does not set it: a modal over a window the operator opened to patch
+    /// something was the first thing they had to dismiss.
     pub(super) update: RwSignal<Option<UpdateInfo>>,
     pub(super) update_busy: RwSignal<bool>,
 }
@@ -701,6 +707,7 @@ pub(crate) struct UpdateState {
 impl UpdateState {
     pub(super) fn new() -> Self {
         Self {
+            available: RwSignal::new(None),
             update: RwSignal::new(None),
             update_busy: RwSignal::new(false),
         }

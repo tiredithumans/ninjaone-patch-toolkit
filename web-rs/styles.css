@@ -475,6 +475,15 @@ select:disabled {
   background: transparent;
 }
 
+/* "Update available" in the top bar: outlined in the accent so it is seen without
+   interrupting; the dialog is a click away. */
+.btn-update {
+  background: var(--accent-soft);
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  white-space: nowrap;
+}
+
 .x {
   background: none;
   border: none;

@@ -14,8 +14,9 @@ impl AppState {
                     self.settings.load_error.set(None);
                     let auto = s.auto_check_updates;
                     self.apply_settings_view(s);
+                    // Only the top bar's badge: the dialog opens when it is clicked.
                     if auto && let Ok(Some(info)) = api::check_for_update().await {
-                        self.updates.update.set(Some(info));
+                        self.updates.available.set(Some(info));
                     }
                 }
                 Err(e) => self.settings.load_error.set(Some(e)),

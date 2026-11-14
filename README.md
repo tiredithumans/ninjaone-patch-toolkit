@@ -299,9 +299,10 @@ code and links you to the activity/job ID to look the run up in the NinjaOne con
 
 ## Updates
 
-The app checks GitHub for a newer release on launch and offers to install it, showing the new
-version's release notes first. Toggle the launch check under **Settings → Automatically check for
-updates**, or click **Check for updates** there anytime. Updates are signed (minisign) and verified
+The app checks GitHub for a newer release on launch and, when there is one, shows **Update
+available** in the top bar; clicking it shows the new version's release notes and offers to install
+it. Toggle the launch check under **Settings → Automatically check for updates**, or click **Check
+for updates** there anytime. Updates are signed (minisign) and verified
 before they install, and only apply once a release is published — so a draft release never ships to
 users.
 

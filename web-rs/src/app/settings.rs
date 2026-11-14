@@ -141,7 +141,12 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
         state.updates.update_busy.set(true);
         spawn_local(async move {
             match api::check_for_update().await {
-                Ok(Some(info)) => state.updates.update.set(Some(info)),
+                // Asked for by hand, so the dialog opens at once; the badge stays
+                // after "Later".
+                Ok(Some(info)) => {
+                    state.updates.available.set(Some(info.clone()));
+                    state.updates.update.set(Some(info));
+                }
                 Ok(None) => state.notify(Toast::ok("You're on the latest version")),
                 Err(e) => state.notify(Toast::err(e)),
             }
