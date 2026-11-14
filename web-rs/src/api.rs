@@ -317,6 +317,11 @@ ipc!(list_locations(org_ids: Vec<i64>) -> Vec<Location>);
 ipc!(list_roles() -> Vec<Role>);
 ipc!(list_device_groups() -> Vec<DeviceGroup>);
 ipc!(list_node_classes() -> Vec<NodeClass>);
+ipc!(
+    /// Starts the backend's device-inventory fetch ahead of the first query. Resolves
+    /// once it is cached; nothing reads the reply.
+    prewarm_fleet() -> ()
+);
 
 // --- Patches + export --------------------------------------------------------
 
@@ -324,7 +329,15 @@ ipc!(
     /// Runs a patch query. `force_refresh` (an auto-refresh tick or the manual ↻) tells
     /// the backend to refetch the whole-fleet patch data; a normal Run query / re-filter
     /// leaves it `false` so the cached fleet is re-scoped client-side with no round trip.
+    /// `coded`: the banner words a failure by its cause (`util::failure_cause`).
+    coded
     query_patches(args: PatchQueryArgs, query_id: u64, force_refresh: bool) -> QueryResult
+);
+
+ipc!(
+    /// Asks the backend to stop the query in flight. The query's own `query_patches`
+    /// call then fails with `ERR_CANCELLED`; this reply only says the ask was heard.
+    cancel_query() -> ()
 );
 
 ipc!(
@@ -359,8 +372,10 @@ ipc!(
 
 ipc!(
     /// Fetches one page of the devices flagged for reboot from the backend's cached
-    /// result; the summary carries only the first.
-    get_reboot_devices(offset: usize, limit: usize) -> Vec<DeviceSummary>
+    /// result; the summary carries only the first. `sort` orders the whole list
+    /// backend-side before it is paged; `None` is the summary's own order.
+    get_reboot_devices(offset: usize, limit: usize, sort: Option<crate::types::RebootSort>)
+        -> Vec<DeviceSummary>
 );
 
 /// Subscribes to a backend event for the lifetime of the app, decoding each
@@ -400,6 +415,11 @@ ipc!(
     /// read from the backend's cached result. `None` when that result no longer
     /// holds the device (a re-query or tenant switch since the click).
     device_detail(device_id: i64) -> Option<DeviceDetail>
+);
+
+ipc!(
+    /// Opens the device's page in the NinjaOne console, in the default browser.
+    open_device_in_ninjaone(device_id: i64) -> ()
 );
 
 ipc!(

@@ -142,9 +142,14 @@ does **not** install — `PatchStatus::Pending.api_value()`), counted from the f
 current-patch cache, with that cache's fetch time.
 
 - The planner **never fetches** for it. `AppState::cached_current_patches` peeks the
-  `TenantCache` slot (tenant-checked, TTL ignored — the dialog states the fetch time instead);
+  `TenantCache` slots (tenant-checked, TTL ignored — the dialog states the fetch time instead);
   a cold family is `known: false` and the dialog says "unknown (patch data not loaded)", never
   zero. Paging a six-figure feed to draw a dialog would make every plan wait on it.
+- A copy fetched for one identity scope (see
+  [query-cache.md](./query-cache.md#a-scoped-query-with-no-fresh-fleet-copy-fetches-only-its-scope))
+  is read only when the inventory places **every** target in that scope
+  (`IdentityScope::names`); the whole-fleet copy covers any device, and the fresher of the two
+  wins. A target the scoped copy never asked about would otherwise preview as "nothing approved".
 - A post-action `invalidate_current_patches()` clears the slot, so the preview never counts
   patches the previous apply may already have installed.
 - A device with **zero** approved patches is a `plan()` *warning*, not a blocker: the apply
@@ -249,7 +254,9 @@ reach reads. The `ScriptPicker` opens in a dialog from the bar's "Run a script�
 which names the bar's options rather than repeating them), and the Jobs tab is history plus a
 Retry that re-opens the same plan → confirm dialog (below).
 
-**The bar is one row whatever is selected.** It used to grow by ~300px of option rows on the
+**The bar is one row whatever is selected**, and a single line of hint and Options while nothing
+is: the action groups are hidden (CSS, still mounted) until the first tick — see
+[frontend.md](./frontend.md#operator-ux). It used to grow by ~300px of option rows on the
 first tick, pushing the ticked row out of view and, once scrolled, covering ~40% of the window.
 The run options now sit behind an **Options** button (`RunOptions`, a `menu::Popover` whose panel
 stays mounted while closed: `RunAsSelect` fetches the sampled device's roles as it mounts, and a
@@ -539,6 +546,15 @@ dispatch, because the display exists to show jobs NinjaOne runs on its own), bac
 minutes after a failure, and shows only patch-ops job
 types (`PATCH_OPS_JOB_TYPES`) on the current result's devices. A `jobStatus` that means finished
 is dropped. The dispatched-job poller below is untouched by it.
+
+The read is narrowed to the result's scope when the `df` grammar can spell it
+(`QueryScope::device_df`, the same organization/location/role clause the install history sends):
+each job carries a whole node record, and the whole tenant's list used to be downloaded on every
+poll and cut down afterwards. The join against the result's devices is unchanged, so a clause
+NinjaOne drops costs the saving and nothing else. The spec declares `df` on `/jobs` without saying
+what grammar it takes there, so a `400` to a filtered read is answered by reading the list
+unfiltered and not sending a filter again this launch (`live_jobs::scoped_running_jobs`,
+`AppState::jobs_df_refused`) — the display must not go dark over an optimization.
 
 Three fields decide a job's fate and the spec gives them different jobs: `statusCode` is the
 enumerated lifecycle (`STARTED`/`IN_PROCESS`/`COMPLETED`/`CANCELLED`/`BLOCKED` for scripts,

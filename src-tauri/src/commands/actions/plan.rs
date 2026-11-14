@@ -433,9 +433,17 @@ pub(super) async fn build_plan(
         _ => DryRunSupport::NotChecked,
     };
     let script_check = check_script(script.as_ref(), library);
-    // Read-only peek at the whole-fleet cache: neither the preview nor the REJECTED
-    // check ever triggers a fetch.
-    let cached = cached_family(req.kind).and_then(|f| state.cached_current_patches(f));
+    // Read-only peek at the patch caches: neither the preview nor the REJECTED
+    // check ever triggers a fetch. A copy fetched for one scope is read only when
+    // the inventory places every target in it — a target it never asked about
+    // would otherwise preview as "nothing approved".
+    let cached = cached_family(req.kind).and_then(|f| {
+        state.cached_current_patches(f, |scope| {
+            req.device_ids
+                .iter()
+                .all(|id| devices.iter().any(|d| d.id == *id && scope.names(d)))
+        })
+    });
     let mut p = plan(PlanInput {
         kind: req.kind,
         device_ids: &req.device_ids,

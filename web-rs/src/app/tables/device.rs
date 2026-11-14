@@ -49,7 +49,7 @@ pub(crate) fn DeviceDetailModal() -> impl IntoView {
     });
     view! {
         {move || {
-            let (_, name) = open.get()?;
+            let (device_id, name) = open.get()?;
             let (dialog, on_tab) = modal::focus_trap();
             // Per dialog, so a new device opens in the canonical order.
             let sort = RwSignal::new(None::<RowSort>);
@@ -66,6 +66,18 @@ pub(crate) fn DeviceDetailModal() -> impl IntoView {
                     >
                         <div class="device-drill-head">
                             <h2 id="device-drill-title">{name}</h2>
+                            // The console is where everything this app does not
+                            // show about a device lives. Desktop only: the demo
+                            // has no instance to open.
+                            <Show when=move || !state.session.web_mode.get()>
+                                <button
+                                    class="link-btn device-drill-open"
+                                    title="Open this device's page in the NinjaOne console"
+                                    on:click=move |_| state.open_device_in_ninjaone(device_id)
+                                >
+                                    "Open in NinjaOne ↗"
+                                </button>
+                            </Show>
                             <button
                                 class="x"
                                 aria-label="Close device details"

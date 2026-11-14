@@ -773,6 +773,7 @@ fn ipc_fixture_is_current() {
                 query_id: 3,
                 stage: "osPatches",
                 loaded: 500,
+                total: Some(6721),
             },
             "action:progress": ActionProgressEvent {
                 batch_id: BATCH_ID,
@@ -821,6 +822,8 @@ fn ipc_fixture_is_current() {
             },
         },
         "enums": {
+            "queryErrorCode": crate::error::QUERY_ERROR_CODES,
+            "rebootSortKey": crate::rows::RebootSortKey::ALL,
             "actionKind": ActionKind::ALL,
             "jobState": JobState::ALL
                 .iter()

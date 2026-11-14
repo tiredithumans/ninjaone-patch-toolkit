@@ -162,6 +162,16 @@ impl<T> TenantCache<T> {
             .then(|| (entry.value.clone(), entry.fetched_at))
     }
 
+    /// `tenant`'s entry however old it is — for a caller that wants a *hint* and
+    /// checks what it does with it, like the slice plan, whose slices are sized
+    /// against the feed before any is paged. Never a substitute for [`Self::peek`]
+    /// where the value is the answer.
+    pub(super) fn peek_stale(&self, tenant: &TenantKey) -> Option<Arc<T>> {
+        let guard = self.slot.lock().ok()?;
+        let entry = guard.as_ref()?;
+        (entry.tenant == *tenant).then(|| entry.value.clone())
+    }
+
     /// Serves `tenant`'s entry, fetching it if there isn't a fresh one.
     ///
     /// `ttl` is a parameter rather than a field because the current-patch families

@@ -15,6 +15,7 @@ mod device;
 mod failures;
 mod live_jobs;
 mod patches;
+mod placeholder;
 mod reboot;
 mod trend;
 
@@ -26,6 +27,7 @@ use device::DeviceLink;
 use failures::FailuresTable;
 use live_jobs::{DeviceRunningJobs, LiveJobsPanel, RunningJobChip};
 use patches::{PatchesTable, reboot_likely_chip};
+use placeholder::NoResult;
 use reboot::RebootTable;
 use trend::TrendTab;
 
@@ -155,25 +157,49 @@ pub(crate) fn Results() -> impl IntoView {
             // Persistent record of the last failed query — the announcing toast
             // auto-dismisses; this stays until the next success or a dismiss.
             <Show when=move || state.query.query_error.with(|e| e.is_some())>
-                <div class="error-banner" role="alert">
-                    <span>
-                        {move || {
-                            let e = state.query.query_error.get().unwrap_or_default();
-                            util::query_error_banner(
-                                &e,
-                                state.query.result.with(|r| r.is_some()),
-                                state.query.error_is_paging.get(),
-                            )
-                        }}
-                    </span>
-                    <button
-                        class="x"
-                        aria-label="Dismiss error"
-                        on:click=move |_| state.query.query_error.set(None)
-                    >
-                        "×"
-                    </button>
-                </div>
+                {move || {
+                    let banner = util::query_error_banner(
+                        &state.query.query_error.get().unwrap_or_default(),
+                        state.query.query_error_code.get().as_deref(),
+                        state.query.result.with(|r| r.is_some()),
+                        state.query.error_is_paging.get(),
+                    );
+                    view! {
+                        <div class="error-banner" role="alert">
+                            <div class="error-banner__body">
+                                <span>{banner.text}</span>
+                                {banner
+                                    .details
+                                    .map(|raw| {
+                                        view! {
+                                            <details class="error-banner__details">
+                                                <summary>"Details"</summary>
+                                                <code>{raw}</code>
+                                            </details>
+                                        }
+                                    })}
+                            </div>
+                            <Show when=move || banner.retry>
+                                <button
+                                    class="link-btn"
+                                    prop:disabled=move || {
+                                        state.run.busy.get() || state.run.refreshing.get()
+                                    }
+                                    on:click=move |_| state.run_query()
+                                >
+                                    "Retry"
+                                </button>
+                            </Show>
+                            <button
+                                class="x"
+                                aria-label="Dismiss error"
+                                on:click=move |_| state.query.query_error.set(None)
+                            >
+                                "×"
+                            </button>
+                        </div>
+                    }
+                }}
             </Show>
             <div
                 id=TAB_PANEL_ID
@@ -270,7 +296,7 @@ fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
     }
 }
 
-/// Prev / "Rows 1–100 of N" / Next above a paged table, rendered only when there
+/// Prev / "Rows 1–100 of N" / Next for a paged table, rendered only when there
 /// is more than one page. The arithmetic is `util`'s; the caller owns the page
 /// index (already clamped) and decides what moving to a page fetches.
 #[component]
@@ -303,29 +329,100 @@ fn Pager(
     }
 }
 
+/// One of a row's flags — "reboot pending", "reboot likely", "job running" — as a
+/// chip holding both its words and a glyph. The words show everywhere but in the
+/// flat Patches table at a window too narrow for them, where the glyph stands in so
+/// the flags stop forcing the row onto a third line (`.chip-flag` in styles.css).
+/// The words are never removed, only hidden from sight there, so a screen reader
+/// reads the same chip at any width; `title` should start with them for the same
+/// reason.
+fn flag_chip(
+    class: &'static str,
+    glyph: &'static str,
+    label: &'static str,
+    title: String,
+) -> impl IntoView {
+    view! {
+        <span class=format!("chip-note chip-flag {class}") title=title>
+            <span class="chip-flag__glyph" aria-hidden="true">{glyph}</span>
+            <span class="chip-flag__text">{label}</span>
+        </span>
+    }
+}
+
 /// A table's header row from its [`util::HelpedColumn`]s: every header that measures
 /// something carries its definition as a tooltip, with a dotted underline saying so.
+///
+/// With `sort`, each header is a button that sorts the table the frontend holds
+/// whole by that column (`util::sort_by_column`); the columns in `unsortable` stay
+/// plain text.
 #[component]
-fn HelpHeaderRow(columns: &'static [util::HelpedColumn]) -> impl IntoView {
+fn HelpHeaderRow(
+    columns: &'static [util::HelpedColumn],
+    #[prop(optional)] sort: Option<RwSignal<Option<util::ColumnSort>>>,
+    #[prop(optional)] unsortable: &'static [usize],
+) -> impl IntoView {
     view! {
         <tr>
             {columns
                 .iter()
-                .map(|&(label, help)| {
-                    if help.is_empty() {
-                        view! { <th scope="col">{label}</th> }.into_any()
-                    } else {
-                        view! {
-                            <th scope="col">
-                                <span class="col-help" title=help>
-                                    {label}
-                                </span>
-                            </th>
-                        }
-                            .into_any()
-                    }
+                .enumerate()
+                .map(|(col, &(label, help))| {
+                    let sort = sort.filter(|_| !unsortable.contains(&col));
+                    header_cell(label, help, col, sort)
                 })
                 .collect_view()}
         </tr>
     }
+}
+
+/// [`HelpHeaderRow`] for a table whose headers need no definitions.
+#[component]
+pub(crate) fn SortHeaderRow(
+    labels: &'static [&'static str],
+    sort: RwSignal<Option<util::ColumnSort>>,
+    #[prop(optional)] unsortable: &'static [usize],
+) -> impl IntoView {
+    view! {
+        <tr>
+            {labels
+                .iter()
+                .enumerate()
+                .map(|(col, &label)| {
+                    header_cell(label, "", col, (!unsortable.contains(&col)).then_some(sort))
+                })
+                .collect_view()}
+        </tr>
+    }
+}
+
+/// One `<th>`: the label, underlined with its definition as the tooltip when it
+/// has one, inside a sort button when the column sorts.
+fn header_cell(
+    label: &'static str,
+    help: &'static str,
+    col: usize,
+    sort: Option<RwSignal<Option<util::ColumnSort>>>,
+) -> AnyView {
+    let text = if help.is_empty() {
+        label.into_any()
+    } else {
+        view! { <span class="col-help" title=help>{label}</span> }.into_any()
+    };
+    let Some(sort) = sort else {
+        return view! { <th scope="col">{text}</th> }.into_any();
+    };
+    view! {
+        <th scope="col" aria-sort=move || util::column_aria_sort(sort.get(), col)>
+            <button
+                type="button"
+                class="th-sort"
+                on:click=move |_| sort.update(|s| *s = util::next_column_sort(*s, col))
+            >
+                {text}
+                <span aria-hidden="true">{move || util::column_sort_glyph(sort.get(), col)}</span>
+            </button>
+        </th>
+    }
+    .into_any()
 }

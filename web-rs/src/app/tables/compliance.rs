@@ -198,7 +198,7 @@ pub(super) fn ComplianceTab() -> impl IntoView {
     view! {
         <Show
             when=has_result
-            fallback=|| view! { <p class="empty">"Run a query to see compliance."</p> }
+            fallback=|| view! { <NoResult idle="Run a query to see compliance."/> }
         >
             <ComplianceKpis/>
             <ComplianceScopeNote/>
@@ -230,56 +230,9 @@ pub(super) fn ComplianceTab() -> impl IntoView {
     }
 }
 
-/// One row of a compliance rollup table, independent of the grouping key. The two
-/// bucket types stay distinct hand-maintained IPC mirrors (`types.rs`); they
-/// converge here only for rendering.
-#[derive(Clone)]
-struct ComplianceRow {
-    label: String,
-    devices_total: usize,
-    devices_within_sla: usize,
-    within_sla_pct: f64,
-    devices_fully_patched: usize,
-    fully_patched_pct: f64,
-    urgent_pending: usize,
-    urgent_past_sla: usize,
-    awaiting_approval: usize,
-    approved_not_installed: usize,
-}
-
-impl From<&ComplianceBucket> for ComplianceRow {
-    fn from(b: &ComplianceBucket) -> Self {
-        Self {
-            label: b.organization.clone(),
-            devices_total: b.devices_total,
-            devices_within_sla: b.devices_within_sla,
-            within_sla_pct: b.within_sla_pct,
-            devices_fully_patched: b.devices_fully_patched,
-            fully_patched_pct: b.fully_patched_pct,
-            urgent_pending: b.urgent_pending,
-            urgent_past_sla: b.urgent_past_sla,
-            awaiting_approval: b.awaiting_approval,
-            approved_not_installed: b.approved_not_installed,
-        }
-    }
-}
-
-impl From<&OsCompliance> for ComplianceRow {
-    fn from(b: &OsCompliance) -> Self {
-        Self {
-            label: b.os.clone(),
-            devices_total: b.devices_total,
-            devices_within_sla: b.devices_within_sla,
-            within_sla_pct: b.within_sla_pct,
-            devices_fully_patched: b.devices_fully_patched,
-            fully_patched_pct: b.fully_patched_pct,
-            urgent_pending: b.urgent_pending,
-            urgent_past_sla: b.urgent_past_sla,
-            awaiting_approval: b.awaiting_approval,
-            approved_not_installed: b.approved_not_installed,
-        }
-    }
-}
+// One row of a compliance rollup table: what the two bucket mirrors converge on
+// for rendering. In `util`, beside the sort that reads it.
+use util::ComplianceRow;
 
 /// What clicking a rollup row's label should narrow to, or `None` for a rollup whose
 /// grouping key isn't a filter facet.
@@ -306,6 +259,14 @@ fn ComplianceRollupTable(
     #[prop(optional)] drill: Option<RollupDrill>,
 ) -> impl IntoView {
     let state = expect_context::<AppState>();
+    // The backend's order until a header is clicked; the fleet-total footer is
+    // never part of the sort.
+    let sort = RwSignal::new(None::<util::ColumnSort>);
+    let sorted = move || {
+        let mut rows = rows.get();
+        util::sort_by_column(&mut rows, sort.get(), util::compliance_sort_value);
+        rows
+    };
     let footer = move || {
         let total = total?.get()?;
         (rows.with(Vec::len) >= 2).then(|| {
@@ -336,11 +297,11 @@ fn ComplianceRollupTable(
                     // Spelled as `rows::{ComplianceBucket,OsCompliance}::COLUMNS`, which
                     // `headers_match_the_backend_columns` holds them to.
                     <thead>
-                        <HelpHeaderRow columns=columns/>
+                        <HelpHeaderRow columns=columns sort=sort/>
                     </thead>
                     <tbody>
                         {move || {
-                            rows.get()
+                            sorted()
                                 .into_iter()
                                 .map(|b| {
                                     let label_cell = match drill {
@@ -427,11 +388,15 @@ fn StuckApprovals() -> impl IntoView {
             .result
             .with(|r| r.as_ref().map(|r| r.approvals.clone()).unwrap_or_default())
     };
+    // Outside the closure below, which re-runs with every result: the sort stays.
+    let sort = RwSignal::new(None::<util::ColumnSort>);
     view! {
         <section class="compliance-approvals" id="cmp-approvals">
             <h3 class="chart-title">"Approvals"</h3>
             {move || {
-                let a = approvals();
+                let mut a = approvals();
+                // Oldest first, as the backend lists them, until a header is clicked.
+                util::sort_by_column(&mut a.stuck_devices, sort.get(), util::stuck_sort_value);
                 let totals = util::approval_totals_line(
                     a.awaiting_approval,
                     a.approved_not_installed,
@@ -460,7 +425,7 @@ fn StuckApprovals() -> impl IntoView {
                             <div class="table-wrap">
                                 <table>
                                     <thead>
-                                        <HelpHeaderRow columns=&util::STUCK_HEADERS/>
+                                        <HelpHeaderRow columns=&util::STUCK_HEADERS sort=sort/>
                                     </thead>
                                     <tbody>
                                         {a

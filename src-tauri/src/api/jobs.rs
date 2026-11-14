@@ -7,15 +7,21 @@
 use anyhow::{Context, Result, bail};
 use serde_json::value::RawValue;
 
-use super::{NinjaApiClient, lenient_rows};
+use super::{NinjaApiClient, df_query, lenient_rows};
 use crate::model::RunningJob;
 
 impl NinjaApiClient {
-    /// Every running job in the tenant. One request: the spec declares no paging,
-    /// only `df`, `jobType`, `lang` and `tz`. Decoded off the runtime, job by job, so
-    /// one malformed job cannot hide the rest ([`parse_jobs`]).
-    pub async fn running_jobs(&self) -> Result<Vec<RunningJob>> {
-        self.get_decoded("/jobs", &[], parse_jobs).await
+    /// The running jobs on the devices `df` names, or every one in the tenant. One
+    /// request: the spec declares no paging, only `df`, `jobType`, `lang` and `tz`.
+    /// Decoded off the runtime, job by job, so one malformed job cannot hide the
+    /// rest ([`parse_jobs`]).
+    ///
+    /// `df` only saves bandwidth — each job carries a whole node record, and the
+    /// list is re-read twice a minute. The caller still joins what comes back
+    /// against its own devices, so a clause NinjaOne drops costs the saving, never
+    /// a job shown on the wrong device.
+    pub async fn running_jobs(&self, df: Option<&str>) -> Result<Vec<RunningJob>> {
+        self.get_decoded("/jobs", &df_query(df), parse_jobs).await
     }
 }
 
@@ -68,7 +74,7 @@ mod tests {
         let http = reqwest::Client::new();
         let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
         let jobs = NinjaApiClient::new(http, auth)
-            .running_jobs()
+            .running_jobs(None)
             .await
             .expect("jobs");
         assert_eq!(jobs.len(), 1);

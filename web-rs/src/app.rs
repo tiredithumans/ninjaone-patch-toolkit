@@ -30,7 +30,7 @@ use header::{Header, SignInButton};
 use settings::{EnableActionsLink, SettingsDialog, SettingsLink};
 use shortcuts::KeyboardShortcuts;
 use state::*;
-use tables::{DeviceDetailModal, Results};
+use tables::{DeviceDetailModal, Results, SortHeaderRow};
 use toaster::Toaster;
 use update::UpdateSplash;
 use util::{
@@ -119,7 +119,7 @@ pub fn App() -> impl IntoView {
         state
             .run
             .progress
-            .update(|p| util::apply_progress_stage(p, &ev.stage, ev.loaded));
+            .update(|p| util::apply_progress_stage(p, &ev.stage, ev.loaded, ev.total));
     });
 
     // Live job status from the backend poller. Rows arrive already advanced, so
@@ -151,6 +151,7 @@ pub fn App() -> impl IntoView {
         let authed = state.is_authed();
         if authed && was_authed != Some(true) {
             state.load_lookups();
+            state.prewarm_fleet();
         }
         authed
     });

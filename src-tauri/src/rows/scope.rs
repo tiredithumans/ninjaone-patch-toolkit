@@ -53,6 +53,13 @@ pub struct QueryScope {
     /// the question being asked does not. The patch families are not in it; the
     /// history carries those as fields of their own.
     pub fingerprint: String,
+    /// The organization/location/role scope as a `df` clause
+    /// ([`FilterParams::patch_filter`]), for a read that only concerns this result's
+    /// devices — the `/jobs` poll. A bandwidth hint, never the boundary: whatever
+    /// reads with it still joins against the result's own devices. Not provenance,
+    /// so it is not serialized with the rest.
+    #[serde(skip)]
+    pub device_df: Option<String>,
 }
 
 /// Renders one id facet as a comma-separated name list.
@@ -228,6 +235,7 @@ pub fn build_query_scope(
         patch_facets,
         device_scoped,
         fingerprint: fingerprint(filter, &classes, os_name, search, statuses, install_history),
+        device_df: filter.patch_filter(),
     }
 }
 

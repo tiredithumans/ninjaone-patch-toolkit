@@ -43,6 +43,96 @@ pub(crate) fn sort_glyph(sort: Option<RowSort>, key: RowSortKey) -> &'static str
     }
 }
 
+/// The sort of a table the frontend holds whole (Failures, the Compliance tables,
+/// Jobs): the column, by its index in the table's header array, and the direction.
+/// The Patches table sorts backend-side instead, by [`RowSort`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ColumnSort {
+    pub col: usize,
+    pub desc: bool,
+}
+
+/// [`next_sort`]'s cycle for a [`ColumnSort`]: none → ascending → descending → none
+/// on the same column; another column starts ascending.
+pub(crate) fn next_column_sort(current: Option<ColumnSort>, col: usize) -> Option<ColumnSort> {
+    match current {
+        Some(s) if s.col == col && !s.desc => Some(ColumnSort { col, desc: true }),
+        Some(s) if s.col == col => None,
+        _ => Some(ColumnSort { col, desc: false }),
+    }
+}
+
+/// `aria-sort` for a column header under a [`ColumnSort`].
+pub(crate) fn column_aria_sort(sort: Option<ColumnSort>, col: usize) -> &'static str {
+    match sort {
+        Some(s) if s.col == col && s.desc => "descending",
+        Some(s) if s.col == col => "ascending",
+        _ => "none",
+    }
+}
+
+/// Direction glyph for a column header under a [`ColumnSort`].
+pub(crate) fn column_sort_glyph(sort: Option<ColumnSort>, col: usize) -> &'static str {
+    match sort {
+        Some(s) if s.col == col && s.desc => " ▼",
+        Some(s) if s.col == col => " ▲",
+        _ => "",
+    }
+}
+
+/// What one cell sorts by.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SortValue<'a> {
+    /// Compared case-insensitively. ISO dates sort chronologically this way.
+    Text(&'a str),
+    Number(f64),
+    /// A blank cell: last in either direction, as in the Patches table.
+    Missing,
+}
+
+impl<'a> SortValue<'a> {
+    /// A cell that may be blank; an empty string is blank too.
+    pub(crate) fn text(value: Option<&'a str>) -> Self {
+        match value {
+            Some(v) if !v.is_empty() => Self::Text(v),
+            _ => Self::Missing,
+        }
+    }
+
+    pub(crate) fn count(n: usize) -> Self {
+        Self::Number(n as f64)
+    }
+}
+
+fn compare_values(a: SortValue<'_>, b: SortValue<'_>, desc: bool) -> Ordering {
+    use SortValue::*;
+    let dir = |o: Ordering| if desc { o.reverse() } else { o };
+    match (a, b) {
+        (Missing, Missing) => Ordering::Equal,
+        (Missing, _) => Ordering::Greater,
+        (_, Missing) => Ordering::Less,
+        (Text(x), Text(y)) => dir(cmp_ci(x, y)),
+        (Number(x), Number(y)) => dir(x.total_cmp(&y)),
+        // A column is one kind throughout; mixed values keep numbers first.
+        (Number(_), Text(_)) => Ordering::Less,
+        (Text(_), Number(_)) => Ordering::Greater,
+    }
+}
+
+/// Sorts `rows` in place by one column, reading each cell through `value`. Stable,
+/// so rows that tie keep the order the backend sent them in, and no sort at all
+/// leaves that order untouched.
+pub(crate) fn sort_by_column<T>(
+    rows: &mut [T],
+    sort: Option<ColumnSort>,
+    value: impl for<'a> Fn(&'a T, usize) -> SortValue<'a>,
+) {
+    let Some(ColumnSort { col, desc }) = sort else {
+        return;
+    };
+    rows.sort_by(|a, b| compare_values(value(a, col), value(b, col), desc));
+}
+
 /// Client-side counterpart of the backend row sort, for demo mode only (the demo
 /// holds its full sample locally; there is no backend cache to re-page from).
 /// Deliberately mirrors `src-tauri/src/rows.rs::compare_rows` — duplicating small

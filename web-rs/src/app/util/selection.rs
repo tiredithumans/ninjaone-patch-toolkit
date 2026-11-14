@@ -89,6 +89,35 @@ pub(crate) fn apply_rows_selection<R: Borrow<PatchRow>>(
     }
 }
 
+/// The rows a Shift-click reaches: from the row clicked before it (`anchor`) to the
+/// one clicked now, inclusive, in page order. `None` when either is not on this
+/// page — no earlier click, or one made on a page since left — and the click is
+/// then an ordinary one.
+///
+/// Only the range is decided here. The caller ticks it through the same
+/// [`apply_rows_selection`] / [`apply_device_selection`] as any other tick, so a
+/// row that cannot be selected stays out of a range too.
+pub(crate) fn shift_click_range(
+    anchor: Option<usize>,
+    clicked: Option<usize>,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    let (anchor, clicked) = (anchor?, clicked?);
+    Some(anchor.min(clicked)..=anchor.max(clicked))
+}
+
+/// Where the patch row `key` on `device_id` sits on a page, by the identity the
+/// selection keys it by ([`patch_key`]).
+pub(crate) fn row_position<R: Borrow<PatchRow>>(
+    rows: &[R],
+    device_id: i64,
+    key: &str,
+) -> Option<usize> {
+    rows.iter().position(|r| {
+        let r = r.borrow();
+        r.device_id == device_id && patch_key(r) == key
+    })
+}
+
 /// The probes `selection_status` answers for a selection: each selected device with
 /// the keys of its ticked patches ([`patch_key`]) — none for a Needs Reboot pick,
 /// which ticks no patch.
@@ -590,6 +619,18 @@ pub(crate) fn nothing_selected_reason(source: SelectionSource) -> &'static str {
     match source {
         SelectionSource::PatchRows => "Select at least one patch row first",
         SelectionSource::Devices => "Select at least one device first",
+    }
+}
+
+/// The action bar's one line while nothing is ticked. The buttons are out of sight
+/// until then, so the hint names what a selection can reach from this tab — the
+/// kinds `source_disabled_reason` lets through.
+pub(crate) fn action_bar_hint(source: SelectionSource) -> &'static str {
+    match source {
+        SelectionSource::PatchRows => {
+            "Select patch rows to scan, patch, reboot or run a script on their devices."
+        }
+        SelectionSource::Devices => "Select devices to reboot or scan them.",
     }
 }
 

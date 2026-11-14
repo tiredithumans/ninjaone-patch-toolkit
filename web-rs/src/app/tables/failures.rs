@@ -6,12 +6,16 @@ use super::*;
 pub(super) fn FailuresTable() -> impl IntoView {
     let state = expect_context::<AppState>();
     // Backend ships the failure rollup whole (one entry per failing patch) in the
-    // summary, already sorted by affected-device count — render it as-is.
+    // summary, already sorted by affected-device count — that order until a
+    // header is clicked.
+    let sort = RwSignal::new(None::<util::ColumnSort>);
     let failures = move || {
-        state
+        let mut rows = state
             .query
             .result
-            .with(|r| r.as_ref().map(|r| r.failures.clone()).unwrap_or_default())
+            .with(|r| r.as_ref().map(|r| r.failures.clone()).unwrap_or_default());
+        util::sort_by_column(&mut rows, sort.get(), util::failure_sort_value);
+        rows
     };
     let has_failures = move || {
         state
@@ -26,7 +30,7 @@ pub(super) fn FailuresTable() -> impl IntoView {
             when=has_failures
             fallback=move || {
                 if state.query.result.with(Option::is_none) {
-                    return view! { <p class="empty">"Run a query to see failed installs."</p> }
+                    return view! { <NoResult idle="Run a query to see failed installs."/> }
                         .into_any();
                 }
                 // A query that never asked for failed installs cannot have found
@@ -56,21 +60,17 @@ pub(super) fn FailuresTable() -> impl IntoView {
             <div class="table-wrap table-wrap--fill">
                 <table>
                     <thead>
-                        <tr>
-                            // Seven columns spelled as `rows::FailureGroup::COLUMNS`
-                            // spells them. `Patch Type` was missing here while the
-                            // workbook and the HTML report both carried it, so the
-                            // on-screen table could not tell an OS failure from a
-                            // third-party one — and third-party rows show "(no KB)",
-                            // which is exactly when the distinction matters.
-                            <th scope="col">"Severity"</th>
-                            <th scope="col">"Patch Type"</th>
-                            <th scope="col">"KB"</th>
-                            <th scope="col">"Patch"</th>
-                            <th scope="col">"Affected Devices"</th>
-                            <th scope="col">"Latest Failure"</th>
-                            <th scope="col">"Devices"</th>
-                        </tr>
+                        // Seven columns spelled as `rows::FailureGroup::COLUMNS`
+                        // spells them (`util::FAILURE_HEADERS`). `Patch Type` was
+                        // missing here while the workbook and the HTML report both
+                        // carried it, so the on-screen table could not tell an OS
+                        // failure from a third-party one — and third-party rows show
+                        // "(no KB)", which is exactly when the distinction matters.
+                        <SortHeaderRow
+                            labels=&util::FAILURE_HEADERS
+                            sort=sort
+                            unsortable=&util::FAILURE_UNSORTABLE
+                        />
                     </thead>
                     <tbody>
                         {move || {

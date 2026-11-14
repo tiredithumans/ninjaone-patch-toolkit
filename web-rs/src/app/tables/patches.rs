@@ -76,12 +76,36 @@ pub(super) fn PatchesTable() -> impl IntoView {
     // Page navigation updates the index and fetches that page on demand — of
     // headers or of rows, matching what the view is actually showing.
     let go_to = Callback::new(move |target: usize| state.go_to_patches_page(target));
+    // The row whose box was clicked last, for a Shift-click range. Kept by row
+    // identity, so one left behind on another page simply matches nothing.
+    let range_anchor = RwSignal::new(None::<(i64, String)>);
 
     view! {
-        <PatchFilterBar/>
+        // The view controls end the filter row rather than taking a row of their
+        // own above the table. Only once there are rows to view.
+        <PatchFilterBar>
+            <Show when=move || { rows_total() > 0 }>
+                <ViewModeSwitch/>
+                <Show when=move || state.query.group_by.get().is_none()>
+                    <ColumnMenu/>
+                </Show>
+                <CveSearch/>
+                // In a narrow window these controls already wrap onto a line of
+                // their own with room to spare, so the pager joins them there and
+                // the footer below is not drawn (`.patch-filter-bar__pager`).
+                <div class="patch-filter-bar__pager">
+                    <Pager
+                        page=Signal::derive(page)
+                        page_count=Signal::derive(page_count)
+                        summary=Signal::derive(pager_summary)
+                        on_page=go_to
+                    />
+                </div>
+            </Show>
+        </PatchFilterBar>
         <Show
             when=move || state.query.result.with(|r| r.is_some())
-            fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
+            fallback=|| view! { <NoResult idle="Run a query to list patches."/> }
         >
             <ChangesPanel/>
             {move || {
@@ -108,21 +132,6 @@ pub(super) fn PatchesTable() -> impl IntoView {
                 <Show when=move || state.action_surface_visible()>
                     <ActionBar/>
                 </Show>
-                // The pager shares the view row rather than taking one of its own
-                // above the action bar.
-                <div class="row patches-toolbar">
-                    <ViewModeSwitch/>
-                    <Pager
-                        page=Signal::derive(page)
-                        page_count=Signal::derive(page_count)
-                        summary=Signal::derive(pager_summary)
-                        on_page=go_to
-                    />
-                    <Show when=move || state.query.group_by.get().is_none()>
-                        <ColumnMenu/>
-                    </Show>
-                    <CveSearch/>
-                </div>
                 <Show when=move || state.query.group_by.get().is_some()>
                     <GroupedPatches/>
                 </Show>
@@ -203,24 +212,38 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                     let stat = status_class(&r.status);
                                     view! {
                                         <tr>
-                                            <RowCheckbox row=Arc::clone(&r)/>
-                                            <td>{r.organization.clone()}</td>
-                                            <td>{r.location.clone().unwrap_or_default()}</td>
-                                            <td>{r.device_role.clone().unwrap_or_default()}</td>
+                                            <RowCheckbox row=Arc::clone(&r) range_anchor=range_anchor/>
+                                            // The identity columns give way to the
+                                            // patch name: cut with an ellipsis past
+                                            // `.cell-clip`'s width, whole on hover.
+                                            <td class="cell-clip" title=r.organization.clone()>
+                                                {r.organization.clone()}
+                                            </td>
+                                            <td class="cell-clip" title=r.location.clone()>
+                                                {r.location.clone().unwrap_or_default()}
+                                            </td>
+                                            <td class="cell-clip" title=r.device_role.clone()>
+                                                {r.device_role.clone().unwrap_or_default()}
+                                            </td>
                                             <td>
                                                 <DeviceLink device_id=r.device_id name=r.device_name.clone()/>
                                                 {reboot_pending_chip(r.needs_reboot)}
                                                 <RunningJobChip device_id=r.device_id/>
                                             </td>
-                                            <td>{r.os_name.clone().unwrap_or_default()}</td>
+                                            <td class="cell-clip" title=r.os_name.clone()>
+                                                {r.os_name.clone().unwrap_or_default()}
+                                            </td>
                                             <td>{r.patch_type.clone()}</td>
                                             <td>{r.kb.clone().unwrap_or_default()}</td>
                                             // Two lines at most, the full name on hover: a long
                                             // cumulative-update title wrapped to six lines
-                                            // and made every row ~100px tall.
+                                            // and made every row ~100px tall. The flag sits
+                                            // beside the name, not on a line under it.
                                             <td class="patch-name">
-                                                <span class="clamp-2" title=r.name.clone()>{r.name.clone()}</span>
-                                                {reboot_likely_chip(r.reboot_likely)}
+                                                <div class="patch-name__row">
+                                                    <span class="clamp-2" title=r.name.clone()>{r.name.clone()}</span>
+                                                    {reboot_likely_chip(r.reboot_likely)}
+                                                </div>
                                             </td>
                                             <td>
                                                 <span class=sev>{r.severity.clone()}</span>
@@ -232,8 +255,11 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                             <td>
                                                 <span class=stat>{r.status.clone()}</span>
                                             </td>
-                                            <td>{r.first_seen_date.clone().unwrap_or_default()}</td>
-                                            <td>{r.installed_date.clone().unwrap_or_default()}</td>
+                                            // The day; the time is on hover. Ages are
+                                            // counted in days, and the two times of day
+                                            // cost the patch name 120px in every row.
+                                            <DateCell stamp=r.first_seen_date.clone()/>
+                                            <DateCell stamp=r.installed_date.clone()/>
                                         </tr>
                                     }
                                 })
@@ -243,9 +269,30 @@ pub(super) fn PatchesTable() -> impl IntoView {
                 </table>
                 </div>
                 </Show>
+                // Under the table (or the groups), where it costs no row above
+                // them; it renders nothing for a single page.
+                <div class="patches-footer">
+                    <Pager
+                        page=Signal::derive(page)
+                        page_count=Signal::derive(page_count)
+                        summary=Signal::derive(pager_summary)
+                        on_page=go_to
+                    />
+                </div>
             </Show>
         </Show>
     }
+}
+
+/// A timestamp cell showing its day (`util::date_part`), the whole value on hover.
+#[component]
+fn DateCell(stamp: Option<String>) -> impl IntoView {
+    let day = stamp
+        .as_deref()
+        .map(util::date_part)
+        .unwrap_or_default()
+        .to_string();
+    view! { <td title=stamp>{day}</td> }
 }
 
 /// Show/hide the Patches table's columns. A `<details>` disclosure, so it opens
@@ -313,8 +360,9 @@ fn ViewModeSwitch() -> impl IntoView {
         (Some(GroupBy::Product), "By product"),
     ];
     view! {
+        // No visible "View" label: on the filter row the four modes name themselves,
+        // and the label was the width that wrapped them under it.
         <div class="view-modes" role="group" aria-label="Patch view mode">
-            <span class="chips-label">"View"</span>
             {MODES
                 .iter()
                 .map(|(mode, label)| {
@@ -483,8 +531,16 @@ fn GroupedPatches() -> impl IntoView {
 /// `PatchRow` carries a dozen-plus `String`s, so cloning it per closure meant ~200
 /// row copies for every reactive re-render of a 100-row page. An `Arc` makes each
 /// closure's copy a refcount bump.
+///
+/// With `range_anchor` (the flat table), a Shift-click also ticks or clears every
+/// row between this one and the row clicked before it, to this box's new state
+/// (`util::shift_click_range`). A group's members take no anchor: a range across
+/// two groups' lists would tick rows the operator cannot see together.
 #[component]
-fn RowCheckbox(row: Arc<PatchRow>) -> impl IntoView {
+fn RowCheckbox(
+    row: Arc<PatchRow>,
+    #[prop(optional)] range_anchor: Option<RwSignal<Option<(i64, String)>>>,
+) -> impl IntoView {
     let state = expect_context::<AppState>();
     let label = format!(
         "Select {} on {}",
@@ -495,6 +551,7 @@ fn RowCheckbox(row: Arc<PatchRow>) -> impl IntoView {
         row.device_name,
     );
     let checked_row = Arc::clone(&row);
+    let clicked_row = Arc::clone(&row);
     view! {
         <td class="col-select">
             <input
@@ -502,6 +559,28 @@ fn RowCheckbox(row: Arc<PatchRow>) -> impl IntoView {
                 aria-label=label
                 prop:disabled=!util::row_selectable(&row)
                 prop:checked=move || state.is_row_selected(&checked_row)
+                // Runs before `change`, with the box already flipped. The range
+                // lands as one selection update; `change` then re-applies this
+                // row's own tick, which is idempotent.
+                on:click=move |ev| {
+                    let Some(anchor) = range_anchor else {
+                        return;
+                    };
+                    let me = (clicked_row.device_id, patch_key(&clicked_row));
+                    if ev.shift_key() {
+                        let rows = state.query.page_rows.get_untracked();
+                        let range = util::shift_click_range(
+                            anchor
+                                .get_untracked()
+                                .and_then(|(device, key)| util::row_position(&rows, device, &key)),
+                            util::row_position(&rows, me.0, &me.1),
+                        );
+                        if let Some(range) = range {
+                            state.toggle_rows_selection(&rows[range], event_target_checked(&ev));
+                        }
+                    }
+                    anchor.set(Some(me));
+                }
                 on:change=move |ev| state.toggle_row_selection(&row, event_target_checked(&ev))
             />
         </td>
@@ -598,13 +677,25 @@ fn exploited_chip_view(title: String) -> impl IntoView {
 /// "reboot pending": the device's own flag ([`util::REBOOT_PENDING_HELP`]).
 fn reboot_pending_chip(pending: bool) -> impl IntoView {
     pending.then(|| {
-        view! { <span class="chip-note" title=util::REBOOT_PENDING_HELP>"reboot pending"</span> }
+        flag_chip(
+            "",
+            "↻",
+            "reboot pending",
+            format!("Reboot pending. {}", util::REBOOT_PENDING_HELP),
+        )
     })
 }
 
 /// "reboot likely": the backend's estimate for the patch ([`util::REBOOT_LIKELY_HELP`]).
+/// Dashed where the glyph stands in for the words, since it is an estimate and the
+/// device's own flag is not.
 pub(super) fn reboot_likely_chip(likely: bool) -> impl IntoView {
     likely.then(|| {
-        view! { <span class="chip-note" title=util::REBOOT_LIKELY_HELP>"reboot likely"</span> }
+        flag_chip(
+            "chip-estimate",
+            "↻",
+            "reboot likely",
+            format!("Reboot likely. {}", util::REBOOT_LIKELY_HELP),
+        )
     })
 }

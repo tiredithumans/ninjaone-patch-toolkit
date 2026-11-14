@@ -272,7 +272,7 @@ async fn an_os_only_query_never_fetches_the_third_party_feed() {
     let state = AppState::seeded(server.uri());
 
     let current = state
-        .fleet_current_patches(false, true, false, None, None)
+        .fleet_current_patches(false, true, false, None, None, None)
         .await
         .expect("os-only fetch");
 
@@ -298,7 +298,7 @@ async fn a_software_only_query_never_fetches_the_os_feed() {
     let state = AppState::seeded(server.uri());
 
     let current = state
-        .fleet_current_patches(false, false, true, None, None)
+        .fleet_current_patches(false, false, true, None, None, None)
         .await
         .expect("software-only fetch");
 
@@ -317,38 +317,60 @@ async fn a_software_only_query_never_fetches_the_os_feed() {
     assert!(patch.kb_number.is_none());
 }
 
-/// The third-party leg reads the device inventory to slice the feed by location.
-/// This mock answers every slice with the whole feed, as NinjaOne would a `df` it
-/// ignored, so the slices are sized, found not to add up, and the feed is paged
-/// whole: the one row arrives once.
-#[tokio::test]
-async fn the_third_party_feed_is_sliced_by_the_inventorys_locations() {
+/// Mounts the four lookup lists, `/locations` answering with `locations`.
+async fn mount_lookups(server: &wiremock::MockServer, locations: serde_json::Value) {
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
 
+    for (p, body) in [
+        (
+            "/api/v2/organizations",
+            json!([{ "id": 1, "name": "Contoso" }]),
+        ),
+        ("/api/v2/locations", locations),
+        ("/api/v2/roles", json!([])),
+        ("/api/v2/groups", json!([])),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+}
+
+/// The third-party leg used to wait for a fresh device inventory before it opened
+/// its feed, so on a cold start the two longest fetches of a query ran one after
+/// the other. Its slice plan now comes from what is in hand — here the location
+/// list, which the query's own lookup leg fetches anyway — and the inventory is
+/// never asked for. The one sizing request shows a plan was in hand: with none the
+/// feed is simply paged. (This feed is one row, far too short to slice, so it is
+/// then paged whole.)
+#[tokio::test]
+async fn the_third_party_feed_never_waits_for_the_inventory() {
+    use serde_json::json;
+
     let server = patch_feed_server().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/devices-detailed"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            { "id": 1, "locationId": 10 },
-            { "id": 2, "locationId": 20 },
-        ])))
-        .mount(&server)
-        .await;
+    mount_lookups(
+        &server,
+        json!([{ "id": 10, "name": "HQ" }, { "id": 20, "name": "Branch" }]),
+    )
+    .await;
     let state = AppState::seeded(server.uri());
 
     let current = state
-        .fleet_current_patches(false, false, true, None, None)
+        .fleet_current_patches(false, false, true, None, None, None)
         .await
         .expect("software-only fetch");
 
+    assert_eq!(current.sw.len(), 1);
     assert_eq!(
-        current.sw.len(),
-        1,
-        "the row arrives once, not once per slice"
+        hits(&server, "/api/v2/devices-detailed").await,
+        0,
+        "the feed must not wait on, or start, an inventory fetch"
     );
-    let mut sliced: Vec<String> = server
+    let page_sizes: Vec<String> = server
         .received_requests()
         .await
         .unwrap_or_default()
@@ -357,17 +379,222 @@ async fn the_third_party_feed_is_sliced_by_the_inventorys_locations() {
         .filter_map(|r| {
             r.url
                 .query_pairs()
-                .find(|(k, _)| k == "df")
+                .find(|(k, _)| k == "pageSize")
                 .map(|(_, v)| v.into_owned())
         })
         .collect();
-    // Sent concurrently, so they may land in either order.
-    sliced.sort();
     assert_eq!(
-        sliced,
-        ["loc=10", "loc=20"],
-        "one size probe per location slice"
+        page_sizes,
+        ["1", "5000"],
+        "sized once against the location plan, then paged whole"
     );
+}
+
+/// The plan is whatever is cached, never a fetch: nothing on a cold start, the
+/// location list once the lookups are in, and the inventory — balanced by device
+/// count — once that is, however long ago it was fetched. Stale is fine for a
+/// proposal the feed's own sizes then accept or refuse.
+#[tokio::test]
+async fn the_slice_plan_comes_from_whatever_is_cached_however_stale() {
+    use crate::api::patches::SlicePlan;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    mount_lookups(
+        &server,
+        json!([
+            { "id": 10, "name": "HQ" },
+            { "id": 20, "name": "Branch" },
+            { "id": 30, "name": "Lab" },
+        ]),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 1, "locationId": 10 },
+            { "id": 2, "locationId": 10 },
+            { "id": 3, "locationId": 20 },
+        ])))
+        .mount(&server)
+        .await;
+    let state = AppState::seeded(server.uri());
+
+    assert_eq!(state.slice_plan_in_hand(), None, "nothing cached yet");
+    assert_eq!(hits(&server, "/api/v2/locations").await, 0, "and no fetch");
+
+    state.lookups().await.expect("lookups");
+    assert_eq!(
+        state.slice_plan_in_hand(),
+        SlicePlan::from_locations([10, 20, 30]),
+        "the location list, every location weighted alike"
+    );
+
+    let (devices, _) = state
+        .fleet_devices_with_time(None)
+        .await
+        .expect("inventory");
+    let by_devices = SlicePlan::from_devices(&devices);
+    assert!(by_devices.is_some());
+    assert_eq!(state.slice_plan_in_hand(), by_devices);
+
+    state
+        .fleet_devices_cache
+        .age(DEVICE_TTL + Duration::from_secs(1));
+    assert_eq!(
+        state.slice_plan_in_hand(),
+        by_devices,
+        "an inventory past its TTL still plans the slices"
+    );
+    assert_eq!(hits(&server, "/api/v2/devices-detailed").await, 1);
+}
+
+/// An OS-patch feed that answers a request under `df` with that scope's one row and
+/// an unfiltered one with the whole fleet's two, and the `df` of every request.
+async fn scoped_os_feed() -> wiremock::MockServer {
+    use serde_json::json;
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let row =
+        |device: i64, kb: &str| json!({ "deviceId": device, "kbNumber": kb, "status": "MANUAL" });
+    let server = MockServer::start().await;
+    for (org, device) in [(5, 1), (6, 2)] {
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .and(query_param("df", format!("org={org}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [row(device, "KB1")], "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .and(query_param_is_missing("df"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [row(1, "KB1"), row(2, "KB1")], "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// The `df` of every OS-patch request `server` has seen, in order.
+async fn os_feed_dfs(server: &wiremock::MockServer) -> Vec<Option<String>> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/api/v2/queries/os-patches")
+        .map(|r| {
+            r.url
+                .query_pairs()
+                .find(|(k, _)| k == "df")
+                .map(|(_, v)| v.into_owned())
+        })
+        .collect()
+}
+
+fn org_scope(org: i64) -> crate::filter::IdentityScope {
+    crate::filter::FilterParams {
+        organization_ids: vec![org],
+        ..Default::default()
+    }
+    .identity_scope()
+    .expect("an organization is an identity scope")
+}
+
+/// A query scoped to one organization used to page every organization's patches,
+/// on a cold start and on every refresh tick. With no fresh whole-fleet copy it now
+/// asks for its scope, keeps that under the scope, and never serves it to another.
+/// A fresh whole-fleet copy still answers any scope for nothing.
+#[tokio::test]
+async fn a_scoped_query_with_no_fresh_fleet_copy_fetches_only_its_scope() {
+    let server = scoped_os_feed().await;
+    let state = AppState::seeded(server.uri());
+    let (five, six) = (org_scope(5), org_scope(6));
+    let os = |scope| state.fleet_current_patches(false, true, false, scope, None, None);
+
+    let first = os(Some(&five)).await.expect("scoped fetch");
+    assert!(first.os_scoped);
+    assert_eq!(first.os.len(), 1, "the scope's rows, not the fleet's");
+    let again = os(Some(&five)).await.expect("cached");
+    assert!(Arc::ptr_eq(&first.os, &again.os), "the same scope is a hit");
+    assert_eq!(os_feed_dfs(&server).await, [Some("org=5".to_string())]);
+
+    // Another scope's copy is not this scope's.
+    let other = os(Some(&six)).await.expect("the other scope");
+    assert!(other.os_scoped);
+    assert_eq!(other.os[0].device_id, Some(2));
+    assert_eq!(
+        os_feed_dfs(&server).await,
+        ["org=5", "org=6"].map(|df| Some(df.to_string()))
+    );
+
+    // An unscoped query fetches the fleet, and that copy then answers any scope.
+    let whole = os(None).await.expect("whole fleet");
+    assert!(!whole.os_scoped);
+    assert_eq!(whole.os.len(), 2);
+    let from_whole = os(Some(&five)).await.expect("read off the fleet copy");
+    assert!(!from_whole.os_scoped);
+    assert!(Arc::ptr_eq(&whole.os, &from_whole.os));
+    assert_eq!(os_feed_dfs(&server).await.len(), 3, "no fourth request");
+
+    // Once the fleet copy has aged out, the scope is fetched on its own again.
+    state
+        .fleet_current_os
+        .age(CURRENT_PATCHES_TTL + Duration::from_secs(1));
+    state
+        .scoped_current_os
+        .age(CURRENT_PATCHES_TTL + Duration::from_secs(1));
+    assert!(os(Some(&five)).await.expect("scoped refetch").os_scoped);
+    assert_eq!(
+        os_feed_dfs(&server).await.last(),
+        Some(&Some("org=5".to_string()))
+    );
+}
+
+/// The scoped copy describes the same devices a mutating action just changed, so
+/// the post-action invalidation takes it with the fleet's; and the Apply-all
+/// preview reads it only for targets its scope names — a device it never asked
+/// about would otherwise preview as "nothing approved".
+#[tokio::test]
+async fn the_scoped_copy_is_invalidated_with_the_fleets_and_previews_only_its_scope() {
+    use crate::model::PatchType;
+    let server = scoped_os_feed().await;
+    let state = AppState::seeded(server.uri());
+    let five = org_scope(5);
+
+    state
+        .fleet_current_patches(false, true, false, Some(&five), None, None)
+        .await
+        .expect("scoped fetch");
+    let (rows, _) = state
+        .cached_current_patches(PatchType::Os, |scope| *scope == five)
+        .expect("every target is in the scope it was fetched for");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        state
+            .cached_current_patches(PatchType::Os, |_| false)
+            .is_none(),
+        "a target outside the scope must not read as covered"
+    );
+
+    state.invalidate_current_patches();
+    assert!(
+        state
+            .cached_current_patches(PatchType::Os, |_| true)
+            .is_none()
+    );
+    state
+        .fleet_current_patches(false, true, false, Some(&five), None, None)
+        .await
+        .expect("refetched after the action");
+    assert_eq!(os_feed_dfs(&server).await.len(), 2);
 }
 
 #[tokio::test]
@@ -376,11 +603,11 @@ async fn widening_to_both_families_reuses_the_already_warm_one() {
     let state = AppState::seeded(server.uri());
 
     state
-        .fleet_current_patches(false, true, false, None, None)
+        .fleet_current_patches(false, true, false, None, None, None)
         .await
         .expect("os-only fetch");
     let both = state
-        .fleet_current_patches(false, true, true, None, None)
+        .fleet_current_patches(false, true, true, None, None, None)
         .await
         .expect("widened fetch");
 
@@ -403,7 +630,7 @@ async fn a_forced_refetch_inside_the_floor_is_served_from_cache() {
 
     for _ in 0..3 {
         state
-            .fleet_current_patches(true, true, false, None, None)
+            .fleet_current_patches(true, true, false, None, None, None)
             .await
             .expect("forced fetch");
     }
@@ -449,7 +676,7 @@ async fn an_invalidation_during_a_fetch_is_not_undone_by_that_fetch() {
         let state = state.clone();
         tokio::spawn(async move {
             state
-                .fleet_current_patches(false, true, false, None, None)
+                .fleet_current_patches(false, true, false, None, None, None)
                 .await
                 .expect("in-flight fetch")
         })
@@ -462,7 +689,7 @@ async fn an_invalidation_during_a_fetch_is_not_undone_by_that_fetch() {
     // The in-flight fetch may still return its rows to its own caller — it has
     // them — but it must not leave them in the cache for the *next* query.
     state
-        .fleet_current_patches(false, true, false, None, None)
+        .fleet_current_patches(false, true, false, None, None, None)
         .await
         .expect("post-action fetch");
     assert_eq!(
@@ -692,11 +919,11 @@ async fn concurrent_cold_fetches_collapse_onto_one_request() {
     let (a, b) = tokio::join!(
         {
             let state = state.clone();
-            async move { state.fleet_devices(None).await.expect("first") }
+            async move { state.fleet_devices_with_time(None).await.expect("first").0 }
         },
         {
             let state = state.clone();
-            async move { state.fleet_devices(None).await.expect("second") }
+            async move { state.fleet_devices_with_time(None).await.expect("second").0 }
         }
     );
 
@@ -749,9 +976,10 @@ async fn the_inventory_carries_reboot_reasons_and_survives_a_health_failure() {
     inventory().mount(&server).await;
     health().mount(&server).await;
     let devices = AppState::seeded(server.uri())
-        .fleet_devices(None)
+        .fleet_devices_with_time(None)
         .await
-        .expect("inventory");
+        .expect("inventory")
+        .0;
     assert_eq!(
         reasons_of(&devices),
         [Some("Windows Update".to_string()), None]
@@ -771,13 +999,17 @@ async fn the_inventory_carries_reboot_reasons_and_survives_a_health_failure() {
     health().mount(&forbidden).await;
     let state = AppState::seeded(forbidden.uri());
     let devices = state
-        .fleet_devices(None)
+        .fleet_devices_with_time(None)
         .await
-        .expect("a health failure must not fail the inventory");
+        .expect("a health failure must not fail the inventory")
+        .0;
     assert_eq!(devices.len(), 2);
     assert!(devices.iter().all(|d| d.pending_reboot_reason.is_none()));
 
-    let within = state.fleet_devices(None).await.expect("within the cap");
+    let (within, _) = state
+        .fleet_devices_with_time(None)
+        .await
+        .expect("within the cap");
     assert!(
         Arc::ptr_eq(&devices, &within),
         "served from cache inside the cap"
@@ -786,7 +1018,10 @@ async fn the_inventory_carries_reboot_reasons_and_survives_a_health_failure() {
     state
         .fleet_devices_cache
         .age(FORCE_MIN_INTERVAL + Duration::from_secs(1));
-    let after = state.fleet_devices(None).await.expect("past the cap");
+    let (after, _) = state
+        .fleet_devices_with_time(None)
+        .await
+        .expect("past the cap");
     assert_eq!(
         reasons_of(&after),
         [Some("Windows Update".to_string()), None],
@@ -891,6 +1126,39 @@ fn a_query_retired_by_a_later_start_is_dropped_even_if_the_later_one_never_finis
         StoreOutcome::Superseded
     );
     assert!(state.with_current_result(|_| ()).unwrap().is_none());
+}
+
+/// Cancel reaches every query started so far, however long ago the cancel landed,
+/// and none started after it: a Cancel pressed as a query finishes must not take
+/// the next one down with it.
+#[tokio::test]
+async fn a_cancel_covers_the_queries_already_started_and_none_started_after() {
+    use std::time::Duration as StdDuration;
+
+    let state = AppState::seeded("https://app.ninjarmm.com".into());
+    let first = state.begin_query();
+    let second = state.begin_query();
+    let (first_cancelled, second_cancelled) = (
+        state.query_cancelled(&first),
+        state.query_cancelled(&second),
+    );
+    let pending = |cancelled| tokio::time::timeout(StdDuration::from_millis(20), cancelled);
+    assert!(
+        pending(state.query_cancelled(&first)).await.is_err(),
+        "nothing is cancelled until the operator says so"
+    );
+
+    state.cancel_queries();
+    first_cancelled.await;
+    second_cancelled.await;
+    // A query that starts watching only now still sees the cancel that covered it.
+    state.query_cancelled(&second).await;
+
+    let third = state.begin_query();
+    assert!(
+        pending(state.query_cancelled(&third)).await.is_err(),
+        "a query started after the cancel is not cancelled by it"
+    );
 }
 
 #[test]
@@ -1361,26 +1629,40 @@ async fn the_apply_preview_peek_never_fetches() {
     let server = patch_feed_server().await;
     let state = AppState::seeded(server.uri());
 
-    assert!(state.cached_current_patches(PatchType::Os).is_none());
+    assert!(
+        state
+            .cached_current_patches(PatchType::Os, |_| true)
+            .is_none()
+    );
     assert_eq!(hits(&server, "/api/v2/queries/os-patches").await, 0);
 
     state
-        .fleet_current_patches(false, true, false, None, None)
+        .fleet_current_patches(false, true, false, None, None, None)
         .await
         .expect("os fetch");
     let (os, _) = state
-        .cached_current_patches(PatchType::Os)
+        .cached_current_patches(PatchType::Os, |_| true)
         .expect("warm after a query");
     assert_eq!(os.len(), 1);
     assert!(
-        state.cached_current_patches(PatchType::Software).is_none(),
+        state
+            .cached_current_patches(PatchType::Software, |_| true)
+            .is_none(),
         "the family that was not queried stays cold"
     );
-    assert!(state.cached_current_patches(PatchType::All).is_none());
+    assert!(
+        state
+            .cached_current_patches(PatchType::All, |_| true)
+            .is_none()
+    );
     assert_eq!(hits(&server, "/api/v2/queries/os-patches").await, 1);
 
     state.invalidate_current_patches();
-    assert!(state.cached_current_patches(PatchType::Os).is_none());
+    assert!(
+        state
+            .cached_current_patches(PatchType::Os, |_| true)
+            .is_none()
+    );
 }
 
 /// The poller's claimed set: every bound activity id in the store, settled jobs

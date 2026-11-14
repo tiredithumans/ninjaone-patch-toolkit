@@ -27,7 +27,7 @@ src-tauri/                       # Tauri 2 backend (native target)
 │   ├── paging.rs                # get_paginated, parse_page/PagedRow, cursor forward-progress
 │   ├── tests.rs                 # retry / pagination / replay tests (wiremock)
 │   ├── devices.rs               # device inventory
-│   ├── patches.rs               # current patches (third-party feed in location slices) + install-history endpoints
+│   ├── patches.rs               # current patches + install-history endpoints; SlicePlan / paged_in_slices (long feeds as verified location slices)
 │   ├── actions.rs               # WRITE path: patch scan/apply, reboot, script/run, automation-script library
 │   ├── activities.rs            # /activities feed used to resolve dispatched jobs
 │   ├── jobs.rs                  # /jobs: what NinjaOne reports running, for display only
@@ -75,7 +75,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   │   └── query.rs · view.rs · selection.rs · actions.rs · live_jobs.rs · lookups.rs · presets.rs · view_link.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
 │   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
-│   ├── tables/                  # one file per results tab (+ changes panel, backlog, device drill-down dialog, live_jobs chip/panel)
+│   ├── tables/                  # one file per results tab (+ changes panel, backlog, device drill-down dialog, live_jobs chip/panel, placeholder: idle hint / running-query panel)
 │   ├── header.rs                # top bar: brand, run controls, Export / account / ⋯ menus
 │   ├── controls.rs              # run controls, export menu, presets, view-link notices
 │   ├── menu.rs                  # MenuButton + dismiss_on_outside: menus and pickers (never aria-modal)
@@ -84,7 +84,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   ├── shortcuts.rs             # key handler + help dialog (map: util::shortcut_for)
 │   ├── modal.rs                 # focus_trap: dialogs take focus on open, keep Tab inside, restore the opener
 │   └── util/                    # JS-free pure helpers + their host tests
-│       └── one file per concern (query, selection, sla, compliance, column_help, guardrails, changes, shortcuts, view_link, theme, …) + tests.rs
+│       └── one file per concern (query, selection, sla, compliance, column_help, guardrails, changes, shortcuts, view_link, theme, table_sort, …) + tests.rs
 ├── src/api.rs                   # ipc! macro → typed invoke wrappers, event subscribe, is_tauri() browser-mode guard
 ├── src/demo.rs                  # pure sample-data builder for demo / web mode
 ├── src/types.rs                 # request/response types mirrored from the backend (+ types/tests.rs: decodes backend-ipc.json)

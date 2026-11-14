@@ -46,6 +46,7 @@ pub(crate) fn Header() -> impl IntoView {
                     </a>
                 </Show>
                 <Show when=move || !state.session.web_mode.get()>
+                    <UpdateBadge/>
                     <button
                         class="btn"
                         // It opens a dialog; it is not a toggle that stays pressed.
@@ -60,6 +61,33 @@ pub(crate) fn Header() -> impl IntoView {
             </div>
             <QueryProgressLine/>
         </header>
+    }
+}
+
+/// "Update available" in the top bar once a check has found one; a click opens the
+/// update dialog (`UpdateSplash`). The launch check used to open that dialog itself,
+/// over a window the operator had opened to do something else.
+#[component]
+fn UpdateBadge() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    move || {
+        state.updates.available.get().map(|info| {
+            let title = format!(
+                "Version {} is available (you're on {}). Click for what's new and to install it.",
+                info.version, info.current_version,
+            );
+            view! {
+                <button
+                    type="button"
+                    class="btn btn-update"
+                    aria-haspopup="dialog"
+                    title=title
+                    on:click=move |_| state.updates.update.set(Some(info.clone()))
+                >
+                    "Update available"
+                </button>
+            }
+        })
     }
 }
 

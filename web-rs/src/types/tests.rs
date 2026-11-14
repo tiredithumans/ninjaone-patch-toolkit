@@ -129,8 +129,11 @@ const COMMAND_CHECKS: [(&str, Check); 23] = [
 /// covers. A wrapper has to be in one list or the other
 /// (`every_ipc_wrapper_is_decoded_or_listed`) — nothing else makes a new command's
 /// shape reach the fixture.
-const NOT_DECODED: [(&str, &str); 13] = [
+const NOT_DECODED: [(&str, &str); 16] = [
     ("sign_in", "returns ()"),
+    ("cancel_query", "returns ()"),
+    ("open_device_in_ninjaone", "returns ()"),
+    ("prewarm_fleet", "returns ()"),
     ("sign_out", "returns ()"),
     ("reauthorize", "returns ()"),
     ("install_update", "returns ()"),
@@ -284,6 +287,31 @@ fn the_mirrored_enums_spell_exactly_the_backends_variants() {
         .map(|s| spelled(serde_json::to_value(s).expect("serialize a job state")["state"].clone()))
         .collect();
     assert_eq!(states, backend("jobState"), "JobState");
+
+    // In order, not as a set: the Needs Reboot headers map a column to its key by
+    // index (`util::reboot_sort_request`).
+    let reboot_keys: Vec<String> = RebootSortKey::ALL
+        .iter()
+        .map(|k| spelled(serde_json::to_value(k).expect("serialize a reboot sort key")))
+        .collect();
+    let backend_keys: Vec<String> = fixture["enums"]["rebootSortKey"]
+        .as_array()
+        .expect("the fixture lists `rebootSortKey`")
+        .iter()
+        .map(|v| v.as_str().expect("a key spelling").to_owned())
+        .collect();
+    assert_eq!(reboot_keys, backend_keys, "RebootSortKey");
+
+    // Not an enum, but the same promise: every cause the backend can attach to a
+    // failed query has words in `util::failure_cause`, and none is spelled apart.
+    let causes: BTreeSet<String> = QUERY_ERROR_CODES.iter().map(|c| c.to_string()).collect();
+    assert_eq!(causes, backend("queryErrorCode"), "query error codes");
+    for code in QUERY_ERROR_CODES {
+        assert!(
+            crate::app::util::failure_cause(Some(code)).is_some(),
+            "`{code}` has no wording"
+        );
+    }
 }
 
 /// The per-device targets go over IPC as a JSON object keyed by the device id as a

@@ -140,6 +140,22 @@ slot lock — the same bump-then-clear the `TenantCache` epochs use, so either i
 the write. `summary_for` makes it an error ("The session ended while this query was running"),
 like `TenantChanged`.
 
+## A cancelled query is dropped, not stored
+
+A whole-fleet fetch runs for minutes and there used to be no way out of one but waiting.
+`cancel_query` calls `AppState::cancel_queries`, which records the newest generation started so far
+in a `watch`; each `query_patches` races its two working awaits (the fetch-and-assemble, then the
+diff) against `AppState::query_cancelled(&token)` through `unless_cancelled`. When the cancel wins
+the work is **dropped where it stands**, which is the whole mechanism: a fetch in flight is a
+future holding its requests, so they are aborted; a whole-fleet leg that had already finished stays
+cached; one cut short stores nothing, and its slot's single-flight gate is released for the next
+caller. The query ends with `ERR_CANCELLED` before it reaches its token, so nothing is stored,
+written to the run history or persisted. The cancel names the generations it covers rather than
+flipping a flag, so one pressed as a query finishes cannot reach the next query, and a `watch`
+means one that lands before the query starts watching is still seen
+(`a_cancel_covers_the_queries_already_started_and_none_started_after`,
+`a_cancelled_query_drops_its_work_and_says_so_by_code`).
+
 ## A tenant switch, a sign-out, a sign-in and a re-authorization all clear the frontend
 
 `save_settings` reports `tenant_changed` on its `SettingsView` (both halves of the tenant key —
@@ -285,6 +301,13 @@ The documented exceptions are `QueryScope` and `instance`, which live on `QueryR
 export provenance the frontend already has — see
 [compliance.md](./compliance.md#both-exports-state-the-facets-from-rowsqueryscope).
 
+**The summary is not held back for the saves.** A stored run leaves two writes behind it — its
+snapshot (the next run's changes baseline) and its first-seen observations — and they used to be
+awaited before `query_patches` returned. They now take their place in `AppState::persist`
+(`PersistGate`, a fair `tokio` mutex) and land after the reply; the next query waits for the gate
+before it reads the ledger or the baseline, and so does quitting. See
+[compliance.md](./compliance.md#changes-since-the-previous-comparable-run).
+
 `changes` (`changes::RunChanges`) rides the same way, but is filled *after* `assemble_result`:
 it needs the previous run's snapshot, so `query_patches` loads it on a blocking thread between
 the join and the summary — from the file, or from the snapshot this process wrote last when the
@@ -295,7 +318,7 @@ compact — see [compliance.md](./compliance.md#changes-since-the-previous-compa
 
 The device inventory and current patches (OS + 3rd-party) are fetched **whole-fleet** (no `df`;
 the third-party feed as location slices that must add up to it, see
-[api-client.md](./api-client.md#the-whole-fleet-third-party-feed-is-paged-in-location-slices-that-must-add-up-to-it))
+[api-client.md](./api-client.md#a-long-patch-feed-is-paged-in-location-slices-that-must-add-up-to-it))
 and cached in `AppState` (`fleet_devices_cache`, `DEVICE_TTL` ~15 min since devices change rarely;
 the current patches in `fleet_current_os` / `fleet_current_sw`, refreshed on `force_refresh` or
 past `CURRENT_PATCHES_TTL`). `run_query` then scopes them to the selected identity facets
@@ -305,6 +328,51 @@ exception: its membership is one small read per selected group per query (see
 [filter.md](./filter.md#device-groups-are-read-per-query-and-fail-closed)). This is why
 `query_patches` takes the cached devices/current as *futures* (concurrent cold fetch) and why there
 is no separate per-query device-filter fetch.
+
+### A scoped query with no fresh fleet copy fetches only its scope
+
+The prefetch makes a re-filter free, but it also made every query pay for the fleet: one
+organization's pending patches cost a page-through of every organization's, on a cold start and
+again on every auto-refresh tick (a forced tick's TTL is `FORCE_MIN_INTERVAL`, so the whole-fleet
+copy is stale for it by construction). `AppState::current_family` therefore reads in this order:
+
+1. a **fresh whole-fleet copy** answers every scope, so it is used whenever there is one — a
+   re-filter over a warm fleet still costs nothing;
+2. without one, a query with an identity scope (`FilterParams::identity_scope`: organization,
+   location, role — the facets `/queries/*` honors in `df`) fetches **that scope** and keeps it in
+   the family's scoped slot (`scoped_current_{os,sw}`, a `TenantCache<ScopedPatches>` keyed by the
+   scope: another scope's copy is dropped, never served);
+3. an unscoped query fetches the fleet, as before.
+
+The clause is the one the install history has always sent (`patch_filter`) and carries the same
+guarantee: it is a saving, never the boundary. `assemble_result` scopes the rows client-side
+whichever slot they came from, so a clause NinjaOne drops costs a larger download, not a wider
+result. A scoped third-party fetch is still sliced by location (the slices are the scope ANDed
+with a `loc` clause, held to the scoped feed's size).
+
+Three things that assumed "the cached feed is the fleet" know the difference:
+
+- **The first-seen ledger** is told (`CurrentPatches::{os,sw}_scoped` → `FeedObservation::scoped`)
+  and prunes only the devices a scoped feed lists — see
+  [compliance.md](./compliance.md#this-app-keeps-its-own-first-seen-record).
+- **The Apply-all preview** reads a scoped copy only for targets its scope names
+  (`cached_current_patches`) — see [actions.md](./actions.md).
+- **`invalidate_current_patches`** clears the scoped slots with the fleet's.
+
+What is given up: changing from one scope to another on a cold cache is now a (small) fetch
+instead of free, and a session that only ever runs scoped queries never warms the fleet copy.
+
+### The inventory is warmed at sign-in
+
+Every query needs the device inventory, whatever its scope or patch type, and it is the one
+`after`-paged whole-fleet fetch — 500 devices a request, in sequence. Nothing used to ask for it
+until the first Run, so the first query of a session waited on all of it. The frontend now calls
+`prewarm_fleet` as the session becomes signed in (the same transition that loads the lookups, and
+again after `clear_session_and_reload`); the command just awaits `fleet_devices_with_time`, so a Run
+that arrives meanwhile joins the fetch at the single-flight gate. Only the inventory is warmed: which
+patch feed is wanted depends on the query, and paging a six-figure feed nobody asks for is a cost,
+not a saving. A failed warm-up is logged at `debug` and swallowed — the first query fetches again
+and reports it.
 
 ### The two current-patch families are cached separately, and only the requested one is fetched
 
@@ -359,7 +427,8 @@ inventory fetched up to fifteen minutes earlier rather than claiming the refresh
 ### Install history is not prefetched
 
 Install history is fetched fresh per query, scoped server-side by `patch_filter` +
-status-pushed-down (too large to cache). The summary carries `data_fetched_at` (when the oldest
+status-pushed-down (too large to cache), and a long pull is paged in location slices like the
+third-party feed. The summary carries `data_fetched_at` (when the oldest
 cached input — a patch family or the device inventory — was fetched, distinct from
 `generated_at`) for the UI's "patch data as of …" label. The
 whole-fleet caches are tenant-scoped, so `clear_lookups_cache` drops them too.

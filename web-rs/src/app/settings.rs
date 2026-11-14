@@ -1,4 +1,46 @@
+use leptos::web_sys::Element;
+
 use super::*;
+
+/// The dialog's sections, as (element id, label), in the order they scroll.
+const SECTIONS: [(&str, &str); 4] = [
+    ("set-connection", "Connection"),
+    ("set-data", "Data and updates"),
+    ("set-sla", "Patch SLA"),
+    ("set-actions", "Patch actions"),
+];
+
+/// Links to the dialog's sections, in its head. The form is about two windows
+/// tall and Patch actions — the part most often reopened — is at the bottom of it.
+///
+/// Buttons that scroll, as on the Compliance tab: an `href="#…"` would overwrite
+/// the web demo's view code in the URL fragment.
+#[component]
+fn SettingsJumps() -> impl IntoView {
+    view! {
+        <nav class="section-jumps settings-jumps" aria-label="Settings sections">
+            {SECTIONS
+                .into_iter()
+                .map(|(id, label)| {
+                    view! {
+                        <button
+                            type="button"
+                            class="link-btn"
+                            on:click=move |_| {
+                                if let Some(el) = document().get_element_by_id(id) {
+                                    let el: &Element = el.as_ref();
+                                    el.scroll_into_view();
+                                }
+                            }
+                        >
+                            {label}
+                        </button>
+                    }
+                })
+                .collect_view()}
+        </nav>
+    }
+}
 
 /// Settings, as a dialog over the app. It used to be an inline panel above the
 /// filters with no way to close it but the header button that opened it, pushing
@@ -99,7 +141,12 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
         state.updates.update_busy.set(true);
         spawn_local(async move {
             match api::check_for_update().await {
-                Ok(Some(info)) => state.updates.update.set(Some(info)),
+                // Asked for by hand, so the dialog opens at once; the badge stays
+                // after "Later".
+                Ok(Some(info)) => {
+                    state.updates.available.set(Some(info.clone()));
+                    state.updates.update.set(Some(info));
+                }
                 Ok(None) => state.notify(Toast::ok("You're on the latest version")),
                 Err(e) => state.notify(Toast::err(e)),
             }
@@ -121,13 +168,16 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
             on:input=move |_| state.settings.dirty.set(true)
             on:change=move |_| state.settings.dirty.set(true)
         >
-            <div class="modal-head">
+            // Stays at the top while the form scrolls under it, so the section links
+            // and Close are in reach from anywhere in a form two windows tall.
+            <div class="modal-head settings-head">
                 <h2 id="settings-title">"Settings"</h2>
+                <SettingsJumps/>
                 <button class="x" aria-label="Close settings" on:click=move |_| close()>
                     "×"
                 </button>
             </div>
-            <h3 class="settings-section">"Connection"</h3>
+            <h3 class="settings-section" id="set-connection">"Connection"</h3>
             <div class="grid">
                 <label>
                     "Region / Instance"
@@ -247,10 +297,17 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                         </button>
                     </span>
                 </label>
-                <label>
+            </div>
+            // What the app reads and downloads, apart from how it connects: these
+            // three used to trail the connection fields in the same grid, a number
+            // field and two checkboxes each landing wherever the row broke.
+            <h3 class="settings-section" id="set-data">"Data and updates"</h3>
+            <div class="settings-stack">
+                <label class="settings-inline-field">
                     "Install history window (days)"
                     <input
                         type="number"
+                        class="narrow"
                         min="1"
                         max="3650"
                         prop:value=move || state.settings.f_install_days.get().to_string()
@@ -268,6 +325,21 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                         "How far back Installed and Failed patches are read by default."
                     </span>
                 </label>
+                <div>
+                    <label class="inline">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || state.settings.f_exploit_data.get()
+                            on:change=move |ev| state.settings.f_exploit_data.set(event_target_checked(&ev))
+                        />
+                        "Mark Windows updates that fix exploited vulnerabilities"
+                    </label>
+                    <p class="settings-hint">
+                        "Downloads public data from Microsoft (about 250 MB the first time, then "
+                        "only revisions) and CISA's Known Exploited Vulnerabilities catalog. "
+                        "Nothing about your fleet is sent."
+                    </p>
+                </div>
                 <label class="inline">
                     <input
                         type="checkbox"
@@ -276,19 +348,6 @@ pub(crate) fn SettingsDialog() -> impl IntoView {
                     />
                     "Automatically check for updates on launch"
                 </label>
-                <label class="inline">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || state.settings.f_exploit_data.get()
-                        on:change=move |ev| state.settings.f_exploit_data.set(event_target_checked(&ev))
-                    />
-                    "Mark Windows updates that fix exploited vulnerabilities"
-                </label>
-                <p class="settings-hint">
-                    "Downloads public data from Microsoft (about 250 MB the first time, then "
-                    "only revisions) and CISA's Known Exploited Vulnerabilities catalog. "
-                    "Nothing about your fleet is sent."
-                </p>
             </div>
             <SlaSettingsFields/>
             <ActionSettingsFields/>
@@ -439,7 +498,7 @@ fn SlaSettingsFields() -> impl IntoView {
     let bands = state.settings.f_sla_by_severity;
     let exempt = state.settings.f_sla_exempt;
     view! {
-        <fieldset class="settings-sla">
+        <fieldset class="settings-sla" id="set-sla">
             <legend>"Patch SLA"</legend>
             <p class="settings-hint">
                 "How long a patch may stay pending after it is first seen before it counts as past SLA. Leave a severity blank to use the default. Tick No SLA for a severity that should never count as past SLA — its patches still count as pending, so a device with them is not fully patched. Unrated (Unknown) patches always use the default. Applies from the next Run query."
@@ -536,7 +595,7 @@ fn ActionSettingsFields() -> impl IntoView {
     let enabled = move || a.with(|s| s.enabled);
 
     view! {
-        <fieldset class="settings-actions">
+        <fieldset class="settings-actions" id="set-actions">
             <legend>"Patch actions"</legend>
             <p class="settings-hint">
                 "Off by default. Turning this on makes the next sign-in request the "

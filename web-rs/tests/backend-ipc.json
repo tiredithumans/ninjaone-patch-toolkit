@@ -1506,6 +1506,21 @@
       "timedOut",
       "unknown",
       "skipped"
+    ],
+    "queryErrorCode": [
+      "network",
+      "rateLimited",
+      "serverError",
+      "accessDenied"
+    ],
+    "rebootSortKey": [
+      "organization",
+      "location",
+      "deviceRole",
+      "device",
+      "os",
+      "pendingPatches",
+      "rebootReason"
     ]
   },
   "events": {
@@ -1554,7 +1569,8 @@
     "query:progress": {
       "loaded": 500,
       "queryId": 3,
-      "stage": "osPatches"
+      "stage": "osPatches",
+      "total": 6721
     }
   },
   "wording": {

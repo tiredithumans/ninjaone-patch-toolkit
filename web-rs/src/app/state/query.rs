@@ -92,6 +92,19 @@ impl AppState {
         self.run_query_inner(false, true);
     }
 
+    /// Stops the query in flight. The backend drops its fetch and the pending
+    /// `query_patches` call comes back cancelled, which is what clears the busy
+    /// state — so a cancel the backend never hears leaves the run as it was. A run
+    /// queued behind this one goes too: it was asked for before the cancel.
+    pub(in crate::app) fn cancel_query(self) {
+        self.run.queued.set(None);
+        spawn_local(async move {
+            if let Err(e) = api::cancel_query().await {
+                self.notify(Toast::err(format!("Couldn't cancel the query: {e}")));
+            }
+        });
+    }
+
     pub(in crate::app) fn run_query_inner(self, silent: bool, force: bool) {
         // An automatic refresh re-runs the query on screen, not whatever the controls
         // say now: a filter edited but not yet applied would otherwise land on the
@@ -271,12 +284,24 @@ impl AppState {
                     self.actions.results_stale.set(false);
                     self.reload_device_detail();
                 }
+                // The operator's own Cancel: nothing failed, so no banner, and the
+                // result on screen (if any) stands. The run's short life says
+                // nothing about how long a query takes, so it is not recorded.
+                Err(e) if util::query_was_cancelled(e.code.as_deref()) => {
+                    self.notify(Toast::ok("Query cancelled."));
+                    flag.set(false);
+                    self.run_queued();
+                    return;
+                }
                 // The toast announces the failure (aria-live); the banner keeps it
-                // visible after the toast auto-dismisses.
+                // visible after the toast auto-dismisses, with the details and Retry.
                 Err(e) => {
+                    let announce = util::failure_cause(e.code.as_deref())
+                        .map_or_else(|| e.message.clone(), str::to_string);
                     self.query.error_is_paging.set(false);
-                    self.query.query_error.set(Some(e.clone()));
-                    self.notify(Toast::err(e));
+                    self.query.query_error_code.set(e.code);
+                    self.query.query_error.set(Some(e.message));
+                    self.notify(Toast::err(announce));
                     // A dead sign-in fails the query and signs the backend out;
                     // re-read the status so the top bar stops saying Connected.
                     self.session.refresh_auth();
@@ -508,6 +533,8 @@ impl AppState {
         if lookups_in_flight {
             self.load_lookups();
         }
+        // The backend dropped its inventory with the session it cleared.
+        self.prewarm_fleet();
         self.load_scripts();
     }
 

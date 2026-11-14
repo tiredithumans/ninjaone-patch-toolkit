@@ -323,6 +323,60 @@ fn sel_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, ty: &str)
     }
 }
 
+/// A Shift-click takes every row between it and the row clicked before it, in
+/// either direction, both ends included — and is an ordinary click when that row is
+/// not on this page (no earlier click, or one made on a page since left).
+#[test]
+fn a_shift_click_takes_the_rows_between_the_two_clicks() {
+    assert_eq!(shift_click_range(Some(1), Some(4)), Some(1..=4));
+    assert_eq!(shift_click_range(Some(4), Some(1)), Some(1..=4));
+    assert_eq!(shift_click_range(Some(2), Some(2)), Some(2..=2));
+    assert_eq!(shift_click_range(None, Some(3)), None);
+    assert_eq!(shift_click_range(Some(3), None), None);
+
+    // The anchor is found by the identity the selection keys a row by, so the
+    // same KB on another device is not it, and a row from another page is nowhere.
+    let page = [
+        sel_row(1, "web-01", Some("KB1"), "Update one", "OS"),
+        sel_row(2, "web-02", Some("KB1"), "Update one", "OS"),
+        sel_row(2, "web-02", None, "Chrome 138", "SOFTWARE"),
+    ];
+    let key = |r: &PatchRow| patch_key(r);
+    assert_eq!(row_position(&page, 2, &key(&page[1])), Some(1));
+    assert_eq!(row_position(&page, 2, &key(&page[2])), Some(2));
+    assert_eq!(row_position(&page, 9, &key(&page[0])), None);
+
+    // The range goes through the same selection surgery as any tick: the rows in
+    // it, each on its own device, and nothing outside it.
+    let mut sel = BTreeMap::new();
+    let range = shift_click_range(Some(0), Some(1)).expect("both on the page");
+    apply_rows_selection(&mut sel, &page[range], true);
+    assert_eq!(sel.len(), 2);
+    assert_eq!(
+        sel[&2].patches.len(),
+        1,
+        "the third row was not in the range"
+    );
+}
+
+/// The idle action bar names what a selection can reach from its tab: a device
+/// ticked on Needs Reboot cannot be patched or sent a script.
+#[test]
+fn the_idle_action_bar_promises_only_what_its_tab_can_reach() {
+    let rows = action_bar_hint(SelectionSource::PatchRows);
+    let devices = action_bar_hint(SelectionSource::Devices);
+    assert!(rows.contains("patch") && rows.contains("script"));
+    assert!(!devices.contains("patch") && !devices.contains("script"));
+    for kind in ActionKind::ALL {
+        if !device_selection_allows(kind) {
+            assert!(
+                source_disabled_reason(SelectionSource::Devices, kind).is_some(),
+                "{kind:?} is not offered from a device selection"
+            );
+        }
+    }
+}
+
 /// The guard chain's *order* is load-bearing and was only reachable by reading
 /// `run_query_inner`: a demo run must be decided before the auth guard (the demo
 /// has no session and would otherwise be told to sign in), and the busy guard
@@ -386,17 +440,82 @@ fn queued_run_fires_once_after_the_run_in_flight_settles() {
 #[test]
 fn progress_stages_land_on_their_own_counters() {
     let mut p = Progress::default();
-    apply_progress_stage(&mut p, "devices", 10);
-    apply_progress_stage(&mut p, "osPatches", 20);
-    apply_progress_stage(&mut p, "swPatches", 30);
-    apply_progress_stage(&mut p, "osInstalls", 40);
-    apply_progress_stage(&mut p, "swInstalls", 50);
-    assert_eq!(p.records(), 150);
+    apply_progress_stage(&mut p, "devices", 10, None);
+    apply_progress_stage(&mut p, "osPatches", 20, Some(40));
+    apply_progress_stage(&mut p, "swPatches", 30, None);
+    apply_progress_stage(&mut p, "osInstalls", 40, None);
+    apply_progress_stage(&mut p, "swInstalls", 50, None);
+    assert_eq!(progress_records(&p), 150);
     assert!(!p.joining);
-    apply_progress_stage(&mut p, "somethingNew", 999);
-    assert_eq!(p.records(), 150, "an unknown stage is ignored");
-    apply_progress_stage(&mut p, "joining", 0);
+    apply_progress_stage(&mut p, "somethingNew", 999, Some(1));
+    assert_eq!(progress_records(&p), 150, "an unknown stage is ignored");
+    apply_progress_stage(&mut p, "joining", 0, None);
     assert!(p.joining);
+}
+
+/// Only the feeds that have reported are listed, in a fixed order, each with its
+/// size when NinjaOne announced one — so a feed the query never asked for is not
+/// shown sitting at zero, and the inventory (which announces nothing) is a count.
+#[test]
+fn the_loading_panel_lists_the_feeds_that_have_reported() {
+    let mut p = Progress::default();
+    assert!(progress_lines(&p).is_empty(), "nothing has answered yet");
+
+    apply_progress_stage(&mut p, "swPatches", 120_000, Some(563_255));
+    apply_progress_stage(&mut p, "devices", 4_210, None);
+    let lines = progress_lines(&p);
+    assert_eq!(
+        lines
+            .iter()
+            .map(|l| (l.label, l.count.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Devices", "4,210"),
+            ("Third-party patches", "120,000 of 563,255"),
+        ]
+    );
+    assert_eq!(lines[0].fraction, None);
+    let fraction = lines[1].fraction.expect("a sized feed has a fraction");
+    assert!((fraction - 120_000.0 / 563_255.0).abs() < 1e-9);
+
+    // An empty feed is done, not 0 of 0 forever.
+    apply_progress_stage(&mut p, "osPatches", 0, Some(0));
+    assert_eq!(progress_lines(&p)[1].fraction, Some(1.0));
+}
+
+/// The bar is measured against the sizes NinjaOne announced when any feed has one,
+/// and only otherwise guessed from the previous run — which is what it always was,
+/// wrong whenever the scope differed and absent on a session's first run.
+#[test]
+fn the_progress_bar_is_measured_when_a_feed_announced_its_size() {
+    let mut p = Progress::default();
+    assert_eq!(progress_fraction(&p, 5_000.0, None), None, "indeterminate");
+    assert_eq!(
+        progress_fraction(&p, 5_000.0, Some(20_000.0)),
+        Some(0.25),
+        "no size yet: the previous run's duration"
+    );
+    assert_eq!(progress_fraction(&p, 5_000.0, Some(0.0)), None);
+
+    // The inventory announces nothing, so it does not make the bar measurable.
+    apply_progress_stage(&mut p, "devices", 9_000, None);
+    assert_eq!(progress_fraction(&p, 5_000.0, Some(20_000.0)), Some(0.25));
+
+    apply_progress_stage(&mut p, "osPatches", 5_000, Some(10_000));
+    apply_progress_stage(&mut p, "swPatches", 10_000, Some(90_000));
+    assert_eq!(
+        progress_fraction(&p, 19_000.0, Some(20_000.0)),
+        Some(0.15),
+        "15,000 of 100,000 records, whatever the clock says"
+    );
+
+    // Held under 1: the rollups still follow the last record.
+    apply_progress_stage(&mut p, "osPatches", 10_000, Some(10_000));
+    apply_progress_stage(&mut p, "swPatches", 90_000, Some(90_000));
+    assert_eq!(progress_fraction(&p, 0.0, None), Some(0.95));
+    // A feed that ran past its announced size cannot push the bar past the rest.
+    apply_progress_stage(&mut p, "swPatches", 500_000, Some(90_000));
+    assert_eq!(progress_fraction(&p, 0.0, None), Some(0.95));
 }
 
 /// Only equality is ever asked of the stamp, so wrapping is safe — and a plain
@@ -3075,34 +3194,79 @@ fn a_capped_failure_list_says_how_many_more() {
 fn a_reboot_page_is_seeded_until_it_runs_past_the_summary() {
     use RebootPage::*;
     assert_eq!(
-        reboot_page_source(0, 100, 100, 450),
+        reboot_page_source(0, 100, 100, 450, false),
         Seeded { start: 0, end: 100 }
     );
     assert_eq!(
-        reboot_page_source(1, 100, 100, 450),
+        reboot_page_source(1, 100, 100, 450, false),
         Fetch {
             offset: 100,
             limit: 100
         }
     );
     assert_eq!(
-        reboot_page_source(4, 100, 100, 450),
+        reboot_page_source(4, 100, 100, 450, false),
         Fetch {
             offset: 400,
             limit: 50
         }
     );
     assert_eq!(
-        reboot_page_source(3, 100, 450, 450),
+        reboot_page_source(3, 100, 450, 450, false),
         Seeded {
             start: 300,
             end: 400
         }
     );
     assert_eq!(
-        reboot_page_source(0, 100, 0, 0),
+        reboot_page_source(0, 100, 0, 0, false),
         Seeded { start: 0, end: 0 }
     );
+}
+
+/// Sorted, even the first page is fetched unless the summary holds the whole list:
+/// its hundred devices are the first hundred of the *unsorted* order, so sorting
+/// them here would show one page of the wrong list. A list held whole is sorted
+/// where it is; and a clicked column names its backend key by position.
+#[test]
+fn a_sorted_reboot_list_is_fetched_unless_the_summary_holds_all_of_it() {
+    use RebootPage::*;
+    assert_eq!(
+        reboot_page_source(0, 100, 100, 450, true),
+        Fetch {
+            offset: 0,
+            limit: 100
+        }
+    );
+    assert_eq!(
+        reboot_page_source(0, 100, 5, 5, true),
+        Seeded { start: 0, end: 5 }
+    );
+    assert_eq!(
+        reboot_page_source(3, 100, 450, 450, true),
+        Seeded {
+            start: 300,
+            end: 400
+        }
+    );
+
+    assert_eq!(reboot_sort_request(None), None);
+    assert_eq!(
+        reboot_sort_request(Some(ColumnSort { col: 5, desc: true })),
+        Some(crate::types::RebootSort {
+            key: crate::types::RebootSortKey::PendingPatches,
+            desc: true
+        })
+    );
+    assert_eq!(
+        reboot_sort_request(Some(ColumnSort {
+            col: REBOOT_HEADERS.len(),
+            desc: false
+        })),
+        None,
+        "a column the table does not have"
+    );
+    assert_eq!(REBOOT_HEADERS.len(), crate::types::RebootSortKey::ALL.len());
 }
 
 #[test]
@@ -4530,14 +4694,66 @@ fn onboarding_names_the_missing_step_once_settings_have_loaded() {
 /// A page that failed to load is not a failed query.
 #[test]
 fn error_banner_tells_a_failed_page_from_a_failed_query() {
-    assert_eq!(
-        query_error_banner("boom", false, false),
-        "Last query failed: boom"
+    let failed = query_error_banner("boom", None, false, false);
+    assert_eq!(failed.text, "Last query failed: boom");
+    assert!(failed.retry && failed.details.is_none());
+    assert!(
+        query_error_banner("boom", None, true, false)
+            .text
+            .contains("previous run")
     );
-    assert!(query_error_banner("boom", true, false).contains("previous run"));
-    let paging = query_error_banner("boom", true, true);
-    assert!(!paging.contains("query failed"), "{paging}");
-    assert!(paging.ends_with("boom"));
+    let paging = query_error_banner("boom", None, true, true);
+    assert!(!paging.text.contains("query failed"), "{}", paging.text);
+    assert!(paging.text.ends_with("boom"));
+    assert!(
+        !paging.retry,
+        "the query worked; re-running it is not the fix"
+    );
+    // A cause left over from an earlier failed query is not this page's.
+    assert_eq!(
+        query_error_banner("boom", Some(crate::types::ERR_SERVER), true, true),
+        paging
+    );
+}
+
+/// Only the operator's own Cancel is "not a failure"; every other code, and none,
+/// still gets the banner.
+#[test]
+fn only_a_cancelled_query_is_not_an_error() {
+    assert!(query_was_cancelled(Some(crate::types::ERR_CANCELLED)));
+    assert!(!query_was_cancelled(None));
+    assert!(!query_was_cancelled(Some(crate::types::ERR_SERVER)));
+    // The wire value the backend's `error::ERR_CANCELLED` sends.
+    assert_eq!(crate::types::ERR_CANCELLED, "cancelled");
+}
+
+/// A failure the backend put down to a cause leads with what to do about it, keeps
+/// the raw message for Details, and says when the rows on screen are older. One it
+/// could not is quoted as before: its own message is the explanation.
+#[test]
+fn a_failed_query_leads_with_its_cause_and_keeps_the_message_for_details() {
+    let raw = "GET https://app.ninjarmm.com/api/v2/queries/software-patches failed (502 Bad Gateway): upstream connect error";
+    let first = query_error_banner(raw, Some(crate::types::ERR_SERVER), false, false);
+    assert_eq!(
+        first.text,
+        "NinjaOne had trouble answering — this is usually temporary."
+    );
+    assert_eq!(first.details.as_deref(), Some(raw));
+    assert!(first.retry);
+
+    let stale = query_error_banner(raw, Some(crate::types::ERR_NETWORK), true, false);
+    assert!(stale.text.starts_with("Couldn't reach NinjaOne"));
+    assert!(
+        stale
+            .text
+            .ends_with("The results below are from the previous run.")
+    );
+    assert!(!stale.text.contains("https://"), "{}", stale.text);
+
+    assert_eq!(failure_cause(None), None);
+    assert_eq!(failure_cause(Some("somethingNewer")), None);
+    let unknown = query_error_banner("no such filter", Some("somethingNewer"), false, false);
+    assert_eq!(unknown.text, "Last query failed: no such filter");
 }
 
 fn query(statuses: &[&str]) -> PatchQueryArgs {
@@ -4909,6 +5125,22 @@ fn data_age_reads_the_backend_stamp_against_the_clock() {
         "a clock behind the data"
     );
     assert_eq!(data_age_label("yesterday", at), None);
+}
+
+/// The date columns show the day of the backend's `yyyy-mm-dd hh:mm UTC` stamp and
+/// leave anything else exactly as it came.
+#[test]
+fn a_date_cell_shows_the_day_of_a_timestamp() {
+    assert_eq!(date_part("2026-05-17 12:00 UTC"), "2026-05-17");
+    assert_eq!(date_part("2026-05-17"), "2026-05-17", "already a day");
+    assert_eq!(date_part(""), "");
+    assert_eq!(date_part("(undated)"), "(undated)");
+    assert_eq!(date_part("2026-05-17T12:00"), "2026-05-17T12:00");
+    // Not cut on a byte that is not a character boundary.
+    assert_eq!(
+        date_part("überfällig seit gestern"),
+        "überfällig seit gestern"
+    );
 }
 
 #[test]

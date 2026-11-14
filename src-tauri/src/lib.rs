@@ -165,6 +165,11 @@ fn install_crypto_provider() {
     }
 }
 
+/// How long quitting waits for the last query's snapshot and first-seen ledger to
+/// reach disk. They are a serialize and an atomic write; past this something is
+/// stuck, and the window is already gone.
+const EXIT_PERSIST_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
@@ -209,15 +214,18 @@ pub fn run() {
             commands::lookups::list_locations,
             commands::lookups::list_roles,
             commands::lookups::list_device_groups,
+            commands::lookups::prewarm_fleet,
             commands::live_jobs::list_running_jobs,
             commands::lookups::list_node_classes,
             commands::patches::query_patches,
+            commands::patches::cancel_query,
             commands::patches::get_patch_rows,
             commands::patches::get_patch_groups,
             commands::patches::get_patch_group_members,
             commands::patches::selection_status,
             commands::patches::get_reboot_devices,
             commands::patches::device_detail,
+            commands::patches::open_device_in_ninjaone,
             commands::export::export_patches_xlsx,
             commands::export::export_report_html,
             commands::export::export_csv,
@@ -240,8 +248,18 @@ pub fn run() {
             // Jobs still awaiting a verdict lose their poller with the process.
             // Synchronous, like the window geometry: nothing runs after this.
             if let tauri::RunEvent::Exit = event {
-                let unresolved = app.state::<AppState>().clear_jobs();
+                let state = app.state::<AppState>();
+                let unresolved = state.clear_jobs();
                 actions::audit::record_all(&unresolved);
+                // The last query's snapshot and first-seen observations may still
+                // be on their way to disk; a quit must not cost the next launch
+                // its baseline. Bounded: an exit never hangs on a stuck write.
+                let saved = tauri::async_runtime::block_on(async {
+                    tokio::time::timeout(EXIT_PERSIST_WAIT, state.persist.settled()).await
+                });
+                if saved.is_err() {
+                    tracing::warn!("quit before the last query's state was saved");
+                }
             }
         });
 }

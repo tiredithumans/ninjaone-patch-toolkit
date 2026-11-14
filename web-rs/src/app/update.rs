@@ -13,8 +13,10 @@ fn render_spans(spans: Vec<MdSpan>) -> impl IntoView {
         .collect_view()
 }
 
-/// Modal shown when an update is available. Renders the new version + the
-/// release notes (changelog) and offers to install + relaunch.
+/// The update dialog: the new version, its release notes (changelog) and the offer
+/// to install and relaunch. Opened from the top bar's "Update available" badge or
+/// by Settings' "Check for updates" — never by the launch check on its own. "Later"
+/// and Escape close it; the badge stays for the session.
 #[component]
 pub(crate) fn UpdateSplash() -> impl IntoView {
     let state = expect_context::<AppState>();

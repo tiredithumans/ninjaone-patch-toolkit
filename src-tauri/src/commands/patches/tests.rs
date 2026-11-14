@@ -50,24 +50,47 @@ fn a_superseded_query_still_returns_its_summary() {
     assert!(summary_for(StoreOutcome::Stored, empty_summary(), 7).is_ok());
 }
 
-/// A query returns only once its baseline is on disk. The save was detached, so the
-/// next query (an auto-refresh tick, a quick re-run) could load the baseline before
-/// the save landed and report changes against the run before this one.
+/// A query no longer waits for its baseline to reach disk — but the next one still
+/// reads it only once it has. The save used to be awaited before the rows were
+/// handed back; before that it was detached outright, so the next query (an
+/// auto-refresh tick, a quick re-run) could load the baseline before the save
+/// landed and report changes against the run before this one. The gate keeps the
+/// ordering and moves the wait to the reader.
 #[tokio::test]
-async fn a_stored_run_returns_only_after_its_baseline_is_saved() {
+async fn a_stored_run_returns_before_its_baseline_is_saved_and_the_next_read_waits() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration as StdDuration;
 
+    let gate = PersistGate::default();
     let saved = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&saved);
-    persist_if_stored(&StoreOutcome::Stored, "test", move || {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        flag.store(true, Ordering::SeqCst);
-    })
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    persist_if_stored(
+        &gate,
+        &StoreOutcome::Stored,
+        vec![Box::new(move || {
+            held.recv().ok();
+            flag.store(true, Ordering::SeqCst);
+        })],
+    )
     .await;
     assert!(
+        !saved.load(Ordering::SeqCst),
+        "the query came back while its save was still running"
+    );
+    assert!(
+        tokio::time::timeout(StdDuration::from_millis(50), gate.settled())
+            .await
+            .is_err(),
+        "a reader must wait for the save in flight"
+    );
+
+    release.send(()).expect("release the save");
+    gate.settled().await;
+    assert!(
         saved.load(Ordering::SeqCst),
-        "returned before the save finished"
+        "the reader was let through before the save landed"
     );
 
     // A run that did not win the cache never becomes the baseline.
@@ -79,10 +102,99 @@ async fn a_stored_run_returns_only_after_its_baseline_is_saved() {
     ] {
         let wrote = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&wrote);
-        persist_if_stored(&outcome, "test", move || flag.store(true, Ordering::SeqCst)).await;
-        tokio::task::yield_now().await;
+        persist_if_stored(
+            &gate,
+            &outcome,
+            vec![Box::new(move || flag.store(true, Ordering::SeqCst))],
+        )
+        .await;
+        gate.settled().await;
         assert!(!wrote.load(Ordering::SeqCst));
     }
+}
+
+/// Two stored runs save in the order they finished, each batch whole before the
+/// next starts, and a save that panics neither wedges the gate nor skips its
+/// sibling: an older snapshot must never land over a newer one.
+#[tokio::test]
+async fn queued_saves_land_in_order_and_a_panic_does_not_wedge_the_gate() {
+    use std::sync::{Arc, Mutex};
+
+    let gate = PersistGate::default();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let note = |entry: &'static str| {
+        let log = Arc::clone(&log);
+        Box::new(move || log.lock().expect("log").push(entry)) as Box<dyn FnOnce() + Send>
+    };
+    gate.queue(vec![
+        Box::new(|| {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            panic!("a save that fails outright");
+        }),
+        note("first run's ledger"),
+    ])
+    .await;
+    gate.queue(vec![note("second run's snapshot")]).await;
+    gate.settled().await;
+    assert_eq!(
+        *log.lock().expect("log"),
+        ["first run's ledger", "second run's snapshot"]
+    );
+}
+
+/// The console link is the configured instance plus a device id and nothing else;
+/// the orphan row's id 0 and an instance that is not an origin open nothing.
+#[test]
+fn the_console_link_is_the_instance_origin_and_a_device_id() {
+    assert_eq!(
+        device_console_url("https://eu.ninjarmm.com", 4217).as_deref(),
+        Ok("https://eu.ninjarmm.com/#/deviceDashboard/4217/overview")
+    );
+    assert_eq!(
+        device_console_url("https://app.ninjarmm.com/", 1).as_deref(),
+        Ok("https://app.ninjarmm.com/#/deviceDashboard/1/overview")
+    );
+    assert!(device_console_url("https://app.ninjarmm.com", 0).is_err());
+    assert!(device_console_url("https://app.ninjarmm.com", -5).is_err());
+    assert!(device_console_url("https://evil.example/x?y", 1).is_err());
+    assert!(device_console_url("not a url", 1).is_err());
+}
+
+/// Cancelling a query drops its work where it stands — which is what aborts the
+/// requests a fetch holds — and ends it with the code the frontend reads as "not a
+/// failure". Work that finishes first is simply returned.
+#[tokio::test]
+async fn a_cancelled_query_drops_its_work_and_says_so_by_code() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let held = DropFlag(Arc::clone(&dropped));
+    let fetch = async move {
+        let _held = held;
+        std::future::pending::<()>().await;
+    };
+    let mut cancelled = std::pin::pin!(std::future::ready(()));
+    let err = unless_cancelled(&mut cancelled, 7, fetch)
+        .await
+        .expect_err("the cancel wins over a fetch that never finishes");
+    assert_eq!(err.code, Some(ERR_CANCELLED));
+    assert!(dropped.load(Ordering::SeqCst), "the fetch was not dropped");
+
+    let mut never = std::pin::pin!(std::future::pending::<()>());
+    assert_eq!(
+        unless_cancelled(&mut never, 7, async { 42 })
+            .await
+            .expect("not cancelled"),
+        42
+    );
 }
 
 /// The frontend has no guard for this: `query_seq` counts runs it *starts*, and
@@ -417,6 +529,8 @@ async fn fleet_current_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPatches>
         fetched_at: fixed_now(),
         os_fetched_at: Some(fixed_now()),
         sw_fetched_at: Some(fixed_now()),
+        os_scoped: false,
+        sw_scoped: false,
     })
 }
 
@@ -424,10 +538,12 @@ async fn fleet_current_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPatches>
 async fn fleet_current_both_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPatches> {
     Ok(CurrentPatches {
         os: Arc::new(c.fleet_os_patches(None, None, None).await?),
-        sw: Arc::new(c.fleet_software_patches(None, None, None).await?),
+        sw: Arc::new(c.fleet_software_patches_sliced(None, None, None).await?),
         fetched_at: fixed_now(),
         os_fetched_at: Some(fixed_now()),
         sw_fetched_at: Some(fixed_now()),
+        os_scoped: false,
+        sw_scoped: false,
     })
 }
 
@@ -512,7 +628,7 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -525,6 +641,7 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Pending]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -587,7 +704,7 @@ async fn a_query_stamps_its_rows_from_the_exploit_snapshot_it_was_given() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -603,6 +720,7 @@ async fn a_query_stamps_its_rows_from_the_exploit_snapshot_it_was_given() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Pending]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -648,6 +766,7 @@ async fn a_query_stamps_its_rows_from_the_exploit_snapshot_it_was_given() {
         "https://app.ninjarmm.com".into(),
         exploited_only,
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -699,7 +818,7 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -712,6 +831,7 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Installed]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -785,7 +905,7 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -801,6 +921,7 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
             vec![PatchStatus::Pending, PatchStatus::Failed],
         ),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -874,7 +995,7 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -887,6 +1008,7 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -961,7 +1083,7 @@ async fn a_custom_install_range_is_pushed_down_and_reapplied_client_side() {
     // Ignored: the absolute range replaces the relative lookback.
     ranged.install_after_days = Some(7);
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -974,6 +1096,7 @@ async fn a_custom_install_range_is_pushed_down_and_reapplied_client_side() {
         "https://app.ninjarmm.com".into(),
         ranged,
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1045,7 +1168,7 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -1058,6 +1181,7 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1123,7 +1247,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let run = |statuses: Vec<PatchStatus>| {
         let server = &server;
         async move {
@@ -1139,6 +1263,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
                 "https://app.ninjarmm.com".into(),
                 args(PatchType::Os, statuses),
                 fixed_now(),
+                None,
                 &progress,
             )
             .await
@@ -1238,7 +1363,7 @@ async fn a_query_records_the_facets_it_ran_under() {
     scoped.filter.organization_ids = vec![1];
     scoped.filter.severities = vec!["CRITICAL".into()];
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -1251,6 +1376,7 @@ async fn a_query_records_the_facets_it_ran_under() {
         "https://app.ninjarmm.com".into(),
         scoped,
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1324,7 +1450,7 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -1337,6 +1463,7 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1346,6 +1473,88 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
     assert_eq!(result.rows.len(), 1);
     assert_eq!(&*result.rows[0].status, "FAILED");
     assert_eq!(result.failures.len(), 1);
+}
+
+/// The install-history pulls are cut by the same location plan as the third-party
+/// feed. A plan in hand costs one sizing request, which carries the pull's own
+/// status and window (so it sizes what will be paged); this one-record history is
+/// far too short to slice and is then paged whole.
+#[tokio::test]
+async fn an_install_history_pull_is_sized_against_the_slice_plan() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [], "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+    let failed_at = fixed_now().timestamp() - 2 * 86_400;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patch-installs"))
+        .and(query_param("status", "FAILED"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "deviceId": 10, "kbNumber": "KBFAIL", "status": "FAILED",
+                  "severity": "CRITICAL", "installedAt": failed_at }
+            ],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
+    let result = run_query(
+        &client(&server),
+        async { Ok::<_, anyhow::Error>(lookups()) },
+        fleet_devices_via(&client(&server)),
+        fleet_current_via(&client(&server)),
+        no_ledger(),
+        ExploitSnapshot::default(),
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        args(PatchType::Os, vec![PatchStatus::Failed]),
+        fixed_now(),
+        SlicePlan::from_locations([1, 2]),
+        &progress,
+    )
+    .await
+    .expect("the query completes")
+    .result;
+    assert_eq!(result.rows.len(), 1);
+
+    let installs: Vec<(String, bool)> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/api/v2/queries/os-patch-installs")
+        .map(|r| {
+            let param = |key: &str| {
+                r.url
+                    .query_pairs()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.into_owned())
+            };
+            (
+                param("pageSize").unwrap_or_default(),
+                param("installedAfter").is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        installs,
+        [("1".to_string(), true), ("5000".to_string(), true)],
+        "sized once under the pull's own window, then paged whole"
+    );
 }
 
 #[tokio::test]
@@ -1384,7 +1593,7 @@ async fn installed_and_failed_query_omits_the_server_side_status_filter() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -1400,6 +1609,7 @@ async fn installed_and_failed_query_omits_the_server_side_status_filter() {
             vec![PatchStatus::Installed, PatchStatus::Failed],
         ),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1448,7 +1658,7 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
         http.clone(),
         AuthState::seeded(http, "http://127.0.0.1:0".into(), "t"),
     );
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &api,
         async { Ok::<_, anyhow::Error>(lookups) },
@@ -1460,6 +1670,8 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: Some(fixed_now()),
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         no_ledger(),
@@ -1469,6 +1681,7 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
         "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1548,6 +1761,8 @@ async fn a_device_group_scope_narrows_to_its_members_and_fails_closed() {
                         fetched_at: fixed_now(),
                         os_fetched_at: Some(fixed_now()),
                         sw_fetched_at: Some(fixed_now()),
+                        os_scoped: false,
+                        sw_scoped: false,
                     })
                 },
                 no_ledger(),
@@ -1557,7 +1772,8 @@ async fn a_device_group_scope_narrows_to_its_members_and_fails_closed() {
                 "https://app.ninjarmm.com".into(),
                 a,
                 fixed_now(),
-                &|_: &'static str, _: usize| {},
+                None,
+                &|_: &'static str, _: usize, _: Option<usize>| {},
             )
             .await
         }
@@ -1619,6 +1835,8 @@ async fn group_scoped_query(
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: Some(fixed_now()),
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         no_ledger(),
@@ -1628,7 +1846,8 @@ async fn group_scoped_query(
         "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
-        &|_: &'static str, _: usize| {},
+        None,
+        &|_: &'static str, _: usize, _: Option<usize>| {},
     )
     .await
 }
@@ -1661,6 +1880,8 @@ async fn data_fetched_at_is_no_newer_than_the_device_inventory() {
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: None,
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         no_ledger(),
@@ -1670,7 +1891,8 @@ async fn data_fetched_at_is_no_newer_than_the_device_inventory() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Pending]),
         fixed_now(),
-        &|_: &'static str, _: usize| {},
+        None,
+        &|_: &'static str, _: usize, _: Option<usize>| {},
     )
     .await
     .expect("query")
@@ -1843,6 +2065,8 @@ async fn a_failed_fleet_leg_abandons_the_install_history_pull() {
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: Some(fixed_now()),
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         no_ledger(),
@@ -1852,7 +2076,8 @@ async fn a_failed_fleet_leg_abandons_the_install_history_pull() {
         "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
-        &|_: &'static str, _: usize| {},
+        None,
+        &|_: &'static str, _: usize, _: Option<usize>| {},
     );
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), query)
         .await
@@ -1900,6 +2125,8 @@ async fn a_failed_lookups_leg_abandons_the_install_history_pull() {
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: Some(fixed_now()),
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         no_ledger(),
@@ -1909,7 +2136,8 @@ async fn a_failed_lookups_leg_abandons_the_install_history_pull() {
         "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
-        &|_: &'static str, _: usize| {},
+        None,
+        &|_: &'static str, _: usize, _: Option<usize>| {},
     );
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), query)
         .await
@@ -1987,7 +2215,7 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
         http.clone(),
         AuthState::seeded(http, "http://127.0.0.1:0".into(), "t"),
     );
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let run = run_query(
         &api,
         async { Ok::<_, anyhow::Error>(lookups) },
@@ -1999,6 +2227,8 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: None,
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         async { Ok(Arc::new(ledger)) },
@@ -2008,6 +2238,7 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Pending]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -2036,16 +2267,19 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
 
     // The observation is the whole fetched family at its own fetch time, for the
     // ledger to merge once the result is stored; the unfetched family is absent.
-    let (feed, at) = run.observation.os.expect("OS was fetched");
+    let FeedObservation {
+        patches: feed, at, ..
+    } = run.observation.os.expect("OS was fetched");
     assert_eq!(feed.len(), 2);
     assert_eq!(at, fixed_now());
     assert!(run.observation.sw.is_none());
 }
 
-/// An org-scoped query hands the ledger the whole fleet's feed, not its slice, so
-/// it can never prune another organization's records for being out of view.
+/// An org-scoped query that read a whole-fleet copy hands the ledger that whole
+/// feed, not its slice, and one that fetched only its scope says so — either way
+/// the ledger can never prune another organization's records for being out of view.
 #[tokio::test]
-async fn a_scoped_query_observes_the_whole_fleets_feed() {
+async fn a_scoped_query_observes_the_feed_it_read_and_says_which_it_was() {
     let devices = Arc::new(vec![dev(10, 1), dev(20, 2)]);
     let os_current = Arc::new(vec![
         cur(10, "KB1", "MANUAL", "CRITICAL"),
@@ -2064,38 +2298,58 @@ async fn a_scoped_query_observes_the_whole_fleets_feed() {
         http.clone(),
         AuthState::seeded(http, "http://127.0.0.1:0".into(), "t"),
     );
-    let progress = |_: &'static str, _: usize| {};
-    let run = run_query(
-        &api,
-        async { Ok::<_, anyhow::Error>(lookups) },
-        async { Ok::<_, anyhow::Error>((devices, fixed_now())) },
-        async {
-            Ok::<_, anyhow::Error>(CurrentPatches {
-                os: os_current,
-                sw: Arc::new(Vec::new()),
-                fetched_at: fixed_now(),
-                os_fetched_at: Some(fixed_now()),
-                sw_fetched_at: None,
-            })
-        },
-        no_ledger(),
-        ExploitSnapshot::default(),
-        30,
-        SlaPolicy::default(),
-        "https://app.ninjarmm.com".into(),
-        a,
-        fixed_now(),
-        &progress,
-    )
-    .await
-    .expect("query");
-    assert_eq!(run.result.rows.len(), 1, "the result is scoped");
-    assert_eq!(
-        run.observation.os.expect("fetched").0.len(),
-        2,
-        "the observation is not"
-    );
-    assert_eq!(run.observation.devices.len(), 2);
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
+    for os_scoped in [false, true] {
+        let (lookups, devices, os_current) = (
+            Arc::clone(&lookups),
+            Arc::clone(&devices),
+            Arc::clone(&os_current),
+        );
+        let run = run_query(
+            &api,
+            async { Ok::<_, anyhow::Error>(lookups) },
+            async { Ok::<_, anyhow::Error>((devices, fixed_now())) },
+            async {
+                Ok::<_, anyhow::Error>(CurrentPatches {
+                    os: os_current,
+                    sw: Arc::new(Vec::new()),
+                    fetched_at: fixed_now(),
+                    os_fetched_at: Some(fixed_now()),
+                    sw_fetched_at: None,
+                    os_scoped,
+                    sw_scoped: false,
+                })
+            },
+            no_ledger(),
+            ExploitSnapshot::default(),
+            30,
+            SlaPolicy::default(),
+            "https://app.ninjarmm.com".into(),
+            PatchQueryArgs {
+                filter: a.filter.clone(),
+                patch_type: a.patch_type,
+                statuses: a.statuses.clone(),
+                install_after_days: a.install_after_days,
+            },
+            fixed_now(),
+            None,
+            &progress,
+        )
+        .await
+        .expect("query");
+        assert_eq!(run.result.rows.len(), 1, "the result is scoped");
+        let observed = run.observation.os.expect("fetched");
+        assert_eq!(
+            observed.patches.len(),
+            2,
+            "the observation is what was read"
+        );
+        assert_eq!(
+            observed.scoped, os_scoped,
+            "and the ledger is told whether that was the whole fleet"
+        );
+        assert_eq!(run.observation.devices.len(), 2);
+    }
 }
 
 /// `status` is not required on an install record. Under the single-status
@@ -2228,7 +2482,7 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -2241,6 +2495,7 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::All, vec![PatchStatus::Pending]),
         fixed_now(),
+        None,
         &progress,
     )
     .await

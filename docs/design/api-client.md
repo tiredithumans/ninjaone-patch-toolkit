@@ -84,8 +84,8 @@ tested without a server.
 
 ## A 429 pauses the whole client, and each attempt's token is bound to the URL's tenant
 
-Three independent sources send on the one production client at once: a query's seven concurrent
-legs, the job poller's `/activities` reads (up to `MAX_FEED_READS_IN_FLIGHT`), and the `/jobs`
+Three independent sources send on the one production client at once: a query's concurrent legs
+(up to six slices of a long feed among them), the job poller's `/activities` reads (up to `MAX_FEED_READS_IN_FLIGHT`), and the `/jobs`
 poll. A rate limit is the tenant's, but a 429 used to pause only the request that drew it, so the
 others kept sending into it and drew 429s of their own. `NinjaApiClient` now holds a shared
 `paused_until` deadline (every clone, `with_send_guard` included, shares it): every 429 — the one
@@ -236,38 +236,55 @@ opens a scan is an ordinary read: a timeout there is retried in place and loses 
 (`a_cursor_page_outlasts_the_client_timeout`). Whether a lost page had been served shows in the
 `re-read a lost cursor page` log line: a `next_offset` one page past `sent_offset` means it had.
 
-## The whole-fleet third-party feed is paged in location slices that must add up to it
+## A long patch feed is paged in location slices that must add up to it
 
 A whole-fleet third-party feed runs to six figures — 563,255 rows, 113 pages of 5000, on the tenant
 whose logs drove this — and one cursor scan pages it strictly in sequence. Every page is a chance to
 lose one, and a lost page can cost the scan everything before it (see
 [above](#a-lost-cursor-page-is-re-read-against-the-count-or-the-scan-restarts)), so the longer the
 scan, the likelier the query fails, and the wait is the whole sequence.
-`fleet_software_patches_sliced` pages it instead as up to `SOFTWARE_SLICES` (4) concurrent scans,
-each scoped by a `loc` clause in `df`. `plan_location_slices` builds them from the cached device
-inventory, largest location first onto the lightest slice by device count. Location rather than
-organization because it is the finer of the two facets the `/queries/*` endpoints honor, so a
-single-organization fleet still splits. A fleet with fewer than two locations, a device with no
-location, or a slice that would name more than `MAX_SLICE_LOCATIONS` (200, to keep the URL well under
-a proxy's request-line limit) is paged whole.
+`NinjaApiClient::paged_in_slices` pages such a feed instead as concurrent scans, each scoped by a
+`loc` clause in `df` (ANDed onto the caller's own `df`, so a scoped feed slices like the whole
+fleet's). Location rather than organization because it is the finer of the two facets the
+`/queries/*` endpoints honor, so a single-organization fleet still splits. It serves the third-party
+feed (`fleet_software_patches_sliced`) and both install-history pulls, which are fetched afresh by
+every query that asks for them, auto-refresh ticks included.
 
-**The slices replace the feed only if they provably add up to it.** NinjaOne drops a `df` clause
-it does not honor without saying so, so a slice could silently be the whole feed. Rows on devices
-the inventory does not list sit in no slice at all. So before any paging, `feed_size` reads a
-one-row page (`pageSize=1`) of each slice and of the whole feed, and the slices' sizes must sum to
-exactly the whole's: the cursor's `count`, or the rows on the page when it is the only one. The
-paged rows must then sum to the same total, which catches a device that moved between slices
-mid-fetch. They are counted before anything is allocated, and the joined vector is sized from the
-rows in hand: sizing it by the announced total let a bogus `count` that the slices summed to abort
-the app on one huge allocation (`an_absurd_announced_count_is_never_allocated`). A server's count
-never sizes an allocation. Any mismatch, or a size that cannot be read, is logged at `warn` and the feed is paged
-whole as before: a few one-row requests and a wasted slice download, never a duplicated or missing
-row. Each slice keeps its own re-read and restart budgets, its log lines carry a `slice{n, of}`
-span, progress is reported as the slices' sum, and the first slice to fail fails the fetch
-(`try_join_all` drops the rest). The OS feed is a single page and is not sliced. The device
-inventory is usually warm; on a cold start the third-party leg waits behind the query's own
-inventory fetch (the same single-flight gate), and an inventory that cannot be read pages the feed
-whole.
+**The feed's size decides whether it is sliced, and into how many.** The whole feed is sized first,
+off a one-row page (`feed_size`: the cursor's `count`, or the rows on the page when it is the only
+one). `SLICE_POLICY` then pages a feed under four pages whole — the slices used to be a flat four
+whatever the feed held, so a 3,000-row feed paid five sizing requests and four scans for what is one
+page — and cuts a longer one to about twelve pages a slice, six slices at most. Under 240,000 rows
+that is no more than the four scans it always was; the 113-page feed gets six slices of about 19.
+The ceiling is there because the slices share the tenant's rate limit with every other leg.
+
+**The plan is a proposal from whatever is in hand.** `SlicePlan` is the fleet's locations and the
+weight each is balanced by: device counts from the cached inventory (`from_devices`, largest
+location first onto the lightest slice), or every location weighted alike from the cached
+`/locations` list (`from_locations`) when no inventory is cached. `AppState::slice_plan_in_hand`
+reads the inventory **however stale** and never fetches. The third-party leg used to await a *fresh*
+inventory before it opened its feed, so on a cold start the two longest fetches of a query — every
+page of `/devices-detailed`, then the feed — ran one after the other; now it waits at most for the
+lookups (`AppState::slice_plan`), a handful of requests the query needs anyway. The install-history
+legs take the plan cached when the query starts and are paged whole on a cold start. A fleet with
+fewer than two locations, an inventory holding a device with no location, or slices that would each
+name more than `MAX_SLICE_LOCATIONS` (200, to keep the URL well under a proxy's request-line limit;
+more slices are cut first, up to the ceiling) is paged whole.
+
+**The slices replace the feed only if they provably add up to it** — which is what makes a stale or
+unweighted plan safe. NinjaOne drops a `df` clause it does not honor without saying so, so a slice
+could silently be the whole feed. Rows on devices the plan does not cover sit in no slice at all. So
+before any paging, a one-row page of each slice reads its size, and the slices' sizes must sum to
+exactly the whole's. The paged rows must then sum to the same total, which catches a device that
+moved between slices mid-fetch. They are counted before anything is allocated, and the joined vector
+is sized from the rows in hand: sizing it by the announced total let a bogus `count` that the slices
+summed to abort the app on one huge allocation (`an_absurd_announced_count_is_never_allocated`). A
+server's count never sizes an allocation. Any mismatch, or a size that cannot be read, is logged at
+`warn` and the feed is paged whole as before: a few one-row requests and a wasted slice download,
+never a duplicated or missing row. Each slice keeps its own re-read and restart budgets, its log
+lines carry a `slice{n, of}` span, progress is reported as the slices' sum against the whole feed's
+size, and the first slice to fail fails the fetch (`try_join_all` drops the rest). The OS feed is a
+page or two and is not sliced.
 
 ## An unreadable `cursor` is an error, not end-of-pages
 

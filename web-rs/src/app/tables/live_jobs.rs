@@ -18,33 +18,56 @@ pub(super) fn RunningJobChip(device_id: i64) -> impl IntoView {
                 j.as_ref()
                     .and_then(|j| util::running_jobs_title(&j.jobs, device_id))
             })
-            .map(|title| view! { <span class="chip-note chip-live" title=title>"job running"</span> })
+            // The small triangle the disclosures use: U+25B6 is drawn as a colour
+            // emoji wherever an emoji font answers for it first.
+            .map(|title| flag_chip("chip-live", "▸", "job running", title))
     }
 }
 
 /// One row per running job. The Device column is left out where the device is
 /// already the subject (the drill-down).
+///
+/// `sort` makes the headers sort buttons. It is the caller's signal because this
+/// table is rebuilt on every poll, and it is offered only with every column shown:
+/// the sort is by the column's place in `util::RUNNING_JOB_HEADERS`.
 #[component]
-fn RunningJobsTable(jobs: Vec<RunningJob>, show_device: bool) -> impl IntoView {
+fn RunningJobsTable(
+    jobs: Vec<RunningJob>,
+    show_device: bool,
+    #[prop(optional)] sort: Option<RwSignal<Option<util::ColumnSort>>>,
+) -> impl IntoView {
+    let sort = sort.filter(|_| show_device);
+    let head = match sort {
+        Some(sort) => {
+            view! { <SortHeaderRow labels=&util::RUNNING_JOB_HEADERS sort=sort/> }.into_any()
+        }
+        None => view! {
+            <tr>
+                {util::RUNNING_JOB_HEADERS
+                    .iter()
+                    // Device and Organization lead the list.
+                    .skip(if show_device { 0 } else { 2 })
+                    .map(|&label| view! { <th scope="col">{label}</th> })
+                    .collect_view()}
+            </tr>
+        }
+        .into_any(),
+    };
+    let rows = move || {
+        let mut jobs = jobs.clone();
+        util::sort_by_column(
+            &mut jobs,
+            sort.and_then(|s| s.get()),
+            util::running_job_sort_value,
+        );
+        jobs
+    };
     view! {
         <div class="table-wrap">
             <table>
-                <thead>
-                    <tr>
-                        {show_device.then(|| view! {
-                            <th scope="col">"Device"</th>
-                            <th scope="col">"Organization"</th>
-                        })}
-                        <th scope="col">"Job"</th>
-                        <th scope="col">"Status"</th>
-                        <th scope="col">"Detail"</th>
-                        <th scope="col">"Started by"</th>
-                        <th scope="col">"Started"</th>
-                        <th scope="col">"Updated"</th>
-                    </tr>
-                </thead>
+                <thead>{head}</thead>
                 <tbody>
-                    {jobs
+                    {move || rows()
                         .into_iter()
                         .map(|j| {
                             view! {
@@ -75,6 +98,8 @@ fn RunningJobsTable(jobs: Vec<RunningJob>, show_device: bool) -> impl IntoView {
 #[component]
 pub(super) fn LiveJobsPanel() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // Held here, not in the table: a poll rebuilds the table every 30 seconds.
+    let sort = RwSignal::new(None::<util::ColumnSort>);
     view! {
         <section class="live-jobs">
             <div class="jobs-toolbar">
@@ -117,7 +142,9 @@ pub(super) fn LiveJobsPanel() -> impl IntoView {
                     <p class="empty">"No patching, script or reboot jobs are running on the devices in this result."</p>
                 }
                     .into_any(),
-                Some(j) => view! { <RunningJobsTable jobs=j.jobs show_device=true/> }.into_any(),
+                Some(j) => {
+                    view! { <RunningJobsTable jobs=j.jobs show_device=true sort=sort/> }.into_any()
+                }
             }}
         </section>
     }

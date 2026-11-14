@@ -36,6 +36,35 @@ version and start a fresh `[Unreleased]`.
   tables beneath them.
 - Installers include THIRD-PARTY-LICENSES.md.
 - Large fleets sort faster, and checking dispatched actions loads far less data from NinjaOne.
+- The Patches table shows about half again as many rows: the action bar is one line until you
+  tick something, and the view controls share the filter row.
+- First seen and Installed are visible again in the default window without scrolling sideways.
+- Patch rows are one or two lines tall instead of up to three; row flags shrink to icons in
+  narrower windows.
+- The date columns show the day; hover for the time.
+- The notes under "Changes since…" open from an ⓘ instead of printing on every run.
+- Failures, the Compliance tables, Needs Reboot and both Jobs tables sort by clicking a column
+  header.
+- Shift-click a checkbox on Patches or Needs Reboot to tick or clear a range of rows.
+- An available update shows as an "Update available" button in the top bar instead of a dialog
+  at launch.
+- Settings has links to its sections that stay in view while you scroll.
+- The Patches pager sits under the table.
+- The first query of a session, and queries that include Installed or Failed history, finish
+  sooner on large fleets; small fleets make fewer requests.
+- The device list starts loading as soon as you are signed in, so the first query has less to
+  wait for.
+- Results appear as soon as they are computed instead of after the run's history is saved.
+- A query limited to certain organizations, locations or roles downloads only their patches when
+  the fleet isn't already loaded, so it and its auto-refresh are much quicker on large tenants.
+- The live "job running" markers download only the jobs in the scope you queried.
+- While the first query runs, the results area shows each data feed's progress against its size
+  instead of "Run a query…", and the progress bar reflects records loaded rather than a guess.
+- A running query can be cancelled.
+- The device details window has an "Open in NinjaOne" link to the device's console page.
+- A failed query says what went wrong in plain words (can't reach NinjaOne, rate-limited, a
+  NinjaOne error, access refused), keeps the technical message under Details, and has a Retry
+  button.
 
 ### Fixed
 

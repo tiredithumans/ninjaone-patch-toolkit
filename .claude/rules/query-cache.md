@@ -48,6 +48,24 @@ paths:
   only the requested family is fetched. Stores are epoch-gated and fetches are single-flight per
   family. `force_refresh` is floored backend-side by `FORCE_MIN_INTERVAL`.
   → `docs/design/query-cache.md#whole-fleet-prefetch--client-side-scoping`
+- **A query with an identity scope and no fresh whole-fleet copy fetches only that scope**
+  (`current_family`, the scoped slots). The `df` is a saving, never the boundary — rows are
+  scoped client-side from either slot — and anything that reads the patch caches must know a
+  scoped copy is not the fleet: the ledger (`FeedObservation::scoped`), the Apply-all preview
+  (`cached_current_patches`'s `in_scope`), `invalidate_current_patches`.
+  → `docs/design/query-cache.md#a-scoped-query-with-no-fresh-fleet-copy-fetches-only-its-scope`
+- **A cancelled query is dropped where it stands (`unless_cancelled`) and ends with
+  `ERR_CANCELLED` before its token: nothing stored, recorded or persisted.** Any new await that
+  does a query's work goes through `unless_cancelled`.
+  → `docs/design/query-cache.md#a-cancelled-query-is-dropped-not-stored`
+- **What a stored query persists (run snapshot, first-seen ledger) is queued on
+  `AppState::persist`, never awaited before the reply; whatever reads either waits for
+  `PersistGate::settled` first.** Tests: `a_stored_run_returns_before_its_baseline_is_saved_and_the_next_read_waits`,
+  `queued_saves_land_in_order_and_a_panic_does_not_wedge_the_gate`.
+  → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
+- **The inventory, and only the inventory, is warmed at sign-in** (`prewarm_fleet`, called beside
+  `load_lookups`); never warm a patch feed nobody has asked for.
+  → `docs/design/query-cache.md#the-inventory-is-warmed-at-sign-in`
 - **Device-group scopes are capped at `MAX_GROUPS_PER_QUERY` before the token is claimed**,
   validated against `/groups` and read `GROUP_READ_CONCURRENCY` at a time; the uncached legs
   (group reads, install history) abort when a devices/current/lookups leg fails.

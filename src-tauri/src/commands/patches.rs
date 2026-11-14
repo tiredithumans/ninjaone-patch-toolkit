@@ -8,24 +8,26 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
+use crate::api::patches::SlicePlan;
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::changes::{self, RunSnapshot};
-use crate::error::UiError;
+use crate::error::{ERR_CANCELLED, UiError};
 use crate::exploits::ExploitSnapshot;
 use crate::filter::FilterParams;
-use crate::first_seen::{self, Family, Observation, Resolver, TenantLedger};
+use crate::first_seen::{self, Family, FeedObservation, Observation, Resolver, TenantLedger};
 use crate::model::{Device, DeviceGroup, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
     ComplianceBucket, DeviceDetail, DeviceSummary, FirstSeenTracking, GroupBy, GroupPage,
     InstallWindow, LookupMaps, OS_TYPE_LABEL, PatchFamilies, PatchRecord, PatchSource, QueryResult,
-    QuerySummary, RowSort, SOFTWARE_TYPE_LABEL, SelectionProbe, SelectionStatus, SlaCutoffs,
-    build_age_buckets, build_approval_backlog, build_compliance, build_compliance_by_os,
-    build_device_backlogs, build_device_summaries, build_failures, build_groups, build_query_scope,
-    build_rows, build_severity_by_org, build_time_to_install, group_member_page, page_rows,
-    slice_groups, sort_device_summaries, sort_order, uncounted_orgs,
+    QuerySummary, RebootSort, RowSort, SOFTWARE_TYPE_LABEL, SelectionProbe, SelectionStatus,
+    SlaCutoffs, build_age_buckets, build_approval_backlog, build_compliance,
+    build_compliance_by_os, build_device_backlogs, build_device_summaries, build_failures,
+    build_groups, build_query_scope, build_rows, build_severity_by_org, build_time_to_install,
+    group_member_page, page_rows, reboot_page, slice_groups, sort_device_summaries, sort_order,
+    uncounted_orgs,
 };
 use crate::settings::{MAX_WINDOW_DAYS, SlaPolicy};
-use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
+use crate::state::{AppState, CurrentPatches, LookupSet, Memo, PersistGate, StoreOutcome};
 
 /// The org/location/role lookups a query joins against, shared behind the cache's
 /// `Arc` so a cache hit hands out a cheap refcount bump instead of a deep clone.
@@ -100,17 +102,29 @@ pub(crate) struct QueryProgressEvent {
     pub(crate) query_id: u64,
     pub(crate) stage: &'static str,
     pub(crate) loaded: usize,
+    /// How many records this stage's feed holds, when NinjaOne announced it (a
+    /// cursor's `count`); absent for the device inventory, which announces nothing,
+    /// and for the rollup stage. What lets the UI draw a bar instead of a counter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) total: Option<usize>,
 }
 
 /// Best-effort emit of a progress event (a dropped event just means one fewer UI
 /// update, never a failed query).
-fn emit_progress(app: &AppHandle, query_id: u64, stage: &'static str, loaded: usize) {
+fn emit_progress(
+    app: &AppHandle,
+    query_id: u64,
+    stage: &'static str,
+    loaded: usize,
+    total: Option<usize>,
+) {
     let _ = app.emit(
         "query:progress",
         QueryProgressEvent {
             query_id,
             stage,
             loaded,
+            total,
         },
     );
 }
@@ -152,6 +166,11 @@ pub async fn query_patches(
     // the result is stamped with the tenant it was actually fetched under. Redeemed
     // at the store below.
     let token = state.begin_query();
+    // The operator's way out of a fetch that can run for minutes. Raced against the
+    // two awaits below that do the work; when it wins they are dropped, and the
+    // requests in flight with them.
+    let cancelled = state.query_cancelled(&token);
+    tokio::pin!(cancelled);
     // The tenant the rows are fetched under — the key for the run snapshot and the
     // first-seen ledger alike.
     let tenant = token.tenant_label();
@@ -162,24 +181,30 @@ pub async fn query_patches(
     // A re-filter (Run query) reuses the cached whole-fleet data; an auto-refresh
     // tick / manual refresh passes `force_refresh` to pull fresh patch state.
     let force = force_refresh.unwrap_or(false);
-    let progress =
-        move |stage: &'static str, loaded: usize| emit_progress(&app, qid, stage, loaded);
+    let progress = move |stage: &'static str, loaded: usize, total: Option<usize>| {
+        emit_progress(&app, qid, stage, loaded, total)
+    };
 
     // Whole-fleet devices + current patches come from `AppState`'s caches, so a scope
     // change re-filters them client-side with no refetch. Both are taken as futures
     // (each carrying its own progress reporter) so a *cold* fetch still resolves
     // concurrently with the lookups and install-history fetches inside `run_query`;
     // a cache hit resolves instantly. `force` bypasses the current-patch TTL.
-    let p_devices = |n: usize| progress("devices", n);
-    let p_os = |n: usize| progress("osPatches", n);
-    let p_sw = |n: usize| progress("swPatches", n);
+    let p_devices = |n: usize, total: Option<usize>| progress("devices", n, total);
+    let p_os = |n: usize, total: Option<usize>| progress("osPatches", n, total);
+    let p_sw = |n: usize, total: Option<usize>| progress("swPatches", n, total);
     let devices_fut = state.fleet_devices_with_time(Some(&p_devices as &ProgressFn));
     // The requested `PatchType` decides which families are fetched at all — a
     // family this query can't display is never worth a whole-fleet page-through.
+    // A query scoped by organization, location or role asks only for that scope
+    // when no fresh whole-fleet copy is cached; the rows are scoped client-side
+    // either way.
+    let identity_scope = args.filter.identity_scope();
     let current_fut = state.fleet_current_patches(
         force,
         args.patch_type.includes_os(),
         args.patch_type.includes_software(),
+        identity_scope.as_ref(),
         Some(&p_os as &ProgressFn),
         Some(&p_sw as &ProgressFn),
     );
@@ -193,7 +218,11 @@ pub async fn query_patches(
     state.exploits.ensure_fresh(settings.exploit_data);
     let exploits = state.exploits.snapshot(settings.exploit_data);
 
+    // Behind whatever the previous query is still writing: its observations are
+    // this query's base.
+    let persist = state.persist.clone();
     let ledger_fut = async move {
+        persist.settled().await;
         tauri::async_runtime::spawn_blocking(move || first_seen::base(&ledger_tenant))
             .await
             .context("loading the first-seen ledger failed")
@@ -214,26 +243,33 @@ pub async fn query_patches(
     let QueryRun {
         result,
         observation,
-    } = run_query(
-        &state.api,
-        state.lookups(),
-        devices_fut,
-        current_fut,
-        ledger_fut,
-        exploits,
-        settings.install_window_days,
-        // Clamped (inside `sla_policy`) for the same panic-guard reason as the
-        // install window: every SLA window reaches `Duration::days` in the rollups,
-        // and a settings.json predating the range validation can hold anything.
-        // Read per query, so an SLA change in Settings reaches the next Run query
-        // — a re-filter over the warm cache — with no refetch.
-        settings.sla_policy(),
-        settings.instance_base_url.clone(),
-        args,
-        Utc::now(),
-        &progress,
+    } = unless_cancelled(
+        &mut cancelled,
+        qid,
+        run_query(
+            &state.api,
+            state.lookups(),
+            devices_fut,
+            current_fut,
+            ledger_fut,
+            exploits,
+            settings.install_window_days,
+            // Clamped (inside `sla_policy`) for the same panic-guard reason as the
+            // install window: every SLA window reaches `Duration::days` in the rollups,
+            // and a settings.json predating the range validation can hold anything.
+            // Read per query, so an SLA change in Settings reaches the next Run query
+            // — a re-filter over the warm cache — with no refetch.
+            settings.sla_policy(),
+            settings.instance_base_url.clone(),
+            args,
+            Utc::now(),
+            // Whatever is cached now, never a wait: the install-history legs start with
+            // the others, and a cold start has nothing to cut them by.
+            state.slice_plan_in_hand(),
+            &progress,
+        ),
     )
-    .await
+    .await?
     // Logged as well as shown: the log is what gets pasted when the app runs on
     // someone else's machine, and a fetch that failed used to leave no line at all.
     .map_err(|err| {
@@ -246,8 +282,15 @@ pub async fn query_patches(
     // feed the fetch takes tens of seconds, and without these three numbers side by
     // side there was no telling whether a slow query was NinjaOne or this process.
     let diff_started = std::time::Instant::now();
-    let (result, snapshot) =
-        diff_against_previous_run(result, tenant.clone(), statuses, install_days).await?;
+    // The previous run's snapshot is this run's baseline; it may still be on its
+    // way to disk (see `PersistGate`).
+    state.persist.settled().await;
+    let (result, snapshot) = unless_cancelled(
+        &mut cancelled,
+        qid,
+        diff_against_previous_run(result, tenant.clone(), statuses, install_days),
+    )
+    .await??;
     let diff_ms = diff_started.elapsed().as_millis();
 
     // Hand the frontend a lightweight summary (first page + rollups) and keep the
@@ -264,47 +307,105 @@ pub async fn query_patches(
     tokio::task::spawn_blocking(move || crate::history::record(&entry));
 
     let outcome = state.store_last_result_if_current(token, result);
-    let persist_started = std::time::Instant::now();
-    tokio::join!(
-        persist_if_stored(&outcome, "run snapshot", move || changes::save(snapshot)),
-        persist_if_stored(&outcome, "first-seen ledger", move || {
-            first_seen::commit(&tenant, observation)
-        }),
-    );
-    tracing::info!(
-        qid,
-        diff_ms,
-        persist_ms = persist_started.elapsed().as_millis(),
-        "query stored"
-    );
+    persist_if_stored(
+        &state.persist,
+        &outcome,
+        vec![
+            Box::new(move || changes::save(snapshot)),
+            Box::new(move || first_seen::commit(&tenant, observation)),
+        ],
+    )
+    .await;
+    tracing::info!(qid, diff_ms, "query stored");
     summary_for(outcome, summary, qid)
 }
 
+/// A device's page in the NinjaOne console, for the drill-down's "Open in NinjaOne".
+///
+/// Built from the configured instance — an origin, which a stored value that is not
+/// one never gets contacted as, here included (`settings::instance_url_problem`) —
+/// and the device id alone, so nothing the frontend sends becomes part of an address
+/// beyond a number. `0` is the orphan row's stand-in for "no device".
+fn device_console_url(instance: &str, device_id: i64) -> Result<String, String> {
+    if device_id <= 0 {
+        return Err("That row has no device to open.".into());
+    }
+    if let Some(problem) = crate::settings::instance_url_problem(instance) {
+        return Err(format!("{problem}; correct the instance in Settings"));
+    }
+    Ok(format!(
+        "{}/#/deviceDashboard/{device_id}/overview",
+        instance.trim_end_matches('/')
+    ))
+}
+
+/// Opens a device's NinjaOne console page in the default browser. Read-only: it
+/// navigates, and whatever the operator then does there is under their NinjaOne
+/// sign-in, not this app's grant. On a blocking thread, like the sign-in's browser
+/// launch (`open::that_detached` still watches its launcher briefly).
+#[tauri::command]
+pub async fn open_device_in_ninjaone(
+    state: State<'_, AppState>,
+    device_id: i64,
+) -> Result<(), UiError> {
+    let url = device_console_url(&state.settings_snapshot().instance_base_url, device_id)
+        .map_err(UiError::new)?;
+    tokio::task::spawn_blocking(move || open::that_detached(&url))
+        .await
+        .map_err(|e| UiError::new(format!("opening the browser panicked: {e}")))?
+        // By kind: `open` words its error with the launcher's whole command line.
+        .map_err(|e| UiError::new(format!("Couldn't open the browser ({:?}).", e.kind())))
+}
+
+/// `work`, unless the operator cancels the query first — then `work` is dropped where
+/// it stands and the query ends with [`ERR_CANCELLED`].
+///
+/// Dropping is the cancel. A fetch in flight is a future holding its requests, so
+/// dropping it aborts them; a whole-fleet leg that had already finished stays
+/// cached, and one cut short stores nothing — its cache slot's single-flight gate
+/// is released for the next caller, which fetches. Nothing is stored, recorded in
+/// the run history or persisted for a cancelled query: it never reached the token.
+async fn unless_cancelled<T>(
+    cancelled: &mut (impl Future<Output = ()> + Unpin),
+    qid: u64,
+    work: impl Future<Output = T>,
+) -> Result<T, UiError> {
+    tokio::select! {
+        biased;
+        () = cancelled => {
+            tracing::info!(qid, "query cancelled");
+            Err(UiError::coded(ERR_CANCELLED, "The query was cancelled."))
+        }
+        done = work => Ok(done),
+    }
+}
+
+/// Stops every query in flight (`AppState::cancel_queries`). The query's own
+/// `query_patches` call then fails with `ERR_CANCELLED`, which is how the frontend
+/// learns it took effect; this only asks.
+#[tauri::command]
+pub fn cancel_query(state: State<'_, AppState>) -> Result<(), UiError> {
+    state.cancel_queries();
+    Ok(())
+}
+
 /// Persists what the next run reads — this run's snapshot as its changes baseline,
-/// and its observations into the first-seen ledger — and returns only once `save`
-/// has finished.
+/// and its observations into the first-seen ledger — without holding the rows back
+/// for it: the writes take their place in the [`PersistGate`] here and land after
+/// the query has returned, and the next query waits for them before it reads either.
 ///
 /// Only a stored result is persisted. A superseded one is by definition older than
 /// the run that won the cache; writing it would roll the baseline backwards, and the
 /// next diff would report changes that already happened. A dropped (tenant-drifted,
-/// session-cleared) one belongs to nobody.
-///
-/// Awaited, not detached. The snapshot save used to be spawned and left to finish
-/// whenever, so a query started straight after this one returned (an auto-refresh
-/// tick, a quick re-run) could load the baseline before the save landed and diff
-/// against the run *before* this one; the ledger has the same race. The wait is a
-/// serialize and an atomic write, small next to the fetch it follows. A failed save
-/// is logged inside `save`; it never fails the query.
+/// session-cleared) one belongs to nobody. A failed save is logged inside
+/// `save`/`commit`; it never fails the query.
 async fn persist_if_stored(
+    gate: &PersistGate,
     outcome: &StoreOutcome,
-    what: &'static str,
-    save: impl FnOnce() + Send + 'static,
+    writes: Vec<Box<dyn FnOnce() + Send>>,
 ) {
-    if !matches!(outcome, StoreOutcome::Stored) {
-        return;
-    }
-    if let Err(err) = tokio::task::spawn_blocking(save).await {
-        tracing::warn!(?err, what, "saving panicked; not advanced");
+    if matches!(outcome, StoreOutcome::Stored) {
+        gate.queue(writes).await;
     }
 }
 
@@ -657,7 +758,8 @@ async fn run_query<L, D, C, G>(
     instance: String,
     args: PatchQueryArgs,
     now: DateTime<Utc>,
-    progress: &(dyn Fn(&'static str, usize) + Send + Sync),
+    slice_plan: Option<SlicePlan>,
+    progress: &(dyn Fn(&'static str, usize, Option<usize>) + Send + Sync),
 ) -> anyhow::Result<QueryRun>
 where
     L: std::future::Future<Output = anyhow::Result<Lookups>>,
@@ -671,8 +773,9 @@ where
     // per-query install history are all independent — resolve them concurrently so
     // latency is the slowest call, not the sum. The install fetch resolves to empty
     // when no install status / matching family is requested.
-    let p_os_inst = |n: usize| progress("osInstalls", n);
-    let p_sw_inst = |n: usize| progress("swInstalls", n);
+    let p_os_inst = |n: usize, total: Option<usize>| progress("osInstalls", n, total);
+    let p_sw_inst = |n: usize, total: Option<usize>| progress("swInstalls", n, total);
+    let slice_plan = slice_plan.as_ref();
     let patch_df_ref = plan.patch_df.as_deref();
     let fetch_started = std::time::Instant::now();
 
@@ -727,6 +830,7 @@ where
                     plan.install_status,
                     plan.install_window.after,
                     plan.install_window.before,
+                    slice_plan,
                     Some(&p_os_inst as &ProgressFn),
                 )
                 .await
@@ -741,6 +845,7 @@ where
                     plan.install_status,
                     plan.install_window.after,
                     plan.install_window.before,
+                    slice_plan,
                     Some(&p_sw_inst as &ProgressFn),
                 )
                 .await
@@ -762,27 +867,30 @@ where
 
     // Fetches done; the rest is the in-memory scope + join/rollup.
     let fetch_ms = fetch_started.elapsed().as_millis();
-    progress("joining", 0);
+    progress("joining", 0, None);
     // Only the families this query asked for: a family left cached from an earlier
     // query is merged by the query that next asks for it.
+    let observed = |included: bool, rows: &Arc<Vec<Patch>>, at: Option<DateTime<Utc>>, scoped| {
+        included.then_some(at).flatten().map(|at| FeedObservation {
+            patches: Arc::clone(rows),
+            at,
+            scoped,
+        })
+    };
     let observation = Observation {
         devices: Arc::clone(&devices),
-        os: plan
-            .include_os
-            .then(|| {
-                current
-                    .os_fetched_at
-                    .map(|at| (Arc::clone(&current.os), at))
-            })
-            .flatten(),
-        sw: plan
-            .include_sw
-            .then(|| {
-                current
-                    .sw_fetched_at
-                    .map(|at| (Arc::clone(&current.sw), at))
-            })
-            .flatten(),
+        os: observed(
+            plan.include_os,
+            &current.os,
+            current.os_fetched_at,
+            current.os_scoped,
+        ),
+        sw: observed(
+            plan.include_sw,
+            &current.sw,
+            current.sw_fetched_at,
+            current.sw_scoped,
+        ),
     };
     let src = FetchedSources {
         devices,
@@ -807,7 +915,8 @@ where
     .await
     .context("join/rollup task failed")?;
     // Fetch (a cache hit reads as ~0) and assembly side by side, with the row count
-    // they produced; `query stored` in `query_patches` adds the diff and the saves.
+    // they produced; `query stored` in `query_patches` adds the diff, and `query
+    // persisted` (`PersistGate::queue`) the saves that follow it.
     tracing::info!(
         rows = result.rows.len(),
         fetch_ms,
@@ -1275,26 +1384,26 @@ pub async fn selection_status(
     .map_err(|e| UiError::new(format!("re-checking the selection panicked: {e}")))
 }
 
-/// One page of the devices flagged for reboot, in the summary's order — the Needs
-/// Reboot tab's pages past the first, which the summary carries. Empty on a cache
+/// One page of the devices flagged for reboot — the Needs Reboot tab's pages past
+/// the first, which the summary carries, and every page once the list is sorted
+/// (`rows::reboot_page`; with no `sort`, the summary's order). Empty on a cache
 /// miss, like the other paging commands.
 #[tauri::command]
 pub fn get_reboot_devices(
     state: State<'_, AppState>,
     offset: usize,
     limit: usize,
+    sort: Option<RebootSort>,
 ) -> Result<Vec<DeviceSummary>, UiError> {
     let Some(result) = state.current_result_handle()? else {
         return Ok(Vec::new());
     };
-    Ok(result
-        .devices
-        .iter()
-        .filter(|d| d.needs_reboot)
-        .skip(offset)
-        .take(clamp_page(limit))
-        .cloned()
-        .collect())
+    Ok(reboot_page(
+        &result.devices,
+        sort,
+        offset,
+        clamp_page(limit),
+    ))
 }
 
 /// Serves the device drill-down — one device's facts, its per-device rollup and up

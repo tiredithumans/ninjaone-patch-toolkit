@@ -98,21 +98,26 @@ impl Toast {
     }
 }
 
-/// Live record counts streamed from the backend while a query runs.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Progress {
-    pub(super) devices: usize,
-    pub(super) os_patches: usize,
-    pub(super) sw_patches: usize,
-    pub(super) os_installs: usize,
-    pub(super) sw_installs: usize,
-    pub(super) joining: bool,
+/// One feed's progress: the records in so far and, when NinjaOne announced it, how
+/// many the feed holds. `started` is set by the feed's first event, so a feed this
+/// query never asked for is not listed at zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Stage {
+    pub(super) loaded: usize,
+    pub(super) total: Option<usize>,
+    pub(super) started: bool,
 }
 
-impl Progress {
-    pub(super) fn records(self) -> usize {
-        self.devices + self.os_patches + self.sw_patches + self.os_installs + self.sw_installs
-    }
+/// Live record counts streamed from the backend while a query runs. What they add
+/// up to and how far along they are is `util::query`'s to say.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Progress {
+    pub(super) devices: Stage,
+    pub(super) os_patches: Stage,
+    pub(super) sw_patches: Stage,
+    pub(super) os_installs: Stage,
+    pub(super) sw_installs: Stage,
+    pub(super) joining: bool,
 }
 
 /// Auth + frontend-context state: who we're signed in as and which environment
@@ -410,6 +415,10 @@ pub(crate) struct QueryState {
     /// results area after the announcing toast auto-dismisses. Cleared by the next
     /// successful run/page fetch or an explicit dismiss.
     pub(super) query_error: RwSignal<Option<String>>,
+    /// The backend's cause for `query_error`, when the query failed for one the
+    /// banner has words for (`util::failure_cause`). Read only beside a
+    /// non-paging `query_error`, so a stale one is never shown.
+    pub(super) query_error_code: RwSignal<Option<String>>,
     /// `query_error` came from loading a page, a sort or group headers of a result
     /// that is still good, not from the query — the banner must not call that a
     /// failed query (`util::query_error_banner`).
@@ -527,6 +536,7 @@ impl QueryState {
             patches_page: RwSignal::new(0),
             page_rows: RwSignal::new(Vec::new()),
             query_error: RwSignal::new(None),
+            query_error_code: RwSignal::new(None),
             error_is_paging: RwSignal::new(false),
             view_loading: RwSignal::new(false),
             patches_sort: RwSignal::new(None),
@@ -605,17 +615,13 @@ impl RunState {
         }
     }
 
-    /// Estimated completion fraction (0.0–0.95) from the previous run's duration,
-    /// or `None` when there's no prior timing yet (→ indeterminate bar). Capped
-    /// below 1.0 so an over-running query doesn't claim to be finished.
+    /// How far along the running query is (`util::progress_fraction`): measured
+    /// against the feeds' announced sizes when there are any, else estimated from
+    /// the previous run's duration, else `None` (→ indeterminate bar).
     pub(super) fn progress_estimate(self) -> Option<f64> {
         let _ = self.elapsed_tick.get();
-        let last = self.last_duration_ms.get()?;
-        if last <= 0.0 {
-            return None;
-        }
         let elapsed = js_sys::Date::now() - self.query_started_ms.get_untracked();
-        Some((elapsed / last).clamp(0.0, 0.95))
+        util::progress_fraction(&self.progress.get(), elapsed, self.last_duration_ms.get())
     }
 }
 
@@ -688,6 +694,12 @@ impl SettingsState {
 /// install-in-flight flag.
 #[derive(Clone, Copy)]
 pub(crate) struct UpdateState {
+    /// The update the launch check or "Check for updates" found. It stays for the
+    /// session — the top bar's badge — whatever the dialog is doing.
+    pub(super) available: RwSignal<Option<UpdateInfo>>,
+    /// The update whose dialog is open; `None` while it is closed. The launch check
+    /// does not set it: a modal over a window the operator opened to patch
+    /// something was the first thing they had to dismiss.
     pub(super) update: RwSignal<Option<UpdateInfo>>,
     pub(super) update_busy: RwSignal<bool>,
 }
@@ -695,6 +707,7 @@ pub(crate) struct UpdateState {
 impl UpdateState {
     pub(super) fn new() -> Self {
         Self {
+            available: RwSignal::new(None),
             update: RwSignal::new(None),
             update_busy: RwSignal::new(false),
         }

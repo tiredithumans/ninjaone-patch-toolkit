@@ -930,6 +930,10 @@ pub struct QueryProgressEvent {
     pub query_id: u64,
     pub stage: String,
     pub loaded: usize,
+    /// How many records the stage's feed holds, when NinjaOne announced it; absent
+    /// for the device inventory and the rollup stage.
+    #[serde(default)]
+    pub total: Option<usize>,
 }
 
 /// Available-update metadata from the backend updater. `notes` is the published
@@ -952,6 +956,41 @@ pub struct UpdateInfo {
 pub struct RowSort {
     pub key: RowSortKey,
     pub desc: bool,
+}
+
+/// Sort request for the paged Needs Reboot list (`get_reboot_devices`). Mirrors the
+/// backend `rows::{RebootSort, RebootSortKey}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebootSort {
+    pub key: RebootSortKey,
+    pub desc: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RebootSortKey {
+    Organization,
+    Location,
+    DeviceRole,
+    Device,
+    Os,
+    PendingPatches,
+    RebootReason,
+}
+
+impl RebootSortKey {
+    /// Every key, in the tab's column order: a clicked column's index names its key
+    /// (`util::reboot_sort_request`). Held to the backend's list by the IPC fixture.
+    pub const ALL: [Self; 7] = [
+        Self::Organization,
+        Self::Location,
+        Self::DeviceRole,
+        Self::Device,
+        Self::Os,
+        Self::PendingPatches,
+        Self::RebootReason,
+    ];
 }
 
 // `Deserialize` only so a shared view link can name a sort column by the same
@@ -1364,6 +1403,23 @@ pub const ERR_PARTIAL_DISPATCH: &str = "partialDispatch";
 /// it had switched tenants, so the previous tenant's result and jobs are gone on the
 /// backend and must go from the screen too.
 pub const ERR_TENANT_CHANGED: &str = "tenantChanged";
+
+/// Mirror of the backend's `error::ERR_CANCELLED`: `query_patches` stopped because
+/// the operator cancelled it, so no error is shown for it.
+pub const ERR_CANCELLED: &str = "cancelled";
+
+/// Mirrors of the backend's `error::ERR_NETWORK` … `ERR_ACCESS`: the causes a failed
+/// query is put down to, which the banner words for the operator
+/// (`util::failure_cause`) ahead of the raw message.
+pub const ERR_NETWORK: &str = "network";
+pub const ERR_RATE_LIMITED: &str = "rateLimited";
+pub const ERR_SERVER: &str = "serverError";
+pub const ERR_ACCESS: &str = "accessDenied";
+
+/// Every cause above, held to the backend's list by the IPC fixture
+/// (`the_mirrored_enums_spell_exactly_the_backends_variants`).
+#[cfg(test)]
+pub const QUERY_ERROR_CODES: [&str; 4] = [ERR_NETWORK, ERR_RATE_LIMITED, ERR_SERVER, ERR_ACCESS];
 
 /// **Frontend-only**, never sent by the backend: the command *succeeded* but its
 /// reply did not decode into the mirror (`api::invoke_coded` tags it). For

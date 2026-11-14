@@ -50,6 +50,29 @@ pub async fn list_device_groups(state: State<'_, AppState>) -> Result<Vec<Device
     Ok(lookups.device_groups.clone())
 }
 
+/// Starts the whole-fleet device inventory fetch ahead of the first query.
+///
+/// Every query needs the inventory, whatever its scope or patch type, and it is the
+/// one `after`-paged whole-fleet fetch: 500 devices a request, in sequence. Nothing
+/// used to ask for it until the operator pressed Run, so the first query of a
+/// session waited on all of it. The frontend calls this as the session becomes
+/// signed in, beside the lookups; a Run that arrives meanwhile joins this fetch at
+/// the cache's single-flight gate rather than starting its own.
+///
+/// Only the inventory: the patch feeds depend on what the operator is about to ask
+/// for, and warming a six-figure feed nobody queries is the opposite of a saving.
+/// A failure is the first query's to report — it fetches again and says why.
+#[tauri::command]
+pub async fn prewarm_fleet(state: State<'_, AppState>) -> Result<(), UiError> {
+    if let Err(err) = state.fleet_devices_with_time(None).await {
+        tracing::debug!(
+            error = format!("{err:#}").as_str(),
+            "inventory prewarm failed"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeClass {

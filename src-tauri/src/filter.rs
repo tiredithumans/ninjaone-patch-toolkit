@@ -176,6 +176,18 @@ impl FilterParams {
         (!parts.is_empty()).then(|| parts.join(" AND "))
     }
 
+    /// The organization/location/role part of this scope, when it has one — what a
+    /// scoped fetch of the current patches asks NinjaOne for
+    /// (`AppState::fleet_current_patches`).
+    pub fn identity_scope(&self) -> Option<IdentityScope> {
+        Some(IdentityScope {
+            df: self.patch_filter()?,
+            organization_ids: self.organization_ids.clone(),
+            location_ids: self.location_ids.clone(),
+            role_ids: self.role_ids.clone(),
+        })
+    }
+
     /// The absolute install-history range, validated against `now` (Unix seconds).
     /// `Ok(None)` when no range is set, i.e. the relative lookback applies.
     ///
@@ -256,6 +268,46 @@ impl FilterParams {
             detected_before: self.detected_before,
             exploited_only: self.exploited_only,
         }
+    }
+}
+
+/// The facets of a scope the `/queries/*` endpoints honor in `df` — organization,
+/// location and role — as the clause that names them and as the ids behind it.
+///
+/// It is what a scoped fetch is keyed by: two queries with the same identity scope
+/// ask for the same rows whatever else they filter on, since every other facet
+/// (class, OS name, device group, the patch facets) is applied client-side. Equal
+/// when the clauses are, and a clause is canonical ([`id_clause`]).
+#[derive(Debug, Clone)]
+pub struct IdentityScope {
+    df: String,
+    organization_ids: Vec<i64>,
+    location_ids: Vec<i64>,
+    role_ids: Vec<i64>,
+}
+
+impl PartialEq for IdentityScope {
+    fn eq(&self, other: &Self) -> bool {
+        self.df == other.df
+    }
+}
+
+impl Eq for IdentityScope {}
+
+impl IdentityScope {
+    /// The clause, as [`FilterParams::patch_filter`] spells it.
+    pub fn df(&self) -> &str {
+        &self.df
+    }
+
+    /// Whether the inventory places `device` in this scope. The same rule the
+    /// client-side scoping applies to these three facets ([`id_allowed`]); the
+    /// server's own answer may differ by however stale the inventory is, which is
+    /// why this decides only what a *preview* may read, never what is counted.
+    pub fn names(&self, device: &Device) -> bool {
+        id_allowed(&self.organization_ids, device.organization_id)
+            && id_allowed(&self.location_ids, device.location_id)
+            && id_allowed(&self.role_ids, device.node_role_id)
     }
 }
 
@@ -553,6 +605,45 @@ mod tests {
             pending_reboot_reason: None,
             vulnerabilities: None,
         }
+    }
+
+    /// The identity scope is the `df` the query endpoints honor and the same three
+    /// facets judged from an inventory record; class, OS name and device groups are
+    /// not part of it, and two spellings of one selection are one scope.
+    #[test]
+    fn the_identity_scope_is_the_org_location_and_role_facets_only() {
+        assert_eq!(FilterParams::default().identity_scope(), None);
+        let class_only = FilterParams {
+            node_classes: vec!["WINDOWS_SERVER".into()],
+            device_group_ids: vec![7],
+            ..Default::default()
+        };
+        assert_eq!(class_only.identity_scope(), None, "nothing `df` can spell");
+
+        let f = FilterParams {
+            organization_ids: vec![2, 1],
+            role_ids: vec![9],
+            node_classes: vec!["WINDOWS_SERVER".into()],
+            ..Default::default()
+        };
+        let scope = f.identity_scope().expect("a scope");
+        assert_eq!(scope.df(), "org in (1, 2) AND role=9");
+        assert!(
+            scope.names(&device(1, 50, 9, "LINUX_SERVER")),
+            "class is not in it"
+        );
+        assert!(!scope.names(&device(3, 50, 9, "WINDOWS_SERVER")));
+        assert!(!scope.names(&device(1, 50, 8, "WINDOWS_SERVER")));
+        let mut unplaced = device(1, 50, 9, "WINDOWS_SERVER");
+        unplaced.organization_id = None;
+        assert!(!scope.names(&unplaced), "no id for an active facet");
+
+        let reordered = FilterParams {
+            organization_ids: vec![1, 2, 2],
+            role_ids: vec![9],
+            ..Default::default()
+        };
+        assert_eq!(reordered.identity_scope(), Some(scope));
     }
 
     #[test]
