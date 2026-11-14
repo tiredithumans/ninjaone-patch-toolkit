@@ -296,7 +296,7 @@ fn TabButton(this: Tab, label: &'static str) -> impl IntoView {
     }
 }
 
-/// Prev / "Rows 1–100 of N" / Next above a paged table, rendered only when there
+/// Prev / "Rows 1–100 of N" / Next for a paged table, rendered only when there
 /// is more than one page. The arithmetic is `util`'s; the caller owns the page
 /// index (already clamped) and decides what moving to a page fetches.
 #[component]
@@ -331,27 +331,77 @@ fn Pager(
 
 /// A table's header row from its [`util::HelpedColumn`]s: every header that measures
 /// something carries its definition as a tooltip, with a dotted underline saying so.
+///
+/// With `sort`, each header is a button that sorts the table the frontend holds
+/// whole by that column (`util::sort_by_column`); the columns in `unsortable` stay
+/// plain text.
 #[component]
-fn HelpHeaderRow(columns: &'static [util::HelpedColumn]) -> impl IntoView {
+fn HelpHeaderRow(
+    columns: &'static [util::HelpedColumn],
+    #[prop(optional)] sort: Option<RwSignal<Option<util::ColumnSort>>>,
+    #[prop(optional)] unsortable: &'static [usize],
+) -> impl IntoView {
     view! {
         <tr>
             {columns
                 .iter()
-                .map(|&(label, help)| {
-                    if help.is_empty() {
-                        view! { <th scope="col">{label}</th> }.into_any()
-                    } else {
-                        view! {
-                            <th scope="col">
-                                <span class="col-help" title=help>
-                                    {label}
-                                </span>
-                            </th>
-                        }
-                            .into_any()
-                    }
+                .enumerate()
+                .map(|(col, &(label, help))| {
+                    let sort = sort.filter(|_| !unsortable.contains(&col));
+                    header_cell(label, help, col, sort)
                 })
                 .collect_view()}
         </tr>
     }
+}
+
+/// [`HelpHeaderRow`] for a table whose headers need no definitions.
+#[component]
+pub(crate) fn SortHeaderRow(
+    labels: &'static [&'static str],
+    sort: RwSignal<Option<util::ColumnSort>>,
+    #[prop(optional)] unsortable: &'static [usize],
+) -> impl IntoView {
+    view! {
+        <tr>
+            {labels
+                .iter()
+                .enumerate()
+                .map(|(col, &label)| {
+                    header_cell(label, "", col, (!unsortable.contains(&col)).then_some(sort))
+                })
+                .collect_view()}
+        </tr>
+    }
+}
+
+/// One `<th>`: the label, underlined with its definition as the tooltip when it
+/// has one, inside a sort button when the column sorts.
+fn header_cell(
+    label: &'static str,
+    help: &'static str,
+    col: usize,
+    sort: Option<RwSignal<Option<util::ColumnSort>>>,
+) -> AnyView {
+    let text = if help.is_empty() {
+        label.into_any()
+    } else {
+        view! { <span class="col-help" title=help>{label}</span> }.into_any()
+    };
+    let Some(sort) = sort else {
+        return view! { <th scope="col">{text}</th> }.into_any();
+    };
+    view! {
+        <th scope="col" aria-sort=move || util::column_aria_sort(sort.get(), col)>
+            <button
+                type="button"
+                class="th-sort"
+                on:click=move |_| sort.update(|s| *s = util::next_column_sort(*s, col))
+            >
+                {text}
+                <span aria-hidden="true">{move || util::column_sort_glyph(sort.get(), col)}</span>
+            </button>
+        </th>
+    }
+    .into_any()
 }

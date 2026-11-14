@@ -30,7 +30,7 @@ use header::{Header, SignInButton};
 use settings::{EnableActionsLink, SettingsDialog, SettingsLink};
 use shortcuts::KeyboardShortcuts;
 use state::*;
-use tables::{DeviceDetailModal, Results};
+use tables::{DeviceDetailModal, Results, SortHeaderRow};
 use toaster::Toaster;
 use update::UpdateSplash;
 use util::{

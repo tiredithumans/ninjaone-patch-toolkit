@@ -54,15 +54,26 @@ pub(super) fn DeviceBacklogSections() -> impl IntoView {
 #[component]
 fn DeviceBacklogTable(kind: DeviceListKind) -> impl IntoView {
     let state = expect_context::<AppState>();
+    // The backend's ranking until a header is clicked.
+    let sort = RwSignal::new(None::<util::ColumnSort>);
     let list = move || {
-        state.query.result.with(|r| {
+        let mut list = state.query.result.with(|r| {
             r.as_ref()
                 .map(|r| match kind {
                     DeviceListKind::Worst => r.worst_devices.clone(),
                     DeviceListKind::Offline => r.offline_backlog.clone(),
                 })
                 .unwrap_or_default()
-        })
+        });
+        match kind {
+            DeviceListKind::Worst => {
+                util::sort_by_column(&mut list.devices, sort.get(), util::worst_sort_value);
+            }
+            DeviceListKind::Offline => {
+                util::sort_by_column(&mut list.devices, sort.get(), util::offline_sort_value);
+            }
+        }
+        list
     };
     let empty = match kind {
         DeviceListKind::Worst => "No online device in scope has a pending patch.",
@@ -70,9 +81,9 @@ fn DeviceBacklogTable(kind: DeviceListKind) -> impl IntoView {
     };
     // Spelled as `rows::DeviceBacklog::{WORST,OFFLINE}_COLUMNS`, which
     // `headers_match_the_backend_columns` holds them to.
-    let columns: &'static [util::HelpedColumn] = match kind {
-        DeviceListKind::Worst => &util::WORST_HEADERS,
-        DeviceListKind::Offline => &util::OFFLINE_HEADERS,
+    let (columns, unsortable): (&'static [util::HelpedColumn], &'static [usize]) = match kind {
+        DeviceListKind::Worst => (&util::WORST_HEADERS, &util::WORST_UNSORTABLE),
+        DeviceListKind::Offline => (&util::OFFLINE_HEADERS, &util::OFFLINE_UNSORTABLE),
     };
     view! {
         <Show
@@ -82,7 +93,7 @@ fn DeviceBacklogTable(kind: DeviceListKind) -> impl IntoView {
             <div class="table-wrap">
                 <table>
                     <thead>
-                        <HelpHeaderRow columns=columns/>
+                        <HelpHeaderRow columns=columns sort=sort unsortable=unsortable/>
                     </thead>
                     <tbody>
                         {move || {

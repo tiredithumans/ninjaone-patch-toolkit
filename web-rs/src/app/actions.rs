@@ -1281,6 +1281,7 @@ pub(crate) fn JobsTable() -> impl IntoView {
     // A retry plans like any dispatch, so it waits on the same things.
     let retry_disabled =
         move || state.blocked_reason().is_some() || state.actions.dispatching.get();
+    let sort = RwSignal::new(None::<util::ColumnSort>);
 
     view! {
         <div class="jobs">
@@ -1359,22 +1360,22 @@ pub(crate) fn JobsTable() -> impl IntoView {
                     <div class="table-wrap">
                         <table class="data-table">
                             <thead>
-                                <tr>
-                                    <th scope="col">"Device"</th>
-                                    <th scope="col">"Organization"</th>
-                                    <th scope="col">"Action"</th>
-                                    <th scope="col">"Mode"</th>
-                                    <th scope="col">"Status"</th>
-                                    <th scope="col">"Exit"</th>
-                                    <th scope="col">"Dispatched"</th>
-                                    <th scope="col">"Duration"</th>
-                                    <th scope="col">"Retry"</th>
-                                </tr>
+                                <SortHeaderRow
+                                    labels=&util::JOB_HEADERS
+                                    sort=sort
+                                    unsortable=&util::JOB_UNSORTABLE
+                                />
                             </thead>
                             <tbody>
-                                // Newest first, as before.
+                                // Newest first until a header is clicked. A sort only
+                                // reorders the keyed rows; none is rebuilt for it.
                                 <For
-                                    each=move || state.actions.jobs.get().into_iter().rev()
+                                    each=move || {
+                                        let mut jobs: Vec<JobReport> =
+                                            state.actions.jobs.get().into_iter().rev().collect();
+                                        util::sort_by_column(&mut jobs, sort.get(), util::job_sort_value);
+                                        jobs
+                                    }
                                     key=util::job_row_key
                                     children=move |j| {
                                         // Only a definite failure gets a Retry;

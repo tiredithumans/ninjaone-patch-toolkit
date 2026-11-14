@@ -29,6 +29,7 @@ mod selection;
 mod shortcuts;
 mod sla;
 mod sort;
+mod table_sort;
 mod theme;
 mod view_link;
 
@@ -53,6 +54,7 @@ pub(crate) use selection::*;
 pub(crate) use shortcuts::*;
 pub(crate) use sla::*;
 pub(crate) use sort::*;
+pub(crate) use table_sort::*;
 pub(crate) use theme::*;
 pub(crate) use view_link::*;
 
