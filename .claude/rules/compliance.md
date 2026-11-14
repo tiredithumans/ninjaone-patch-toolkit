@@ -68,7 +68,9 @@ Violating these silently misreports a fleet.
   → `docs/design/compliance.md#there-is-no-per-patch-reboot-field-in-the-ninjaone-api`
 - **First seen is the earlier of NinjaOne's time and `crate::first_seen`'s record** (identity
   `changes::write_patch_key`; undated stays undated; merged from the whole fetched feed per family
-  at its own fetch time; saved only on `StoreOutcome::Stored`; offline devices carried over).
+  at its own fetch time; saved only on `StoreOutcome::Stored`; offline devices carried over). **A
+  feed fetched for one scope (`FeedObservation::scoped`) prunes only the devices it lists** —
+  never judge coverage from the inventory.
   → `docs/design/compliance.md#this-app-keeps-its-own-first-seen-record`
   → `docs/design/compliance.md#there-is-no-patch-release-date-in-the-ninjaone-api`
 - **`PatchRow` strings are interned `Arc<str>`** (`rows::Interner`, `DeviceLabels`); the

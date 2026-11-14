@@ -142,9 +142,14 @@ does **not** install — `PatchStatus::Pending.api_value()`), counted from the f
 current-patch cache, with that cache's fetch time.
 
 - The planner **never fetches** for it. `AppState::cached_current_patches` peeks the
-  `TenantCache` slot (tenant-checked, TTL ignored — the dialog states the fetch time instead);
+  `TenantCache` slots (tenant-checked, TTL ignored — the dialog states the fetch time instead);
   a cold family is `known: false` and the dialog says "unknown (patch data not loaded)", never
   zero. Paging a six-figure feed to draw a dialog would make every plan wait on it.
+- A copy fetched for one identity scope (see
+  [query-cache.md](./query-cache.md#a-scoped-query-with-no-fresh-fleet-copy-fetches-only-its-scope))
+  is read only when the inventory places **every** target in that scope
+  (`IdentityScope::names`); the whole-fleet copy covers any device, and the fresher of the two
+  wins. A target the scoped copy never asked about would otherwise preview as "nothing approved".
 - A post-action `invalidate_current_patches()` clears the slot, so the preview never counts
   patches the previous apply may already have installed.
 - A device with **zero** approved patches is a `plan()` *warning*, not a blocker: the apply

@@ -597,8 +597,22 @@ NinjaOne's time is the older one nothing changes; when it is not, this record is
   newer, and never lowers a past-SLA count.
 - **Merged from the whole fetched feed, per family, at that family's own fetch time**
   (`CurrentPatches::{os,sw}_fetched_at`; the combined `fetched_at` is the older family's). An
-  org-scoped query sees every org's records (the feed is whole-fleet), so it can stamp them and
-  can never prune them for being out of view. A family the query did not fetch is untouched.
+  org-scoped query that read a whole-fleet copy sees every org's records, so it can stamp them
+  and can never prune them for being out of view. A family the query did not fetch is untouched.
+- **A feed fetched for one scope says nothing about a device it does not list.** A scoped query
+  with no fresh whole-fleet copy fetches its organization/location/role scope only
+  ([query-cache.md](./query-cache.md#a-scoped-query-with-no-fresh-fleet-copy-fetches-only-its-scope)),
+  and `FeedObservation::scoped` says so. `rebuild` then keeps the entries of every device with no
+  row in the feed exactly as they were: pruned, each patch pending on an out-of-scope device would
+  be re-stamped the next time it was seen, and its age — and its SLA — would restart. Which
+  devices the feed "lists" is read off the feed itself, not off the inventory's idea of the scope,
+  so a stale inventory cannot prune anything; a device that does have a row is listed in full
+  (`df` narrows devices, never a device's patches) and is rebuilt like any other. The cost is an
+  entry that outlives its patch on a device that is simply fully patched: it goes the next time
+  that device shows up in any feed, or at the next whole-fleet merge, and until then can only make
+  a re-offered patch look older, never younger. `since` is still the family's first merge of any
+  kind; a device first seen later — newly enrolled, or newly in scope — is dated from then, as it
+  always was (`a_scoped_feed_never_prunes_a_device_it_does_not_list`).
 - **Pruned when no longer pending**, except for devices offline in the inventory — their absence
   proves nothing, the `rollup_device` reasoning — so a deleted device's records fall out and a
   sleeping laptop's do not. A feed no newer than the last one merged (`merged_at`) is skipped, and

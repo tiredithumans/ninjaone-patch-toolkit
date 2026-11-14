@@ -41,6 +41,8 @@ version and start a fresh `[Unreleased]`.
 - The device list starts loading as soon as you are signed in, so the first query has less to
   wait for.
 - Results appear as soon as they are computed instead of after the run's history is saved.
+- A query limited to certain organizations, locations or roles downloads only their patches when
+  the fleet isn't already loaded, so it and its auto-refresh are much quicker on large tenants.
 - The live "job running" markers download only the jobs in the scope you queried.
 - While the first query runs, the results area shows each data feed's progress against its size
   instead of "Run a query…", and the progress bar reflects records loaded rather than a guess.

@@ -272,7 +272,7 @@ async fn an_os_only_query_never_fetches_the_third_party_feed() {
     let state = AppState::seeded(server.uri());
 
     let current = state
-        .fleet_current_patches(false, true, false, None, None)
+        .fleet_current_patches(false, true, false, None, None, None)
         .await
         .expect("os-only fetch");
 
@@ -298,7 +298,7 @@ async fn a_software_only_query_never_fetches_the_os_feed() {
     let state = AppState::seeded(server.uri());
 
     let current = state
-        .fleet_current_patches(false, false, true, None, None)
+        .fleet_current_patches(false, false, true, None, None, None)
         .await
         .expect("software-only fetch");
 
@@ -360,7 +360,7 @@ async fn the_third_party_feed_never_waits_for_the_inventory() {
     let state = AppState::seeded(server.uri());
 
     let current = state
-        .fleet_current_patches(false, false, true, None, None)
+        .fleet_current_patches(false, false, true, None, None, None)
         .await
         .expect("software-only fetch");
 
@@ -451,17 +451,163 @@ async fn the_slice_plan_comes_from_whatever_is_cached_however_stale() {
     assert_eq!(hits(&server, "/api/v2/devices-detailed").await, 1);
 }
 
+/// An OS-patch feed that answers a request under `df` with that scope's one row and
+/// an unfiltered one with the whole fleet's two, and the `df` of every request.
+async fn scoped_os_feed() -> wiremock::MockServer {
+    use serde_json::json;
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let row =
+        |device: i64, kb: &str| json!({ "deviceId": device, "kbNumber": kb, "status": "MANUAL" });
+    let server = MockServer::start().await;
+    for (org, device) in [(5, 1), (6, 2)] {
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/os-patches"))
+            .and(query_param("df", format!("org={org}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [row(device, "KB1")], "cursor": ""
+            })))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .and(query_param_is_missing("df"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [row(1, "KB1"), row(2, "KB1")], "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// The `df` of every OS-patch request `server` has seen, in order.
+async fn os_feed_dfs(server: &wiremock::MockServer) -> Vec<Option<String>> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/api/v2/queries/os-patches")
+        .map(|r| {
+            r.url
+                .query_pairs()
+                .find(|(k, _)| k == "df")
+                .map(|(_, v)| v.into_owned())
+        })
+        .collect()
+}
+
+fn org_scope(org: i64) -> crate::filter::IdentityScope {
+    crate::filter::FilterParams {
+        organization_ids: vec![org],
+        ..Default::default()
+    }
+    .identity_scope()
+    .expect("an organization is an identity scope")
+}
+
+/// A query scoped to one organization used to page every organization's patches,
+/// on a cold start and on every refresh tick. With no fresh whole-fleet copy it now
+/// asks for its scope, keeps that under the scope, and never serves it to another.
+/// A fresh whole-fleet copy still answers any scope for nothing.
+#[tokio::test]
+async fn a_scoped_query_with_no_fresh_fleet_copy_fetches_only_its_scope() {
+    let server = scoped_os_feed().await;
+    let state = AppState::seeded(server.uri());
+    let (five, six) = (org_scope(5), org_scope(6));
+    let os = |scope| state.fleet_current_patches(false, true, false, scope, None, None);
+
+    let first = os(Some(&five)).await.expect("scoped fetch");
+    assert!(first.os_scoped);
+    assert_eq!(first.os.len(), 1, "the scope's rows, not the fleet's");
+    let again = os(Some(&five)).await.expect("cached");
+    assert!(Arc::ptr_eq(&first.os, &again.os), "the same scope is a hit");
+    assert_eq!(os_feed_dfs(&server).await, [Some("org=5".to_string())]);
+
+    // Another scope's copy is not this scope's.
+    let other = os(Some(&six)).await.expect("the other scope");
+    assert!(other.os_scoped);
+    assert_eq!(other.os[0].device_id, Some(2));
+    assert_eq!(
+        os_feed_dfs(&server).await,
+        ["org=5", "org=6"].map(|df| Some(df.to_string()))
+    );
+
+    // An unscoped query fetches the fleet, and that copy then answers any scope.
+    let whole = os(None).await.expect("whole fleet");
+    assert!(!whole.os_scoped);
+    assert_eq!(whole.os.len(), 2);
+    let from_whole = os(Some(&five)).await.expect("read off the fleet copy");
+    assert!(!from_whole.os_scoped);
+    assert!(Arc::ptr_eq(&whole.os, &from_whole.os));
+    assert_eq!(os_feed_dfs(&server).await.len(), 3, "no fourth request");
+
+    // Once the fleet copy has aged out, the scope is fetched on its own again.
+    state
+        .fleet_current_os
+        .age(CURRENT_PATCHES_TTL + Duration::from_secs(1));
+    state
+        .scoped_current_os
+        .age(CURRENT_PATCHES_TTL + Duration::from_secs(1));
+    assert!(os(Some(&five)).await.expect("scoped refetch").os_scoped);
+    assert_eq!(
+        os_feed_dfs(&server).await.last(),
+        Some(&Some("org=5".to_string()))
+    );
+}
+
+/// The scoped copy describes the same devices a mutating action just changed, so
+/// the post-action invalidation takes it with the fleet's; and the Apply-all
+/// preview reads it only for targets its scope names — a device it never asked
+/// about would otherwise preview as "nothing approved".
+#[tokio::test]
+async fn the_scoped_copy_is_invalidated_with_the_fleets_and_previews_only_its_scope() {
+    use crate::model::PatchType;
+    let server = scoped_os_feed().await;
+    let state = AppState::seeded(server.uri());
+    let five = org_scope(5);
+
+    state
+        .fleet_current_patches(false, true, false, Some(&five), None, None)
+        .await
+        .expect("scoped fetch");
+    let (rows, _) = state
+        .cached_current_patches(PatchType::Os, |scope| *scope == five)
+        .expect("every target is in the scope it was fetched for");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        state
+            .cached_current_patches(PatchType::Os, |_| false)
+            .is_none(),
+        "a target outside the scope must not read as covered"
+    );
+
+    state.invalidate_current_patches();
+    assert!(
+        state
+            .cached_current_patches(PatchType::Os, |_| true)
+            .is_none()
+    );
+    state
+        .fleet_current_patches(false, true, false, Some(&five), None, None)
+        .await
+        .expect("refetched after the action");
+    assert_eq!(os_feed_dfs(&server).await.len(), 2);
+}
+
 #[tokio::test]
 async fn widening_to_both_families_reuses_the_already_warm_one() {
     let server = patch_feed_server().await;
     let state = AppState::seeded(server.uri());
 
     state
-        .fleet_current_patches(false, true, false, None, None)
+        .fleet_current_patches(false, true, false, None, None, None)
         .await
         .expect("os-only fetch");
     let both = state
-        .fleet_current_patches(false, true, true, None, None)
+        .fleet_current_patches(false, true, true, None, None, None)
         .await
         .expect("widened fetch");
 
@@ -484,7 +630,7 @@ async fn a_forced_refetch_inside_the_floor_is_served_from_cache() {
 
     for _ in 0..3 {
         state
-            .fleet_current_patches(true, true, false, None, None)
+            .fleet_current_patches(true, true, false, None, None, None)
             .await
             .expect("forced fetch");
     }
@@ -530,7 +676,7 @@ async fn an_invalidation_during_a_fetch_is_not_undone_by_that_fetch() {
         let state = state.clone();
         tokio::spawn(async move {
             state
-                .fleet_current_patches(false, true, false, None, None)
+                .fleet_current_patches(false, true, false, None, None, None)
                 .await
                 .expect("in-flight fetch")
         })
@@ -543,7 +689,7 @@ async fn an_invalidation_during_a_fetch_is_not_undone_by_that_fetch() {
     // The in-flight fetch may still return its rows to its own caller — it has
     // them — but it must not leave them in the cache for the *next* query.
     state
-        .fleet_current_patches(false, true, false, None, None)
+        .fleet_current_patches(false, true, false, None, None, None)
         .await
         .expect("post-action fetch");
     assert_eq!(
@@ -1483,26 +1629,40 @@ async fn the_apply_preview_peek_never_fetches() {
     let server = patch_feed_server().await;
     let state = AppState::seeded(server.uri());
 
-    assert!(state.cached_current_patches(PatchType::Os).is_none());
+    assert!(
+        state
+            .cached_current_patches(PatchType::Os, |_| true)
+            .is_none()
+    );
     assert_eq!(hits(&server, "/api/v2/queries/os-patches").await, 0);
 
     state
-        .fleet_current_patches(false, true, false, None, None)
+        .fleet_current_patches(false, true, false, None, None, None)
         .await
         .expect("os fetch");
     let (os, _) = state
-        .cached_current_patches(PatchType::Os)
+        .cached_current_patches(PatchType::Os, |_| true)
         .expect("warm after a query");
     assert_eq!(os.len(), 1);
     assert!(
-        state.cached_current_patches(PatchType::Software).is_none(),
+        state
+            .cached_current_patches(PatchType::Software, |_| true)
+            .is_none(),
         "the family that was not queried stays cold"
     );
-    assert!(state.cached_current_patches(PatchType::All).is_none());
+    assert!(
+        state
+            .cached_current_patches(PatchType::All, |_| true)
+            .is_none()
+    );
     assert_eq!(hits(&server, "/api/v2/queries/os-patches").await, 1);
 
     state.invalidate_current_patches();
-    assert!(state.cached_current_patches(PatchType::Os).is_none());
+    assert!(
+        state
+            .cached_current_patches(PatchType::Os, |_| true)
+            .is_none()
+    );
 }
 
 /// The poller's claimed set: every bound activity id in the store, settled jobs

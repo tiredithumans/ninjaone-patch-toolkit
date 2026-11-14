@@ -529,6 +529,8 @@ async fn fleet_current_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPatches>
         fetched_at: fixed_now(),
         os_fetched_at: Some(fixed_now()),
         sw_fetched_at: Some(fixed_now()),
+        os_scoped: false,
+        sw_scoped: false,
     })
 }
 
@@ -540,6 +542,8 @@ async fn fleet_current_both_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPat
         fetched_at: fixed_now(),
         os_fetched_at: Some(fixed_now()),
         sw_fetched_at: Some(fixed_now()),
+        os_scoped: false,
+        sw_scoped: false,
     })
 }
 
@@ -1666,6 +1670,8 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: Some(fixed_now()),
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         no_ledger(),
@@ -1755,6 +1761,8 @@ async fn a_device_group_scope_narrows_to_its_members_and_fails_closed() {
                         fetched_at: fixed_now(),
                         os_fetched_at: Some(fixed_now()),
                         sw_fetched_at: Some(fixed_now()),
+                        os_scoped: false,
+                        sw_scoped: false,
                     })
                 },
                 no_ledger(),
@@ -1827,6 +1835,8 @@ async fn group_scoped_query(
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: Some(fixed_now()),
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         no_ledger(),
@@ -1870,6 +1880,8 @@ async fn data_fetched_at_is_no_newer_than_the_device_inventory() {
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: None,
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         no_ledger(),
@@ -2053,6 +2065,8 @@ async fn a_failed_fleet_leg_abandons_the_install_history_pull() {
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: Some(fixed_now()),
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         no_ledger(),
@@ -2111,6 +2125,8 @@ async fn a_failed_lookups_leg_abandons_the_install_history_pull() {
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: Some(fixed_now()),
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         no_ledger(),
@@ -2211,6 +2227,8 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
                 fetched_at: fixed_now(),
                 os_fetched_at: Some(fixed_now()),
                 sw_fetched_at: None,
+                os_scoped: false,
+                sw_scoped: false,
             })
         },
         async { Ok(Arc::new(ledger)) },
@@ -2249,16 +2267,19 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
 
     // The observation is the whole fetched family at its own fetch time, for the
     // ledger to merge once the result is stored; the unfetched family is absent.
-    let (feed, at) = run.observation.os.expect("OS was fetched");
+    let FeedObservation {
+        patches: feed, at, ..
+    } = run.observation.os.expect("OS was fetched");
     assert_eq!(feed.len(), 2);
     assert_eq!(at, fixed_now());
     assert!(run.observation.sw.is_none());
 }
 
-/// An org-scoped query hands the ledger the whole fleet's feed, not its slice, so
-/// it can never prune another organization's records for being out of view.
+/// An org-scoped query that read a whole-fleet copy hands the ledger that whole
+/// feed, not its slice, and one that fetched only its scope says so — either way
+/// the ledger can never prune another organization's records for being out of view.
 #[tokio::test]
-async fn a_scoped_query_observes_the_whole_fleets_feed() {
+async fn a_scoped_query_observes_the_feed_it_read_and_says_which_it_was() {
     let devices = Arc::new(vec![dev(10, 1), dev(20, 2)]);
     let os_current = Arc::new(vec![
         cur(10, "KB1", "MANUAL", "CRITICAL"),
@@ -2278,38 +2299,57 @@ async fn a_scoped_query_observes_the_whole_fleets_feed() {
         AuthState::seeded(http, "http://127.0.0.1:0".into(), "t"),
     );
     let progress = |_: &'static str, _: usize, _: Option<usize>| {};
-    let run = run_query(
-        &api,
-        async { Ok::<_, anyhow::Error>(lookups) },
-        async { Ok::<_, anyhow::Error>((devices, fixed_now())) },
-        async {
-            Ok::<_, anyhow::Error>(CurrentPatches {
-                os: os_current,
-                sw: Arc::new(Vec::new()),
-                fetched_at: fixed_now(),
-                os_fetched_at: Some(fixed_now()),
-                sw_fetched_at: None,
-            })
-        },
-        no_ledger(),
-        ExploitSnapshot::default(),
-        30,
-        SlaPolicy::default(),
-        "https://app.ninjarmm.com".into(),
-        a,
-        fixed_now(),
-        None,
-        &progress,
-    )
-    .await
-    .expect("query");
-    assert_eq!(run.result.rows.len(), 1, "the result is scoped");
-    assert_eq!(
-        run.observation.os.expect("fetched").0.len(),
-        2,
-        "the observation is not"
-    );
-    assert_eq!(run.observation.devices.len(), 2);
+    for os_scoped in [false, true] {
+        let (lookups, devices, os_current) = (
+            Arc::clone(&lookups),
+            Arc::clone(&devices),
+            Arc::clone(&os_current),
+        );
+        let run = run_query(
+            &api,
+            async { Ok::<_, anyhow::Error>(lookups) },
+            async { Ok::<_, anyhow::Error>((devices, fixed_now())) },
+            async {
+                Ok::<_, anyhow::Error>(CurrentPatches {
+                    os: os_current,
+                    sw: Arc::new(Vec::new()),
+                    fetched_at: fixed_now(),
+                    os_fetched_at: Some(fixed_now()),
+                    sw_fetched_at: None,
+                    os_scoped,
+                    sw_scoped: false,
+                })
+            },
+            no_ledger(),
+            ExploitSnapshot::default(),
+            30,
+            SlaPolicy::default(),
+            "https://app.ninjarmm.com".into(),
+            PatchQueryArgs {
+                filter: a.filter.clone(),
+                patch_type: a.patch_type,
+                statuses: a.statuses.clone(),
+                install_after_days: a.install_after_days,
+            },
+            fixed_now(),
+            None,
+            &progress,
+        )
+        .await
+        .expect("query");
+        assert_eq!(run.result.rows.len(), 1, "the result is scoped");
+        let observed = run.observation.os.expect("fetched");
+        assert_eq!(
+            observed.patches.len(),
+            2,
+            "the observation is what was read"
+        );
+        assert_eq!(
+            observed.scoped, os_scoped,
+            "and the ledger is told whether that was the whole fleet"
+        );
+        assert_eq!(run.observation.devices.len(), 2);
+    }
 }
 
 /// `status` is not required on an install record. Under the single-status

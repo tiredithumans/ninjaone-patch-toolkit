@@ -329,6 +329,39 @@ exception: its membership is one small read per selected group per query (see
 `query_patches` takes the cached devices/current as *futures* (concurrent cold fetch) and why there
 is no separate per-query device-filter fetch.
 
+### A scoped query with no fresh fleet copy fetches only its scope
+
+The prefetch makes a re-filter free, but it also made every query pay for the fleet: one
+organization's pending patches cost a page-through of every organization's, on a cold start and
+again on every auto-refresh tick (a forced tick's TTL is `FORCE_MIN_INTERVAL`, so the whole-fleet
+copy is stale for it by construction). `AppState::current_family` therefore reads in this order:
+
+1. a **fresh whole-fleet copy** answers every scope, so it is used whenever there is one — a
+   re-filter over a warm fleet still costs nothing;
+2. without one, a query with an identity scope (`FilterParams::identity_scope`: organization,
+   location, role — the facets `/queries/*` honors in `df`) fetches **that scope** and keeps it in
+   the family's scoped slot (`scoped_current_{os,sw}`, a `TenantCache<ScopedPatches>` keyed by the
+   scope: another scope's copy is dropped, never served);
+3. an unscoped query fetches the fleet, as before.
+
+The clause is the one the install history has always sent (`patch_filter`) and carries the same
+guarantee: it is a saving, never the boundary. `assemble_result` scopes the rows client-side
+whichever slot they came from, so a clause NinjaOne drops costs a larger download, not a wider
+result. A scoped third-party fetch is still sliced by location (the slices are the scope ANDed
+with a `loc` clause, held to the scoped feed's size).
+
+Three things that assumed "the cached feed is the fleet" know the difference:
+
+- **The first-seen ledger** is told (`CurrentPatches::{os,sw}_scoped` → `FeedObservation::scoped`)
+  and prunes only the devices a scoped feed lists — see
+  [compliance.md](./compliance.md#this-app-keeps-its-own-first-seen-record).
+- **The Apply-all preview** reads a scoped copy only for targets its scope names
+  (`cached_current_patches`) — see [actions.md](./actions.md).
+- **`invalidate_current_patches`** clears the scoped slots with the fleet's.
+
+What is given up: changing from one scope to another on a cold cache is now a (small) fetch
+instead of free, and a session that only ever runs scoped queries never warms the fleet copy.
+
 ### The inventory is warmed at sign-in
 
 Every query needs the device inventory, whatever its scope or patch type, and it is the one

@@ -14,7 +14,7 @@ use crate::changes::{self, RunSnapshot};
 use crate::error::{ERR_CANCELLED, UiError};
 use crate::exploits::ExploitSnapshot;
 use crate::filter::FilterParams;
-use crate::first_seen::{self, Family, Observation, Resolver, TenantLedger};
+use crate::first_seen::{self, Family, FeedObservation, Observation, Resolver, TenantLedger};
 use crate::model::{Device, DeviceGroup, Patch, PatchRow, PatchStatus, PatchType};
 use crate::rows::{
     ComplianceBucket, DeviceDetail, DeviceSummary, FirstSeenTracking, GroupBy, GroupPage,
@@ -195,10 +195,15 @@ pub async fn query_patches(
     let devices_fut = state.fleet_devices_with_time(Some(&p_devices as &ProgressFn));
     // The requested `PatchType` decides which families are fetched at all — a
     // family this query can't display is never worth a whole-fleet page-through.
+    // A query scoped by organization, location or role asks only for that scope
+    // when no fresh whole-fleet copy is cached; the rows are scoped client-side
+    // either way.
+    let identity_scope = args.filter.identity_scope();
     let current_fut = state.fleet_current_patches(
         force,
         args.patch_type.includes_os(),
         args.patch_type.includes_software(),
+        identity_scope.as_ref(),
         Some(&p_os as &ProgressFn),
         Some(&p_sw as &ProgressFn),
     );
@@ -864,24 +869,27 @@ where
     progress("joining", 0, None);
     // Only the families this query asked for: a family left cached from an earlier
     // query is merged by the query that next asks for it.
+    let observed = |included: bool, rows: &Arc<Vec<Patch>>, at: Option<DateTime<Utc>>, scoped| {
+        included.then_some(at).flatten().map(|at| FeedObservation {
+            patches: Arc::clone(rows),
+            at,
+            scoped,
+        })
+    };
     let observation = Observation {
         devices: Arc::clone(&devices),
-        os: plan
-            .include_os
-            .then(|| {
-                current
-                    .os_fetched_at
-                    .map(|at| (Arc::clone(&current.os), at))
-            })
-            .flatten(),
-        sw: plan
-            .include_sw
-            .then(|| {
-                current
-                    .sw_fetched_at
-                    .map(|at| (Arc::clone(&current.sw), at))
-            })
-            .flatten(),
+        os: observed(
+            plan.include_os,
+            &current.os,
+            current.os_fetched_at,
+            current.os_scoped,
+        ),
+        sw: observed(
+            plan.include_sw,
+            &current.sw,
+            current.sw_fetched_at,
+            current.sw_scoped,
+        ),
     };
     let src = FetchedSources {
         devices,

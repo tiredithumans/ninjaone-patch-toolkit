@@ -48,6 +48,12 @@ paths:
   only the requested family is fetched. Stores are epoch-gated and fetches are single-flight per
   family. `force_refresh` is floored backend-side by `FORCE_MIN_INTERVAL`.
   → `docs/design/query-cache.md#whole-fleet-prefetch--client-side-scoping`
+- **A query with an identity scope and no fresh whole-fleet copy fetches only that scope**
+  (`current_family`, the scoped slots). The `df` is a saving, never the boundary — rows are
+  scoped client-side from either slot — and anything that reads the patch caches must know a
+  scoped copy is not the fleet: the ledger (`FeedObservation::scoped`), the Apply-all preview
+  (`cached_current_patches`'s `in_scope`), `invalidate_current_patches`.
+  → `docs/design/query-cache.md#a-scoped-query-with-no-fresh-fleet-copy-fetches-only-its-scope`
 - **A cancelled query is dropped where it stands (`unless_cancelled`) and ends with
   `ERR_CANCELLED` before its token: nothing stored, recorded or persisted.** Any new await that
   does a query's work goes through `unless_cancelled`.

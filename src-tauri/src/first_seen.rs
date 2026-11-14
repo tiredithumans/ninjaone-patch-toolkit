@@ -14,7 +14,9 @@
 //! time NinjaOne sends.
 //!
 //! One file per tenant under `first-seen/`, per patch family, rebuilt from the
-//! whole-fleet feed each time a newer fetch of that family wins the result cache.
+//! feed each time a newer fetch of that family wins the result cache — the whole
+//! fleet's, or one scope's, which then only speaks for the devices it lists
+//! ([`FeedObservation`]).
 //! Best-effort throughout, like `changes`: a failed write costs the next run some
 //! history, never the operator their fleet.
 
@@ -167,8 +169,15 @@ impl TenantLedger {
     /// A ledger whose OS family recorded every pending record in `feed` at `at` —
     /// what a first query at `at` over that feed would have committed.
     pub fn recorded(tenant: &str, feed: &[Patch], at: DateTime<Utc>) -> Self {
-        let os = rebuild(None, feed, Family::Os, at.timestamp(), &HashSet::new())
-            .map(|r| Arc::new(r.section));
+        let os = rebuild(
+            None,
+            feed,
+            Family::Os,
+            at.timestamp(),
+            &HashSet::new(),
+            false,
+        )
+        .map(|r| Arc::new(r.section));
         Self {
             tenant: tenant.to_string(),
             os,
@@ -211,13 +220,26 @@ fn key_into(key: &mut String, name: &mut String, family: Family, p: &Patch) {
 }
 
 /// What one query fetched that the ledger is rebuilt from: the whole-fleet device
-/// inventory and each family's whole-fleet feed with its own fetch instant. Whole
-/// fleet, not the query's scope — an org-scoped query sees every org's records, so
-/// it can stamp them and can never prune them for being out of its view.
+/// inventory and each family's feed with its own fetch instant.
 pub struct Observation {
     pub devices: Arc<Vec<Device>>,
-    pub os: Option<(Arc<Vec<Patch>>, DateTime<Utc>)>,
-    pub sw: Option<(Arc<Vec<Patch>>, DateTime<Utc>)>,
+    pub os: Option<FeedObservation>,
+    pub sw: Option<FeedObservation>,
+}
+
+/// One family's feed as a query fetched it.
+///
+/// A whole-fleet feed sees every device's records, so a record missing from it is
+/// no longer pending and its entry goes. A `scoped` feed — fetched for the query's
+/// organization/location/role scope only (`AppState::fleet_current_patches`) — says
+/// that only about the devices it lists: a device absent from it may simply be out
+/// of its scope, and pruning that device's entries would restart the age of every
+/// patch pending on it. So a scoped feed stamps and prunes the devices it names and
+/// leaves every other entry exactly as it was ([`rebuild`]).
+pub struct FeedObservation {
+    pub patches: Arc<Vec<Patch>>,
+    pub at: DateTime<Utc>,
+    pub scoped: bool,
 }
 
 /// The base a query ages its records against: the ledger this process holds for
@@ -279,10 +301,17 @@ pub fn commit(tenant: &str, obs: Observation) {
         (Family::Os, &obs.os, &mut next.os),
         (Family::Software, &obs.sw, &mut next.sw),
     ] {
-        let Some((patches, at)) = feed else {
+        let Some(feed) = feed else {
             continue;
         };
-        if let Some(r) = rebuild(slot.as_deref(), patches, family, at.timestamp(), &offline) {
+        if let Some(r) = rebuild(
+            slot.as_deref(),
+            &feed.patches,
+            family,
+            feed.at.timestamp(),
+            &offline,
+            feed.scoped,
+        ) {
             rebuilt_any = true;
             changed |= r.membership_changed;
             *slot = Some(Arc::new(r.section));
@@ -313,19 +342,28 @@ struct Rebuilt {
     membership_changed: bool,
 }
 
-/// One family rebuilt from its whole-fleet feed fetched at `at`: every pending
-/// record keeps the first observation it already had, or is stamped `at`; a record
-/// no longer pending is dropped, unless its device is offline — an offline device's
-/// absence from the feed proves nothing, the same reasoning that keeps it out of the
-/// rollups. `None` when there is nothing to merge: the feed is no newer than the
-/// last one merged, or it holds no pending record while the ledger holds some (a
-/// successful empty page must not wipe the history).
+/// One family rebuilt from its feed fetched at `at`: every pending record keeps the
+/// first observation it already had, or is stamped `at`; a record no longer pending
+/// is dropped, unless its device is offline — an offline device's absence from the
+/// feed proves nothing, the same reasoning that keeps it out of the rollups. `None`
+/// when there is nothing to merge: the feed is no newer than the last one merged, or
+/// it holds no pending record while the ledger holds some (a successful empty page
+/// must not wipe the history).
+///
+/// A `scoped` feed proves nothing about a device it does not list either, for
+/// another reason: it only asked about its scope ([`FeedObservation`]). The entries
+/// of every device with no row in it are kept as they were. A device that does have
+/// a row is listed in full — `df` narrows devices, never a device's patches — so it
+/// is rebuilt like any other. An entry kept this way for a device that is simply
+/// fully patched goes the next time that device shows up in any feed, or at the next
+/// whole-fleet merge.
 fn rebuild(
     prev: Option<&FamilyLedger>,
     feed: &[Patch],
     family: Family,
     at: i64,
     offline: &HashSet<i64>,
+    scoped: bool,
 ) -> Option<Rebuilt> {
     if prev.is_some_and(|p| at <= p.merged_at) {
         return None;
@@ -338,10 +376,15 @@ fn rebuild(
     let (mut name, mut key) = (String::new(), String::new());
     let mut added = 0usize;
     let mut any_pending = false;
+    // Only a scoped feed needs to know which devices it listed.
+    let mut listed: HashSet<i64> = HashSet::new();
     for p in feed {
         let Some(device_id) = p.device_id else {
             continue;
         };
+        if scoped {
+            listed.insert(device_id);
+        }
         if !is_pending(p.status.as_deref()) {
             continue;
         }
@@ -366,7 +409,8 @@ fn rebuild(
     }
     if let Some(prev) = prev {
         for (&(device_id, ix), &first) in &prev.entries {
-            if !offline.contains(&device_id) {
+            let unproven = offline.contains(&device_id) || (scoped && !listed.contains(&device_id));
+            if !unproven {
                 continue;
             }
             let ix = next.intern(&prev.keys[ix as usize]);

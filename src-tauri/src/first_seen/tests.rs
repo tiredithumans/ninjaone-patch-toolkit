@@ -49,7 +49,7 @@ fn first(l: &FamilyLedger, device_id: i64, p: &Patch) -> Option<i64> {
 
 fn rebuilt(prev: Option<&FamilyLedger>, feed: &[Patch], at: i64, offline: &[i64]) -> Rebuilt {
     let offline: HashSet<i64> = offline.iter().copied().collect();
-    rebuild(prev, feed, Family::Os, at, &offline).expect("a newer feed rebuilds")
+    rebuild(prev, feed, Family::Os, at, &offline, false).expect("a newer feed rebuilds")
 }
 
 /// A record keeps the fetch it first appeared in; a new one is stamped with this
@@ -85,6 +85,63 @@ fn an_unchanged_feed_is_not_a_membership_change() {
     assert_eq!(again.section.merged_at, T0 + DAY);
 }
 
+/// A feed fetched for one scope proves nothing about a device it does not list —
+/// that device may simply be out of the scope — so its entries stay exactly as they
+/// were. Pruned, every patch pending on it would be re-stamped the next time it was
+/// seen, and its age (and its SLA) would restart. A device the feed does list is
+/// listed in full, so it is rebuilt like any other: its resolved record goes, its
+/// new one is stamped. The same feed taken as the whole fleet's prunes the absent
+/// device, which is what a whole-fleet merge after a scoped one still does.
+#[test]
+fn a_scoped_feed_never_prunes_a_device_it_does_not_list() {
+    let kept = os_patch(1, "KB1", "MANUAL");
+    let resolved = os_patch(1, "KB2", "MANUAL");
+    let elsewhere = os_patch(2, "KB3", "MANUAL");
+    let day0 = rebuilt(
+        None,
+        &[kept.clone(), resolved.clone(), elsewhere.clone()],
+        T0,
+        &[],
+    )
+    .section;
+
+    let new = os_patch(1, "KB9", "MANUAL");
+    let feed = [kept.clone(), new.clone()];
+    let none_offline = HashSet::new();
+    let scoped = rebuild(
+        Some(&day0),
+        &feed,
+        Family::Os,
+        T0 + 3 * DAY,
+        &none_offline,
+        true,
+    )
+    .expect("a newer feed rebuilds")
+    .section;
+    assert_eq!(first(&scoped, 1, &kept), Some(T0));
+    assert_eq!(
+        first(&scoped, 1, &resolved),
+        None,
+        "resolved on a listed device"
+    );
+    assert_eq!(first(&scoped, 1, &new), Some(T0 + 3 * DAY));
+    assert_eq!(
+        first(&scoped, 2, &elsewhere),
+        Some(T0),
+        "a device the scoped feed never asked about keeps its record"
+    );
+
+    let whole = rebuilt(Some(&day0), &feed, T0 + 3 * DAY, &[]).section;
+    assert_eq!(first(&whole, 2, &elsewhere), None);
+    let later = rebuilt(Some(&scoped), &feed, T0 + 4 * DAY, &[]).section;
+    assert_eq!(
+        first(&later, 2, &elsewhere),
+        None,
+        "the next whole-fleet merge prunes what the scoped one could not judge"
+    );
+    assert_eq!(first(&later, 1, &new), Some(T0 + 3 * DAY));
+}
+
 /// A feed no newer than the last one merged is skipped, so an older run can never
 /// roll the record back; and a feed with no pending record never wipes it.
 #[test]
@@ -92,23 +149,34 @@ fn an_older_or_empty_feed_never_rewrites_the_record() {
     let a = os_patch(1, "KB1", "MANUAL");
     let day5 = rebuilt(None, std::slice::from_ref(&a), T0 + 5 * DAY, &[]).section;
     let offline = HashSet::new();
-    assert!(rebuild(Some(&day5), &[], Family::Os, T0, &offline).is_none());
+    assert!(rebuild(Some(&day5), &[], Family::Os, T0, &offline, false).is_none());
     assert!(
         rebuild(
             Some(&day5),
             std::slice::from_ref(&a),
             Family::Os,
             T0 + 5 * DAY,
-            &offline
+            &offline,
+            false
         )
         .is_none()
     );
     assert!(
-        rebuild(Some(&day5), &[], Family::Os, T0 + 9 * DAY, &offline).is_none(),
+        rebuild(Some(&day5), &[], Family::Os, T0 + 9 * DAY, &offline, false).is_none(),
         "a successful empty page must not prune everything"
     );
     let rejected = os_patch(1, "KB1", "REJECTED");
-    assert!(rebuild(Some(&day5), &[rejected], Family::Os, T0 + 9 * DAY, &offline).is_none());
+    assert!(
+        rebuild(
+            Some(&day5),
+            &[rejected],
+            Family::Os,
+            T0 + 9 * DAY,
+            &offline,
+            false
+        )
+        .is_none()
+    );
 }
 
 /// An offline device's absence from the feed proves nothing, so its records are

@@ -11,6 +11,8 @@ use crate::actions::JobReport;
 use crate::api::patches::SlicePlan;
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::auth::AuthState;
+use crate::filter::IdentityScope;
+use crate::first_seen::Family;
 #[cfg(test)]
 use crate::model::PatchRow;
 use crate::model::{Device, DeviceGroup, Location, Organization, Patch, Role, apply_health};
@@ -216,6 +218,32 @@ pub struct CurrentPatches {
     /// fetched OS feed by a third-party feed still cached from earlier.
     pub os_fetched_at: Option<DateTime<Utc>>,
     pub sw_fetched_at: Option<DateTime<Utc>>,
+    /// Whether each family was fetched for the query's identity scope only
+    /// ([`ScopedPatches`]) rather than for the whole fleet. The rows are scoped
+    /// client-side either way; what this changes is what their *absence* means, so
+    /// the first-seen ledger must not prune by a scoped feed what it never asked for.
+    pub os_scoped: bool,
+    pub sw_scoped: bool,
+}
+
+/// One family's current patches for one identity scope: what a scoped query fetches
+/// when no fresh whole-fleet copy is in hand.
+///
+/// The whole-fleet prefetch makes a re-filter free, but it also made every query
+/// pay for the fleet: one organization's pending patches cost a page-through of
+/// every organization's, on a cold start and again on every auto-refresh tick.
+/// A scoped copy is keyed by its scope, so only that scope is ever served from it.
+pub struct ScopedPatches {
+    pub scope: IdentityScope,
+    pub rows: Arc<Vec<Patch>>,
+}
+
+/// One family resolved for a query: its rows, when they were fetched, and whether
+/// they are the query's scope only.
+struct FamilyHit {
+    rows: Arc<Vec<Patch>>,
+    at: DateTime<Utc>,
+    scoped: bool,
 }
 
 /// What [`AppState::write_settings`] hands back once the write is on disk.
@@ -304,6 +332,11 @@ pub struct AppState {
     /// Whole-fleet current third-party patches. Held apart from the OS family so a
     /// query that doesn't ask for it never pays to fetch it.
     fleet_current_sw: TenantCache<Vec<Patch>>,
+    /// The current patches of the identity scope last queried, per family, for a
+    /// scoped query with no fresh whole-fleet copy to read ([`ScopedPatches`]). One
+    /// scope at a time: an entry for another scope is dropped, not served.
+    scoped_current_os: TenantCache<ScopedPatches>,
+    scoped_current_sw: TenantCache<ScopedPatches>,
     /// Dispatched action jobs, stamped with the tenant they belong to. Mutable and
     /// long-lived — it outlives the IPC call that created it — so it carries the
     /// same tenant check as `last_result`: a tenant switch reads as a miss, and a
@@ -429,6 +462,8 @@ impl AppState {
             fleet_devices_cache: TenantCache::default(),
             fleet_current_os: TenantCache::default(),
             fleet_current_sw: TenantCache::default(),
+            scoped_current_os: TenantCache::default(),
+            scoped_current_sw: TenantCache::default(),
             jobs: Mutex::new(None),
             // Seeded from the clock, not 1: the audit log joins a job's records by
             // these ids and outlives the process, so ids that restarted every
@@ -702,6 +737,7 @@ impl AppState {
         force: bool,
         include_os: bool,
         include_sw: bool,
+        scope: Option<&IdentityScope>,
         on_os: Option<&ProgressFn<'_>>,
         on_sw: Option<&ProgressFn<'_>>,
     ) -> Result<CurrentPatches> {
@@ -719,18 +755,7 @@ impl AppState {
             async {
                 match include_os {
                     true => self
-                        .fleet_current_os
-                        .get_or_fetch(
-                            &key,
-                            current_patches_ttl(force),
-                            "current OS patches",
-                            || async {
-                                self.api
-                                    .fleet_os_patches(None, None, on_os)
-                                    .await
-                                    .map(Fetched::complete)
-                            },
-                        )
+                        .current_family(Family::Os, &key, force, scope, on_os)
                         .await
                         .map(Some),
                     false => Ok(None),
@@ -739,19 +764,7 @@ impl AppState {
             async {
                 match include_sw {
                     true => self
-                        .fleet_current_sw
-                        .get_or_fetch(
-                            &key,
-                            current_patches_ttl(force),
-                            "current software patches",
-                            || async {
-                                let plan = self.slice_plan().await;
-                                self.api
-                                    .fleet_software_patches_sliced(None, plan.as_ref(), on_sw)
-                                    .await
-                                    .map(Fetched::complete)
-                            },
-                        )
+                        .current_family(Family::Software, &key, force, scope, on_sw)
                         .await
                         .map(Some),
                     false => Ok(None),
@@ -760,14 +773,11 @@ impl AppState {
         );
         let (os_hit, sw_hit) = (os_hit?, sw_hit?);
 
-        let (os, os_at) = match os_hit {
-            Some((rows, at)) => (rows, Some(at)),
-            None => (Arc::new(Vec::new()), None),
-        };
-        let (sw, sw_at) = match sw_hit {
-            Some((rows, at)) => (rows, Some(at)),
-            None => (Arc::new(Vec::new()), None),
-        };
+        let unfetched = || (Arc::new(Vec::new()), None, false);
+        let (os, os_at, os_scoped) =
+            os_hit.map_or_else(unfetched, |hit| (hit.rows, Some(hit.at), hit.scoped));
+        let (sw, sw_at, sw_scoped) =
+            sw_hit.map_or_else(unfetched, |hit| (hit.rows, Some(hit.at), hit.scoped));
 
         Ok(CurrentPatches {
             os,
@@ -782,7 +792,113 @@ impl AppState {
                 .unwrap_or_else(Utc::now),
             os_fetched_at: os_at,
             sw_fetched_at: sw_at,
+            os_scoped,
+            sw_scoped,
         })
+    }
+
+    /// One family of current patches for a query: the whole fleet's, or — for a
+    /// query with an identity scope and no fresh whole-fleet copy to read — that
+    /// scope's alone.
+    ///
+    /// A fresh whole-fleet copy answers every scope, so it is read first and a
+    /// re-filter over it still costs nothing. Without one, an unscoped query fetches
+    /// the fleet as it always did, and a scoped one asks NinjaOne for its scope
+    /// (`IdentityScope::df`, the clause the install history already sends) and keeps
+    /// the answer in the scoped slot. The clause is a saving, never the boundary:
+    /// `assemble_result` scopes the rows client-side whichever slot they came from,
+    /// so a clause NinjaOne drops costs a larger download, not a wider result.
+    async fn current_family(
+        &self,
+        family: Family,
+        key: &TenantKey,
+        force: bool,
+        scope: Option<&IdentityScope>,
+        on_progress: Option<&ProgressFn<'_>>,
+    ) -> Result<FamilyHit> {
+        let ttl = current_patches_ttl(force);
+        let (whole, scoped, label) = match family {
+            Family::Os => (
+                &self.fleet_current_os,
+                &self.scoped_current_os,
+                "current OS patches",
+            ),
+            Family::Software => (
+                &self.fleet_current_sw,
+                &self.scoped_current_sw,
+                "current software patches",
+            ),
+        };
+        let Some(scope) = scope.filter(|_| whole.peek(key, ttl).is_none()) else {
+            let (rows, at) = whole
+                .get_or_fetch(key, ttl, label, || async {
+                    self.fetch_current(family, None, on_progress)
+                        .await
+                        .map(Fetched::complete)
+                })
+                .await?;
+            return Ok(FamilyHit {
+                rows,
+                at,
+                scoped: false,
+            });
+        };
+
+        // Another scope's copy is not this scope's: dropped, so the fetch below
+        // runs rather than hitting it.
+        if scoped
+            .peek_stale(key)
+            .is_some_and(|held| held.scope != *scope)
+        {
+            scoped.invalidate();
+        }
+        let (held, at) = scoped
+            .get_or_fetch(key, ttl, label, || async {
+                let rows = self
+                    .fetch_current(family, Some(scope.df()), on_progress)
+                    .await?;
+                Ok(Fetched::complete(ScopedPatches {
+                    scope: scope.clone(),
+                    rows: Arc::new(rows),
+                }))
+            })
+            .await?;
+        if held.scope == *scope {
+            return Ok(FamilyHit {
+                rows: Arc::clone(&held.rows),
+                at,
+                scoped: true,
+            });
+        }
+        // A query for another scope stored while this one waited at the gate. The
+        // frontend does not overlap queries, so this is a hand-built caller's path:
+        // answered correctly, and not cached over the other's copy.
+        let rows = self
+            .fetch_current(family, Some(scope.df()), on_progress)
+            .await?;
+        Ok(FamilyHit {
+            rows: Arc::new(rows),
+            at: Utc::now(),
+            scoped: true,
+        })
+    }
+
+    /// Pages one family's current patches under `df` (the whole fleet when `None`).
+    async fn fetch_current(
+        &self,
+        family: Family,
+        df: Option<&str>,
+        on_progress: Option<&ProgressFn<'_>>,
+    ) -> Result<Vec<Patch>> {
+        match family {
+            Family::Os => self.api.fleet_os_patches(df, None, on_progress).await,
+            Family::Software => {
+                let plan = self.slice_plan().await;
+                self.api
+                    .fleet_software_patches_sliced(df, plan.as_ref(), on_progress)
+                    .await
+            }
+        }
     }
 
     /// Drops cached lookups so a different tenant (after sign-out or an instance
@@ -1084,27 +1200,45 @@ impl AppState {
         // fetch about to store sees the bump and drops its write.
         self.fleet_current_os.invalidate();
         self.fleet_current_sw.invalidate();
+        // The scoped copies describe the same devices the action just changed.
+        self.scoped_current_os.invalidate();
+        self.scoped_current_sw.invalidate();
     }
 
-    /// One family of the whole-fleet current patches **if it is already cached** for
-    /// the current tenant, with its fetch time — never fetches. `None` on a miss, a
-    /// tenant change, or `PatchType::All` (there is no combined slot).
+    /// One family of current patches covering `targets` **if it is already cached**
+    /// for the current tenant, with its fetch time — never fetches. `None` on a miss,
+    /// a tenant change, or `PatchType::All` (there is no combined slot).
+    ///
+    /// The whole-fleet copy covers any device. A scoped copy covers only the devices
+    /// its scope names, so it is offered only when `in_scope` says every target is
+    /// in that scope (the caller checks the inventory, `IdentityScope::names`) — a
+    /// device it never asked about would otherwise read as "nothing approved". The
+    /// fresher of the two wins.
     ///
     /// Served past [`CURRENT_PATCHES_TTL`]: the TTL decides when a *query* refetches,
     /// while this feeds the Apply-all preview, which states the fetch time rather
-    /// than hiding older data. A post-action invalidation still clears the slot, so
+    /// than hiding older data. A post-action invalidation still clears the slots, so
     /// the preview never counts patches the last apply may already have installed.
     pub fn cached_current_patches(
         &self,
         family: crate::model::PatchType,
+        in_scope: impl Fn(&IdentityScope) -> bool,
     ) -> Option<(Arc<Vec<Patch>>, DateTime<Utc>)> {
         use crate::model::PatchType;
-        let slot = match family {
-            PatchType::Os => &self.fleet_current_os,
-            PatchType::Software => &self.fleet_current_sw,
+        let (whole, scoped) = match family {
+            PatchType::Os => (&self.fleet_current_os, &self.scoped_current_os),
+            PatchType::Software => (&self.fleet_current_sw, &self.scoped_current_sw),
             PatchType::All => return None,
         };
-        slot.peek(&self.tenant_key(), Duration::MAX)
+        let key = self.tenant_key();
+        let scoped = scoped
+            .peek(&key, Duration::MAX)
+            .filter(|(held, _)| in_scope(&held.scope))
+            .map(|(held, at)| (Arc::clone(&held.rows), at));
+        [whole.peek(&key, Duration::MAX), scoped]
+            .into_iter()
+            .flatten()
+            .max_by_key(|(_, at)| *at)
     }
 
     /// Drops **only** the device inventory. A reboot flips `os.needsReboot`, and
