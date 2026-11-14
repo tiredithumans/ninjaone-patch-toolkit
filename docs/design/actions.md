@@ -254,7 +254,9 @@ reach reads. The `ScriptPicker` opens in a dialog from the bar's "Run a script�
 which names the bar's options rather than repeating them), and the Jobs tab is history plus a
 Retry that re-opens the same plan → confirm dialog (below).
 
-**The bar is one row whatever is selected.** It used to grow by ~300px of option rows on the
+**The bar is one row whatever is selected**, and a single line of hint and Options while nothing
+is: the action groups are hidden (CSS, still mounted) until the first tick — see
+[frontend.md](./frontend.md#operator-ux). It used to grow by ~300px of option rows on the
 first tick, pushing the ticked row out of view and, once scrolled, covering ~40% of the window.
 The run options now sit behind an **Options** button (`RunOptions`, a `menu::Popover` whose panel
 stays mounted while closed: `RunAsSelect` fetches the sampled device's roles as it mounts, and a
