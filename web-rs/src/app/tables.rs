@@ -15,6 +15,7 @@ mod device;
 mod failures;
 mod live_jobs;
 mod patches;
+mod placeholder;
 mod reboot;
 mod trend;
 
@@ -26,6 +27,7 @@ use device::DeviceLink;
 use failures::FailuresTable;
 use live_jobs::{DeviceRunningJobs, LiveJobsPanel, RunningJobChip};
 use patches::{PatchesTable, reboot_likely_chip};
+use placeholder::NoResult;
 use reboot::RebootTable;
 use trend::TrendTab;
 

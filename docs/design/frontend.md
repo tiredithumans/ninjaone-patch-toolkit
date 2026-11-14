@@ -287,6 +287,22 @@ update splash so "Check for updates" stacks above it. Before the first sign-in t
 says what to do (`util::onboarding`): it waits for the saved settings to load, because the form
 starts on defaults and deciding earlier flashed "Connect to NinjaOne" on every launch.
 
+**A running query.** The top bar keeps its one line ("Running… 12s · loaded 49,200 records") and
+the progress line under it, and gains **Cancel**. With no result on screen yet — the first query of
+a session, the longest one — the tab panel itself shows the query (`tables/placeholder.rs`
+`NoResult`): one line per feed that has reported, its records in and, where NinjaOne announced the
+feed's size, how much of it that is, with Cancel beside them. Those panels used to go on saying
+"Run a query…" under a query that was already running. The backend's `query:progress` events
+carry the cursor's announced `count` as `total` (the device inventory announces none);
+`util::progress_lines` lists the feeds and `util::progress_fraction` drives the bar — measured
+against the announced sizes when any feed has one, and only otherwise the old guess from the
+previous run's duration, which was wrong whenever the scope or the cache state differed and absent
+on a session's first run. Cancel calls `cancel_query`; the backend drops the fetch and the pending
+`query_patches` comes back with `ERR_CANCELLED`, which is what clears the busy state
+(`util::query_was_cancelled`: a toast, no error banner, the result on screen untouched, a queued
+run dropped with it). See
+[query-cache.md](./query-cache.md#a-cancelled-query-is-dropped-not-stored).
+
 Per-machine view conveniences — none of them configuration, so none go through
 `settings.json` (see `api::ui_pref_str`) — and the rules each one keeps.
 

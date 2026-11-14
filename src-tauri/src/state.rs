@@ -351,6 +351,10 @@ pub struct AppState {
     job_poller_running: Arc<AtomicBool>,
     /// Single-slot confirmation gate — one dialog is open at a time.
     pending_confirm: Mutex<Option<PendingConfirm>>,
+    /// The newest query generation the operator has cancelled; a query watches it
+    /// for its own ([`Self::query_cancelled`]). A `watch` so a cancel that lands
+    /// before the query starts watching is not missed.
+    query_cancel: tokio::sync::watch::Sender<u64>,
     /// NinjaOne refused a device filter on `/jobs` this launch, so the poll reads
     /// the whole list (`commands::live_jobs::scoped_running_jobs`). Process-wide: a
     /// refusal is the endpoint's, and a wrong guess costs only bandwidth.
@@ -436,6 +440,7 @@ impl AppState {
             result_epoch: AtomicU64::new(0),
             job_poller_running: Arc::new(AtomicBool::new(false)),
             pending_confirm: Mutex::new(None),
+            query_cancel: tokio::sync::watch::Sender::new(0),
             jobs_df_refused: AtomicBool::new(false),
             persist: PersistGate::default(),
             exploits: Arc::default(),
@@ -808,6 +813,29 @@ impl AppState {
             generation: self.query_generation.fetch_add(1, Ordering::SeqCst) + 1,
             tenant: self.tenant_key(),
             result_epoch: self.result_epoch.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Cancels every query started so far. One started after this is untouched: the
+    /// cancel names the generations it covers, so a Cancel pressed as a query
+    /// finishes cannot reach the next one.
+    pub fn cancel_queries(&self) {
+        let latest = self.query_generation.load(Ordering::SeqCst);
+        self.query_cancel
+            .send_modify(|cancelled| *cancelled = (*cancelled).max(latest));
+    }
+
+    /// Resolves once the operator cancels the query `token` was claimed for, and
+    /// never otherwise. `query_patches` races its fetch against this and drops the
+    /// fetch — the requests in flight with it — when it wins.
+    pub fn query_cancelled(&self, token: &QueryToken) -> impl Future<Output = ()> + 'static {
+        let mut cancel = self.query_cancel.subscribe();
+        let generation = token.generation;
+        async move {
+            // The sender lives in `AppState`; were it gone, nothing could cancel.
+            if cancel.wait_for(|&c| c >= generation).await.is_err() {
+                std::future::pending::<()>().await;
+            }
         }
     }
 

@@ -218,6 +218,7 @@ pub fn run() {
             commands::live_jobs::list_running_jobs,
             commands::lookups::list_node_classes,
             commands::patches::query_patches,
+            commands::patches::cancel_query,
             commands::patches::get_patch_rows,
             commands::patches::get_patch_groups,
             commands::patches::get_patch_group_members,

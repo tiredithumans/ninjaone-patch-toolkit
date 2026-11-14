@@ -198,7 +198,7 @@ pub(super) fn ComplianceTab() -> impl IntoView {
     view! {
         <Show
             when=has_result
-            fallback=|| view! { <p class="empty">"Run a query to see compliance."</p> }
+            fallback=|| view! { <NoResult idle="Run a query to see compliance."/> }
         >
             <ComplianceKpis/>
             <ComplianceScopeNote/>

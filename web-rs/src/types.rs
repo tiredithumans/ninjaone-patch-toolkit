@@ -1369,6 +1369,10 @@ pub const ERR_PARTIAL_DISPATCH: &str = "partialDispatch";
 /// backend and must go from the screen too.
 pub const ERR_TENANT_CHANGED: &str = "tenantChanged";
 
+/// Mirror of the backend's `error::ERR_CANCELLED`: `query_patches` stopped because
+/// the operator cancelled it, so no error is shown for it.
+pub const ERR_CANCELLED: &str = "cancelled";
+
 /// Mirrors of the backend's `error::ERR_NETWORK` … `ERR_ACCESS`: the causes a failed
 /// query is put down to, which the banner words for the operator
 /// (`util::failure_cause`) ahead of the raw message.

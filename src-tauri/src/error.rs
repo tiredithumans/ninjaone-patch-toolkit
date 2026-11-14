@@ -22,6 +22,10 @@ pub const ERR_PARTIAL_DISPATCH: &str = "partialDispatch";
 /// are already gone, so the frontend must drop what it shows of them too.
 pub const ERR_TENANT_CHANGED: &str = "tenantChanged";
 
+/// `query_patches` stopped because the operator cancelled it (`cancel_query`): not a
+/// failure, so the frontend shows no error for it.
+pub const ERR_CANCELLED: &str = "cancelled";
+
 /// The causes a failed read can be put down to in the operator's own terms, so the
 /// frontend leads with what to do and keeps `message` — a method, a URL and a
 /// status — for the details (`api::failure_code`). Mirrored in `web-rs/src/types.rs`

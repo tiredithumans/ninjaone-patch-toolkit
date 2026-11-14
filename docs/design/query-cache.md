@@ -140,6 +140,22 @@ slot lock — the same bump-then-clear the `TenantCache` epochs use, so either i
 the write. `summary_for` makes it an error ("The session ended while this query was running"),
 like `TenantChanged`.
 
+## A cancelled query is dropped, not stored
+
+A whole-fleet fetch runs for minutes and there used to be no way out of one but waiting.
+`cancel_query` calls `AppState::cancel_queries`, which records the newest generation started so far
+in a `watch`; each `query_patches` races its two working awaits (the fetch-and-assemble, then the
+diff) against `AppState::query_cancelled(&token)` through `unless_cancelled`. When the cancel wins
+the work is **dropped where it stands**, which is the whole mechanism: a fetch in flight is a
+future holding its requests, so they are aborted; a whole-fleet leg that had already finished stays
+cached; one cut short stores nothing, and its slot's single-flight gate is released for the next
+caller. The query ends with `ERR_CANCELLED` before it reaches its token, so nothing is stored,
+written to the run history or persisted. The cancel names the generations it covers rather than
+flipping a flag, so one pressed as a query finishes cannot reach the next query, and a `watch`
+means one that lands before the query starts watching is still seen
+(`a_cancel_covers_the_queries_already_started_and_none_started_after`,
+`a_cancelled_query_drops_its_work_and_says_so_by_code`).
+
 ## A tenant switch, a sign-out, a sign-in and a re-authorization all clear the frontend
 
 `save_settings` reports `tenant_changed` on its `SettingsView` (both halves of the tenant key —

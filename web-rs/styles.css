@@ -828,6 +828,66 @@ tbody tr:hover {
   margin-left: auto;
 }
 
+/* --- A running query with no result on screen yet (tables/placeholder.rs) --- */
+.query-loading {
+  display: grid;
+  gap: 10px;
+  max-width: 520px;
+  padding: 18px 4px;
+}
+
+.query-loading__title {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.query-loading__feeds {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.query-loading__feeds li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  font-size: 13px;
+}
+
+.query-loading__count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.query-loading__meter {
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--panel-2);
+}
+
+.query-loading__meter span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.query-loading__note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.query-loading .btn {
+  justify-self: start;
+}
+
 /* --- Running-query progress --- */
 .progress-bar {
   height: 100%;

@@ -335,6 +335,12 @@ ipc!(
 );
 
 ipc!(
+    /// Asks the backend to stop the query in flight. The query's own `query_patches`
+    /// call then fails with `ERR_CANCELLED`; this reply only says the ask was heard.
+    cancel_query() -> ()
+);
+
+ipc!(
     /// Fetches one page of detail rows from the backend's cached query result. The
     /// full row set lives in the backend cache (not shipped over IPC), so the table
     /// pages a large fleet by requesting just the visible window. `sort` re-orders

@@ -11,7 +11,7 @@ use tokio::task::JoinSet;
 use crate::api::patches::SlicePlan;
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::changes::{self, RunSnapshot};
-use crate::error::UiError;
+use crate::error::{ERR_CANCELLED, UiError};
 use crate::exploits::ExploitSnapshot;
 use crate::filter::FilterParams;
 use crate::first_seen::{self, Family, Observation, Resolver, TenantLedger};
@@ -165,6 +165,11 @@ pub async fn query_patches(
     // the result is stamped with the tenant it was actually fetched under. Redeemed
     // at the store below.
     let token = state.begin_query();
+    // The operator's way out of a fetch that can run for minutes. Raced against the
+    // two awaits below that do the work; when it wins they are dropped, and the
+    // requests in flight with them.
+    let cancelled = state.query_cancelled(&token);
+    tokio::pin!(cancelled);
     // The tenant the rows are fetched under — the key for the run snapshot and the
     // first-seen ledger alike.
     let tenant = token.tenant_label();
@@ -232,29 +237,33 @@ pub async fn query_patches(
     let QueryRun {
         result,
         observation,
-    } = run_query(
-        &state.api,
-        state.lookups(),
-        devices_fut,
-        current_fut,
-        ledger_fut,
-        exploits,
-        settings.install_window_days,
-        // Clamped (inside `sla_policy`) for the same panic-guard reason as the
-        // install window: every SLA window reaches `Duration::days` in the rollups,
-        // and a settings.json predating the range validation can hold anything.
-        // Read per query, so an SLA change in Settings reaches the next Run query
-        // — a re-filter over the warm cache — with no refetch.
-        settings.sla_policy(),
-        settings.instance_base_url.clone(),
-        args,
-        Utc::now(),
-        // Whatever is cached now, never a wait: the install-history legs start with
-        // the others, and a cold start has nothing to cut them by.
-        state.slice_plan_in_hand(),
-        &progress,
+    } = unless_cancelled(
+        &mut cancelled,
+        qid,
+        run_query(
+            &state.api,
+            state.lookups(),
+            devices_fut,
+            current_fut,
+            ledger_fut,
+            exploits,
+            settings.install_window_days,
+            // Clamped (inside `sla_policy`) for the same panic-guard reason as the
+            // install window: every SLA window reaches `Duration::days` in the rollups,
+            // and a settings.json predating the range validation can hold anything.
+            // Read per query, so an SLA change in Settings reaches the next Run query
+            // — a re-filter over the warm cache — with no refetch.
+            settings.sla_policy(),
+            settings.instance_base_url.clone(),
+            args,
+            Utc::now(),
+            // Whatever is cached now, never a wait: the install-history legs start with
+            // the others, and a cold start has nothing to cut them by.
+            state.slice_plan_in_hand(),
+            &progress,
+        ),
     )
-    .await
+    .await?
     // Logged as well as shown: the log is what gets pasted when the app runs on
     // someone else's machine, and a fetch that failed used to leave no line at all.
     .map_err(|err| {
@@ -270,8 +279,12 @@ pub async fn query_patches(
     // The previous run's snapshot is this run's baseline; it may still be on its
     // way to disk (see `PersistGate`).
     state.persist.settled().await;
-    let (result, snapshot) =
-        diff_against_previous_run(result, tenant.clone(), statuses, install_days).await?;
+    let (result, snapshot) = unless_cancelled(
+        &mut cancelled,
+        qid,
+        diff_against_previous_run(result, tenant.clone(), statuses, install_days),
+    )
+    .await??;
     let diff_ms = diff_started.elapsed().as_millis();
 
     // Hand the frontend a lightweight summary (first page + rollups) and keep the
@@ -299,6 +312,38 @@ pub async fn query_patches(
     .await;
     tracing::info!(qid, diff_ms, "query stored");
     summary_for(outcome, summary, qid)
+}
+
+/// `work`, unless the operator cancels the query first — then `work` is dropped where
+/// it stands and the query ends with [`ERR_CANCELLED`].
+///
+/// Dropping is the cancel. A fetch in flight is a future holding its requests, so
+/// dropping it aborts them; a whole-fleet leg that had already finished stays
+/// cached, and one cut short stores nothing — its cache slot's single-flight gate
+/// is released for the next caller, which fetches. Nothing is stored, recorded in
+/// the run history or persisted for a cancelled query: it never reached the token.
+async fn unless_cancelled<T>(
+    cancelled: &mut (impl Future<Output = ()> + Unpin),
+    qid: u64,
+    work: impl Future<Output = T>,
+) -> Result<T, UiError> {
+    tokio::select! {
+        biased;
+        () = cancelled => {
+            tracing::info!(qid, "query cancelled");
+            Err(UiError::coded(ERR_CANCELLED, "The query was cancelled."))
+        }
+        done = work => Ok(done),
+    }
+}
+
+/// Stops every query in flight (`AppState::cancel_queries`). The query's own
+/// `query_patches` call then fails with `ERR_CANCELLED`, which is how the frontend
+/// learns it took effect; this only asks.
+#[tauri::command]
+pub fn cancel_query(state: State<'_, AppState>) -> Result<(), UiError> {
+    state.cancel_queries();
+    Ok(())
 }
 
 /// Persists what the next run reads — this run's snapshot as its changes baseline,

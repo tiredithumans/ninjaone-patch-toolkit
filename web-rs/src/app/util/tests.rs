@@ -399,6 +399,36 @@ fn progress_stages_land_on_their_own_counters() {
     assert!(p.joining);
 }
 
+/// Only the feeds that have reported are listed, in a fixed order, each with its
+/// size when NinjaOne announced one — so a feed the query never asked for is not
+/// shown sitting at zero, and the inventory (which announces nothing) is a count.
+#[test]
+fn the_loading_panel_lists_the_feeds_that_have_reported() {
+    let mut p = Progress::default();
+    assert!(progress_lines(&p).is_empty(), "nothing has answered yet");
+
+    apply_progress_stage(&mut p, "swPatches", 120_000, Some(563_255));
+    apply_progress_stage(&mut p, "devices", 4_210, None);
+    let lines = progress_lines(&p);
+    assert_eq!(
+        lines
+            .iter()
+            .map(|l| (l.label, l.count.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Devices", "4,210"),
+            ("Third-party patches", "120,000 of 563,255"),
+        ]
+    );
+    assert_eq!(lines[0].fraction, None);
+    let fraction = lines[1].fraction.expect("a sized feed has a fraction");
+    assert!((fraction - 120_000.0 / 563_255.0).abs() < 1e-9);
+
+    // An empty feed is done, not 0 of 0 forever.
+    apply_progress_stage(&mut p, "osPatches", 0, Some(0));
+    assert_eq!(progress_lines(&p)[1].fraction, Some(1.0));
+}
+
 /// The bar is measured against the sizes NinjaOne announced when any feed has one,
 /// and only otherwise guessed from the previous run — which is what it always was,
 /// wrong whenever the scope differed and absent on a session's first run.
@@ -4585,6 +4615,17 @@ fn error_banner_tells_a_failed_page_from_a_failed_query() {
         query_error_banner("boom", Some(crate::types::ERR_SERVER), true, true),
         paging
     );
+}
+
+/// Only the operator's own Cancel is "not a failure"; every other code, and none,
+/// still gets the banner.
+#[test]
+fn only_a_cancelled_query_is_not_an_error() {
+    assert!(query_was_cancelled(Some(crate::types::ERR_CANCELLED)));
+    assert!(!query_was_cancelled(None));
+    assert!(!query_was_cancelled(Some(crate::types::ERR_SERVER)));
+    // The wire value the backend's `error::ERR_CANCELLED` sends.
+    assert_eq!(crate::types::ERR_CANCELLED, "cancelled");
 }
 
 /// A failure the backend put down to a cause leads with what to do about it, keeps

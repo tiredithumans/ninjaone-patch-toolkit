@@ -129,8 +129,9 @@ const COMMAND_CHECKS: [(&str, Check); 23] = [
 /// covers. A wrapper has to be in one list or the other
 /// (`every_ipc_wrapper_is_decoded_or_listed`) — nothing else makes a new command's
 /// shape reach the fixture.
-const NOT_DECODED: [(&str, &str); 14] = [
+const NOT_DECODED: [(&str, &str); 15] = [
     ("sign_in", "returns ()"),
+    ("cancel_query", "returns ()"),
     ("prewarm_fleet", "returns ()"),
     ("sign_out", "returns ()"),
     ("reauthorize", "returns ()"),

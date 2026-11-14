@@ -81,12 +81,12 @@ pub(super) fn RebootTable() -> impl IntoView {
             when=has_devices
             fallback=move || {
                 // Before the first run nothing is known, which is not "none".
-                let text = if state.query.result.with(Option::is_none) {
-                    "Run a query to see which devices need a reboot."
+                if state.query.result.with(Option::is_none) {
+                    view! { <NoResult idle="Run a query to see which devices need a reboot."/> }
+                        .into_any()
                 } else {
-                    "No devices flagged for reboot."
-                };
-                view! { <p class="empty">{text}</p> }
+                    view! { <p class="empty">"No devices flagged for reboot."</p> }.into_any()
+                }
             }
         >
             <Pager

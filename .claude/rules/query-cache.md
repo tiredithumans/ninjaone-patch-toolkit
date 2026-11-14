@@ -48,6 +48,10 @@ paths:
   only the requested family is fetched. Stores are epoch-gated and fetches are single-flight per
   family. `force_refresh` is floored backend-side by `FORCE_MIN_INTERVAL`.
   → `docs/design/query-cache.md#whole-fleet-prefetch--client-side-scoping`
+- **A cancelled query is dropped where it stands (`unless_cancelled`) and ends with
+  `ERR_CANCELLED` before its token: nothing stored, recorded or persisted.** Any new await that
+  does a query's work goes through `unless_cancelled`.
+  → `docs/design/query-cache.md#a-cancelled-query-is-dropped-not-stored`
 - **What a stored query persists (run snapshot, first-seen ledger) is queued on
   `AppState::persist`, never awaited before the reply; whatever reads either waits for
   `PersistGate::settled` first.** Tests: `a_stored_run_returns_before_its_baseline_is_saved_and_the_next_read_waits`,

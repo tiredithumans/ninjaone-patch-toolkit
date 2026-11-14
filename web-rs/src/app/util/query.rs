@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use crate::types::{PatchGroup, PatchQueryArgs, RowSort};
 
 use super::super::state::{Progress, Stage};
-use super::{clamp_page, filters_changed, page_count, paged_total};
+use super::{clamp_page, filters_changed, group_thousands, page_count, paged_total};
 
 /// What [`AppState::run_query_inner`] should do, decided from the flags alone.
 ///
@@ -160,6 +160,46 @@ fn stages(p: &Progress) -> [(&'static str, Stage); 5] {
 /// Records loaded so far across every feed.
 pub(crate) fn progress_records(p: &Progress) -> usize {
     stages(p).iter().map(|(_, s)| s.loaded).sum()
+}
+
+/// One feed's line in the loading panel.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProgressLine {
+    pub label: &'static str,
+    /// "5,000 of 6,721" when the feed announced its size, else "4,210".
+    pub count: String,
+    /// How much of the feed is in, when its size is known.
+    pub fraction: Option<f64>,
+}
+
+/// The feeds that have reported, in a fixed order — a feed this query did not ask
+/// for never appears, and one that has not answered yet is not shown at zero.
+pub(crate) fn progress_lines(p: &Progress) -> Vec<ProgressLine> {
+    stages(p)
+        .into_iter()
+        .filter(|(_, s)| s.started)
+        .map(|(label, s)| ProgressLine {
+            label,
+            count: match s.total {
+                Some(total) => format!(
+                    "{} of {}",
+                    group_thousands(s.loaded),
+                    group_thousands(total)
+                ),
+                None => group_thousands(s.loaded),
+            },
+            fraction: s.total.map(|total| stage_fraction(s.loaded, total)),
+        })
+        .collect()
+}
+
+/// `loaded / total`, within 0–1. A feed that announced nothing to read is done.
+fn stage_fraction(loaded: usize, total: usize) -> f64 {
+    if total == 0 {
+        1.0
+    } else {
+        (loaded as f64 / total as f64).clamp(0.0, 1.0)
+    }
 }
 
 /// How far along a running query is, 0–0.95, or `None` for an indeterminate bar.
@@ -331,6 +371,12 @@ pub(crate) fn failure_cause(code: Option<&str>) -> Option<&'static str> {
         ),
         _ => None,
     }
+}
+
+/// Whether a failed `query_patches` was the operator's own Cancel
+/// (`types::ERR_CANCELLED`): nothing went wrong, so there is no error to show.
+pub(crate) fn query_was_cancelled(code: Option<&str>) -> bool {
+    code == Some(crate::types::ERR_CANCELLED)
 }
 
 /// The results area's error banner: what it says, the raw message when that is not

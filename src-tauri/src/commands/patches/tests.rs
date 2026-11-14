@@ -142,6 +142,43 @@ async fn queued_saves_land_in_order_and_a_panic_does_not_wedge_the_gate() {
     );
 }
 
+/// Cancelling a query drops its work where it stands — which is what aborts the
+/// requests a fetch holds — and ends it with the code the frontend reads as "not a
+/// failure". Work that finishes first is simply returned.
+#[tokio::test]
+async fn a_cancelled_query_drops_its_work_and_says_so_by_code() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let held = DropFlag(Arc::clone(&dropped));
+    let fetch = async move {
+        let _held = held;
+        std::future::pending::<()>().await;
+    };
+    let mut cancelled = std::pin::pin!(std::future::ready(()));
+    let err = unless_cancelled(&mut cancelled, 7, fetch)
+        .await
+        .expect_err("the cancel wins over a fetch that never finishes");
+    assert_eq!(err.code, Some(ERR_CANCELLED));
+    assert!(dropped.load(Ordering::SeqCst), "the fetch was not dropped");
+
+    let mut never = std::pin::pin!(std::future::pending::<()>());
+    assert_eq!(
+        unless_cancelled(&mut never, 7, async { 42 })
+            .await
+            .expect("not cancelled"),
+        42
+    );
+}
+
 /// The frontend has no guard for this: `query_seq` counts runs it *starts*, and
 /// switching instance never bumps it, so a returned summary was rendered — the
 /// previous tenant's rows and rollups over the new tenant's empty cache, while

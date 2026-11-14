@@ -81,7 +81,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
         <PatchFilterBar/>
         <Show
             when=move || state.query.result.with(|r| r.is_some())
-            fallback=|| view! { <p class="empty">"Run a query to list patches."</p> }
+            fallback=|| view! { <NoResult idle="Run a query to list patches."/> }
         >
             <ChangesPanel/>
             {move || {

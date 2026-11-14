@@ -75,7 +75,7 @@ web-rs/                          # Leptos 0.8 CSR frontend — separate wasm32 c
 │   │   └── query.rs · view.rs · selection.rs · actions.rs · live_jobs.rs · lookups.rs · presets.rs · view_link.rs
 │   ├── actions.rs               # ActionBar (the one dispatch surface), ConfirmActionModal, RunAsRoles, JobsTable
 │   ├── tables.rs                # results panel: tab bar, banners, applied-filter chips, Pager
-│   ├── tables/                  # one file per results tab (+ changes panel, backlog, device drill-down dialog, live_jobs chip/panel)
+│   ├── tables/                  # one file per results tab (+ changes panel, backlog, device drill-down dialog, live_jobs chip/panel, placeholder: idle hint / running-query panel)
 │   ├── header.rs                # top bar: brand, run controls, Export / account / ⋯ menus
 │   ├── controls.rs              # run controls, export menu, presets, view-link notices
 │   ├── menu.rs                  # MenuButton + dismiss_on_outside: menus and pickers (never aria-modal)

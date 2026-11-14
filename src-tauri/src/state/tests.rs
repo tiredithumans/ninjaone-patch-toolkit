@@ -982,6 +982,39 @@ fn a_query_retired_by_a_later_start_is_dropped_even_if_the_later_one_never_finis
     assert!(state.with_current_result(|_| ()).unwrap().is_none());
 }
 
+/// Cancel reaches every query started so far, however long ago the cancel landed,
+/// and none started after it: a Cancel pressed as a query finishes must not take
+/// the next one down with it.
+#[tokio::test]
+async fn a_cancel_covers_the_queries_already_started_and_none_started_after() {
+    use std::time::Duration as StdDuration;
+
+    let state = AppState::seeded("https://app.ninjarmm.com".into());
+    let first = state.begin_query();
+    let second = state.begin_query();
+    let (first_cancelled, second_cancelled) = (
+        state.query_cancelled(&first),
+        state.query_cancelled(&second),
+    );
+    let pending = |cancelled| tokio::time::timeout(StdDuration::from_millis(20), cancelled);
+    assert!(
+        pending(state.query_cancelled(&first)).await.is_err(),
+        "nothing is cancelled until the operator says so"
+    );
+
+    state.cancel_queries();
+    first_cancelled.await;
+    second_cancelled.await;
+    // A query that starts watching only now still sees the cancel that covered it.
+    state.query_cancelled(&second).await;
+
+    let third = state.begin_query();
+    assert!(
+        pending(state.query_cancelled(&third)).await.is_err(),
+        "a query started after the cancel is not cancelled by it"
+    );
+}
+
 #[test]
 fn a_lone_query_stores_normally() {
     let state = AppState::new().expect("build state");

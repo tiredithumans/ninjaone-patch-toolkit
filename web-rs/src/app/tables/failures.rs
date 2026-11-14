@@ -26,7 +26,7 @@ pub(super) fn FailuresTable() -> impl IntoView {
             when=has_failures
             fallback=move || {
                 if state.query.result.with(Option::is_none) {
-                    return view! { <p class="empty">"Run a query to see failed installs."</p> }
+                    return view! { <NoResult idle="Run a query to see failed installs."/> }
                         .into_any();
                 }
                 // A query that never asked for failed installs cannot have found

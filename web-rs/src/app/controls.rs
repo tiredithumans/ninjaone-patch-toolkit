@@ -32,6 +32,19 @@ pub(crate) fn RunControls() -> impl IntoView {
                     }
                 }}
             </button>
+            // A query can run for minutes on a large fleet; this drops the backend's
+            // fetch, and the reply it then gets is what clears the busy state.
+            <Show when=move || {
+                (state.run.busy.get() || state.run.refreshing.get()) && !state.session.is_demo()
+            }>
+                <button
+                    class="btn btn-ghost"
+                    title="Stop this query. Whatever is on screen stays as it is."
+                    on:click=move |_| state.cancel_query()
+                >
+                    "Cancel"
+                </button>
+            </Show>
             // The live region announces that a query started and what it ended on.
             // The counter beside it ticks twice a second and is hidden from it: as
             // the region's own text it was re-announced on every tick.
