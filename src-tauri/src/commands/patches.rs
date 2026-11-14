@@ -26,7 +26,7 @@ use crate::rows::{
     slice_groups, sort_device_summaries, sort_order, uncounted_orgs,
 };
 use crate::settings::{MAX_WINDOW_DAYS, SlaPolicy};
-use crate::state::{AppState, CurrentPatches, LookupSet, Memo, StoreOutcome};
+use crate::state::{AppState, CurrentPatches, LookupSet, Memo, PersistGate, StoreOutcome};
 
 /// The org/location/role lookups a query joins against, shared behind the cache's
 /// `Arc` so a cache hit hands out a cheap refcount bump instead of a deep clone.
@@ -207,7 +207,11 @@ pub async fn query_patches(
     state.exploits.ensure_fresh(settings.exploit_data);
     let exploits = state.exploits.snapshot(settings.exploit_data);
 
+    // Behind whatever the previous query is still writing: its observations are
+    // this query's base.
+    let persist = state.persist.clone();
     let ledger_fut = async move {
+        persist.settled().await;
         tauri::async_runtime::spawn_blocking(move || first_seen::base(&ledger_tenant))
             .await
             .context("loading the first-seen ledger failed")
@@ -263,6 +267,9 @@ pub async fn query_patches(
     // feed the fetch takes tens of seconds, and without these three numbers side by
     // side there was no telling whether a slow query was NinjaOne or this process.
     let diff_started = std::time::Instant::now();
+    // The previous run's snapshot is this run's baseline; it may still be on its
+    // way to disk (see `PersistGate`).
+    state.persist.settled().await;
     let (result, snapshot) =
         diff_against_previous_run(result, tenant.clone(), statuses, install_days).await?;
     let diff_ms = diff_started.elapsed().as_millis();
@@ -281,47 +288,36 @@ pub async fn query_patches(
     tokio::task::spawn_blocking(move || crate::history::record(&entry));
 
     let outcome = state.store_last_result_if_current(token, result);
-    let persist_started = std::time::Instant::now();
-    tokio::join!(
-        persist_if_stored(&outcome, "run snapshot", move || changes::save(snapshot)),
-        persist_if_stored(&outcome, "first-seen ledger", move || {
-            first_seen::commit(&tenant, observation)
-        }),
-    );
-    tracing::info!(
-        qid,
-        diff_ms,
-        persist_ms = persist_started.elapsed().as_millis(),
-        "query stored"
-    );
+    persist_if_stored(
+        &state.persist,
+        &outcome,
+        vec![
+            Box::new(move || changes::save(snapshot)),
+            Box::new(move || first_seen::commit(&tenant, observation)),
+        ],
+    )
+    .await;
+    tracing::info!(qid, diff_ms, "query stored");
     summary_for(outcome, summary, qid)
 }
 
 /// Persists what the next run reads — this run's snapshot as its changes baseline,
-/// and its observations into the first-seen ledger — and returns only once `save`
-/// has finished.
+/// and its observations into the first-seen ledger — without holding the rows back
+/// for it: the writes take their place in the [`PersistGate`] here and land after
+/// the query has returned, and the next query waits for them before it reads either.
 ///
 /// Only a stored result is persisted. A superseded one is by definition older than
 /// the run that won the cache; writing it would roll the baseline backwards, and the
 /// next diff would report changes that already happened. A dropped (tenant-drifted,
-/// session-cleared) one belongs to nobody.
-///
-/// Awaited, not detached. The snapshot save used to be spawned and left to finish
-/// whenever, so a query started straight after this one returned (an auto-refresh
-/// tick, a quick re-run) could load the baseline before the save landed and diff
-/// against the run *before* this one; the ledger has the same race. The wait is a
-/// serialize and an atomic write, small next to the fetch it follows. A failed save
-/// is logged inside `save`; it never fails the query.
+/// session-cleared) one belongs to nobody. A failed save is logged inside
+/// `save`/`commit`; it never fails the query.
 async fn persist_if_stored(
+    gate: &PersistGate,
     outcome: &StoreOutcome,
-    what: &'static str,
-    save: impl FnOnce() + Send + 'static,
+    writes: Vec<Box<dyn FnOnce() + Send>>,
 ) {
-    if !matches!(outcome, StoreOutcome::Stored) {
-        return;
-    }
-    if let Err(err) = tokio::task::spawn_blocking(save).await {
-        tracing::warn!(?err, what, "saving panicked; not advanced");
+    if matches!(outcome, StoreOutcome::Stored) {
+        gate.queue(writes).await;
     }
 }
 
@@ -828,7 +824,8 @@ where
     .await
     .context("join/rollup task failed")?;
     // Fetch (a cache hit reads as ~0) and assembly side by side, with the row count
-    // they produced; `query stored` in `query_patches` adds the diff and the saves.
+    // they produced; `query stored` in `query_patches` adds the diff, and `query
+    // persisted` (`PersistGate::queue`) the saves that follow it.
     tracing::info!(
         rows = result.rows.len(),
         fetch_ms,

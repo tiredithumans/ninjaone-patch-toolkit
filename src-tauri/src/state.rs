@@ -228,6 +228,53 @@ pub struct SettingsWrite<'a, R> {
     pub writer: tokio::sync::MutexGuard<'a, ()>,
 }
 
+/// Orders what a stored query writes behind it — its run snapshot and its
+/// first-seen observations — against the next query's reads of them, without making
+/// the query that wrote them wait.
+///
+/// Those writes used to be awaited before `query_patches` returned, because a query
+/// started straight after (an auto-refresh tick, a quick re-run) could otherwise
+/// load its baseline before the save landed and diff against the run *before* the
+/// last one; the ledger has the same race. That put a serialize, an atomic write
+/// and a sync of two whole-result files between the fetch finishing and the rows
+/// reaching the screen. The ordering is kept by moving the wait to the reader: a
+/// write holds the gate until it lands, and a reader waits for the gate first. A
+/// `tokio` mutex, which is fair, so writes land in the order they were queued.
+#[derive(Clone, Default)]
+pub struct PersistGate(Arc<tokio::sync::Mutex<()>>);
+
+impl PersistGate {
+    /// Resolves once every write queued so far has landed. Call before reading
+    /// what a query persists.
+    pub async fn settled(&self) {
+        drop(self.0.lock().await);
+    }
+
+    /// Runs `writes` on the blocking pool, together, behind every write queued
+    /// before them, and returns as soon as they hold their place — not once they
+    /// have run. A write that panics is logged and does not hold up the rest.
+    pub async fn queue(&self, writes: Vec<Box<dyn FnOnce() + Send>>) {
+        let place = Arc::clone(&self.0).lock_owned().await;
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let mut running = tokio::task::JoinSet::new();
+            for write in writes {
+                running.spawn_blocking(write);
+            }
+            while let Some(done) = running.join_next().await {
+                if let Err(err) = done {
+                    warn!(?err, "a query's persisted state was not saved");
+                }
+            }
+            tracing::info!(
+                persist_ms = started.elapsed().as_millis(),
+                "query persisted"
+            );
+            drop(place);
+        });
+    }
+}
+
 /// Process-wide application state injected into every Tauri command.
 pub struct AppState {
     pub auth: AuthState,
@@ -304,6 +351,8 @@ pub struct AppState {
     job_poller_running: Arc<AtomicBool>,
     /// Single-slot confirmation gate — one dialog is open at a time.
     pending_confirm: Mutex<Option<PendingConfirm>>,
+    /// What stored queries are still writing to disk; see [`PersistGate`].
+    pub persist: PersistGate,
     /// Public exploit data (Microsoft's CVE mapping, CISA's catalog). Process-wide
     /// rather than tenant-stamped: it is the same for every tenant and nothing in it
     /// came from one. Behind an [`Arc`] so its background refresh can own a handle.
@@ -383,6 +432,7 @@ impl AppState {
             result_epoch: AtomicU64::new(0),
             job_poller_running: Arc::new(AtomicBool::new(false)),
             pending_confirm: Mutex::new(None),
+            persist: PersistGate::default(),
             exploits: Arc::default(),
         }
     }

@@ -306,10 +306,15 @@ product-line identity for them.
 
 The baseline advances only when a result **wins the cache** (`StoreOutcome::Stored`); a
 superseded run is older than the one that won, and writing it would roll the baseline back. The
-write is atomic (temp + rename, 0600) on a blocking thread, and `query_patches` awaits it before
-returning (`persist_if_stored`). It used to be detached, so a query started right after
+write is atomic (temp + rename, 0600) on a blocking thread, queued behind `AppState::persist`
+(`persist_if_stored` → `PersistGate::queue`): `query_patches` returns once the write holds its
+place, not once it has landed, and the next query waits for the gate (`PersistGate::settled`)
+before it loads its baseline. Detached outright, as it first was, a query started right after
 (an auto-refresh tick, a quick re-run) could load the baseline before the save landed and diff
-against the run before last. The snapshot that write landed is also kept in memory
+against the run before last; awaited before returning, as it then was, a serialize, a write and a
+sync of two whole-result files stood between the fetch finishing and the rows reaching the screen.
+Quitting waits for the gate too (bounded), so the last run of a session is still the next
+launch's baseline. The snapshot that write landed is also kept in memory
 (`changes::LastSaved`, one slot) as the next baseline for the same tenant and scope, so a refresh
 cadence over one scope never re-reads and re-parses the file; another scope reads its file. Only a
 snapshot that reached disk is remembered, so memory never names a baseline the next launch cannot
@@ -600,7 +605,8 @@ NinjaOne's time is the older one nothing changes; when it is not, this record is
   a feed with no pending record never prunes a non-empty record.
 - **Persisted like the run snapshots:** one file per tenant under `first-seen/` (tenant stamped
   inside and checked on load), atomic temp + rename, 0600, written only on
-  `StoreOutcome::Stored` and awaited (`persist_if_stored`), the last-written copy held in memory
+  `StoreOutcome::Stored`, behind the same gate the next query's ledger load waits on
+  (`persist_if_stored`, `PersistGate`), the last-written copy held in memory
   (`SLOT`) as the next base. Capped at a million entries per family (the newest dropped first)
   and 8 tenants / 128 MiB. Unreferenced keys are not written.
 - **It only knows what this install has seen.** It starts at the first query after the upgrade,

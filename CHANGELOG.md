@@ -40,6 +40,7 @@ version and start a fresh `[Unreleased]`.
   sooner on large fleets; small fleets make fewer requests.
 - The device list starts loading as soon as you are signed in, so the first query has less to
   wait for.
+- Results appear as soon as they are computed instead of after the run's history is saved.
 
 ### Fixed
 

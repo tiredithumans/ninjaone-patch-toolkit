@@ -50,24 +50,47 @@ fn a_superseded_query_still_returns_its_summary() {
     assert!(summary_for(StoreOutcome::Stored, empty_summary(), 7).is_ok());
 }
 
-/// A query returns only once its baseline is on disk. The save was detached, so the
-/// next query (an auto-refresh tick, a quick re-run) could load the baseline before
-/// the save landed and report changes against the run before this one.
+/// A query no longer waits for its baseline to reach disk — but the next one still
+/// reads it only once it has. The save used to be awaited before the rows were
+/// handed back; before that it was detached outright, so the next query (an
+/// auto-refresh tick, a quick re-run) could load the baseline before the save
+/// landed and report changes against the run before this one. The gate keeps the
+/// ordering and moves the wait to the reader.
 #[tokio::test]
-async fn a_stored_run_returns_only_after_its_baseline_is_saved() {
+async fn a_stored_run_returns_before_its_baseline_is_saved_and_the_next_read_waits() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration as StdDuration;
 
+    let gate = PersistGate::default();
     let saved = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&saved);
-    persist_if_stored(&StoreOutcome::Stored, "test", move || {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        flag.store(true, Ordering::SeqCst);
-    })
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    persist_if_stored(
+        &gate,
+        &StoreOutcome::Stored,
+        vec![Box::new(move || {
+            held.recv().ok();
+            flag.store(true, Ordering::SeqCst);
+        })],
+    )
     .await;
     assert!(
+        !saved.load(Ordering::SeqCst),
+        "the query came back while its save was still running"
+    );
+    assert!(
+        tokio::time::timeout(StdDuration::from_millis(50), gate.settled())
+            .await
+            .is_err(),
+        "a reader must wait for the save in flight"
+    );
+
+    release.send(()).expect("release the save");
+    gate.settled().await;
+    assert!(
         saved.load(Ordering::SeqCst),
-        "returned before the save finished"
+        "the reader was let through before the save landed"
     );
 
     // A run that did not win the cache never becomes the baseline.
@@ -79,10 +102,44 @@ async fn a_stored_run_returns_only_after_its_baseline_is_saved() {
     ] {
         let wrote = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&wrote);
-        persist_if_stored(&outcome, "test", move || flag.store(true, Ordering::SeqCst)).await;
-        tokio::task::yield_now().await;
+        persist_if_stored(
+            &gate,
+            &outcome,
+            vec![Box::new(move || flag.store(true, Ordering::SeqCst))],
+        )
+        .await;
+        gate.settled().await;
         assert!(!wrote.load(Ordering::SeqCst));
     }
+}
+
+/// Two stored runs save in the order they finished, each batch whole before the
+/// next starts, and a save that panics neither wedges the gate nor skips its
+/// sibling: an older snapshot must never land over a newer one.
+#[tokio::test]
+async fn queued_saves_land_in_order_and_a_panic_does_not_wedge_the_gate() {
+    use std::sync::{Arc, Mutex};
+
+    let gate = PersistGate::default();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let note = |entry: &'static str| {
+        let log = Arc::clone(&log);
+        Box::new(move || log.lock().expect("log").push(entry)) as Box<dyn FnOnce() + Send>
+    };
+    gate.queue(vec![
+        Box::new(|| {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            panic!("a save that fails outright");
+        }),
+        note("first run's ledger"),
+    ])
+    .await;
+    gate.queue(vec![note("second run's snapshot")]).await;
+    gate.settled().await;
+    assert_eq!(
+        *log.lock().expect("log"),
+        ["first run's ledger", "second run's snapshot"]
+    );
 }
 
 /// The frontend has no guard for this: `query_seq` counts runs it *starts*, and

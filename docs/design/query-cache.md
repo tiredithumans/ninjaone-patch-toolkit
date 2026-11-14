@@ -285,6 +285,13 @@ The documented exceptions are `QueryScope` and `instance`, which live on `QueryR
 export provenance the frontend already has — see
 [compliance.md](./compliance.md#both-exports-state-the-facets-from-rowsqueryscope).
 
+**The summary is not held back for the saves.** A stored run leaves two writes behind it — its
+snapshot (the next run's changes baseline) and its first-seen observations — and they used to be
+awaited before `query_patches` returned. They now take their place in `AppState::persist`
+(`PersistGate`, a fair `tokio` mutex) and land after the reply; the next query waits for the gate
+before it reads the ledger or the baseline, and so does quitting. See
+[compliance.md](./compliance.md#changes-since-the-previous-comparable-run).
+
 `changes` (`changes::RunChanges`) rides the same way, but is filled *after* `assemble_result`:
 it needs the previous run's snapshot, so `query_patches` loads it on a blocking thread between
 the join and the summary — from the file, or from the snapshot this process wrote last when the

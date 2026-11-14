@@ -48,6 +48,11 @@ paths:
   only the requested family is fetched. Stores are epoch-gated and fetches are single-flight per
   family. `force_refresh` is floored backend-side by `FORCE_MIN_INTERVAL`.
   → `docs/design/query-cache.md#whole-fleet-prefetch--client-side-scoping`
+- **What a stored query persists (run snapshot, first-seen ledger) is queued on
+  `AppState::persist`, never awaited before the reply; whatever reads either waits for
+  `PersistGate::settled` first.** Tests: `a_stored_run_returns_before_its_baseline_is_saved_and_the_next_read_waits`,
+  `queued_saves_land_in_order_and_a_panic_does_not_wedge_the_gate`.
+  → `docs/design/query-cache.md#compact-aggregates-ride-in-the-summary-not-the-rows`
 - **The inventory, and only the inventory, is warmed at sign-in** (`prewarm_fleet`, called beside
   `load_lookups`); never warm a patch feed nobody has asked for.
   → `docs/design/query-cache.md#the-inventory-is-warmed-at-sign-in`
