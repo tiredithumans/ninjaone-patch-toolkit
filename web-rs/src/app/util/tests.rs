@@ -359,6 +359,24 @@ fn a_shift_click_takes_the_rows_between_the_two_clicks() {
     );
 }
 
+/// The idle action bar names what a selection can reach from its tab: a device
+/// ticked on Needs Reboot cannot be patched or sent a script.
+#[test]
+fn the_idle_action_bar_promises_only_what_its_tab_can_reach() {
+    let rows = action_bar_hint(SelectionSource::PatchRows);
+    let devices = action_bar_hint(SelectionSource::Devices);
+    assert!(rows.contains("patch") && rows.contains("script"));
+    assert!(!devices.contains("patch") && !devices.contains("script"));
+    for kind in ActionKind::ALL {
+        if !device_selection_allows(kind) {
+            assert!(
+                source_disabled_reason(SelectionSource::Devices, kind).is_some(),
+                "{kind:?} is not offered from a device selection"
+            );
+        }
+    }
+}
+
 /// The guard chain's *order* is load-bearing and was only reachable by reading
 /// `run_query_inner`: a demo run must be decided before the auth guard (the demo
 /// has no session and would otherwise be told to sign in), and the busy guard
@@ -5062,6 +5080,22 @@ fn data_age_reads_the_backend_stamp_against_the_clock() {
         "a clock behind the data"
     );
     assert_eq!(data_age_label("yesterday", at), None);
+}
+
+/// The date columns show the day of the backend's `yyyy-mm-dd hh:mm UTC` stamp and
+/// leave anything else exactly as it came.
+#[test]
+fn a_date_cell_shows_the_day_of_a_timestamp() {
+    assert_eq!(date_part("2026-05-17 12:00 UTC"), "2026-05-17");
+    assert_eq!(date_part("2026-05-17"), "2026-05-17", "already a day");
+    assert_eq!(date_part(""), "");
+    assert_eq!(date_part("(undated)"), "(undated)");
+    assert_eq!(date_part("2026-05-17T12:00"), "2026-05-17T12:00");
+    // Not cut on a byte that is not a character boundary.
+    assert_eq!(
+        date_part("überfällig seit gestern"),
+        "überfällig seit gestern"
+    );
 }
 
 #[test]

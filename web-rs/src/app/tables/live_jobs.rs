@@ -18,7 +18,9 @@ pub(super) fn RunningJobChip(device_id: i64) -> impl IntoView {
                 j.as_ref()
                     .and_then(|j| util::running_jobs_title(&j.jobs, device_id))
             })
-            .map(|title| view! { <span class="chip-note chip-live" title=title>"job running"</span> })
+            // The small triangle the disclosures use: U+25B6 is drawn as a colour
+            // emoji wherever an emoji font answers for it first.
+            .map(|title| flag_chip("chip-live", "▸", "job running", title))
     }
 }
 

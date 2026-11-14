@@ -622,6 +622,18 @@ pub(crate) fn nothing_selected_reason(source: SelectionSource) -> &'static str {
     }
 }
 
+/// The action bar's one line while nothing is ticked. The buttons are out of sight
+/// until then, so the hint names what a selection can reach from this tab — the
+/// kinds `source_disabled_reason` lets through.
+pub(crate) fn action_bar_hint(source: SelectionSource) -> &'static str {
+    match source {
+        SelectionSource::PatchRows => {
+            "Select patch rows to scan, patch, reboot or run a script on their devices."
+        }
+        SelectionSource::Devices => "Select devices to reboot or scan them.",
+    }
+}
+
 /// The action bar's selection summary. `None` when nothing is selected, so the
 /// caller renders the hint instead.
 ///

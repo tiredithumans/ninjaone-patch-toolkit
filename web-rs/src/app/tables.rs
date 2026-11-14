@@ -329,6 +329,27 @@ fn Pager(
     }
 }
 
+/// One of a row's flags — "reboot pending", "reboot likely", "job running" — as a
+/// chip holding both its words and a glyph. The words show everywhere but in the
+/// flat Patches table at a window too narrow for them, where the glyph stands in so
+/// the flags stop forcing the row onto a third line (`.chip-flag` in styles.css).
+/// The words are never removed, only hidden from sight there, so a screen reader
+/// reads the same chip at any width; `title` should start with them for the same
+/// reason.
+fn flag_chip(
+    class: &'static str,
+    glyph: &'static str,
+    label: &'static str,
+    title: String,
+) -> impl IntoView {
+    view! {
+        <span class=format!("chip-note chip-flag {class}") title=title>
+            <span class="chip-flag__glyph" aria-hidden="true">{glyph}</span>
+            <span class="chip-flag__text">{label}</span>
+        </span>
+    }
+}
+
 /// A table's header row from its [`util::HelpedColumn`]s: every header that measures
 /// something carries its definition as a tooltip, with a dotted underline saying so.
 ///

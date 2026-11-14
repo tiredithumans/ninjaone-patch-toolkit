@@ -245,8 +245,13 @@ fn FiltersChanged() -> impl IntoView {
 /// The bar remounts on every tab switch, so each select's choice rides on its
 /// options (`prop:selected`): a remount set a select's value before its options
 /// existed, and the control showed "Any time" over a window still filtering.
+///
+/// `children` are the tab's own view controls (the Patches tab's view mode, column
+/// chooser and CVE search), which sit at the end of the same row instead of taking
+/// one of their own above the table. They are not filters, and no patch facet is
+/// ever passed in this way.
 #[component]
-pub(crate) fn PatchFilterBar() -> impl IntoView {
+pub(crate) fn PatchFilterBar(#[prop(optional)] children: Option<Children>) -> impl IntoView {
     let state = expect_context::<AppState>();
     let install_history = move || {
         state
@@ -412,6 +417,7 @@ pub(crate) fn PatchFilterBar() -> impl IntoView {
                     }}
                 </Show>
             </Show>
+            {children.map(|children| view! { <div class="patch-filter-bar__view">{children()}</div> })}
         </div>
     }
 }

@@ -70,7 +70,10 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
     let full_label = move |kind: ActionKind| format!("{}. {}", kind.label(), kind.blast_radius());
 
     view! {
-        <div class="action-bar">
+        // Idle until something is ticked: the hint and the run options on one line.
+        // The action groups stay mounted but out of the layout and the tab order
+        // (`.action-bar--idle`), so the first tick only reveals them.
+        <div class="action-bar" class:action-bar--idle=move || !any()>
             <div class="action-bar-summary">
                 // Planning asks NinjaOne about the script and the devices; until it
                 // answers, every button below is disabled and this says why.
@@ -86,13 +89,7 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
                     };
                     let Some(text) = summary else {
                         return view! {
-                            <span class="action-bar-hint">
-                                {if rows_source {
-                                    "Select patch rows to act on their devices."
-                                } else {
-                                    "Select devices to reboot or scan them."
-                                }}
-                            </span>
+                            <span class="action-bar-hint">{util::action_bar_hint(source)}</span>
                         }
                             .into_any();
                     };
@@ -218,7 +215,7 @@ pub(crate) fn ActionBar(#[prop(optional)] source: SelectionSource) -> impl IntoV
             <Show when=move || rows_source>
                 <button
                     type="button"
-                    class="btn btn-sm btn-ghost"
+                    class="btn btn-sm btn-ghost action-bar-script"
                     prop:disabled=move || blocked().is_some() || !any()
                     title=move || {
                         if blocked().is_none() && !any() {

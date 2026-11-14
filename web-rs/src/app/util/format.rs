@@ -48,6 +48,20 @@ pub(crate) fn tab_after_key(current: Tab, key: &str) -> Option<Tab> {
     }
 }
 
+/// The day of a `yyyy-mm-dd hh:mm UTC` timestamp, for a cell too narrow for the
+/// time of day; the caller keeps the whole value as the cell's tooltip. Anything
+/// not shaped like one — a bare date, a blank, text — is returned as it is.
+pub(crate) fn date_part(stamp: &str) -> &str {
+    let bytes = stamp.as_bytes();
+    let dated = bytes.len() > 10
+        && bytes[10] == b' '
+        && bytes[..10].iter().enumerate().all(|(i, b)| match i {
+            4 | 7 => *b == b'-',
+            _ => b.is_ascii_digit(),
+        });
+    if dated { &stamp[..10] } else { stamp }
+}
+
 /// The failures table's Devices cell: the names the summary carries, then how many
 /// more the patch failed on — the backend caps each group's list.
 pub(crate) fn failure_device_list(names: &[String], affected: usize) -> String {

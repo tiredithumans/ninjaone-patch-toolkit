@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// The caveats paragraph, which the strip's ⓘ controls.
+const NOTES_ID: &str = "changes-notes";
+
 /// Which change list is open under the strip.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ChangeKind {
@@ -12,9 +15,16 @@ enum ChangeKind {
 }
 
 /// The strip above the Patches table: the baseline and the three counts on one
-/// line, each opening its list below it, then the caveats that decide how they may
-/// be read (every surface prints those; `changes_notes`). It used to be a boxed
-/// panel of three stacked disclosures and two note lines above every result.
+/// line, each opening its list below it, then an ⓘ that opens the caveats deciding
+/// how they may be read (`changes_notes`; the exports print them). It used to be a
+/// boxed panel of three stacked disclosures and two note lines above every result,
+/// and then a strip with the caveats always printed under it — a second line above
+/// every table, saying the same thing on every run.
+///
+/// The caveats are closed, not gone: they are the ⓘ's tooltip, they stay in the
+/// accessibility tree while closed (`sr-only`), and an unmeasured count still reads
+/// "—" rather than 0. With no baseline there are no counts to qualify, so the one
+/// sentence saying so takes their place on the line.
 ///
 /// Rendered even when the query matched no rows — "everything was resolved since
 /// yesterday" is exactly when the table is empty.
@@ -28,6 +38,8 @@ pub(super) fn ChangesPanel() -> impl IntoView {
             .with(|r| r.as_ref().map(|r| r.changes.clone()))
     };
     let open = RwSignal::new(None::<ChangeKind>);
+    // Out here with `open`: the closure below re-runs with every result.
+    let notes_open = RwSignal::new(false);
 
     move || {
         changes().map(|c| {
@@ -80,13 +92,49 @@ pub(super) fn ChangesPanel() -> impl IntoView {
                     }
                 })
                 .collect_view();
+            let has_notes = !notes.is_empty();
+            let info = (has_baseline && has_notes).then(|| {
+                view! {
+                    <button
+                        type="button"
+                        class="changes-info"
+                        aria-label="How to read these counts"
+                        aria-expanded=move || notes_open.get().to_string()
+                        aria-controls=NOTES_ID
+                        title=notes.clone()
+                        on:click=move |_| notes_open.update(|o| *o = !*o)
+                    >
+                        "ⓘ"
+                    </button>
+                }
+            });
+            let note = has_notes.then(|| {
+                if has_baseline {
+                    view! {
+                        <p
+                            id=NOTES_ID
+                            class="changes-note"
+                            class:sr-only=move || !notes_open.get()
+                        >
+                            {notes.clone()}
+                        </p>
+                    }
+                        .into_any()
+                } else {
+                    view! { <span class="changes-note">{notes.clone()}</span> }.into_any()
+                }
+            });
+            // Inline on the strip without a baseline, under it with one.
+            let (inline_note, below_note) = if has_baseline { (None, note) } else { (note, None) };
             view! {
                 <section class="changes" aria-label="Changes since the previous run">
                     <div class="changes-strip">
                         <span class="changes-title">{title}</span>
                         {toggles}
+                        {inline_note}
+                        {info}
                     </div>
-                    {(!notes.is_empty()).then(|| view! { <p class="changes-note">{notes}</p> })}
+                    {below_note}
                     {bodies}
                 </section>
             }
