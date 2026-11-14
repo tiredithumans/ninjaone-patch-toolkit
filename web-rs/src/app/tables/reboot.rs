@@ -75,6 +75,8 @@ pub(super) fn RebootTable() -> impl IntoView {
     };
     let has_devices = move || total() > 0;
     let page_state = move || state.device_page_selection_state(&devices());
+    // The device whose box was clicked last, for a Shift-click range on this page.
+    let range_anchor = RwSignal::new(None::<i64>);
 
     view! {
         <Show
@@ -163,6 +165,30 @@ pub(super) fn RebootTable() -> impl IntoView {
                                                     type="checkbox"
                                                     aria-label=label
                                                     prop:checked=move || state.is_device_selected(id)
+                                                    // Before `change`, with the box
+                                                    // already flipped: a Shift-click
+                                                    // takes every device from the last
+                                                    // one clicked to this one with it.
+                                                    on:click=move |ev| {
+                                                        if ev.shift_key() {
+                                                            let page = devices();
+                                                            let at = |id: i64| {
+                                                                page.iter().position(|d| d.device_id == id)
+                                                            };
+                                                            let range = util::shift_click_range(
+                                                                range_anchor.get_untracked().and_then(at),
+                                                                at(id),
+                                                            );
+                                                            if let Some(range) = range {
+                                                                state
+                                                                    .toggle_device_page(
+                                                                        &page[range],
+                                                                        event_target_checked(&ev),
+                                                                    );
+                                                            }
+                                                        }
+                                                        range_anchor.set(Some(id));
+                                                    }
                                                     on:change=move |ev| {
                                                         state
                                                             .toggle_device_selection(

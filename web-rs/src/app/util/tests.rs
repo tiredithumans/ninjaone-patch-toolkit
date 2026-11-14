@@ -323,6 +323,42 @@ fn sel_row(device_id: i64, device: &str, kb: Option<&str>, name: &str, ty: &str)
     }
 }
 
+/// A Shift-click takes every row between it and the row clicked before it, in
+/// either direction, both ends included — and is an ordinary click when that row is
+/// not on this page (no earlier click, or one made on a page since left).
+#[test]
+fn a_shift_click_takes_the_rows_between_the_two_clicks() {
+    assert_eq!(shift_click_range(Some(1), Some(4)), Some(1..=4));
+    assert_eq!(shift_click_range(Some(4), Some(1)), Some(1..=4));
+    assert_eq!(shift_click_range(Some(2), Some(2)), Some(2..=2));
+    assert_eq!(shift_click_range(None, Some(3)), None);
+    assert_eq!(shift_click_range(Some(3), None), None);
+
+    // The anchor is found by the identity the selection keys a row by, so the
+    // same KB on another device is not it, and a row from another page is nowhere.
+    let page = [
+        sel_row(1, "web-01", Some("KB1"), "Update one", "OS"),
+        sel_row(2, "web-02", Some("KB1"), "Update one", "OS"),
+        sel_row(2, "web-02", None, "Chrome 138", "SOFTWARE"),
+    ];
+    let key = |r: &PatchRow| patch_key(r);
+    assert_eq!(row_position(&page, 2, &key(&page[1])), Some(1));
+    assert_eq!(row_position(&page, 2, &key(&page[2])), Some(2));
+    assert_eq!(row_position(&page, 9, &key(&page[0])), None);
+
+    // The range goes through the same selection surgery as any tick: the rows in
+    // it, each on its own device, and nothing outside it.
+    let mut sel = BTreeMap::new();
+    let range = shift_click_range(Some(0), Some(1)).expect("both on the page");
+    apply_rows_selection(&mut sel, &page[range], true);
+    assert_eq!(sel.len(), 2);
+    assert_eq!(
+        sel[&2].patches.len(),
+        1,
+        "the third row was not in the range"
+    );
+}
+
 /// The guard chain's *order* is load-bearing and was only reachable by reading
 /// `run_query_inner`: a demo run must be decided before the auth guard (the demo
 /// has no session and would otherwise be told to sign in), and the busy guard

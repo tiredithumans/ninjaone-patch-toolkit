@@ -89,6 +89,35 @@ pub(crate) fn apply_rows_selection<R: Borrow<PatchRow>>(
     }
 }
 
+/// The rows a Shift-click reaches: from the row clicked before it (`anchor`) to the
+/// one clicked now, inclusive, in page order. `None` when either is not on this
+/// page — no earlier click, or one made on a page since left — and the click is
+/// then an ordinary one.
+///
+/// Only the range is decided here. The caller ticks it through the same
+/// [`apply_rows_selection`] / [`apply_device_selection`] as any other tick, so a
+/// row that cannot be selected stays out of a range too.
+pub(crate) fn shift_click_range(
+    anchor: Option<usize>,
+    clicked: Option<usize>,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    let (anchor, clicked) = (anchor?, clicked?);
+    Some(anchor.min(clicked)..=anchor.max(clicked))
+}
+
+/// Where the patch row `key` on `device_id` sits on a page, by the identity the
+/// selection keys it by ([`patch_key`]).
+pub(crate) fn row_position<R: Borrow<PatchRow>>(
+    rows: &[R],
+    device_id: i64,
+    key: &str,
+) -> Option<usize> {
+    rows.iter().position(|r| {
+        let r = r.borrow();
+        r.device_id == device_id && patch_key(r) == key
+    })
+}
+
 /// The probes `selection_status` answers for a selection: each selected device with
 /// the keys of its ticked patches ([`patch_key`]) — none for a Needs Reboot pick,
 /// which ticks no patch.

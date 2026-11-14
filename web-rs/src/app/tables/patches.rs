@@ -76,6 +76,9 @@ pub(super) fn PatchesTable() -> impl IntoView {
     // Page navigation updates the index and fetches that page on demand — of
     // headers or of rows, matching what the view is actually showing.
     let go_to = Callback::new(move |target: usize| state.go_to_patches_page(target));
+    // The row whose box was clicked last, for a Shift-click range. Kept by row
+    // identity, so one left behind on another page simply matches nothing.
+    let range_anchor = RwSignal::new(None::<(i64, String)>);
 
     view! {
         <PatchFilterBar/>
@@ -203,7 +206,7 @@ pub(super) fn PatchesTable() -> impl IntoView {
                                     let stat = status_class(&r.status);
                                     view! {
                                         <tr>
-                                            <RowCheckbox row=Arc::clone(&r)/>
+                                            <RowCheckbox row=Arc::clone(&r) range_anchor=range_anchor/>
                                             <td>{r.organization.clone()}</td>
                                             <td>{r.location.clone().unwrap_or_default()}</td>
                                             <td>{r.device_role.clone().unwrap_or_default()}</td>
@@ -483,8 +486,16 @@ fn GroupedPatches() -> impl IntoView {
 /// `PatchRow` carries a dozen-plus `String`s, so cloning it per closure meant ~200
 /// row copies for every reactive re-render of a 100-row page. An `Arc` makes each
 /// closure's copy a refcount bump.
+///
+/// With `range_anchor` (the flat table), a Shift-click also ticks or clears every
+/// row between this one and the row clicked before it, to this box's new state
+/// (`util::shift_click_range`). A group's members take no anchor: a range across
+/// two groups' lists would tick rows the operator cannot see together.
 #[component]
-fn RowCheckbox(row: Arc<PatchRow>) -> impl IntoView {
+fn RowCheckbox(
+    row: Arc<PatchRow>,
+    #[prop(optional)] range_anchor: Option<RwSignal<Option<(i64, String)>>>,
+) -> impl IntoView {
     let state = expect_context::<AppState>();
     let label = format!(
         "Select {} on {}",
@@ -495,6 +506,7 @@ fn RowCheckbox(row: Arc<PatchRow>) -> impl IntoView {
         row.device_name,
     );
     let checked_row = Arc::clone(&row);
+    let clicked_row = Arc::clone(&row);
     view! {
         <td class="col-select">
             <input
@@ -502,6 +514,28 @@ fn RowCheckbox(row: Arc<PatchRow>) -> impl IntoView {
                 aria-label=label
                 prop:disabled=!util::row_selectable(&row)
                 prop:checked=move || state.is_row_selected(&checked_row)
+                // Runs before `change`, with the box already flipped. The range
+                // lands as one selection update; `change` then re-applies this
+                // row's own tick, which is idempotent.
+                on:click=move |ev| {
+                    let Some(anchor) = range_anchor else {
+                        return;
+                    };
+                    let me = (clicked_row.device_id, patch_key(&clicked_row));
+                    if ev.shift_key() {
+                        let rows = state.query.page_rows.get_untracked();
+                        let range = util::shift_click_range(
+                            anchor
+                                .get_untracked()
+                                .and_then(|(device, key)| util::row_position(&rows, device, &key)),
+                            util::row_position(&rows, me.0, &me.1),
+                        );
+                        if let Some(range) = range {
+                            state.toggle_rows_selection(&rows[range], event_target_checked(&ev));
+                        }
+                    }
+                    anchor.set(Some(me));
+                }
                 on:change=move |ev| state.toggle_row_selection(&row, event_target_checked(&ev))
             />
         </td>
