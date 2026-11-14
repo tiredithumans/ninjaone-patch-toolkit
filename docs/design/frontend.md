@@ -150,6 +150,13 @@ The updater fetches the signed `latest.json` from the GitHub releases endpoint
 check is gated by the `auto_check_updates` setting. Packaging and signing:
 [ci.md](./ci.md#auto-update-packaging).
 
+**The launch check opens nothing.** It sets `UpdateState::available`, which draws an "Update
+available" badge in the top bar (`header::UpdateBadge`); the splash opens when the badge is
+clicked, or at once from Settings' "Check for updates", which was asked for by hand. It used to
+open the splash itself — a modal over a window the operator had opened to patch something.
+`UpdateState::update` still means "the splash is open" (auto-refresh holds on it and Settings'
+Escape defers to it), so "Later" and Escape clear only that and the badge stays for the session.
+
 ## Frontend reactivity is closure-based (Leptos CSR)
 
 `{move || sig.get()}` to track, `.get()` / `.with()` to read; state is `RwSignal<T>`. CSS is
@@ -283,7 +290,10 @@ signal). What must stay visible does not go in a menu: the copied view code and 
 cross-instance view render as notices under the bar (`controls::ViewNotices`). **Settings is a
 dialog** (focus trap, Escape — unless the update splash is open over it — and Close, which keeps
 what was typed until Save, as hiding the old inline panel did), rendered at App level before the
-update splash so "Check for updates" stacks above it. Before the first sign-in the results panel
+update splash so "Check for updates" stacks above it. Its head — the title, links to its four
+sections (`settings::SettingsJumps`, scrolling buttons like the Compliance tab's) and Close — stays
+put while the form, about two windows tall, scrolls under it, as Save does at the other end.
+Before the first sign-in the results panel
 says what to do (`util::onboarding`): it waits for the saved settings to load, because the form
 starts on defaults and deciding earlier flashed "Connect to NinjaOne" on every launch.
 
@@ -342,7 +352,40 @@ unreadable is Patches / flat). Each tab carries a count of what is waiting there
 pending-only query never looked for failures, so "0" would claim more than it knows — and Jobs
 what is still in flight. The empty Failures tab offers "Include failed installs and run" when the
 query never asked for them. "Changes since …" is one strip: the three counts open their lists
-below it, and its caveats stay printed under it.
+below it, and an ⓘ at its end opens the caveats. Those were printed under it on every run, a
+second line above every table; closed, they are still the ⓘ's tooltip and still in the
+accessibility tree (`sr-only`), and an unmeasured count reads "—", never 0. With no baseline
+there are no counts to qualify, so the one sentence saying so takes their place on the strip.
+
+**What sits above the Patches table.** Four rows, each one line in the default window: the tabs,
+the patch filter row, the changes strip and the action bar. The Patches tab's view controls
+(view mode, column chooser, CVE search) are `PatchFilterBar`'s `children` and end the filter row
+— they are not filters, and no patch facet is passed that way; they used to share a toolbar row
+of their own with the pager. The pager sits under the table (`.patches-footer`); below 1200px,
+where the view controls already wrap under the filters with room to spare, it joins them
+instead (`.patch-filter-bar__pager`, the same `Pager` drawn twice and one hidden) so the footer
+does not cost the table a row. The **action bar is idle until something is ticked**
+(`.action-bar--idle`): the hint (`util::action_bar_hint`, naming what a selection reaches from
+that tab) and the run options, on one line. The action groups stay mounted, out of the layout,
+the tab order and the accessibility tree — `RunOptions` must not remount (see
+[actions.md](./actions.md)) and the first tick should only reveal buttons, not build them. They
+used to sit there disabled: about 100px of buttons that could not be pressed.
+
+**Client-sorted tables.** Failures, the Compliance tables (organizations, by OS, worst devices,
+offline, stuck approvals) and both Jobs tables hold their rows whole, so their headers sort in
+the frontend (`util::ColumnSort`, `util::sort_by_column`, one `*_sort_value` per table in
+`util/table_sort.rs`; `every_header_sorts_or_is_listed_as_unsortable`). The cycle is the Patches
+table's — ascending, descending, off — and off is the backend's own order; the sort is stable and
+a blank is last in either direction. A Compliance header keeps its definition
+(`HelpHeaderRow`'s optional `sort`); the fleet-total footer is never sorted. The Patches table
+and Needs Reboot are paged from the backend's cache and sort there.
+
+**Shift-click.** In the flat Patches table and on Needs Reboot, Shift-clicking a row's box ticks
+or clears every row from the last one clicked to it (`util::shift_click_range`), through the
+same selection helpers as any tick, so a row that cannot be selected stays out. The anchor is
+the row's identity, not its index, and is looked up on the page on screen: one left on another
+page matches nothing and the click is an ordinary one. Group members take no anchor — a range
+across two groups' lists would tick rows never seen together.
 
 **Compliance is one page with jump links.** Read for a report, it is wanted in one scroll, so it
 stays one page; a strip of section links (`SectionJumps`, buttons calling `scroll_into_view` —
@@ -379,7 +422,25 @@ know is kept and ignored. A machine that never stored a choice hides Location an
 and both are in the device drill-down. A stored empty list (everything shown) sticks; an
 unreadable value still shows every column. Long patch names clamp to two lines (`.clamp-2` on an
 inner span — `-webkit-box` on the cell would lose its table-cell layout) with the full name on
-hover. Hiding is positional CSS generated per table
+hover.
+
+**The default columns fit the default window.** Hiding two columns stopped being enough once the
+CVEs column and the row flags arrived: at 1360px the table needed 1454px (1575px on real
+timestamps), First seen and Installed were back out of view, and the patch name — the only cell
+allowed to wrap — was squeezed to its minimum, which put its flag on a third line (65px rows).
+Now every column keeps its natural width and the patch name takes what is left
+(`.patches-table td.patch-name { width: 100% }`). What gave way: cell padding (10 → 8px);
+Organization, Location, Role and OS, which cut with an ellipsis past 150px and keep the whole
+value as a tooltip (`.cell-clip`); the two date columns, which show the day and keep the time as
+a tooltip (`util::date_part` — ages are counted in days); and the row flags, which below 1600px
+draw a glyph in place of their words (`tables::flag_chip`, `.chip-flag`). The words are hidden
+from sight only, never removed, so a screen reader reads the same chip at any width and the
+tooltip starts with them; "reboot likely" is dashed, being an estimate where "reboot pending" is
+the device's own flag. The hidden words are positioned against their chip
+(`position: relative`): left to the page, each one in a row scrolled out of the table still
+counted toward the document's height and the window grew a scrollbar. The flag sits beside the
+name (`.patch-name__row`), so a row is one line (32px) or two (46px), never three. The grouped
+views, the drill-down and wide windows keep the words. Hiding is positional CSS generated per table
 (`util::hidden_columns_css`), not a filtered cell list, so adding a column touches only
 `PATCH_COLUMNS` and the row markup. Device and Patch are required. Exports ignore it.
 
