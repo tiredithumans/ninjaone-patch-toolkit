@@ -48,6 +48,9 @@ paths:
   only the requested family is fetched. Stores are epoch-gated and fetches are single-flight per
   family. `force_refresh` is floored backend-side by `FORCE_MIN_INTERVAL`.
   → `docs/design/query-cache.md#whole-fleet-prefetch--client-side-scoping`
+- **The inventory, and only the inventory, is warmed at sign-in** (`prewarm_fleet`, called beside
+  `load_lookups`); never warm a patch feed nobody has asked for.
+  → `docs/design/query-cache.md#the-inventory-is-warmed-at-sign-in`
 - **Device-group scopes are capped at `MAX_GROUPS_PER_QUERY` before the token is claimed**,
   validated against `/groups` and read `GROUP_READ_CONCURRENCY` at a time; the uncached legs
   (group reads, install history) abort when a devices/current/lookups leg fails.

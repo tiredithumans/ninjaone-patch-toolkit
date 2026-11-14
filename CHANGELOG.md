@@ -38,6 +38,8 @@ version and start a fresh `[Unreleased]`.
 - Large fleets sort faster, and checking dispatched actions loads far less data from NinjaOne.
 - The first query of a session, and queries that include Installed or Failed history, finish
   sooner on large fleets; small fleets make fewer requests.
+- The device list starts loading as soon as you are signed in, so the first query has less to
+  wait for.
 
 ### Fixed
 

@@ -508,6 +508,8 @@ impl AppState {
         if lookups_in_flight {
             self.load_lookups();
         }
+        // The backend dropped its inventory with the session it cleared.
+        self.prewarm_fleet();
         self.load_scripts();
     }
 

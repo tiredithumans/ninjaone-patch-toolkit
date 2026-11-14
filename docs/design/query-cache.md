@@ -306,6 +306,18 @@ exception: its membership is one small read per selected group per query (see
 `query_patches` takes the cached devices/current as *futures* (concurrent cold fetch) and why there
 is no separate per-query device-filter fetch.
 
+### The inventory is warmed at sign-in
+
+Every query needs the device inventory, whatever its scope or patch type, and it is the one
+`after`-paged whole-fleet fetch — 500 devices a request, in sequence. Nothing used to ask for it
+until the first Run, so the first query of a session waited on all of it. The frontend now calls
+`prewarm_fleet` as the session becomes signed in (the same transition that loads the lookups, and
+again after `clear_session_and_reload`); the command just awaits `fleet_devices_with_time`, so a Run
+that arrives meanwhile joins the fetch at the single-flight gate. Only the inventory is warmed: which
+patch feed is wanted depends on the query, and paging a six-figure feed nobody asks for is a cost,
+not a saving. A failed warm-up is logged at `debug` and swallowed — the first query fetches again
+and reports it.
+
 ### The two current-patch families are cached separately, and only the requested one is fetched
 
 `fleet_current_patches` takes `include_os` / `include_sw` straight from the query's `PatchType`; a

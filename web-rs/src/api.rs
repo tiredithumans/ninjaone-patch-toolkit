@@ -317,6 +317,11 @@ ipc!(list_locations(org_ids: Vec<i64>) -> Vec<Location>);
 ipc!(list_roles() -> Vec<Role>);
 ipc!(list_device_groups() -> Vec<DeviceGroup>);
 ipc!(list_node_classes() -> Vec<NodeClass>);
+ipc!(
+    /// Starts the backend's device-inventory fetch ahead of the first query. Resolves
+    /// once it is cached; nothing reads the reply.
+    prewarm_fleet() -> ()
+);
 
 // --- Patches + export --------------------------------------------------------
 

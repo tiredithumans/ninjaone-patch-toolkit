@@ -151,6 +151,7 @@ pub fn App() -> impl IntoView {
         let authed = state.is_authed();
         if authed && was_authed != Some(true) {
             state.load_lookups();
+            state.prewarm_fleet();
         }
         authed
     });

@@ -4,6 +4,15 @@
 use super::*;
 
 impl AppState {
+    /// Has the backend start fetching the device inventory, so the first Run query
+    /// finds it cached or already in flight instead of starting it. Fire and
+    /// forget: the reply carries nothing, and a failure is the query's to report.
+    pub(in crate::app) fn prewarm_fleet(self) {
+        spawn_local(async move {
+            let _ = api::prewarm_fleet().await;
+        });
+    }
+
     /// Loads the org/role/group/location lists. Each reply is dropped if the
     /// session ended while it was in flight (`clear_session` moved the epoch): it
     /// describes the previous session — often the previous tenant — and painting it
