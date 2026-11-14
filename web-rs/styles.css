@@ -1672,7 +1672,58 @@ tbody tr:hover {
 
 .modal.settings {
   max-height: 88vh;
+  padding-top: 0;
   padding-bottom: 0;
+}
+
+/* The title, the section links and Close stay put while the form scrolls under
+   them, as Save does at the other end. */
+.settings-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  align-items: center;
+  margin: 0 -22px 4px;
+  padding: 14px 22px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-head h2 {
+  margin: 0;
+}
+
+.settings-jumps {
+  flex: 1 1 auto;
+  margin: 0 0 0 12px;
+}
+
+/* A section a link scrolled to starts below the sticky head, not under it. */
+.modal.settings [id^="set-"] {
+  scroll-margin-top: 64px;
+}
+
+/* One setting per line, each with its own hint. */
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-stack .settings-hint {
+  margin: 2px 0 0;
+}
+
+.settings-inline-field {
+  align-items: flex-start;
+}
+
+/* The limits and the two script ids: even columns, inputs on one baseline. */
+.settings-actions > .row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  align-items: end;
+  gap: 12px;
 }
 
 .settings-section {
