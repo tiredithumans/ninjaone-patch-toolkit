@@ -3,11 +3,14 @@
 //! resolves from `/activities` alone (`commands::actions::poller`).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
+use reqwest::StatusCode;
 use serde::Serialize;
 use tauri::State;
 
+use crate::api::NinjaApiClient;
 use crate::error::UiError;
 use crate::model::RunningJob;
 use crate::rows::DeviceSummary;
@@ -140,6 +143,40 @@ pub fn running_job_rows(jobs: Vec<RunningJob>, devices: &[DeviceSummary]) -> Vec
     rows
 }
 
+/// Reads the running jobs under the result's device scope, when it has one the
+/// `df` grammar can spell, and the whole tenant's otherwise.
+///
+/// `/jobs` used to be read whole on every poll — twice a minute while a result is
+/// on screen, each job carrying a full node record — and then cut down to the
+/// result's devices here. A result scoped to one organization now asks for that
+/// organization's jobs. The join in [`running_job_rows`] is unchanged, so the
+/// filter is only ever a saving.
+///
+/// The spec declares `df` on this endpoint and nothing about its grammar there. If
+/// NinjaOne refuses the clause (a `400`), the read is repeated unfiltered and
+/// `refused` remembers not to send one again this launch: the display must not go
+/// dark over an optimization.
+async fn scoped_running_jobs(
+    api: &NinjaApiClient,
+    df: Option<&str>,
+    refused: &AtomicBool,
+) -> anyhow::Result<Vec<RunningJob>> {
+    let df = df.filter(|_| !refused.load(Ordering::Relaxed));
+    match api.running_jobs(df).await {
+        Err(err)
+            if df.is_some() && crate::api::status_of(&err) == Some(StatusCode::BAD_REQUEST) =>
+        {
+            tracing::warn!(
+                error = format!("{err:#}").as_str(),
+                "NinjaOne refused the device filter on /jobs; reading the whole list from now on"
+            );
+            refused.store(true, Ordering::Relaxed);
+            api.running_jobs(None).await
+        }
+        other => other,
+    }
+}
+
 /// The patch-ops jobs NinjaOne reports running on the current result's devices.
 /// Empty when there is no result to scope to, like the paging commands.
 ///
@@ -149,13 +186,20 @@ pub fn running_job_rows(jobs: Vec<RunningJob>, devices: &[DeviceSummary]) -> Vec
 #[tauri::command]
 pub async fn list_running_jobs(state: State<'_, AppState>) -> Result<RunningJobs, UiError> {
     let fetched_at = Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
-    if state.current_result_handle()?.is_none() {
+    let Some(scoped_to) = state.current_result_handle()? else {
         return Ok(RunningJobs {
             fetched_at,
             jobs: Vec::new(),
         });
-    }
-    let jobs = state.api.running_jobs().await.map_err(UiError::from)?;
+    };
+    let jobs = scoped_running_jobs(
+        &state.api,
+        scoped_to.scope.device_df.as_deref(),
+        &state.jobs_df_refused,
+    )
+    .await
+    .map_err(UiError::from)?;
+    drop(scoped_to);
     let jobs = match state.current_result_handle()? {
         // Off the runtime, like the decode before it: a patch window's join and sort
         // are tens of thousands of rows.
@@ -283,5 +327,84 @@ mod tests {
                 (4_999, "srv-04999", "Software patching"),
             ]
         );
+    }
+
+    /// A `/jobs` server that refuses any `df` with a 400 when `refuses`, and
+    /// otherwise answers with one job, and the `df` of every request it saw.
+    async fn poll_jobs(refuses: bool, polls: usize) -> (Vec<usize>, Vec<Option<String>>, bool) {
+        use wiremock::matchers::{method, path, query_param_is_missing};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let jobs = ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "uid": "a", "deviceId": 1, "jobType": "PATCH_MANAGEMENT", "jobStatus": "IN_PROCESS" }
+        ]));
+        if refuses {
+            Mock::given(method("GET"))
+                .and(path("/api/v2/jobs"))
+                .and(query_param_is_missing("df"))
+                .respond_with(jobs)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v2/jobs"))
+                .respond_with(ResponseTemplate::new(400).set_body_string("Invalid device filter"))
+                .mount(&server)
+                .await;
+        } else {
+            Mock::given(method("GET"))
+                .and(path("/api/v2/jobs"))
+                .respond_with(jobs)
+                .mount(&server)
+                .await;
+        }
+        let http = reqwest::Client::new();
+        let auth = crate::auth::AuthState::seeded(http.clone(), server.uri(), "test-token");
+        let api = NinjaApiClient::new(http, auth);
+        let refused = AtomicBool::new(false);
+        let mut read = Vec::new();
+        for _ in 0..polls {
+            read.push(
+                scoped_running_jobs(&api, Some("org=5"), &refused)
+                    .await
+                    .expect("the jobs are read")
+                    .len(),
+            );
+        }
+        let sent = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|r| {
+                r.url
+                    .query_pairs()
+                    .find(|(k, _)| k == "df")
+                    .map(|(_, v)| v.into_owned())
+            })
+            .collect();
+        (read, sent, refused.load(Ordering::Relaxed))
+    }
+
+    /// A result scoped to an organization asks NinjaOne for that organization's
+    /// jobs, on every poll, instead of the whole tenant's.
+    #[tokio::test]
+    async fn the_jobs_poll_asks_only_for_the_results_scope() {
+        let (read, sent, refused) = poll_jobs(false, 2).await;
+        assert_eq!(read, [1, 1]);
+        assert_eq!(sent, [Some("org=5".to_string()), Some("org=5".to_string())]);
+        assert!(!refused);
+    }
+
+    /// The spec does not say what `df` grammar `/jobs` takes. If NinjaOne refuses the
+    /// clause, the same poll is answered unfiltered and no later one sends a filter:
+    /// the display must not go dark, or pay a refused request twice a minute, over
+    /// an optimization.
+    #[tokio::test]
+    async fn a_refused_jobs_filter_falls_back_to_the_whole_list_for_good() {
+        let (read, sent, refused) = poll_jobs(true, 2).await;
+        assert_eq!(read, [1, 1], "both polls still list the job");
+        assert_eq!(sent, [Some("org=5".to_string()), None, None]);
+        assert!(refused);
     }
 }

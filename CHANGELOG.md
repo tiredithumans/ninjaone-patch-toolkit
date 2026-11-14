@@ -41,6 +41,7 @@ version and start a fresh `[Unreleased]`.
 - The device list starts loading as soon as you are signed in, so the first query has less to
   wait for.
 - Results appear as soon as they are computed instead of after the run's history is saved.
+- The live "job running" markers download only the jobs in the scope you queried.
 - A failed query says what went wrong in plain words (can't reach NinjaOne, rate-limited, a
   NinjaOne error, access refused), keeps the technical message under Details, and has a Retry
   button.

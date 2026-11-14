@@ -351,6 +351,10 @@ pub struct AppState {
     job_poller_running: Arc<AtomicBool>,
     /// Single-slot confirmation gate — one dialog is open at a time.
     pending_confirm: Mutex<Option<PendingConfirm>>,
+    /// NinjaOne refused a device filter on `/jobs` this launch, so the poll reads
+    /// the whole list (`commands::live_jobs::scoped_running_jobs`). Process-wide: a
+    /// refusal is the endpoint's, and a wrong guess costs only bandwidth.
+    pub jobs_df_refused: AtomicBool,
     /// What stored queries are still writing to disk; see [`PersistGate`].
     pub persist: PersistGate,
     /// Public exploit data (Microsoft's CVE mapping, CISA's catalog). Process-wide
@@ -432,6 +436,7 @@ impl AppState {
             result_epoch: AtomicU64::new(0),
             job_poller_running: Arc::new(AtomicBool::new(false)),
             pending_confirm: Mutex::new(None),
+            jobs_df_refused: AtomicBool::new(false),
             persist: PersistGate::default(),
             exploits: Arc::default(),
         }

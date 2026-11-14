@@ -540,6 +540,15 @@ minutes after a failure, and shows only patch-ops job
 types (`PATCH_OPS_JOB_TYPES`) on the current result's devices. A `jobStatus` that means finished
 is dropped. The dispatched-job poller below is untouched by it.
 
+The read is narrowed to the result's scope when the `df` grammar can spell it
+(`QueryScope::device_df`, the same organization/location/role clause the install history sends):
+each job carries a whole node record, and the whole tenant's list used to be downloaded on every
+poll and cut down afterwards. The join against the result's devices is unchanged, so a clause
+NinjaOne drops costs the saving and nothing else. The spec declares `df` on `/jobs` without saying
+what grammar it takes there, so a `400` to a filtered read is answered by reading the list
+unfiltered and not sending a filter again this launch (`live_jobs::scoped_running_jobs`,
+`AppState::jobs_df_refused`) — the display must not go dark over an optimization.
+
 Three fields decide a job's fate and the spec gives them different jobs: `statusCode` is the
 enumerated lifecycle (`STARTED`/`IN_PROCESS`/`COMPLETED`/`CANCELLED`/`BLOCKED` for scripts,
 kind-prefixed codes for the native actions — see below), `status` is

@@ -76,7 +76,9 @@ the variant in `web-rs/src/types.rs::ActionKind`. → `docs/design/actions.md`
   sampled before the first `.await`.
   → `docs/design/actions.md#job-state-is-tenant-stamped-the-poller-is-single-claim`
 - **`/jobs` is display-only** (`commands::live_jobs`, polled by `util::live_jobs_due`), never a
-  resolution source. → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
+  resolution source. Its `df` (the result's scope) is a saving only: the rows are still joined
+  against the result's devices, and a refused filter falls back to the whole list.
+  → `docs/design/actions.md#resolving-a-dispatched-action-from-activities`
 - **A job resolves from `/activities` only, one read per device per tick** (`poller::feed_reads`,
   at most `MAX_FEED_READS_IN_FLIGHT` in flight; a 50-row read, repeated at 500 only when
   `window_may_be_cut_short`; `Activity.data` stays raw until `exit_code()`; the 15 s interval
