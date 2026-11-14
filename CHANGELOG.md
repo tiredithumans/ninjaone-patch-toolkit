@@ -11,6 +11,11 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-14
+
+Faster queries on large fleets, a results area that shows what a running query is doing and lets
+you cancel it, and more of the window for the Patches table.
+
 ### Security
 
 - Two copies of the app running at once no longer let one silently undo the other's settings,
@@ -18,53 +23,44 @@ version and start a fresh `[Unreleased]`.
 - The app window can now only receive events from the app, not call its other built-in
   functions.
 
+### Added
+
+- A running query can be cancelled, and while the first one runs the results area shows each data
+  feed's progress against its size.
+- A failed query says what went wrong in plain words, keeps the technical message under Details,
+  and has a Retry button.
+- Failures, the Compliance tables, Needs Reboot and both Jobs tables sort by clicking a column
+  header, and Shift-click ticks or clears a range of rows on Patches and Needs Reboot.
+- The device details window links to the device's page in NinjaOne.
+- Settings has section links that stay in view while you scroll.
+
 ### Changed
 
-- The action confirmation says how current each device's online/offline status is.
-- Devices still queued when the maintenance window closes are no longer sent the action; they show
-  as "not sent: maintenance window closed while dispatching".
-- The audit trail names the NinjaOne instance when it holds dispatches from more than one.
-- Refreshing the same query (↻ Refresh, or the stale banner's Refresh link) keeps your selection,
-  so you can send Software after OS without re-ticking.
+- Queries are faster on large fleets: the device list starts loading at sign-in, the first query
+  no longer fetches its two largest feeds one after the other, Installed/Failed history downloads
+  in parallel, results appear before the run's history is saved, and small fleets make fewer
+  requests.
+- A query limited to certain organizations, locations or roles downloads only their patches when
+  the whole fleet isn't already loaded, and the live "job running" markers download only that
+  scope's jobs.
+- The Patches table shows about half again as many rows in the default window, with First seen and
+  Installed visible again: the action bar is one line until you tick something, the view controls
+  share the filter row, rows are at most two lines, dates show the day (hover for the time), the
+  "Changes since…" notes open from an ⓘ, and the pager sits under the table.
+- An available update shows as an "Update available" button in the top bar instead of a dialog at
+  launch.
+- Refreshing the same query keeps your selection, so you can send Software after OS without
+  re-ticking.
+- The action confirmation says how current each device's online/offline status is, and devices
+  still queued when the maintenance window closes are no longer sent the action.
+- "Patch data as of" also reflects when the device list was last fetched, so it never looks fresher
+  than it is.
 - Applying a preset ignores organizations, roles and groups this instance doesn't have, and says
   how many were dropped.
-- "Patch data as of" also reflects when the device list (reboot and offline status) was last
-  fetched, so it never looks fresher than it is.
-- Pending-patch age buckets agree with the SLA: a patch past a 30-day SLA no longer shows in
-  "0-30 days".
-- The HTML report's compliance charts show the same organizations and operating systems as the
-  tables beneath them.
+- Pending-patch age buckets agree with the SLA, and the HTML report's charts show the same
+  organizations and operating systems as its tables.
+- The audit trail names the NinjaOne instance when it holds dispatches from more than one.
 - Installers include THIRD-PARTY-LICENSES.md.
-- Large fleets sort faster, and checking dispatched actions loads far less data from NinjaOne.
-- The Patches table shows about half again as many rows: the action bar is one line until you
-  tick something, and the view controls share the filter row.
-- First seen and Installed are visible again in the default window without scrolling sideways.
-- Patch rows are one or two lines tall instead of up to three; row flags shrink to icons in
-  narrower windows.
-- The date columns show the day; hover for the time.
-- The notes under "Changes since…" open from an ⓘ instead of printing on every run.
-- Failures, the Compliance tables, Needs Reboot and both Jobs tables sort by clicking a column
-  header.
-- Shift-click a checkbox on Patches or Needs Reboot to tick or clear a range of rows.
-- An available update shows as an "Update available" button in the top bar instead of a dialog
-  at launch.
-- Settings has links to its sections that stay in view while you scroll.
-- The Patches pager sits under the table.
-- The first query of a session, and queries that include Installed or Failed history, finish
-  sooner on large fleets; small fleets make fewer requests.
-- The device list starts loading as soon as you are signed in, so the first query has less to
-  wait for.
-- Results appear as soon as they are computed instead of after the run's history is saved.
-- A query limited to certain organizations, locations or roles downloads only their patches when
-  the fleet isn't already loaded, so it and its auto-refresh are much quicker on large tenants.
-- The live "job running" markers download only the jobs in the scope you queried.
-- While the first query runs, the results area shows each data feed's progress against its size
-  instead of "Run a query…", and the progress bar reflects records loaded rather than a guess.
-- A running query can be cancelled.
-- The device details window has an "Open in NinjaOne" link to the device's console page.
-- A failed query says what went wrong in plain words (can't reach NinjaOne, rate-limited, a
-  NinjaOne error, access refused), keeps the technical message under Details, and has a Retry
-  button.
 
 ### Fixed
 
