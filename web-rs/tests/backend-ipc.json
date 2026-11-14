@@ -1554,7 +1554,8 @@
     "query:progress": {
       "loaded": 500,
       "queryId": 3,
-      "stage": "osPatches"
+      "stage": "osPatches",
+      "total": 6721
     }
   },
   "wording": {

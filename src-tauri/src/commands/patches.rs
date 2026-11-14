@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
+use crate::api::patches::SlicePlan;
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::changes::{self, RunSnapshot};
 use crate::error::UiError;
@@ -100,17 +101,29 @@ pub(crate) struct QueryProgressEvent {
     pub(crate) query_id: u64,
     pub(crate) stage: &'static str,
     pub(crate) loaded: usize,
+    /// How many records this stage's feed holds, when NinjaOne announced it (a
+    /// cursor's `count`); absent for the device inventory, which announces nothing,
+    /// and for the rollup stage. What lets the UI draw a bar instead of a counter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) total: Option<usize>,
 }
 
 /// Best-effort emit of a progress event (a dropped event just means one fewer UI
 /// update, never a failed query).
-fn emit_progress(app: &AppHandle, query_id: u64, stage: &'static str, loaded: usize) {
+fn emit_progress(
+    app: &AppHandle,
+    query_id: u64,
+    stage: &'static str,
+    loaded: usize,
+    total: Option<usize>,
+) {
     let _ = app.emit(
         "query:progress",
         QueryProgressEvent {
             query_id,
             stage,
             loaded,
+            total,
         },
     );
 }
@@ -162,17 +175,18 @@ pub async fn query_patches(
     // A re-filter (Run query) reuses the cached whole-fleet data; an auto-refresh
     // tick / manual refresh passes `force_refresh` to pull fresh patch state.
     let force = force_refresh.unwrap_or(false);
-    let progress =
-        move |stage: &'static str, loaded: usize| emit_progress(&app, qid, stage, loaded);
+    let progress = move |stage: &'static str, loaded: usize, total: Option<usize>| {
+        emit_progress(&app, qid, stage, loaded, total)
+    };
 
     // Whole-fleet devices + current patches come from `AppState`'s caches, so a scope
     // change re-filters them client-side with no refetch. Both are taken as futures
     // (each carrying its own progress reporter) so a *cold* fetch still resolves
     // concurrently with the lookups and install-history fetches inside `run_query`;
     // a cache hit resolves instantly. `force` bypasses the current-patch TTL.
-    let p_devices = |n: usize| progress("devices", n);
-    let p_os = |n: usize| progress("osPatches", n);
-    let p_sw = |n: usize| progress("swPatches", n);
+    let p_devices = |n: usize, total: Option<usize>| progress("devices", n, total);
+    let p_os = |n: usize, total: Option<usize>| progress("osPatches", n, total);
+    let p_sw = |n: usize, total: Option<usize>| progress("swPatches", n, total);
     let devices_fut = state.fleet_devices_with_time(Some(&p_devices as &ProgressFn));
     // The requested `PatchType` decides which families are fetched at all — a
     // family this query can't display is never worth a whole-fleet page-through.
@@ -231,6 +245,9 @@ pub async fn query_patches(
         settings.instance_base_url.clone(),
         args,
         Utc::now(),
+        // Whatever is cached now, never a wait: the install-history legs start with
+        // the others, and a cold start has nothing to cut them by.
+        state.slice_plan_in_hand(),
         &progress,
     )
     .await
@@ -657,7 +674,8 @@ async fn run_query<L, D, C, G>(
     instance: String,
     args: PatchQueryArgs,
     now: DateTime<Utc>,
-    progress: &(dyn Fn(&'static str, usize) + Send + Sync),
+    slice_plan: Option<SlicePlan>,
+    progress: &(dyn Fn(&'static str, usize, Option<usize>) + Send + Sync),
 ) -> anyhow::Result<QueryRun>
 where
     L: std::future::Future<Output = anyhow::Result<Lookups>>,
@@ -671,8 +689,9 @@ where
     // per-query install history are all independent — resolve them concurrently so
     // latency is the slowest call, not the sum. The install fetch resolves to empty
     // when no install status / matching family is requested.
-    let p_os_inst = |n: usize| progress("osInstalls", n);
-    let p_sw_inst = |n: usize| progress("swInstalls", n);
+    let p_os_inst = |n: usize, total: Option<usize>| progress("osInstalls", n, total);
+    let p_sw_inst = |n: usize, total: Option<usize>| progress("swInstalls", n, total);
+    let slice_plan = slice_plan.as_ref();
     let patch_df_ref = plan.patch_df.as_deref();
     let fetch_started = std::time::Instant::now();
 
@@ -727,6 +746,7 @@ where
                     plan.install_status,
                     plan.install_window.after,
                     plan.install_window.before,
+                    slice_plan,
                     Some(&p_os_inst as &ProgressFn),
                 )
                 .await
@@ -741,6 +761,7 @@ where
                     plan.install_status,
                     plan.install_window.after,
                     plan.install_window.before,
+                    slice_plan,
                     Some(&p_sw_inst as &ProgressFn),
                 )
                 .await
@@ -762,7 +783,7 @@ where
 
     // Fetches done; the rest is the in-memory scope + join/rollup.
     let fetch_ms = fetch_started.elapsed().as_millis();
-    progress("joining", 0);
+    progress("joining", 0, None);
     // Only the families this query asked for: a family left cached from an earlier
     // query is merged by the query that next asks for it.
     let observation = Observation {

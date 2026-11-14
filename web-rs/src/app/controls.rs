@@ -125,7 +125,7 @@ fn progress_label(state: AppState) -> String {
     if p.joining {
         format!("Running… {secs:.0}s · computing rollups…")
     } else {
-        let n = p.records();
+        let n = util::progress_records(&p);
         if n > 0 {
             format!(
                 "Running… {secs:.0}s · loaded {} records",

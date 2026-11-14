@@ -138,16 +138,21 @@ async fn restart_scan<T>(
     all.clear();
     *scan = CursorScan::default();
     if let Some(report) = on_progress {
-        report(0);
+        report(0, None);
     }
     tokio::time::sleep(SCAN_RESTART_DELAY).await;
     true
 }
 
-/// Sink for incremental pagination progress: invoked with the cumulative row
-/// count after each page is accumulated. Callers that don't stream progress to
+/// Sink for incremental pagination progress: invoked after each page is
+/// accumulated with the cumulative row count and, when the server announced one,
+/// the size of the whole fetch (a cursor's `count`; `None` for the `after`-paged
+/// list endpoints, which announce nothing). Callers that don't stream progress to
 /// the UI pass `None`.
-pub type ProgressFn<'a> = dyn Fn(usize) + Send + Sync + 'a;
+///
+/// The total is what lets the UI draw a real bar. It is display only: nothing
+/// sizes an allocation or ends a scan by it.
+pub type ProgressFn<'a> = dyn Fn(usize, Option<usize>) + Send + Sync + 'a;
 
 impl NinjaApiClient {
     /// Issues a request and decodes the success body as one page of rows,
@@ -362,7 +367,7 @@ impl NinjaApiClient {
                         all.push(item);
                     }
                     if let Some(report) = on_progress {
-                        report(all.len());
+                        report(all.len(), None);
                     }
                     // A short page is the last page. Otherwise advance the cursor to
                     // the largest id seen; stop if it can't move forward (no id, or
@@ -401,12 +406,12 @@ impl NinjaApiClient {
                     let page_len = results.len();
                     all.extend(results);
 
-                    if let Some(report) = on_progress {
-                        report(all.len());
-                    }
                     if scan.announced_total.is_none() {
                         scan.announced_total = cursor_count(next.as_ref());
                         log_cursor_opened(path, page_len, next.as_ref());
+                    }
+                    if let Some(report) = on_progress {
+                        report(all.len(), scan.announced_total);
                     }
                     if rereading {
                         // Whether NinjaOne answered with the lost page or the one after

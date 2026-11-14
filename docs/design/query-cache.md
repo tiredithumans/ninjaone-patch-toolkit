@@ -295,7 +295,7 @@ compact — see [compliance.md](./compliance.md#changes-since-the-previous-compa
 
 The device inventory and current patches (OS + 3rd-party) are fetched **whole-fleet** (no `df`;
 the third-party feed as location slices that must add up to it, see
-[api-client.md](./api-client.md#the-whole-fleet-third-party-feed-is-paged-in-location-slices-that-must-add-up-to-it))
+[api-client.md](./api-client.md#a-long-patch-feed-is-paged-in-location-slices-that-must-add-up-to-it))
 and cached in `AppState` (`fleet_devices_cache`, `DEVICE_TTL` ~15 min since devices change rarely;
 the current patches in `fleet_current_os` / `fleet_current_sw`, refreshed on `force_refresh` or
 past `CURRENT_PATCHES_TTL`). `run_query` then scopes them to the selected identity facets
@@ -359,7 +359,8 @@ inventory fetched up to fifteen minutes earlier rather than claiming the refresh
 ### Install history is not prefetched
 
 Install history is fetched fresh per query, scoped server-side by `patch_filter` +
-status-pushed-down (too large to cache). The summary carries `data_fetched_at` (when the oldest
+status-pushed-down (too large to cache), and a long pull is paged in location slices like the
+third-party feed. The summary carries `data_fetched_at` (when the oldest
 cached input — a patch family or the device inventory — was fetched, distinct from
 `generated_at`) for the UI's "patch data as of …" label. The
 whole-fleet caches are tenant-scoped, so `clear_lookups_cache` drops them too.

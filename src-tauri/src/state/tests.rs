@@ -317,25 +317,46 @@ async fn a_software_only_query_never_fetches_the_os_feed() {
     assert!(patch.kb_number.is_none());
 }
 
-/// The third-party leg reads the device inventory to slice the feed by location.
-/// This mock answers every slice with the whole feed, as NinjaOne would a `df` it
-/// ignored, so the slices are sized, found not to add up, and the feed is paged
-/// whole: the one row arrives once.
-#[tokio::test]
-async fn the_third_party_feed_is_sliced_by_the_inventorys_locations() {
+/// Mounts the four lookup lists, `/locations` answering with `locations`.
+async fn mount_lookups(server: &wiremock::MockServer, locations: serde_json::Value) {
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
 
+    for (p, body) in [
+        (
+            "/api/v2/organizations",
+            json!([{ "id": 1, "name": "Contoso" }]),
+        ),
+        ("/api/v2/locations", locations),
+        ("/api/v2/roles", json!([])),
+        ("/api/v2/groups", json!([])),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+}
+
+/// The third-party leg used to wait for a fresh device inventory before it opened
+/// its feed, so on a cold start the two longest fetches of a query ran one after
+/// the other. Its slice plan now comes from what is in hand — here the location
+/// list, which the query's own lookup leg fetches anyway — and the inventory is
+/// never asked for. The one sizing request shows a plan was in hand: with none the
+/// feed is simply paged. (This feed is one row, far too short to slice, so it is
+/// then paged whole.)
+#[tokio::test]
+async fn the_third_party_feed_never_waits_for_the_inventory() {
+    use serde_json::json;
+
     let server = patch_feed_server().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/devices-detailed"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            { "id": 1, "locationId": 10 },
-            { "id": 2, "locationId": 20 },
-        ])))
-        .mount(&server)
-        .await;
+    mount_lookups(
+        &server,
+        json!([{ "id": 10, "name": "HQ" }, { "id": 20, "name": "Branch" }]),
+    )
+    .await;
     let state = AppState::seeded(server.uri());
 
     let current = state
@@ -343,12 +364,13 @@ async fn the_third_party_feed_is_sliced_by_the_inventorys_locations() {
         .await
         .expect("software-only fetch");
 
+    assert_eq!(current.sw.len(), 1);
     assert_eq!(
-        current.sw.len(),
-        1,
-        "the row arrives once, not once per slice"
+        hits(&server, "/api/v2/devices-detailed").await,
+        0,
+        "the feed must not wait on, or start, an inventory fetch"
     );
-    let mut sliced: Vec<String> = server
+    let page_sizes: Vec<String> = server
         .received_requests()
         .await
         .unwrap_or_default()
@@ -357,17 +379,76 @@ async fn the_third_party_feed_is_sliced_by_the_inventorys_locations() {
         .filter_map(|r| {
             r.url
                 .query_pairs()
-                .find(|(k, _)| k == "df")
+                .find(|(k, _)| k == "pageSize")
                 .map(|(_, v)| v.into_owned())
         })
         .collect();
-    // Sent concurrently, so they may land in either order.
-    sliced.sort();
     assert_eq!(
-        sliced,
-        ["loc=10", "loc=20"],
-        "one size probe per location slice"
+        page_sizes,
+        ["1", "5000"],
+        "sized once against the location plan, then paged whole"
     );
+}
+
+/// The plan is whatever is cached, never a fetch: nothing on a cold start, the
+/// location list once the lookups are in, and the inventory — balanced by device
+/// count — once that is, however long ago it was fetched. Stale is fine for a
+/// proposal the feed's own sizes then accept or refuse.
+#[tokio::test]
+async fn the_slice_plan_comes_from_whatever_is_cached_however_stale() {
+    use crate::api::patches::SlicePlan;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    mount_lookups(
+        &server,
+        json!([
+            { "id": 10, "name": "HQ" },
+            { "id": 20, "name": "Branch" },
+            { "id": 30, "name": "Lab" },
+        ]),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 1, "locationId": 10 },
+            { "id": 2, "locationId": 10 },
+            { "id": 3, "locationId": 20 },
+        ])))
+        .mount(&server)
+        .await;
+    let state = AppState::seeded(server.uri());
+
+    assert_eq!(state.slice_plan_in_hand(), None, "nothing cached yet");
+    assert_eq!(hits(&server, "/api/v2/locations").await, 0, "and no fetch");
+
+    state.lookups().await.expect("lookups");
+    assert_eq!(
+        state.slice_plan_in_hand(),
+        SlicePlan::from_locations([10, 20, 30]),
+        "the location list, every location weighted alike"
+    );
+
+    let (devices, _) = state
+        .fleet_devices_with_time(None)
+        .await
+        .expect("inventory");
+    let by_devices = SlicePlan::from_devices(&devices);
+    assert!(by_devices.is_some());
+    assert_eq!(state.slice_plan_in_hand(), by_devices);
+
+    state
+        .fleet_devices_cache
+        .age(DEVICE_TTL + Duration::from_secs(1));
+    assert_eq!(
+        state.slice_plan_in_hand(),
+        by_devices,
+        "an inventory past its TTL still plans the slices"
+    );
+    assert_eq!(hits(&server, "/api/v2/devices-detailed").await, 1);
 }
 
 #[tokio::test]
@@ -692,11 +773,11 @@ async fn concurrent_cold_fetches_collapse_onto_one_request() {
     let (a, b) = tokio::join!(
         {
             let state = state.clone();
-            async move { state.fleet_devices(None).await.expect("first") }
+            async move { state.fleet_devices_with_time(None).await.expect("first").0 }
         },
         {
             let state = state.clone();
-            async move { state.fleet_devices(None).await.expect("second") }
+            async move { state.fleet_devices_with_time(None).await.expect("second").0 }
         }
     );
 
@@ -749,9 +830,10 @@ async fn the_inventory_carries_reboot_reasons_and_survives_a_health_failure() {
     inventory().mount(&server).await;
     health().mount(&server).await;
     let devices = AppState::seeded(server.uri())
-        .fleet_devices(None)
+        .fleet_devices_with_time(None)
         .await
-        .expect("inventory");
+        .expect("inventory")
+        .0;
     assert_eq!(
         reasons_of(&devices),
         [Some("Windows Update".to_string()), None]
@@ -771,13 +853,17 @@ async fn the_inventory_carries_reboot_reasons_and_survives_a_health_failure() {
     health().mount(&forbidden).await;
     let state = AppState::seeded(forbidden.uri());
     let devices = state
-        .fleet_devices(None)
+        .fleet_devices_with_time(None)
         .await
-        .expect("a health failure must not fail the inventory");
+        .expect("a health failure must not fail the inventory")
+        .0;
     assert_eq!(devices.len(), 2);
     assert!(devices.iter().all(|d| d.pending_reboot_reason.is_none()));
 
-    let within = state.fleet_devices(None).await.expect("within the cap");
+    let (within, _) = state
+        .fleet_devices_with_time(None)
+        .await
+        .expect("within the cap");
     assert!(
         Arc::ptr_eq(&devices, &within),
         "served from cache inside the cap"
@@ -786,7 +872,10 @@ async fn the_inventory_carries_reboot_reasons_and_survives_a_health_failure() {
     state
         .fleet_devices_cache
         .age(FORCE_MIN_INTERVAL + Duration::from_secs(1));
-    let after = state.fleet_devices(None).await.expect("past the cap");
+    let (after, _) = state
+        .fleet_devices_with_time(None)
+        .await
+        .expect("past the cap");
     assert_eq!(
         reasons_of(&after),
         [Some("Windows Update".to_string()), None],

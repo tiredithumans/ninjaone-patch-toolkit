@@ -36,12 +36,14 @@ paths:
   of the client's 45 s; every other request keeps the client's.** Test:
   `a_cursor_page_outlasts_the_client_timeout`.
   → `docs/design/api-client.md#a-cursor-page-waits-longer-than-any-other-request`
-- **The whole-fleet third-party feed is paged as location slices of the device inventory
-  (`fleet_software_patches_sliced`, `plan_location_slices`) only if the slices' one-row
-  `feed_size`s, and then their paged rows, sum to exactly the whole feed's; any mismatch pages it
-  whole. A server-announced `count` never sizes an allocation.** Never trust a `df` slice
-  unverified — NinjaOne drops an unhonored clause silently.
-  → `docs/design/api-client.md#the-whole-fleet-third-party-feed-is-paged-in-location-slices-that-must-add-up-to-it`
+- **A long patch feed (third-party current, both install histories) is paged as location slices
+  (`paged_in_slices`) only if the slices' one-row `feed_size`s, and then their paged rows, sum to
+  exactly the whole feed's; any mismatch pages it whole. The feed's size picks the slice count
+  (`SLICE_POLICY`; a short feed is paged whole) and the `SlicePlan` comes from what is cached,
+  however stale (`AppState::slice_plan_in_hand`) — never from a fetch the feed waits on. A
+  server-announced `count` never sizes an allocation.** Never trust a `df` slice unverified —
+  NinjaOne drops an unhonored clause silently.
+  → `docs/design/api-client.md#a-long-patch-feed-is-paged-in-location-slices-that-must-add-up-to-it`
 - **A 429 extends the client-wide `paused_until` (shared by every clone, never shortened) and
   every attempt waits it out first, then sleeps its own `rate_limit_jitter()` before re-sending;
   `backoff` is jittered too; `Retry-After` is read as seconds or an HTTP-date, capped at

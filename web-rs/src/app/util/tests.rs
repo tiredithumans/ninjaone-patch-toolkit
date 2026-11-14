@@ -386,17 +386,52 @@ fn queued_run_fires_once_after_the_run_in_flight_settles() {
 #[test]
 fn progress_stages_land_on_their_own_counters() {
     let mut p = Progress::default();
-    apply_progress_stage(&mut p, "devices", 10);
-    apply_progress_stage(&mut p, "osPatches", 20);
-    apply_progress_stage(&mut p, "swPatches", 30);
-    apply_progress_stage(&mut p, "osInstalls", 40);
-    apply_progress_stage(&mut p, "swInstalls", 50);
-    assert_eq!(p.records(), 150);
+    apply_progress_stage(&mut p, "devices", 10, None);
+    apply_progress_stage(&mut p, "osPatches", 20, Some(40));
+    apply_progress_stage(&mut p, "swPatches", 30, None);
+    apply_progress_stage(&mut p, "osInstalls", 40, None);
+    apply_progress_stage(&mut p, "swInstalls", 50, None);
+    assert_eq!(progress_records(&p), 150);
     assert!(!p.joining);
-    apply_progress_stage(&mut p, "somethingNew", 999);
-    assert_eq!(p.records(), 150, "an unknown stage is ignored");
-    apply_progress_stage(&mut p, "joining", 0);
+    apply_progress_stage(&mut p, "somethingNew", 999, Some(1));
+    assert_eq!(progress_records(&p), 150, "an unknown stage is ignored");
+    apply_progress_stage(&mut p, "joining", 0, None);
     assert!(p.joining);
+}
+
+/// The bar is measured against the sizes NinjaOne announced when any feed has one,
+/// and only otherwise guessed from the previous run — which is what it always was,
+/// wrong whenever the scope differed and absent on a session's first run.
+#[test]
+fn the_progress_bar_is_measured_when_a_feed_announced_its_size() {
+    let mut p = Progress::default();
+    assert_eq!(progress_fraction(&p, 5_000.0, None), None, "indeterminate");
+    assert_eq!(
+        progress_fraction(&p, 5_000.0, Some(20_000.0)),
+        Some(0.25),
+        "no size yet: the previous run's duration"
+    );
+    assert_eq!(progress_fraction(&p, 5_000.0, Some(0.0)), None);
+
+    // The inventory announces nothing, so it does not make the bar measurable.
+    apply_progress_stage(&mut p, "devices", 9_000, None);
+    assert_eq!(progress_fraction(&p, 5_000.0, Some(20_000.0)), Some(0.25));
+
+    apply_progress_stage(&mut p, "osPatches", 5_000, Some(10_000));
+    apply_progress_stage(&mut p, "swPatches", 10_000, Some(90_000));
+    assert_eq!(
+        progress_fraction(&p, 19_000.0, Some(20_000.0)),
+        Some(0.15),
+        "15,000 of 100,000 records, whatever the clock says"
+    );
+
+    // Held under 1: the rollups still follow the last record.
+    apply_progress_stage(&mut p, "osPatches", 10_000, Some(10_000));
+    apply_progress_stage(&mut p, "swPatches", 90_000, Some(90_000));
+    assert_eq!(progress_fraction(&p, 0.0, None), Some(0.95));
+    // A feed that ran past its announced size cannot push the bar past the rest.
+    apply_progress_stage(&mut p, "swPatches", 500_000, Some(90_000));
+    assert_eq!(progress_fraction(&p, 0.0, None), Some(0.95));
 }
 
 /// Only equality is ever asked of the stamp, so wrapping is safe — and a plain

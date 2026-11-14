@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use crate::actions::JobReport;
+use crate::api::patches::SlicePlan;
 use crate::api::{NinjaApiClient, ProgressFn};
 use crate::auth::AuthState;
 #[cfg(test)]
@@ -541,19 +542,12 @@ impl AppState {
         Ok(set)
     }
 
-    /// Whole-fleet device inventory (no `df`), served from a long-TTL cache so
-    /// identity facets can be applied client-side without re-pulling the fleet on
-    /// every scope change. Fetches on a miss / past [`DEVICE_TTL`]. The lock is never
-    /// held across the `.await`.
-    pub async fn fleet_devices(
-        &self,
-        on_progress: Option<&ProgressFn<'_>>,
-    ) -> Result<Arc<Vec<Device>>> {
-        Ok(self.fleet_devices_with_time(on_progress).await?.0)
-    }
-
-    /// [`Self::fleet_devices`] with the time the inventory was fetched. The
-    /// inventory carries Needs Reboot and the offline exclusion and is cached for
+    /// Whole-fleet device inventory (no `df`) and the time it was fetched, served
+    /// from a long-TTL cache so identity facets can be applied client-side without
+    /// re-pulling the fleet on every scope change. Fetches on a miss / past
+    /// [`DEVICE_TTL`]. The lock is never held across the `.await`.
+    ///
+    /// The inventory carries Needs Reboot and the offline exclusion and is cached for
     /// [`DEVICE_TTL`] — longer than the patch families, and a forced refresh does
     /// not shorten it — so both callers that report on it say how old it is: the
     /// query folds it into its "data as of" time, and the action planner shows how
@@ -591,6 +585,45 @@ impl AppState {
                 })
             })
             .await
+    }
+
+    /// The location plan a long patch feed is sliced by, from whatever is already in
+    /// hand: the device inventory however stale (balanced by device count), else the
+    /// cached location list (every location weighted alike). Never a fetch.
+    ///
+    /// Stale is fine because a plan is only a proposal: the slices are paged only if
+    /// their sizes add up to the whole feed's (`NinjaApiClient::paged_in_slices`).
+    /// An inventory that cannot be cut — one location, a device with none — is an
+    /// answer, not a miss, so the location list is not tried behind it: it could
+    /// only propose slices the sizes then refuse.
+    pub fn slice_plan_in_hand(&self) -> Option<SlicePlan> {
+        let key = self.tenant_key();
+        match self.fleet_devices_cache.peek_stale(&key) {
+            Some(devices) => SlicePlan::from_devices(&devices),
+            None => self
+                .lookups_cache
+                .peek_stale(&key)
+                .and_then(|set| SlicePlan::from_locations(set.locations.iter().map(|l| l.id))),
+        }
+    }
+
+    /// [`Self::slice_plan_in_hand`], waiting for the lookups when neither they nor
+    /// an inventory are cached yet — the first query of a session.
+    ///
+    /// The third-party feed used to wait here for a *fresh inventory*, so on a cold
+    /// start the two longest fetches of a query ran one after the other: the feed
+    /// did not open until every page of `/devices-detailed` was in. The lookups are
+    /// a handful of requests the query needs anyway, behind the same single-flight
+    /// gate its own lookup leg takes. A failed lookup is that leg's error to
+    /// surface; here it only means the feed is paged whole.
+    async fn slice_plan(&self) -> Option<SlicePlan> {
+        let key = self.tenant_key();
+        if self.fleet_devices_cache.peek_stale(&key).is_none()
+            && self.lookups_cache.peek_stale(&key).is_none()
+        {
+            let _ = self.lookups().await;
+        }
+        self.slice_plan_in_hand()
     }
 
     /// Whole-fleet current patches (no `df`) for the requested families, cached so a
@@ -652,21 +685,11 @@ impl AppState {
                             current_patches_ttl(force),
                             "current software patches",
                             || async {
-                                // The inventory says how to slice the feed. It is
-                                // usually warm, and on a cold start the query is
-                                // fetching it anyway, behind the same gate.
-                                let rows = match self.fleet_devices(None).await {
-                                    Ok(devices) => {
-                                        self.api
-                                            .fleet_software_patches_sliced(&devices, on_sw)
-                                            .await
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "device inventory unavailable; paging the third-party feed whole");
-                                        self.api.fleet_software_patches(None, None, on_sw).await
-                                    }
-                                };
-                                rows.map(Fetched::complete)
+                                let plan = self.slice_plan().await;
+                                self.api
+                                    .fleet_software_patches_sliced(None, plan.as_ref(), on_sw)
+                                    .await
+                                    .map(Fetched::complete)
                             },
                         )
                         .await

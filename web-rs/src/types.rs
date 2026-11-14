@@ -930,6 +930,10 @@ pub struct QueryProgressEvent {
     pub query_id: u64,
     pub stage: String,
     pub loaded: usize,
+    /// How many records the stage's feed holds, when NinjaOne announced it; absent
+    /// for the device inventory and the rollup stage.
+    #[serde(default)]
+    pub total: Option<usize>,
 }
 
 /// Available-update metadata from the backend updater. `notes` is the published

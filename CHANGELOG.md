@@ -36,6 +36,8 @@ version and start a fresh `[Unreleased]`.
   tables beneath them.
 - Installers include THIRD-PARTY-LICENSES.md.
 - Large fleets sort faster, and checking dispatched actions loads far less data from NinjaOne.
+- The first query of a session, and queries that include Installed or Failed history, finish
+  sooner on large fleets; small fleets make fewer requests.
 
 ### Fixed
 

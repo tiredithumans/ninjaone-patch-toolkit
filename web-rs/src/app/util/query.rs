@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use crate::types::{PatchGroup, PatchQueryArgs, RowSort};
 
-use super::super::state::Progress;
+use super::super::state::{Progress, Stage};
 use super::{clamp_page, filters_changed, page_count, paged_total};
 
 /// What [`AppState::run_query_inner`] should do, decided from the flags alone.
@@ -118,16 +118,76 @@ pub(crate) fn take_queued_run(
 
 /// Applies one backend `query:progress` event to the live counters. Unknown stages
 /// are ignored rather than guessed at, so a newer backend cannot corrupt the bar.
-pub(crate) fn apply_progress_stage(p: &mut Progress, stage: &str, loaded: usize) {
-    match stage {
-        "devices" => p.devices = loaded,
-        "osPatches" => p.os_patches = loaded,
-        "swPatches" => p.sw_patches = loaded,
-        "osInstalls" => p.os_installs = loaded,
-        "swInstalls" => p.sw_installs = loaded,
-        "joining" => p.joining = true,
-        _ => {}
+///
+/// `total` is taken as sent, absent included: a scan that starts over reports zero
+/// rows and no size until its new cursor announces one.
+pub(crate) fn apply_progress_stage(
+    p: &mut Progress,
+    stage: &str,
+    loaded: usize,
+    total: Option<usize>,
+) {
+    let slot = match stage {
+        "devices" => &mut p.devices,
+        "osPatches" => &mut p.os_patches,
+        "swPatches" => &mut p.sw_patches,
+        "osInstalls" => &mut p.os_installs,
+        "swInstalls" => &mut p.sw_installs,
+        "joining" => {
+            p.joining = true;
+            return;
+        }
+        _ => return,
+    };
+    *slot = Stage {
+        loaded,
+        total,
+        started: true,
+    };
+}
+
+/// Every feed a query can read, in the order they are listed, with its label.
+fn stages(p: &Progress) -> [(&'static str, Stage); 5] {
+    [
+        ("Devices", p.devices),
+        ("OS patches", p.os_patches),
+        ("Third-party patches", p.sw_patches),
+        ("OS install history", p.os_installs),
+        ("Third-party install history", p.sw_installs),
+    ]
+}
+
+/// Records loaded so far across every feed.
+pub(crate) fn progress_records(p: &Progress) -> usize {
+    stages(p).iter().map(|(_, s)| s.loaded).sum()
+}
+
+/// How far along a running query is, 0–0.95, or `None` for an indeterminate bar.
+///
+/// Measured where it can be: the records in against the sizes NinjaOne announced,
+/// over the feeds that announced one. That used to be a guess from how long the
+/// previous run took — wrong whenever the scope, the statuses or the cache state
+/// differed from last time, and unavailable on the first run of a session, the
+/// longest one. The guess remains the fallback while no feed has announced a size
+/// (the device inventory never does). Held under 1.0: the rollups still follow the
+/// last record, and an over-running estimate must not claim to be finished.
+pub(crate) fn progress_fraction(
+    p: &Progress,
+    elapsed_ms: f64,
+    last_duration_ms: Option<f64>,
+) -> Option<f64> {
+    const CEILING: f64 = 0.95;
+    let (loaded, total) = stages(p)
+        .iter()
+        .filter_map(|(_, s)| s.total.map(|total| (s.loaded.min(total), total)))
+        .fold((0usize, 0usize), |(l, t), (loaded, total)| {
+            (l.saturating_add(loaded), t.saturating_add(total))
+        });
+    if total > 0 {
+        return Some((loaded as f64 / total as f64).clamp(0.0, CEILING));
     }
+    let last = last_duration_ms.filter(|ms| *ms > 0.0)?;
+    Some((elapsed_ms / last).clamp(0.0, CEILING))
 }
 
 /// Which collection the view fetches once a run has landed.

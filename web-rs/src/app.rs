@@ -119,7 +119,7 @@ pub fn App() -> impl IntoView {
         state
             .run
             .progress
-            .update(|p| util::apply_progress_stage(p, &ev.stage, ev.loaded));
+            .update(|p| util::apply_progress_stage(p, &ev.stage, ev.loaded, ev.total));
     });
 
     // Live job status from the backend poller. Rows arrive already advanced, so

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,21 +11,134 @@ use super::{NinjaApiClient, ProgressFn, df_query};
 use crate::model::{Device, Patch};
 
 const SOFTWARE_PATCHES: &str = "/queries/software-patches";
+const OS_PATCH_INSTALLS: &str = "/queries/os-patch-installs";
+const SOFTWARE_PATCH_INSTALLS: &str = "/queries/software-patch-installs";
 
-/// How many location slices the whole-fleet third-party feed is split into, all
-/// paged at once.
+/// When a feed is paged as concurrent location slices, and into how many.
 ///
-/// One cursor scan of a 563,255-row feed is 113 pages in a row, and every page is a
-/// chance to lose one: on 2026-10-26 a page went missing every 19–85 pages, and each
-/// loss cost the scan all it had paged. Four slices cut a scan to about 28 pages and
-/// the wait to about the largest slice's, at four requests in flight — fewer than
-/// the seven legs a cold query already sends at once.
-const SOFTWARE_SLICES: usize = 4;
+/// One cursor scan pages strictly in sequence, and every page is a chance to lose
+/// one: on 2026-10-26 the 563,255-row third-party feed (113 pages) lost a page every
+/// 19–85 pages, and each loss cost the scan all it had paged. Slices cut both the
+/// wait and the exposure. The count used to be a flat four whatever the feed held,
+/// so a 3,000-row feed paid five sizing requests and four scans for what is one
+/// page, and a six-figure one still ran 28 pages a slice.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SlicePolicy {
+    /// A feed shorter than this is paged whole: a few pages in a row cost less than
+    /// sizing the slices does.
+    pub(super) min_rows: usize,
+    /// Rows one slice is cut to hold.
+    pub(super) rows_per_slice: usize,
+    /// Most slices paged at once. They share the tenant's rate limit with every
+    /// other leg of the query, the job poller and the `/jobs` poll.
+    pub(super) max_slices: usize,
+}
+
+/// Four pages before a feed is sliced, twelve pages a slice, six slices at most:
+/// under 240,000 rows this asks for no more than the four scans it always did.
+pub(super) const SLICE_POLICY: SlicePolicy = SlicePolicy {
+    min_rows: 4 * REPORTING_PAGE_SIZE as usize,
+    rows_per_slice: 12 * REPORTING_PAGE_SIZE as usize,
+    max_slices: 6,
+};
+
+impl SlicePolicy {
+    /// How many slices a feed of `total` rows is paged in; `1` pages it whole.
+    pub(super) fn slices_for(&self, total: usize) -> usize {
+        if total < self.min_rows {
+            1
+        } else {
+            total
+                .div_ceil(self.rows_per_slice.max(1))
+                .clamp(2, self.max_slices.max(2))
+        }
+    }
+}
 
 /// The most locations one slice names. Each id adds a few characters to the URL,
 /// and a request line past a proxy's limit (8 KB is common) fails outright, so a
 /// tenant with more locations than the slices can name pages the feed whole.
 const MAX_SLICE_LOCATIONS: usize = 200;
+
+/// The fleet's locations and the weight each is balanced by, from which a feed's
+/// `loc` slices are cut ([`SlicePlan::clauses`]).
+///
+/// Location rather than organization because it is the finer of the two facets the
+/// `/queries/*` endpoints honor in `df`: a fleet in one organization still splits.
+///
+/// A plan is only ever a *proposal*. NinjaOne drops a `df` clause it does not honor
+/// without saying so, and a plan can miss rows (a device with no location, a
+/// location the list does not name), so the fetch pages the slices only once their
+/// sizes — and then their rows — add up to the whole feed's
+/// ([`NinjaApiClient::paged_in_slices`]). That check is what lets a plan come from
+/// whatever is already in hand, however stale, instead of from a fresh inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlicePlan {
+    /// `(location id, weight)`, heaviest first, ties by id.
+    locations: Vec<(i64, usize)>,
+}
+
+impl SlicePlan {
+    /// A plan balanced by device count. `None` when the fleet cannot be cut in two:
+    /// fewer than two locations, or a device with none (no clause could name it).
+    pub fn from_devices(devices: &[Device]) -> Option<Self> {
+        let mut per_location: HashMap<i64, usize> = HashMap::new();
+        for device in devices {
+            *per_location.entry(device.location_id?).or_default() += 1;
+        }
+        Self::weighted(per_location.into_iter().collect())
+    }
+
+    /// A plan over a bare list of location ids, every one weighted alike — for when
+    /// no inventory is in hand to count devices by. Less even than
+    /// [`Self::from_devices`], and just as safe: the sizes decide.
+    pub fn from_locations(ids: impl IntoIterator<Item = i64>) -> Option<Self> {
+        let unique: HashSet<i64> = ids.into_iter().collect();
+        Self::weighted(unique.into_iter().map(|id| (id, 1)).collect())
+    }
+
+    fn weighted(mut locations: Vec<(i64, usize)>) -> Option<Self> {
+        if locations.len() < 2 {
+            return None;
+        }
+        locations.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        Some(Self { locations })
+    }
+
+    /// Up to `wanted` `loc` clauses that together name every location, balanced by
+    /// weight: largest first, each onto the lightest slice so far, so the split is
+    /// close to even unless one location dominates, and that one then gets a slice
+    /// to itself. More slices than `wanted` when that is what keeps each under
+    /// [`MAX_SLICE_LOCATIONS`]; `None` when even `max_slices` cannot, or when the
+    /// result would be a single slice.
+    fn clauses(&self, wanted: usize, max_slices: usize) -> Option<Vec<String>> {
+        let to_fit = self.locations.len().div_ceil(MAX_SLICE_LOCATIONS);
+        let count = wanted.max(to_fit).min(self.locations.len());
+        if count < 2 || count > max_slices {
+            return None;
+        }
+        let mut slices: Vec<(usize, Vec<i64>)> = vec![(0, Vec::new()); count];
+        for &(location, weight) in &self.locations {
+            let lightest = (0..slices.len())
+                .min_by_key(|&slice| slices[slice].0)
+                .unwrap_or(0);
+            slices[lightest].0 += weight;
+            slices[lightest].1.push(location);
+        }
+        if slices
+            .iter()
+            .any(|(_, ids)| ids.len() > MAX_SLICE_LOCATIONS)
+        {
+            return None;
+        }
+        Some(
+            slices
+                .iter()
+                .filter_map(|(_, ids)| crate::filter::id_clause("loc", ids))
+                .collect(),
+        )
+    }
+}
 
 impl NinjaApiClient {
     /// Current OS patches across the filtered fleet — those "for which there were
@@ -47,107 +160,149 @@ impl NinjaApiClient {
         .await
     }
 
-    /// Current third-party software patches across the filtered fleet.
-    pub async fn fleet_software_patches(
-        &self,
-        df: Option<&str>,
-        status: Option<&str>,
-        on_progress: Option<&ProgressFn<'_>>,
-    ) -> Result<Vec<Patch>> {
-        self.get_paginated_reporting(
-            SOFTWARE_PATCHES,
-            &patch_query(df, status),
-            REPORTING_PAGE_SIZE,
-            on_progress,
-        )
-        .await
-    }
-
-    /// Every current third-party patch in the fleet, paged as concurrent location
-    /// slices of `devices` (see [`plan_location_slices`]) rather than one long scan.
-    ///
-    /// The slices replace the whole feed only if they provably add up to it. Before
-    /// any paging, a one-row page per slice and one for the whole feed read their
-    /// sizes, and the slices' must sum to exactly the whole's. That catches a `df`
-    /// NinjaOne ignores (an unhonored clause is dropped silently, so every slice would
-    /// be the whole feed) and rows on devices no slice names (the inventory's
-    /// locations do not cover them) before either costs a download. The paged rows
-    /// must then add up to the same total, which catches a device that moved between
-    /// slices mid-fetch. Anything else — no plan, a size that cannot be read, a sum
-    /// that does not match — pages the feed whole, as before.
+    /// Current third-party patches under `df` (the whole fleet when `None`), paged
+    /// as concurrent location slices of `plan` when the feed is long enough to be
+    /// worth it — see [`Self::paged_in_slices`].
     pub async fn fleet_software_patches_sliced(
         &self,
-        devices: &[Device],
+        df: Option<&str>,
+        plan: Option<&SlicePlan>,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
-        let Some(slices) = plan_location_slices(devices) else {
-            return self.fleet_software_patches(None, None, on_progress).await;
+        self.paged_in_slices(SLICE_POLICY, SOFTWARE_PATCHES, df, &[], plan, on_progress)
+            .await
+    }
+
+    /// Pages one `/queries/*` patch feed — `rest` is its query without the `df` —
+    /// as concurrent location slices of `plan` rather than one long scan, when
+    /// `policy` says the feed is long enough and the slices provably add up to it.
+    ///
+    /// The whole feed is sized first, off a one-row page; a short feed is then
+    /// simply paged, at the cost of that one request. Otherwise a one-row page per
+    /// slice reads their sizes, which must sum to exactly the whole's. That catches
+    /// a `df` NinjaOne ignores (an unhonored clause is dropped silently, so every
+    /// slice would be the whole feed) and rows no slice names (a device with no
+    /// location, a location the plan does not list) before either costs a download.
+    /// The paged rows must then add up to the same total, which catches a device
+    /// that moved between slices mid-fetch. Anything else — no plan, a size that
+    /// cannot be read, a sum that does not match — pages the feed whole.
+    ///
+    /// A slice's `df` is the caller's own narrowed by a `loc` clause, so a scoped
+    /// feed slices like the whole fleet's.
+    pub(super) async fn paged_in_slices(
+        &self,
+        policy: SlicePolicy,
+        path: &'static str,
+        df: Option<&str>,
+        rest: &[(&'static str, String)],
+        plan: Option<&SlicePlan>,
+        on_progress: Option<&ProgressFn<'_>>,
+    ) -> Result<Vec<Patch>> {
+        let query_for = |df: Option<&str>| {
+            let mut query = df_query(df);
+            query.extend_from_slice(rest);
+            query
+        };
+        let whole_query = query_for(df);
+        let whole =
+            || self.get_paginated_reporting(path, &whole_query, REPORTING_PAGE_SIZE, on_progress);
+        let Some(plan) = plan else {
+            return whole().await;
         };
         let started = std::time::Instant::now();
 
-        // The whole feed first, then each slice.
-        let queries: Vec<_> = std::iter::once(df_query(None))
-            .chain(slices.iter().map(|df| df_query(Some(df))))
+        let total = match self.feed_size(path, &whole_query).await {
+            Ok(Some(total)) => total,
+            Ok(None) => return whole().await,
+            Err(err) => {
+                warn!(
+                    path,
+                    error = format!("{err:#}").as_str(),
+                    "could not size the feed; paging it whole"
+                );
+                return whole().await;
+            }
+        };
+        let wanted = policy.slices_for(total);
+        if wanted < 2 {
+            return whole().await;
+        }
+        let Some(clauses) = plan.clauses(wanted, policy.max_slices) else {
+            return whole().await;
+        };
+        let slices: Vec<String> = clauses
+            .into_iter()
+            .map(|loc| match df {
+                Some(scope) if !scope.is_empty() => format!("{scope} AND {loc}"),
+                _ => loc,
+            })
             .collect();
+
+        let queries: Vec<_> = slices.iter().map(|df| query_for(Some(df))).collect();
         let sizes = try_join_all(
             queries
                 .iter()
-                .map(|query| self.feed_size(SOFTWARE_PATCHES, query))
+                .map(|query| self.feed_size(path, query))
                 .collect(),
         )
         .await;
-        let total = match sizes {
-            Ok(sizes) => {
-                let (whole, parts) = (sizes[0], &sizes[1..]);
+        match sizes {
+            Ok(parts) => {
                 let sliced = parts.iter().copied().sum::<Option<usize>>();
-                match whole {
-                    Some(whole) if sliced == Some(whole) => Some(whole),
-                    _ => {
-                        warn!(
-                            path = SOFTWARE_PATCHES,
-                            ?whole,
-                            ?parts,
-                            "the location slices do not add up to the whole feed; paging it whole"
-                        );
-                        None
-                    }
+                if sliced != Some(total) {
+                    warn!(
+                        path,
+                        whole = total,
+                        ?parts,
+                        "the location slices do not add up to the whole feed; paging it whole"
+                    );
+                    return whole().await;
                 }
             }
             Err(err) => {
                 warn!(
-                    path = SOFTWARE_PATCHES,
+                    path,
                     error = format!("{err:#}").as_str(),
                     "could not size the location slices; paging the feed whole"
                 );
-                None
+                return whole().await;
             }
-        };
-        let Some(total) = total else {
-            return self.fleet_software_patches(None, None, on_progress).await;
-        };
+        }
 
         // Each slice restarts its own progress from zero, so the sum is what the
-        // operator sees.
+        // operator sees, against the whole feed's size.
         let loaded: Vec<AtomicUsize> = slices.iter().map(|_| AtomicUsize::new(0)).collect();
         let report = |slice: usize, rows: usize| {
             loaded[slice].store(rows, Ordering::Relaxed);
             if let Some(report) = on_progress {
-                report(loaded.iter().map(|n| n.load(Ordering::Relaxed)).sum());
+                report(
+                    loaded.iter().map(|n| n.load(Ordering::Relaxed)).sum(),
+                    Some(total),
+                );
             }
         };
         let report = &report;
         let reporters: Vec<_> = (0..slices.len())
-            .map(|slice| move |rows: usize| report(slice, rows))
+            .map(|slice| move |rows: usize, _: Option<usize>| report(slice, rows))
             .collect();
         let pages = try_join_all(
-            slices
+            queries
                 .iter()
                 .zip(&reporters)
                 .enumerate()
-                .map(|(n, (df, reporter))| {
+                .map(|(n, (query, reporter))| {
                     // Every log line a slice's scan writes carries which slice it is.
-                    self.fleet_software_patches(Some(df), None, Some(reporter as &ProgressFn))
-                        .instrument(info_span!("slice", n = n + 1, of = slices.len()))
+                    self.get_paginated_reporting(
+                        path,
+                        query,
+                        REPORTING_PAGE_SIZE,
+                        Some(reporter as &ProgressFn),
+                    )
+                    .instrument(info_span!(
+                        "slice",
+                        n = n + 1,
+                        of = slices.len()
+                    ))
                 })
                 .collect(),
         )
@@ -159,19 +314,19 @@ impl NinjaApiClient {
         let paged: usize = pages.iter().map(Vec::len).sum();
         if paged != total {
             warn!(
-                path = SOFTWARE_PATCHES,
+                path,
                 rows = paged,
                 total,
                 "the location slices paged a different total than the whole feed holds; paging it whole"
             );
-            return self.fleet_software_patches(None, None, on_progress).await;
+            return whole().await;
         }
         let mut rows = Vec::with_capacity(paged);
         for page in pages {
             rows.extend(page);
         }
         info!(
-            path = SOFTWARE_PATCHES,
+            path,
             slices = slices.len(),
             rows = rows.len(),
             elapsed_s = started.elapsed().as_secs(),
@@ -184,39 +339,51 @@ impl NinjaApiClient {
     /// endpoint returns both successful and failed records; `status` narrows it to a
     /// single NinjaOne install status (`FAILED`/`INSTALLED`) server-side, so a query
     /// for just one of them isn't forced to download the other and discard it.
+    ///
+    /// A long pull is paged as location slices of `plan` under the same checks as
+    /// the third-party feed ([`Self::paged_in_slices`]): it is fetched afresh by
+    /// every query that asks for it, auto-refresh ticks included, and a month of
+    /// successful installs on a large fleet is as long a scan as any.
     pub async fn fleet_os_patch_installs(
         &self,
         df: Option<&str>,
         status: Option<&str>,
         installed_after: i64,
         installed_before: Option<i64>,
+        plan: Option<&SlicePlan>,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
-        let query = install_query(df, status, installed_after, installed_before);
-        self.get_paginated_reporting(
-            "/queries/os-patch-installs",
-            &query,
-            REPORTING_PAGE_SIZE,
+        let rest = install_query(status, installed_after, installed_before);
+        self.paged_in_slices(
+            SLICE_POLICY,
+            OS_PATCH_INSTALLS,
+            df,
+            &rest,
+            plan,
             on_progress,
         )
         .await
     }
 
     /// Software-patch install history within a time window (Unix seconds). `status`
-    /// narrows to a single install status server-side — see `fleet_os_patch_installs`.
+    /// narrows to a single install status server-side, and a long pull is sliced —
+    /// see `fleet_os_patch_installs`.
     pub async fn fleet_software_patch_installs(
         &self,
         df: Option<&str>,
         status: Option<&str>,
         installed_after: i64,
         installed_before: Option<i64>,
+        plan: Option<&SlicePlan>,
         on_progress: Option<&ProgressFn<'_>>,
     ) -> Result<Vec<Patch>> {
-        let query = install_query(df, status, installed_after, installed_before);
-        self.get_paginated_reporting(
-            "/queries/software-patch-installs",
-            &query,
-            REPORTING_PAGE_SIZE,
+        let rest = install_query(status, installed_after, installed_before);
+        self.paged_in_slices(
+            SLICE_POLICY,
+            SOFTWARE_PATCH_INSTALLS,
+            df,
+            &rest,
+            plan,
             on_progress,
         )
         .await
@@ -229,48 +396,6 @@ fn patch_query(df: Option<&str>, status: Option<&str>) -> Vec<(&'static str, Str
         query.push(("status", s.to_string()));
     }
     query
-}
-
-/// Splits the fleet into up to [`SOFTWARE_SLICES`] `df` clauses by location,
-/// balanced by device count, or `None` when it cannot be split in two: fewer than
-/// two locations, a device with none (no clause could name it), or a slice that
-/// would name more than [`MAX_SLICE_LOCATIONS`].
-///
-/// Location rather than organization because it is the finer of the two facets the
-/// `/queries/*` endpoints honor in `df`: a fleet in one organization still splits.
-pub fn plan_location_slices(devices: &[Device]) -> Option<Vec<String>> {
-    let mut per_location: HashMap<i64, usize> = HashMap::new();
-    for device in devices {
-        *per_location.entry(device.location_id?).or_default() += 1;
-    }
-    if per_location.len() < 2 {
-        return None;
-    }
-    let mut locations: Vec<(i64, usize)> = per_location.into_iter().collect();
-    // Largest first, each onto the lightest slice so far: close to even unless one
-    // location dominates, and that one then gets a slice to itself.
-    locations.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let mut slices: Vec<(usize, Vec<i64>)> =
-        vec![(0, Vec::new()); SOFTWARE_SLICES.min(locations.len())];
-    for (location, count) in locations {
-        let lightest = (0..slices.len())
-            .min_by_key(|&slice| slices[slice].0)
-            .unwrap_or(0);
-        slices[lightest].0 += count;
-        slices[lightest].1.push(location);
-    }
-    if slices
-        .iter()
-        .any(|(_, ids)| ids.len() > MAX_SLICE_LOCATIONS)
-    {
-        return None;
-    }
-    Some(
-        slices
-            .iter()
-            .filter_map(|(_, ids)| crate::filter::id_clause("loc", ids))
-            .collect(),
-    )
 }
 
 /// Polls every future in `futures` on the current task, as `tokio::try_join!` does
@@ -301,13 +426,14 @@ async fn try_join_all<T, F: Future<Output = Result<T>>>(futures: Vec<F>) -> Resu
     .await
 }
 
+/// The install-history query without its `df`, which [`NinjaApiClient::paged_in_slices`]
+/// adds — whole, or narrowed per slice.
 fn install_query(
-    df: Option<&str>,
     status: Option<&str>,
     installed_after: i64,
     installed_before: Option<i64>,
 ) -> Vec<(&'static str, String)> {
-    let mut query = df_query(df);
+    let mut query = Vec::new();
     if let Some(s) = status {
         query.push(("status", s.to_string()));
     }
@@ -337,24 +463,71 @@ mod tests {
         devices
     }
 
+    /// The clauses a plan over `devices` cuts for `wanted` slices, under the
+    /// shipped ceiling.
+    fn clauses(devices: &[Device], wanted: usize) -> Option<Vec<String>> {
+        SlicePlan::from_devices(devices)?.clauses(wanted, SLICE_POLICY.max_slices)
+    }
+
     /// Largest location first, each onto the lightest slice: the six locations land
     /// as 5 / 4 / 4 / 3 devices rather than in the order they were listed.
     #[test]
     fn the_feed_is_sliced_by_location_and_balanced_by_device_count() {
         let devices = fleet(&[(6, 1), (4, 2), (1, 5), (5, 1), (3, 3), (2, 4)]);
         assert_eq!(
-            plan_location_slices(&devices).expect("a plan"),
+            clauses(&devices, 4).expect("a plan"),
             ["loc=1", "loc=2", "loc in (3, 6)", "loc in (4, 5)"]
+        );
+        assert_eq!(
+            clauses(&devices, 2).expect("a plan"),
+            ["loc in (1, 4, 5)", "loc in (2, 3, 6)"],
+            "fewer slices, still balanced: 8 and 8 devices"
         );
     }
 
     #[test]
     fn fewer_locations_than_slices_get_one_slice_each() {
         let devices = fleet(&[(7, 3), (8, 1)]);
+        assert_eq!(clauses(&devices, 4).expect("a plan"), ["loc=7", "loc=8"]);
+    }
+
+    /// With no inventory to count devices by, the cached location list still cuts
+    /// the feed: every location weighs the same, so they are dealt out in id order,
+    /// and a repeated id names its location once.
+    #[test]
+    fn a_bare_location_list_is_dealt_out_evenly() {
+        let plan = SlicePlan::from_locations([30, 10, 20, 40, 10]).expect("a plan");
         assert_eq!(
-            plan_location_slices(&devices).expect("a plan"),
-            ["loc=7", "loc=8"]
+            plan.clauses(2, SLICE_POLICY.max_slices).expect("clauses"),
+            ["loc in (10, 30)", "loc in (20, 40)"]
         );
+        assert_eq!(SlicePlan::from_locations([7]), None);
+        assert_eq!(SlicePlan::from_locations([]), None);
+    }
+
+    /// A short feed is paged whole, a long one in more slices the longer it is, and
+    /// never past the ceiling. Under 240,000 rows that is at most the four scans the
+    /// feed was always cut into.
+    #[test]
+    fn the_slice_count_follows_the_feed_size() {
+        let page = REPORTING_PAGE_SIZE as usize;
+        let slices = |rows: usize| SLICE_POLICY.slices_for(rows);
+        assert_eq!(slices(0), 1);
+        assert_eq!(
+            slices(4 * page - 1),
+            1,
+            "three pages and a bit: paged whole"
+        );
+        assert_eq!(slices(4 * page), 2);
+        assert_eq!(slices(24 * page), 2);
+        assert_eq!(slices(24 * page + 1), 3);
+        assert_eq!(slices(48 * page), 4);
+        assert_eq!(
+            slices(563_255),
+            6,
+            "the 113-page feed: six slices of 19 pages"
+        );
+        assert_eq!(slices(usize::MAX), 6);
     }
 
     /// The slices finish in whatever order NinjaOne answers them, but their rows are
@@ -389,17 +562,28 @@ mod tests {
     /// no slice, and a slice naming too many ids is a URL a proxy may refuse.
     #[test]
     fn a_fleet_that_cannot_be_sliced_is_paged_whole() {
-        assert_eq!(plan_location_slices(&fleet(&[(1, 9)])), None);
-        assert_eq!(plan_location_slices(&[]), None);
+        assert_eq!(SlicePlan::from_devices(&fleet(&[(1, 9)])), None);
+        assert_eq!(SlicePlan::from_devices(&[]), None);
 
         let mut unplaced = fleet(&[(1, 2), (2, 2)]);
         unplaced[0].location_id = None;
-        assert_eq!(plan_location_slices(&unplaced), None);
+        assert_eq!(SlicePlan::from_devices(&unplaced), None);
 
-        let most = SOFTWARE_SLICES * MAX_SLICE_LOCATIONS;
         let locations = |n: usize| (1..=n as i64).map(|l| (l, 1)).collect::<Vec<_>>();
-        assert!(plan_location_slices(&fleet(&locations(most))).is_some());
-        assert_eq!(plan_location_slices(&fleet(&locations(most + 1))), None);
+        let most = SLICE_POLICY.max_slices * MAX_SLICE_LOCATIONS;
+        assert!(clauses(&fleet(&locations(most)), 2).is_some());
+        assert_eq!(clauses(&fleet(&locations(most + 1)), 2), None);
+    }
+
+    /// A fleet with more locations than the wanted slices can name gets as many more
+    /// slices as it takes to keep each URL short, rather than one long scan.
+    #[test]
+    fn extra_slices_keep_every_slice_under_the_location_cap() {
+        let locations: Vec<_> = (1..=(2 * MAX_SLICE_LOCATIONS as i64 + 1))
+            .map(|l| (l, 1))
+            .collect();
+        let cut = clauses(&fleet(&locations), 2).expect("a plan");
+        assert_eq!(cut.len(), 3, "two slices would name 201 locations each");
     }
 
     /// The query builders decide what the *server* filters, so a mistake here is
@@ -443,11 +627,11 @@ mod tests {
     /// `installedBefore`.
     #[test]
     fn the_install_window_always_sends_after_and_before_only_when_bounded() {
-        let open = install_query(None, None, 1_700_000_000, None);
+        let open = install_query(None, 1_700_000_000, None);
         assert_eq!(keys(&open), vec!["installedAfter"]);
         assert_eq!(value(&open, "installedAfter"), Some("1700000000"));
 
-        let bounded = install_query(None, None, 1_700_000_000, Some(1_800_000_000));
+        let bounded = install_query(None, 1_700_000_000, Some(1_800_000_000));
         assert_eq!(keys(&bounded), vec!["installedAfter", "installedBefore"]);
         assert_eq!(value(&bounded, "installedBefore"), Some("1800000000"));
     }
@@ -455,14 +639,15 @@ mod tests {
     /// Status pushdown is what keeps a failure-dashboard query from downloading
     /// the window's successful installs just to drop them. `run_query` passes a
     /// status only when exactly one install status is requested; with both, it must
-    /// be absent or the other kind of record never arrives.
+    /// be absent or the other kind of record never arrives. The `df` is not this
+    /// builder's: the slicer adds it, whole or narrowed per slice.
     #[test]
     fn the_install_history_pushes_a_single_status_and_omits_it_otherwise() {
-        let failed = install_query(Some("org = 1"), Some("FAILED"), 1, None);
-        assert_eq!(keys(&failed), vec!["df", "status", "installedAfter"]);
+        let failed = install_query(Some("FAILED"), 1, None);
+        assert_eq!(keys(&failed), vec!["status", "installedAfter"]);
         assert_eq!(value(&failed, "status"), Some("FAILED"));
 
-        let both = install_query(Some("org = 1"), None, 1, None);
+        let both = install_query(None, 1, None);
         assert!(
             !keys(&both).contains(&"status"),
             "requesting INSTALLED *and* FAILED must not narrow the server-side status"

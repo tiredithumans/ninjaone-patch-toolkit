@@ -1,4 +1,5 @@
 use super::paging::*;
+use super::patches::{SlicePlan, SlicePolicy};
 use super::*;
 use serde_json::json;
 
@@ -521,7 +522,7 @@ async fn a_stable_cursor_name_with_an_advancing_offset_is_progress_not_a_stall()
     let client = NinjaApiClient::new(http, auth);
 
     let patches = client
-        .fleet_software_patches(None, None, None)
+        .fleet_software_patches_sliced(None, None, None)
         .await
         .expect("software patches call");
 
@@ -572,7 +573,7 @@ async fn a_cursor_that_never_advances_is_an_error_not_a_short_read() {
     let client = NinjaApiClient::new(http, auth);
 
     let err = client
-        .fleet_software_patches(None, None, None)
+        .fleet_software_patches_sliced(None, None, None)
         .await
         .expect_err("a stalled cursor must be reported, not returned as a short read");
     assert!(
@@ -629,7 +630,7 @@ async fn a_cursor_that_oscillates_is_an_error_not_an_endless_scan() {
     let client = NinjaApiClient::new(http, auth);
 
     let err = client
-        .fleet_software_patches(None, None, None)
+        .fleet_software_patches_sliced(None, None, None)
         .await
         .expect_err("a revisited cursor must be reported, not paged forever");
     assert!(
@@ -863,7 +864,7 @@ async fn a_cursor_page_outlasts_the_client_timeout() {
     let client = NinjaApiClient::new(http, auth).with_cursor_page_timeout(Duration::from_secs(5));
 
     let patches = client
-        .fleet_software_patches(None, None, None)
+        .fleet_software_patches_sliced(None, None, None)
         .await
         .expect("the slow cursor page is waited for");
     assert_eq!(patches.len(), 3);
@@ -1934,7 +1935,7 @@ async fn scan_software(pages: Vec<serde_json::Value>) -> (Result<Vec<Patch>>, Ve
     let http = reqwest::Client::new();
     let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
     let client = NinjaApiClient::new(http, auth);
-    let result = client.fleet_software_patches(None, None, None).await;
+    let result = client.fleet_software_patches_sliced(None, None, None).await;
     (result, request_cursors(&server).await)
 }
 
@@ -2237,7 +2238,7 @@ async fn scan_live(
         .mount(&server)
         .await;
     let result = timing_out_client(&server)
-        .fleet_software_patches(None, None, None)
+        .fleet_software_patches_sliced(None, None, None)
         .await
         .map(|patches| patches.iter().map(|p| p.device_id).collect());
     (result, request_cursors(&server).await)
@@ -2495,13 +2496,36 @@ struct FeedRequest {
     page_size: String,
 }
 
+/// A policy that slices any feed, four rows to a slice: the fixtures are a dozen
+/// rows, not the twenty thousand the shipped policy starts at.
+const TINY_SLICES: SlicePolicy = SlicePolicy {
+    min_rows: 1,
+    rows_per_slice: 4,
+    max_slices: 4,
+};
+
+/// What one sliced fetch did: the device id of every row kept (sorted), the rows
+/// and total last reported as progress, and every request the server saw.
+struct SlicedScan {
+    kept: Vec<Option<i64>>,
+    progress: usize,
+    total: Option<usize>,
+    requests: Vec<FeedRequest>,
+}
+
 /// Fetches the third-party feed in slices of `inventory` from a [`LocationFeed`]
-/// over `feed`, and returns the device id of every row kept (sorted), the progress
-/// last reported, and every request the server saw.
-async fn scan_sliced(
+/// over `feed`, under [`TINY_SLICES`].
+async fn scan_sliced(inventory: &[(i64, i64)], feed: LocationFeed) -> SlicedScan {
+    scan_sliced_with(TINY_SLICES, None, inventory, feed).await
+}
+
+/// [`scan_sliced`] under `policy`, with the feed scoped by `df`.
+async fn scan_sliced_with(
+    policy: SlicePolicy,
+    df: Option<&str>,
     inventory: &[(i64, i64)],
     feed: LocationFeed,
-) -> (Vec<Option<i64>>, usize, Vec<FeedRequest>) {
+) -> SlicedScan {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer};
 
@@ -2517,18 +2541,28 @@ async fn scan_sliced(
             serde_json::from_value(json!({ "id": id, "locationId": loc })).expect("device")
         })
         .collect();
-    let last = std::sync::atomic::AtomicUsize::new(0);
-    let progress = |n: usize| last.store(n, std::sync::atomic::Ordering::SeqCst);
+    let plan = SlicePlan::from_devices(&devices);
+    let last = std::sync::Mutex::new((0, None));
+    let progress = |n: usize, total: Option<usize>| {
+        *last.lock().expect("progress") = (n, total);
+    };
     let http = reqwest::Client::new();
     let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
-    let mut rows: Vec<_> = NinjaApiClient::new(http, auth)
-        .fleet_software_patches_sliced(&devices, Some(&progress))
+    let mut kept: Vec<_> = NinjaApiClient::new(http, auth)
+        .paged_in_slices(
+            policy,
+            "/queries/software-patches",
+            df,
+            &[],
+            plan.as_ref(),
+            Some(&progress),
+        )
         .await
         .expect("the fetch completes")
         .iter()
         .map(|p| p.device_id)
         .collect();
-    rows.sort_unstable();
+    kept.sort_unstable();
     let requests = server
         .received_requests()
         .await
@@ -2547,7 +2581,13 @@ async fn scan_sliced(
             }
         })
         .collect();
-    (rows, last.into_inner(), requests)
+    let (progress, total) = last.into_inner().expect("progress");
+    SlicedScan {
+        kept,
+        progress,
+        total,
+        requests,
+    }
 }
 
 /// Six `(device, location)` pairs over three locations.
@@ -2573,7 +2613,12 @@ fn requests_for(requests: &[FeedRequest], page_size: &str) -> Vec<Option<String>
 /// them, and no whole-feed scan at all.
 #[tokio::test]
 async fn the_third_party_feed_is_paged_in_location_slices_that_add_up_to_it() {
-    let (kept, progress, requests) = scan_sliced(
+    let SlicedScan {
+        kept,
+        progress,
+        total,
+        requests,
+    } = scan_sliced(
         &THREE_LOCATIONS,
         LocationFeed {
             rows: two_rows_each(),
@@ -2588,6 +2633,7 @@ async fn the_third_party_feed_is_paged_in_location_slices_that_add_up_to_it() {
         progress, 12,
         "the slices' progress is reported as one total"
     );
+    assert_eq!(total, Some(12), "against the whole feed's size");
     let slices = ["loc=10", "loc=20", "loc=30"].map(|df| Some(df.to_string()));
     let sized: Vec<_> = std::iter::once(None).chain(slices.clone()).collect();
     assert_eq!(
@@ -2607,7 +2653,12 @@ async fn the_third_party_feed_is_paged_in_location_slices_that_add_up_to_it() {
 /// paged whole instead — each row once, not once per slice.
 #[tokio::test]
 async fn slices_the_server_does_not_filter_are_never_paged() {
-    let (kept, progress, requests) = scan_sliced(
+    let SlicedScan {
+        kept,
+        progress,
+        requests,
+        ..
+    } = scan_sliced(
         &THREE_LOCATIONS,
         LocationFeed {
             rows: two_rows_each(),
@@ -2632,7 +2683,7 @@ async fn slices_the_server_does_not_filter_are_never_paged() {
 async fn rows_no_slice_covers_page_the_feed_whole() {
     let mut rows = two_rows_each();
     rows.push((99, 40));
-    let (kept, _, requests) = scan_sliced(
+    let SlicedScan { kept, requests, .. } = scan_sliced(
         &THREE_LOCATIONS,
         LocationFeed {
             rows,
@@ -2658,7 +2709,7 @@ async fn rows_no_slice_covers_page_the_feed_whole() {
 /// whole.
 #[tokio::test]
 async fn slices_that_page_a_different_total_page_the_feed_whole() {
-    let (kept, _, requests) = scan_sliced(
+    let SlicedScan { kept, requests, .. } = scan_sliced(
         &THREE_LOCATIONS,
         LocationFeed {
             rows: two_rows_each(),
@@ -2680,7 +2731,7 @@ async fn slices_that_page_a_different_total_page_the_feed_whole() {
 /// first, fall short of the total, and the feed is paged whole like any mismatch.
 #[tokio::test]
 async fn an_absurd_announced_count_is_never_allocated() {
-    let (kept, _, requests) = scan_sliced(
+    let SlicedScan { kept, requests, .. } = scan_sliced(
         &THREE_LOCATIONS,
         LocationFeed {
             rows: two_rows_each(),
@@ -2694,4 +2745,109 @@ async fn an_absurd_announced_count_is_never_allocated() {
     let mut paged = requests_for(&requests, &REPORTING_PAGE_SIZE.to_string());
     paged.retain(Option::is_none);
     assert_eq!(paged, [None], "the slices were paged, then the feed whole");
+}
+
+/// A feed too short to be worth slicing costs one sizing request and is then paged
+/// in one scan: it used to be sized five times over and paged as four scans, for
+/// what is a single page.
+#[tokio::test]
+async fn a_short_feed_is_sized_once_and_paged_whole() {
+    let SlicedScan { kept, requests, .. } = scan_sliced_with(
+        SlicePolicy {
+            min_rows: 100,
+            ..TINY_SLICES
+        },
+        None,
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows: two_rows_each(),
+            honors_df: true,
+            drifts: false,
+            count_scale: 1,
+        },
+    )
+    .await;
+    assert_eq!(kept.len(), 12);
+    assert_eq!(
+        requests_for(&requests, "1"),
+        [None],
+        "only the whole is sized"
+    );
+    assert_eq!(
+        requests_for(&requests, &REPORTING_PAGE_SIZE.to_string()),
+        [None]
+    );
+}
+
+/// A scoped feed is cut the same way: each slice is the caller's own `df` narrowed
+/// by a `loc` clause, and they are held to the scoped feed's size. This server
+/// drops every `df`, so the slices are sized and then refused; what is asserted is
+/// what they asked for.
+#[tokio::test]
+async fn the_slices_of_a_scoped_feed_keep_its_scope() {
+    let SlicedScan { kept, requests, .. } = scan_sliced_with(
+        TINY_SLICES,
+        Some("org=5"),
+        &THREE_LOCATIONS,
+        LocationFeed {
+            rows: two_rows_each(),
+            honors_df: false,
+            drifts: false,
+            count_scale: 1,
+        },
+    )
+    .await;
+    assert_eq!(kept.len(), 12);
+    assert_eq!(
+        requests_for(&requests, "1"),
+        [
+            "org=5",
+            "org=5 AND loc=10",
+            "org=5 AND loc=20",
+            "org=5 AND loc=30"
+        ]
+        .map(|df| Some(df.to_string())),
+    );
+    assert_eq!(
+        requests_for(&requests, &REPORTING_PAGE_SIZE.to_string()),
+        [Some("org=5".to_string())],
+        "the refused slices are never paged; the scoped feed is, whole"
+    );
+}
+
+/// A cursor scan reports its announced `count` beside the rows loaded, so the UI
+/// can draw how far along the fetch is; the count is taken from the first cursor.
+#[tokio::test]
+async fn progress_carries_the_cursors_announced_count() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/software-patches"))
+        .respond_with(LocationFeed {
+            rows: two_rows_each(),
+            honors_df: true,
+            drifts: false,
+            count_scale: 1,
+        })
+        .mount(&server)
+        .await;
+    let seen = std::sync::Mutex::new(Vec::new());
+    let progress = |n: usize, total: Option<usize>| seen.lock().expect("seen").push((n, total));
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    NinjaApiClient::new(http, auth)
+        .get_paginated_reporting::<crate::model::Patch>(
+            "/queries/software-patches",
+            &[],
+            5,
+            Some(&progress),
+        )
+        .await
+        .expect("the scan completes");
+    assert_eq!(
+        seen.into_inner().expect("seen"),
+        [(5, Some(12)), (10, Some(12)), (12, Some(12))]
+    );
 }

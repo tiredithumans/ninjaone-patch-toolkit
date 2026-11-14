@@ -773,6 +773,7 @@ fn ipc_fixture_is_current() {
                 query_id: 3,
                 stage: "osPatches",
                 loaded: 500,
+                total: Some(6721),
             },
             "action:progress": ActionProgressEvent {
                 batch_id: BATCH_ID,

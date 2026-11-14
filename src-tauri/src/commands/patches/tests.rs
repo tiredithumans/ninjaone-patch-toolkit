@@ -424,7 +424,7 @@ async fn fleet_current_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPatches>
 async fn fleet_current_both_via(c: &NinjaApiClient) -> anyhow::Result<CurrentPatches> {
     Ok(CurrentPatches {
         os: Arc::new(c.fleet_os_patches(None, None, None).await?),
-        sw: Arc::new(c.fleet_software_patches(None, None, None).await?),
+        sw: Arc::new(c.fleet_software_patches_sliced(None, None, None).await?),
         fetched_at: fixed_now(),
         os_fetched_at: Some(fixed_now()),
         sw_fetched_at: Some(fixed_now()),
@@ -512,7 +512,7 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -525,6 +525,7 @@ async fn pending_query_joins_current_feed_and_maps_manual_to_pending() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Pending]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -587,7 +588,7 @@ async fn a_query_stamps_its_rows_from_the_exploit_snapshot_it_was_given() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -603,6 +604,7 @@ async fn a_query_stamps_its_rows_from_the_exploit_snapshot_it_was_given() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Pending]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -648,6 +650,7 @@ async fn a_query_stamps_its_rows_from_the_exploit_snapshot_it_was_given() {
         "https://app.ninjarmm.com".into(),
         exploited_only,
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -699,7 +702,7 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -712,6 +715,7 @@ async fn installed_query_routes_to_history_endpoint_not_current_feed() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Installed]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -785,7 +789,7 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -801,6 +805,7 @@ async fn failed_and_untyped_current_records_count_as_pending_and_show_as_rows() 
             vec![PatchStatus::Pending, PatchStatus::Failed],
         ),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -874,7 +879,7 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -887,6 +892,7 @@ async fn install_records_outside_the_lookback_window_are_dropped_client_side() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -961,7 +967,7 @@ async fn a_custom_install_range_is_pushed_down_and_reapplied_client_side() {
     // Ignored: the absolute range replaces the relative lookback.
     ranged.install_after_days = Some(7);
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -974,6 +980,7 @@ async fn a_custom_install_range_is_pushed_down_and_reapplied_client_side() {
         "https://app.ninjarmm.com".into(),
         ranged,
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1045,7 +1052,7 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -1058,6 +1065,7 @@ async fn failed_query_populates_the_failure_rollup_grouped_by_patch() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1123,7 +1131,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let run = |statuses: Vec<PatchStatus>| {
         let server = &server;
         async move {
@@ -1139,6 +1147,7 @@ async fn devices_carry_their_own_health_in_a_stable_order() {
                 "https://app.ninjarmm.com".into(),
                 args(PatchType::Os, statuses),
                 fixed_now(),
+                None,
                 &progress,
             )
             .await
@@ -1238,7 +1247,7 @@ async fn a_query_records_the_facets_it_ran_under() {
     scoped.filter.organization_ids = vec![1];
     scoped.filter.severities = vec!["CRITICAL".into()];
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -1251,6 +1260,7 @@ async fn a_query_records_the_facets_it_ran_under() {
         "https://app.ninjarmm.com".into(),
         scoped,
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1324,7 +1334,7 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -1337,6 +1347,7 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Failed]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1346,6 +1357,88 @@ async fn failed_only_query_pushes_status_filter_to_the_install_endpoint() {
     assert_eq!(result.rows.len(), 1);
     assert_eq!(&*result.rows[0].status, "FAILED");
     assert_eq!(result.failures.len(), 1);
+}
+
+/// The install-history pulls are cut by the same location plan as the third-party
+/// feed. A plan in hand costs one sizing request, which carries the pull's own
+/// status and window (so it sizes what will be paged); this one-record history is
+/// far too short to slice and is then paged whole.
+#[tokio::test]
+async fn an_install_history_pull_is_sized_against_the_slice_plan() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/devices-detailed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": 10, "systemName": "web-01", "organizationId": 1, "offline": false }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patches"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [], "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+    let failed_at = fixed_now().timestamp() - 2 * 86_400;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/queries/os-patch-installs"))
+        .and(query_param("status", "FAILED"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "deviceId": 10, "kbNumber": "KBFAIL", "status": "FAILED",
+                  "severity": "CRITICAL", "installedAt": failed_at }
+            ],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
+    let result = run_query(
+        &client(&server),
+        async { Ok::<_, anyhow::Error>(lookups()) },
+        fleet_devices_via(&client(&server)),
+        fleet_current_via(&client(&server)),
+        no_ledger(),
+        ExploitSnapshot::default(),
+        30,
+        SlaPolicy::default(),
+        "https://app.ninjarmm.com".into(),
+        args(PatchType::Os, vec![PatchStatus::Failed]),
+        fixed_now(),
+        SlicePlan::from_locations([1, 2]),
+        &progress,
+    )
+    .await
+    .expect("the query completes")
+    .result;
+    assert_eq!(result.rows.len(), 1);
+
+    let installs: Vec<(String, bool)> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/api/v2/queries/os-patch-installs")
+        .map(|r| {
+            let param = |key: &str| {
+                r.url
+                    .query_pairs()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.into_owned())
+            };
+            (
+                param("pageSize").unwrap_or_default(),
+                param("installedAfter").is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        installs,
+        [("1".to_string(), true), ("5000".to_string(), true)],
+        "sized once under the pull's own window, then paged whole"
+    );
 }
 
 #[tokio::test]
@@ -1384,7 +1477,7 @@ async fn installed_and_failed_query_omits_the_server_side_status_filter() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -1400,6 +1493,7 @@ async fn installed_and_failed_query_omits_the_server_side_status_filter() {
             vec![PatchStatus::Installed, PatchStatus::Failed],
         ),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1448,7 +1542,7 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
         http.clone(),
         AuthState::seeded(http, "http://127.0.0.1:0".into(), "t"),
     );
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &api,
         async { Ok::<_, anyhow::Error>(lookups) },
@@ -1469,6 +1563,7 @@ async fn org_scope_filters_cached_fleet_client_side_without_a_df() {
         "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -1557,7 +1652,8 @@ async fn a_device_group_scope_narrows_to_its_members_and_fails_closed() {
                 "https://app.ninjarmm.com".into(),
                 a,
                 fixed_now(),
-                &|_: &'static str, _: usize| {},
+                None,
+                &|_: &'static str, _: usize, _: Option<usize>| {},
             )
             .await
         }
@@ -1628,7 +1724,8 @@ async fn group_scoped_query(
         "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
-        &|_: &'static str, _: usize| {},
+        None,
+        &|_: &'static str, _: usize, _: Option<usize>| {},
     )
     .await
 }
@@ -1670,7 +1767,8 @@ async fn data_fetched_at_is_no_newer_than_the_device_inventory() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Pending]),
         fixed_now(),
-        &|_: &'static str, _: usize| {},
+        None,
+        &|_: &'static str, _: usize, _: Option<usize>| {},
     )
     .await
     .expect("query")
@@ -1852,7 +1950,8 @@ async fn a_failed_fleet_leg_abandons_the_install_history_pull() {
         "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
-        &|_: &'static str, _: usize| {},
+        None,
+        &|_: &'static str, _: usize, _: Option<usize>| {},
     );
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), query)
         .await
@@ -1909,7 +2008,8 @@ async fn a_failed_lookups_leg_abandons_the_install_history_pull() {
         "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
-        &|_: &'static str, _: usize| {},
+        None,
+        &|_: &'static str, _: usize, _: Option<usize>| {},
     );
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), query)
         .await
@@ -1987,7 +2087,7 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
         http.clone(),
         AuthState::seeded(http, "http://127.0.0.1:0".into(), "t"),
     );
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let run = run_query(
         &api,
         async { Ok::<_, anyhow::Error>(lookups) },
@@ -2008,6 +2108,7 @@ async fn a_record_the_app_saw_first_is_aged_from_the_apps_record() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::Os, vec![PatchStatus::Pending]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -2064,7 +2165,7 @@ async fn a_scoped_query_observes_the_whole_fleets_feed() {
         http.clone(),
         AuthState::seeded(http, "http://127.0.0.1:0".into(), "t"),
     );
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let run = run_query(
         &api,
         async { Ok::<_, anyhow::Error>(lookups) },
@@ -2085,6 +2186,7 @@ async fn a_scoped_query_observes_the_whole_fleets_feed() {
         "https://app.ninjarmm.com".into(),
         a,
         fixed_now(),
+        None,
         &progress,
     )
     .await
@@ -2228,7 +2330,7 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
         .mount(&server)
         .await;
 
-    let progress = |_: &'static str, _: usize| {};
+    let progress = |_: &'static str, _: usize, _: Option<usize>| {};
     let result = run_query(
         &client(&server),
         async { Ok::<_, anyhow::Error>(lookups()) },
@@ -2241,6 +2343,7 @@ async fn a_software_record_becomes_a_row_and_reaches_the_fleet_rollups() {
         "https://app.ninjarmm.com".into(),
         args(PatchType::All, vec![PatchStatus::Pending]),
         fixed_now(),
+        None,
         &progress,
     )
     .await
