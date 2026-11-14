@@ -822,6 +822,7 @@ fn ipc_fixture_is_current() {
             },
         },
         "enums": {
+            "queryErrorCode": crate::error::QUERY_ERROR_CODES,
             "actionKind": ActionKind::ALL,
             "jobState": JobState::ALL
                 .iter()

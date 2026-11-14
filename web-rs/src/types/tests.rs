@@ -285,6 +285,17 @@ fn the_mirrored_enums_spell_exactly_the_backends_variants() {
         .map(|s| spelled(serde_json::to_value(s).expect("serialize a job state")["state"].clone()))
         .collect();
     assert_eq!(states, backend("jobState"), "JobState");
+
+    // Not an enum, but the same promise: every cause the backend can attach to a
+    // failed query has words in `util::failure_cause`, and none is spelled apart.
+    let causes: BTreeSet<String> = QUERY_ERROR_CODES.iter().map(|c| c.to_string()).collect();
+    assert_eq!(causes, backend("queryErrorCode"), "query error codes");
+    for code in QUERY_ERROR_CODES {
+        assert!(
+            crate::app::util::failure_cause(Some(code)).is_some(),
+            "`{code}` has no wording"
+        );
+    }
 }
 
 /// The per-device targets go over IPC as a JSON object keyed by the device id as a

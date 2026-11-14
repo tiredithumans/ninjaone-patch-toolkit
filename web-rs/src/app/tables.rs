@@ -155,25 +155,49 @@ pub(crate) fn Results() -> impl IntoView {
             // Persistent record of the last failed query — the announcing toast
             // auto-dismisses; this stays until the next success or a dismiss.
             <Show when=move || state.query.query_error.with(|e| e.is_some())>
-                <div class="error-banner" role="alert">
-                    <span>
-                        {move || {
-                            let e = state.query.query_error.get().unwrap_or_default();
-                            util::query_error_banner(
-                                &e,
-                                state.query.result.with(|r| r.is_some()),
-                                state.query.error_is_paging.get(),
-                            )
-                        }}
-                    </span>
-                    <button
-                        class="x"
-                        aria-label="Dismiss error"
-                        on:click=move |_| state.query.query_error.set(None)
-                    >
-                        "×"
-                    </button>
-                </div>
+                {move || {
+                    let banner = util::query_error_banner(
+                        &state.query.query_error.get().unwrap_or_default(),
+                        state.query.query_error_code.get().as_deref(),
+                        state.query.result.with(|r| r.is_some()),
+                        state.query.error_is_paging.get(),
+                    );
+                    view! {
+                        <div class="error-banner" role="alert">
+                            <div class="error-banner__body">
+                                <span>{banner.text}</span>
+                                {banner
+                                    .details
+                                    .map(|raw| {
+                                        view! {
+                                            <details class="error-banner__details">
+                                                <summary>"Details"</summary>
+                                                <code>{raw}</code>
+                                            </details>
+                                        }
+                                    })}
+                            </div>
+                            <Show when=move || banner.retry>
+                                <button
+                                    class="link-btn"
+                                    prop:disabled=move || {
+                                        state.run.busy.get() || state.run.refreshing.get()
+                                    }
+                                    on:click=move |_| state.run_query()
+                                >
+                                    "Retry"
+                                </button>
+                            </Show>
+                            <button
+                                class="x"
+                                aria-label="Dismiss error"
+                                on:click=move |_| state.query.query_error.set(None)
+                            >
+                                "×"
+                            </button>
+                        </div>
+                    }
+                }}
             </Show>
             <div
                 id=TAB_PANEL_ID

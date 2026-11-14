@@ -12,8 +12,22 @@ serializes to `{ message }`, which the frontend renders in a toast (map errors w
 `.map_err(UiError::from)`). An error the frontend must *branch* on adds a `code` with
 `UiError::coded(error::ERR_*, …)`, mirrored as a `types.rs` constant. Its wrapper is declared
 `coded` in `ipc!` and returns `api::IpcError { message, code }`. Never match on message text.
-The codes today are `ERR_PARTIAL_DISPATCH` (see [actions.md](./actions.md)) and `ERR_TENANT_CHANGED` (a settings save that failed after switching tenants, so the frontend clears the previous tenant's view as on success). Must be in `generate_handler![]` **and** have an `invoke(...)`
+The codes today are `ERR_PARTIAL_DISPATCH` (see [actions.md](./actions.md)), `ERR_TENANT_CHANGED` (a settings save that failed after switching tenants, so the frontend clears the previous tenant's view as on success), and the four failure causes below. Must be in `generate_handler![]` **and** have an `invoke(...)`
 wrapper in `web-rs/src/api.rs`.
+
+**An API failure carries its cause.** `From<anyhow::Error> for UiError` asks `api::failure_code`,
+which reads the error's *type* — a refused response is an `api::HttpFailure` with its status, a
+lost cursor page a `CursorReplayUnsafe`, an unanswered request a `reqwest::Error` in the chain —
+and attaches `ERR_NETWORK`, `ERR_RATE_LIMITED`, `ERR_SERVER` or `ERR_ACCESS` when it is one of
+those; the message is unchanged. `query_patches` is a `coded` wrapper so the results banner can
+lead with the cause in the operator's terms (`util::failure_cause`,
+`util::query_error_banner`), keep the raw message — a method, a URL and a status, which used to be
+all it said — under **Details**, and offer **Retry**; the announcing toast carries the same one
+line. A failure with no such cause (a filter NinjaOne rejected, an expired sign-in, whose messages
+are already written for the operator) is quoted as before, and a failed *page* of a good result
+offers no Retry. The backend's list (`error::QUERY_ERROR_CODES`) rides in the IPC fixture's
+`enums.queryErrorCode`, and `the_mirrored_enums_spell_exactly_the_backends_variants` holds the
+frontend's constants and wording to it.
 
 **`async` is the default, not a requirement.** A handler that only reads or writes in-process
 state and never `.await`s anything — `list_jobs`, `clear_jobs`, `get_settings`,

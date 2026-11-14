@@ -789,15 +789,39 @@ tbody tr:hover {
    palette as .toast-err, but it stays until the next success or a dismiss. */
 .error-banner {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
-  margin-top: 10px;
+  /* Both sides: the patch filter bar starts right under it. */
+  margin: 10px 0;
   padding: 8px 12px;
   border: 1px solid var(--danger);
   border-radius: 8px;
   background: color-mix(in srgb, var(--danger) 10%, transparent);
   color: var(--danger-fg);
   font-size: 13px;
+}
+
+.error-banner__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.error-banner__details {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.error-banner__details summary {
+  cursor: pointer;
+  width: fit-content;
+}
+
+/* The backend's own message: a method, a URL and a status. */
+.error-banner__details code {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 .error-banner .x {

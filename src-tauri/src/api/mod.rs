@@ -8,7 +8,7 @@ pub mod patches;
 
 pub use paging::ProgressFn;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -173,6 +173,55 @@ impl std::error::Error for CursorRefused {}
 /// Whether `err` (or anything it wraps) is a [`CursorRefused`].
 fn is_cursor_refused(err: &anyhow::Error) -> bool {
     err.downcast_ref::<CursorRefused>().is_some()
+}
+
+/// A response this client gave up on because NinjaOne answered with something other
+/// than a success, kept as a type so a caller branches on the status
+/// ([`status_of`]) instead of on the message — which is the text such a failure has
+/// always carried, unchanged.
+#[derive(Debug)]
+pub struct HttpFailure {
+    pub status: StatusCode,
+    message: String,
+}
+
+impl fmt::Display for HttpFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HttpFailure {}
+
+/// The status NinjaOne refused or failed the request with, if `err` (or anything it
+/// wraps) is an [`HttpFailure`].
+pub fn status_of(err: &anyhow::Error) -> Option<StatusCode> {
+    err.downcast_ref::<HttpFailure>().map(|f| f.status)
+}
+
+/// Which cause the frontend has words for (`error::ERR_*`), when `err` is one of
+/// them: NinjaOne rate-limiting, refusing access or failing, or the request never
+/// getting an answer at all. `None` for everything else, which is shown as its own
+/// message — a 400 naming a rejected filter, a guardrail, a decode failure.
+///
+/// A lost cursor page counts as NinjaOne failing whichever way it was lost: a
+/// gateway error, or a page it took past the timeout to serve.
+pub fn failure_code(err: &anyhow::Error) -> Option<&'static str> {
+    use crate::error::{ERR_ACCESS, ERR_NETWORK, ERR_RATE_LIMITED, ERR_SERVER};
+    if let Some(status) = status_of(err) {
+        return match status {
+            StatusCode::TOO_MANY_REQUESTS => Some(ERR_RATE_LIMITED),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Some(ERR_ACCESS),
+            s if s.is_server_error() => Some(ERR_SERVER),
+            _ => None,
+        };
+    }
+    if is_cursor_replay_unsafe(err) {
+        return Some(ERR_SERVER);
+    }
+    err.chain()
+        .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
+        .then_some(ERR_NETWORK)
 }
 
 /// Asked before every attempt of an acting request; `false` stops it unsent.
@@ -606,9 +655,13 @@ impl NinjaApiClient {
             }
 
             if !status.is_success() {
+                let failure = |text: &str| HttpFailure {
+                    status,
+                    message: format!("{method} {url} failed ({status}): {text}"),
+                };
                 if let Some(hint) = redirect_hint(&resp) {
                     warn!(%method, %url, %status, "redirect not followed");
-                    bail!("{method} {url} failed ({status}): {hint}");
+                    return Err(failure(&hint).into());
                 }
                 let text = truncate_body(&resp.text().await.unwrap_or_default());
                 warn!(%method, %url, %status, body = %text, "http error");
@@ -631,11 +684,9 @@ impl NinjaApiClient {
                 // A cursor NinjaOne refuses is a broken scan, not a bad request:
                 // the pagination loop starts the scan over.
                 if status == StatusCode::BAD_REQUEST && replay == ReplaySafety::CursorPage {
-                    return Err(
-                        anyhow!("{method} {url} failed ({status}): {text}").context(CursorRefused)
-                    );
+                    return Err(anyhow::Error::new(failure(&text)).context(CursorRefused));
                 }
-                bail!("{method} {url} failed ({status}): {text}");
+                return Err(failure(&text).into());
             }
             return Ok(resp);
         }

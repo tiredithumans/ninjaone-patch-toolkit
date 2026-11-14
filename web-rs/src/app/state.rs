@@ -415,6 +415,10 @@ pub(crate) struct QueryState {
     /// results area after the announcing toast auto-dismisses. Cleared by the next
     /// successful run/page fetch or an explicit dismiss.
     pub(super) query_error: RwSignal<Option<String>>,
+    /// The backend's cause for `query_error`, when the query failed for one the
+    /// banner has words for (`util::failure_cause`). Read only beside a
+    /// non-paging `query_error`, so a stale one is never shown.
+    pub(super) query_error_code: RwSignal<Option<String>>,
     /// `query_error` came from loading a page, a sort or group headers of a result
     /// that is still good, not from the query — the banner must not call that a
     /// failed query (`util::query_error_banner`).
@@ -532,6 +536,7 @@ impl QueryState {
             patches_page: RwSignal::new(0),
             page_rows: RwSignal::new(Vec::new()),
             query_error: RwSignal::new(None),
+            query_error_code: RwSignal::new(None),
             error_is_paging: RwSignal::new(false),
             view_loading: RwSignal::new(false),
             patches_sort: RwSignal::new(None),

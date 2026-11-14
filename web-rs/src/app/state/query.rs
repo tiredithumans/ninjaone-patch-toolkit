@@ -272,11 +272,14 @@ impl AppState {
                     self.reload_device_detail();
                 }
                 // The toast announces the failure (aria-live); the banner keeps it
-                // visible after the toast auto-dismisses.
+                // visible after the toast auto-dismisses, with the details and Retry.
                 Err(e) => {
+                    let announce = util::failure_cause(e.code.as_deref())
+                        .map_or_else(|| e.message.clone(), str::to_string);
                     self.query.error_is_paging.set(false);
-                    self.query.query_error.set(Some(e.clone()));
-                    self.notify(Toast::err(e));
+                    self.query.query_error_code.set(e.code);
+                    self.query.query_error.set(Some(e.message));
+                    self.notify(Toast::err(announce));
                     // A dead sign-in fails the query and signs the backend out;
                     // re-read the status so the top bar stops saying Connected.
                     self.session.refresh_auth();

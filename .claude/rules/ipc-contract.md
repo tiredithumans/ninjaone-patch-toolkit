@@ -36,7 +36,10 @@ A command returning a new shape (or a new event) also adds one entry to
   (`leptos::logging::warn!`) instead of dropping it silently.
 - **Errors are `UiError { message }`; one the frontend branches on adds a `code`**
   (`UiError::coded(error::ERR_*)` + the `types.rs` mirror + a `coded` `ipc!` wrapper), never
-  message matching. → `docs/design/frontend.md#tauri-commands`
+  message matching. An API failure gets its cause from its *type* (`api::failure_code`:
+  `HttpFailure` status, lost cursor page, `reqwest::Error`); a new cause joins
+  `error::QUERY_ERROR_CODES`, its mirror and `util::failure_cause` together.
+  → `docs/design/frontend.md#tauri-commands`
 - **IPC arg keys equal the handler's parameter names, camelCase.** Renaming a parameter is a
   wire-format change; update both sides. → `docs/design/frontend.md#ipc-arg-shape--keys-match-rust-fn-parameter-names-camelcase`
 - **Compact aggregates (`failures`, `approvals`, `changes`, `worst_devices`, …) ride on both

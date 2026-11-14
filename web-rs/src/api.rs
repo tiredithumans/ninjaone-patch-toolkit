@@ -329,6 +329,8 @@ ipc!(
     /// Runs a patch query. `force_refresh` (an auto-refresh tick or the manual ↻) tells
     /// the backend to refetch the whole-fleet patch data; a normal Run query / re-filter
     /// leaves it `false` so the cached fleet is re-scoped client-side with no round trip.
+    /// `coded`: the banner words a failure by its cause (`util::failure_cause`).
+    coded
     query_patches(args: PatchQueryArgs, query_id: u64, force_refresh: bool) -> QueryResult
 );
 

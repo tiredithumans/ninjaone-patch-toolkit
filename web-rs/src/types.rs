@@ -1369,6 +1369,19 @@ pub const ERR_PARTIAL_DISPATCH: &str = "partialDispatch";
 /// backend and must go from the screen too.
 pub const ERR_TENANT_CHANGED: &str = "tenantChanged";
 
+/// Mirrors of the backend's `error::ERR_NETWORK` … `ERR_ACCESS`: the causes a failed
+/// query is put down to, which the banner words for the operator
+/// (`util::failure_cause`) ahead of the raw message.
+pub const ERR_NETWORK: &str = "network";
+pub const ERR_RATE_LIMITED: &str = "rateLimited";
+pub const ERR_SERVER: &str = "serverError";
+pub const ERR_ACCESS: &str = "accessDenied";
+
+/// Every cause above, held to the backend's list by the IPC fixture
+/// (`the_mirrored_enums_spell_exactly_the_backends_variants`).
+#[cfg(test)]
+pub const QUERY_ERROR_CODES: [&str; 4] = [ERR_NETWORK, ERR_RATE_LIMITED, ERR_SERVER, ERR_ACCESS];
+
 /// **Frontend-only**, never sent by the backend: the command *succeeded* but its
 /// reply did not decode into the mirror (`api::invoke_coded` tags it). For
 /// `run_action` that means the batch went out, so the dialog must not offer to send

@@ -2851,3 +2851,67 @@ async fn progress_carries_the_cursors_announced_count() {
         [(5, Some(12)), (10, Some(12)), (12, Some(12))]
     );
 }
+
+/// A response NinjaOne refused is typed by its status, under the message it always
+/// carried, and is put down to a cause the frontend has words for — through any
+/// context layered on top. A refusal that names something the operator sent (a 400)
+/// has no such cause: its own message is the explanation.
+#[tokio::test]
+async fn a_refused_request_is_typed_by_its_status_and_put_down_to_a_cause() {
+    use crate::error::{ERR_ACCESS, ERR_NETWORK, ERR_RATE_LIMITED, ERR_SERVER};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/roles"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("no monitoring scope"))
+        .mount(&server)
+        .await;
+    let http = reqwest::Client::new();
+    let auth = AuthState::seeded(http.clone(), server.uri(), "test-token");
+    let err = NinjaApiClient::new(http, auth)
+        .roles()
+        .await
+        .expect_err("a 403 is a failure")
+        .context("loading the lookups");
+    assert_eq!(status_of(&err), Some(StatusCode::FORBIDDEN));
+    assert_eq!(failure_code(&err), Some(ERR_ACCESS));
+    let text = format!("{err:#}");
+    assert!(
+        text.ends_with("/api/v2/roles failed (403 Forbidden): no monitoring scope"),
+        "the message is unchanged: {text}"
+    );
+
+    let failed = |status: u16| {
+        anyhow::Error::new(HttpFailure {
+            status: StatusCode::from_u16(status).expect("a status"),
+            message: format!("GET /x failed ({status})"),
+        })
+    };
+    assert_eq!(failure_code(&failed(401)), Some(ERR_ACCESS));
+    assert_eq!(failure_code(&failed(429)), Some(ERR_RATE_LIMITED));
+    assert_eq!(failure_code(&failed(502)), Some(ERR_SERVER));
+    assert_eq!(failure_code(&failed(400)), None, "a rejected filter");
+    assert_eq!(failure_code(&failed(404)), None);
+
+    // A page NinjaOne never delivered is NinjaOne failing, however it was lost.
+    let lost = anyhow::Error::new(CursorReplayUnsafe {
+        why: "the cursor page timed out after it was sent".into(),
+        served: false,
+    })
+    .context("/queries/software-patches lost a cursor page");
+    assert_eq!(failure_code(&lost), Some(ERR_SERVER));
+
+    // Nothing listening: the request never got an answer.
+    let unreachable = reqwest::Client::new()
+        .get("http://127.0.0.1:1/")
+        .send()
+        .await
+        .expect_err("nothing listens on port 1");
+    assert_eq!(
+        failure_code(&anyhow::Error::new(unreachable).context("http send")),
+        Some(ERR_NETWORK)
+    );
+    assert_eq!(failure_code(&anyhow::anyhow!("not authenticated")), None);
+}

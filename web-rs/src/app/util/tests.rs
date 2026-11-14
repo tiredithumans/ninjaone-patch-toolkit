@@ -4565,14 +4565,55 @@ fn onboarding_names_the_missing_step_once_settings_have_loaded() {
 /// A page that failed to load is not a failed query.
 #[test]
 fn error_banner_tells_a_failed_page_from_a_failed_query() {
-    assert_eq!(
-        query_error_banner("boom", false, false),
-        "Last query failed: boom"
+    let failed = query_error_banner("boom", None, false, false);
+    assert_eq!(failed.text, "Last query failed: boom");
+    assert!(failed.retry && failed.details.is_none());
+    assert!(
+        query_error_banner("boom", None, true, false)
+            .text
+            .contains("previous run")
     );
-    assert!(query_error_banner("boom", true, false).contains("previous run"));
-    let paging = query_error_banner("boom", true, true);
-    assert!(!paging.contains("query failed"), "{paging}");
-    assert!(paging.ends_with("boom"));
+    let paging = query_error_banner("boom", None, true, true);
+    assert!(!paging.text.contains("query failed"), "{}", paging.text);
+    assert!(paging.text.ends_with("boom"));
+    assert!(
+        !paging.retry,
+        "the query worked; re-running it is not the fix"
+    );
+    // A cause left over from an earlier failed query is not this page's.
+    assert_eq!(
+        query_error_banner("boom", Some(crate::types::ERR_SERVER), true, true),
+        paging
+    );
+}
+
+/// A failure the backend put down to a cause leads with what to do about it, keeps
+/// the raw message for Details, and says when the rows on screen are older. One it
+/// could not is quoted as before: its own message is the explanation.
+#[test]
+fn a_failed_query_leads_with_its_cause_and_keeps_the_message_for_details() {
+    let raw = "GET https://app.ninjarmm.com/api/v2/queries/software-patches failed (502 Bad Gateway): upstream connect error";
+    let first = query_error_banner(raw, Some(crate::types::ERR_SERVER), false, false);
+    assert_eq!(
+        first.text,
+        "NinjaOne had trouble answering — this is usually temporary."
+    );
+    assert_eq!(first.details.as_deref(), Some(raw));
+    assert!(first.retry);
+
+    let stale = query_error_banner(raw, Some(crate::types::ERR_NETWORK), true, false);
+    assert!(stale.text.starts_with("Couldn't reach NinjaOne"));
+    assert!(
+        stale
+            .text
+            .ends_with("The results below are from the previous run.")
+    );
+    assert!(!stale.text.contains("https://"), "{}", stale.text);
+
+    assert_eq!(failure_cause(None), None);
+    assert_eq!(failure_cause(Some("somethingNewer")), None);
+    let unknown = query_error_banner("no such filter", Some("somethingNewer"), false, false);
+    assert_eq!(unknown.text, "Last query failed: no such filter");
 }
 
 fn query(statuses: &[&str]) -> PatchQueryArgs {

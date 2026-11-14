@@ -309,17 +309,84 @@ pub(crate) fn settle_open_groups(
     OpenGroups { open, refetch }
 }
 
-/// The results area's error banner. A failed page, sort or group-header load is
-/// not a failed query: the result is still good, only that view of it did not
-/// arrive, and calling it "Last query failed" sent operators to re-run a query
-/// that had worked.
-pub(crate) fn query_error_banner(error: &str, has_result: bool, paging: bool) -> String {
+/// What a failed query is put down to, in the operator's terms, for the causes
+/// the backend names (`types::ERR_NETWORK` …). `None` for any other failure, whose
+/// own message is the explanation — a filter NinjaOne rejected, an expired sign-in.
+///
+/// The raw message is a method, a URL and a status. It used to be all the banner
+/// and the toast said, so the operator had to know that "502 Bad Gateway" on
+/// `/queries/software-patches` means "wait a minute and press Run again".
+pub(crate) fn failure_cause(code: Option<&str>) -> Option<&'static str> {
+    use crate::types::{ERR_ACCESS, ERR_NETWORK, ERR_RATE_LIMITED, ERR_SERVER};
+    match code? {
+        ERR_NETWORK => {
+            Some("Couldn't reach NinjaOne — check this computer's connection, VPN or proxy.")
+        }
+        ERR_RATE_LIMITED => {
+            Some("NinjaOne is rate-limiting this app — wait a minute before trying again.")
+        }
+        ERR_SERVER => Some("NinjaOne had trouble answering — this is usually temporary."),
+        ERR_ACCESS => Some(
+            "NinjaOne refused access — sign in again; if it keeps happening, check the API app's scopes.",
+        ),
+        _ => None,
+    }
+}
+
+/// The results area's error banner: what it says, the raw message when that is not
+/// already in the text, and whether running the query again is the remedy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ErrorBanner {
+    pub text: String,
+    /// The backend's message, shown under "Details" when `text` words the cause
+    /// instead of quoting it.
+    pub details: Option<String>,
+    pub retry: bool,
+}
+
+/// A failed page, sort or group-header load is not a failed query: the result is
+/// still good, only that view of it did not arrive, and calling it "Last query
+/// failed" sent operators to re-run a query that had worked — so it offers no Retry
+/// either. A failed query leads with its cause when the backend named one
+/// ([`failure_cause`]) and keeps the raw message for the details.
+pub(crate) fn query_error_banner(
+    error: &str,
+    code: Option<&str>,
+    has_result: bool,
+    paging: bool,
+) -> ErrorBanner {
     if paging {
-        format!("Couldn't load those rows — what is below is the last view that loaded: {error}")
-    } else if has_result {
-        format!("Last query failed — the results below are from the previous run: {error}")
+        return ErrorBanner {
+            text: format!(
+                "Couldn't load those rows — what is below is the last view that loaded: {error}"
+            ),
+            details: None,
+            retry: false,
+        };
+    }
+    let previous = if has_result {
+        " The results below are from the previous run."
     } else {
-        format!("Last query failed: {error}")
+        ""
+    };
+    match failure_cause(code) {
+        Some(cause) => ErrorBanner {
+            text: format!("{cause}{previous}"),
+            details: Some(error.to_string()),
+            retry: true,
+        },
+        None if has_result => ErrorBanner {
+            text: format!(
+                "Last query failed — the results below are from the previous run: {error}"
+            ),
+            details: None,
+            retry: true,
+        },
+        None => ErrorBanner {
+            text: format!("Last query failed: {error}"),
+            details: None,
+            retry: true,
+        },
     }
 }
 
