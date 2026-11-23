@@ -11,6 +11,12 @@ version and start a fresh `[Unreleased]`.
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-11-23
+
+### Security
+
+- Updated the libraries the app is built on, picking up two upstream security fixes.
+
 ## [0.24.0] - 2026-11-14
 
 Faster queries on large fleets, a results area that shows what a running query is doing and lets
