@@ -338,5 +338,5 @@ jobs:
           # newest at tag time, chosen inside the step that holds the signing key,
           # with no diff in the repo and none of Dependabot's cooldown. Bump it by
           # hand, in its own PR, to a release at least a week old.
-          tauriScript: npx --yes @tauri-apps/cli@2.12.4
+          tauriScript: npx --yes @tauri-apps/cli@2.12.6
           args: --config src-tauri/updater-build.json
