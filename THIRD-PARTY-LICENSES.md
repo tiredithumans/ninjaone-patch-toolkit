@@ -11,7 +11,7 @@ Regenerate with `just licenses`. Do not edit by hand.
 
 ## Desktop app (src-tauri)
 
-- MIT License (534 crates)
+- MIT License (535 crates)
 - ISC License (25 crates)
 - Unicode License v3 (19 crates)
 - Apache License 2.0 (9 crates)
@@ -955,7 +955,7 @@ limitations under the License.
 
 Used by:
 - [dpi 0.1.2](https://github.com/rust-windowing/winit)
-- [tao 0.37.2](https://github.com/tauri-apps/tao)
+- [tao 0.37.3](https://github.com/tauri-apps/tao)
 
 ```
 Apache License
@@ -1312,7 +1312,7 @@ pub(crate) static GB18030_2022_OVERRIDE_BYTES: [[u8; 2]; 18] &#x3D; [
 
 Used by:
 - [alloc-no-stdlib 3.0.0](https://github.com/dropbox/rust-alloc-no-stdlib)
-- [brotli 9.1.1](https://github.com/dropbox/rust-brotli)
+- [brotli 9.1.3](https://github.com/dropbox/rust-brotli)
 
 ```
 Copyright (c) 2016 Dropbox, Inc.
@@ -2549,7 +2549,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [brotli 9.1.1](https://github.com/dropbox/rust-brotli)
+- [brotli 9.1.3](https://github.com/dropbox/rust-brotli)
 
 ```
 Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
@@ -2648,7 +2648,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [form_urlencoded 1.2.2](https://github.com/servo/rust-url)
+- [form_urlencoded 1.2.3](https://github.com/servo/rust-url)
 
 ```
 Copyright (c) 2013-2016 The rust-url developers
@@ -2684,7 +2684,7 @@ DEALINGS IN THE SOFTWARE.
 Used by:
 - [idna 1.1.0](https://github.com/servo/rust-url/)
 - [percent-encoding 2.3.2](https://github.com/servo/rust-url/)
-- [url 2.5.8](https://github.com/servo/rust-url)
+- [url 2.5.9](https://github.com/servo/rust-url)
 
 ```
 Copyright (c) 2013-2025 The rust-url developers
@@ -2718,10 +2718,10 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [cc 1.11.2](https://github.com/rust-lang/cc-rs)
+- [cc 1.11.3](https://github.com/rust-lang/cc-rs)
 - [cfg-if 1.0.5](https://github.com/rust-lang/cfg-if)
 - [cmake 0.1.58](https://github.com/rust-lang/cmake-rs)
-- [filetime 0.2.29](https://github.com/alexcrichton/filetime)
+- [filetime 0.2.30](https://github.com/alexcrichton/filetime)
 - [find-msvc-tools 0.1.15](https://github.com/rust-lang/cc-rs)
 - [jobserver 0.1.35](https://github.com/rust-lang/jobserver-rs)
 - [js-sys 0.3.107](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys)
@@ -2904,9 +2904,9 @@ Used by:
 - [num-rational 0.4.2](https://github.com/rust-num/num-rational)
 - [num-traits 0.2.19](https://github.com/rust-num/num-traits)
 - [num 0.4.3](https://github.com/rust-num/num)
-- [regex-automata 0.4.18](https://github.com/rust-lang/regex)
-- [regex-syntax 0.8.11](https://github.com/rust-lang/regex)
-- [regex 1.13.1](https://github.com/rust-lang/regex)
+- [regex-automata 0.4.19](https://github.com/rust-lang/regex)
+- [regex-syntax 0.8.12](https://github.com/rust-lang/regex)
+- [regex 1.13.2](https://github.com/rust-lang/regex)
 
 ```
 Copyright (c) 2014 The Rust Project Developers
@@ -2940,7 +2940,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [uuid 1.29.2](https://github.com/uuid-rs/uuid)
+- [uuid 1.29.3](https://github.com/uuid-rs/uuid)
 
 ```
 Copyright (c) 2014 The Rust Project Developers
@@ -3104,8 +3104,8 @@ THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [serde_with 3.24.0](https://github.com/jonasbb/serde_with/)
-- [serde_with_macros 3.24.0](https://github.com/jonasbb/serde_with/)
+- [serde_with 3.25.0](https://github.com/jonasbb/serde_with/)
+- [serde_with_macros 3.25.0](https://github.com/jonasbb/serde_with/)
 
 ```
 Copyright (c) 2015
@@ -3139,7 +3139,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [plist 1.10.3](https://github.com/ebarnard/rust-plist/)
+- [plist 1.10.4](https://github.com/ebarnard/rust-plist/)
 
 ```
 Copyright (c) 2015 Edward Barnard
@@ -3549,7 +3549,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [hashbrown 0.12.3](https://github.com/rust-lang/hashbrown)
-- [hashbrown 0.17.1](https://github.com/rust-lang/hashbrown)
+- [hashbrown 0.17.2](https://github.com/rust-lang/hashbrown)
 
 ```
 Copyright (c) 2016 Amanieu d&#x27;Antras
@@ -3775,8 +3775,8 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [apple-native-keyring-store 1.0.2](https://github.com/open-source-cooperative/apple-native-keyring-store.git)
-- [keyring-core 1.0.1](https://github.com/open-source-cooperative/keyring-core.git)
+- [apple-native-keyring-store 1.0.3](https://github.com/open-source-cooperative/apple-native-keyring-store.git)
+- [keyring-core 1.1.0](https://github.com/open-source-cooperative/keyring-core.git)
 - [keyring 4.2.0](https://github.com/open-source-cooperative/keyring-rs)
 - [zbus-secret-service-keyring-store 1.0.1](https://github.com/open-source-cooperative/zbus-secret-service-keyring-store.git)
 
@@ -4270,7 +4270,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [cookie 0.18.2](https://github.com/SergioBenitez/cookie-rs)
+- [cookie 0.18.3](https://github.com/SergioBenitez/cookie-rs)
 
 ```
 Copyright (c) 2017 Sergio Benitez
@@ -4603,7 +4603,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [bytes 1.12.1](https://github.com/tokio-rs/bytes)
+- [bytes 1.12.2](https://github.com/tokio-rs/bytes)
 
 ```
 Copyright (c) 2018 Carl Lerche
@@ -4671,7 +4671,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [smallvec 1.16.5](https://github.com/servo/rust-smallvec)
+- [smallvec 1.16.6](https://github.com/smallvec/smallvec)
 
 ```
 Copyright (c) 2018 The Servo Project Developers
@@ -5064,7 +5064,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [zeroize 1.9.1](https://github.com/RustCrypto/utils)
+- [zeroize 1.9.2](https://github.com/RustCrypto/utils)
 
 ```
 Copyright (c) 2018-2026 The RustCrypto Project Developers
@@ -5273,7 +5273,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [bumpalo 3.20.3](https://github.com/fitzgen/bumpalo)
+- [bumpalo 3.20.4](https://github.com/fitzgen/bumpalo)
 
 ```
 Copyright (c) 2019 Nick Fitzgerald
@@ -6188,7 +6188,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [zcheapstr 1.2.0](https://github.com/z-galaxy/zcheapstr/)
+- [zcheapstr 1.4.0](https://github.com/z-galaxy/zcheapstr/)
 
 ```
 Copyright (c) 2026 Zeeshan Ali Khan &amp; zcheapstr contributors
@@ -6225,12 +6225,12 @@ Used by:
 - [serde_spanned 0.6.9](https://github.com/toml-rs/toml)
 - [serde_spanned 1.1.3](https://github.com/toml-rs/toml)
 - [toml 0.8.2](https://github.com/toml-rs/toml)
-- [toml 1.2.1+spec-1.1.0](https://github.com/toml-rs/toml)
+- [toml 1.2.2+spec-1.1.0](https://github.com/toml-rs/toml)
 - [toml_datetime 1.1.3+spec-1.1.0](https://github.com/toml-rs/toml)
 - [toml_edit 0.19.15](https://github.com/toml-rs/toml)
 - [toml_edit 0.20.2](https://github.com/toml-rs/toml)
-- [toml_edit 0.25.19+spec-1.1.0](https://github.com/toml-rs/toml)
-- [toml_parser 1.1.5+spec-1.1.0](https://github.com/toml-rs/toml)
+- [toml_edit 0.25.20+spec-1.1.0](https://github.com/toml-rs/toml)
+- [toml_parser 1.1.6+spec-1.1.0](https://github.com/toml-rs/toml)
 - [toml_writer 1.2.0+spec-1.1.0](https://github.com/toml-rs/toml)
 
 ```
@@ -6451,7 +6451,7 @@ THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRES
 ### MIT License
 
 Used by:
-- [rand 0.10.3](https://github.com/rust-random/rand)
+- [rand 0.10.4](https://github.com/rust-random/rand)
 
 ```
 Copyright 2018 Developers of the Rand project
@@ -6583,13 +6583,13 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [tauri-build 2.7.4](https://github.com/tauri-apps/tauri)
-- [tauri-codegen 2.7.4](https://github.com/tauri-apps/tauri)
-- [tauri-macros 2.7.4](https://github.com/tauri-apps/tauri)
-- [tauri-runtime-wry 2.12.3](https://github.com/tauri-apps/tauri)
-- [tauri-runtime 2.12.2](https://github.com/tauri-apps/tauri)
-- [tauri-utils 2.10.2](https://github.com/tauri-apps/tauri)
-- [tauri 2.12.5](https://github.com/tauri-apps/tauri)
+- [tauri-build 2.7.6](https://github.com/tauri-apps/tauri)
+- [tauri-codegen 2.7.6](https://github.com/tauri-apps/tauri)
+- [tauri-macros 2.7.6](https://github.com/tauri-apps/tauri)
+- [tauri-runtime-wry 2.12.5](https://github.com/tauri-apps/tauri)
+- [tauri-runtime 2.12.4](https://github.com/tauri-apps/tauri)
+- [tauri-utils 2.10.4](https://github.com/tauri-apps/tauri)
+- [tauri 2.12.7](https://github.com/tauri-apps/tauri)
 
 ```
 MIT License
@@ -7110,7 +7110,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [wry 0.57.2](https://github.com/tauri-apps/wry)
+- [wry 0.57.3](https://github.com/tauri-apps/wry)
 
 ```
 MIT License
@@ -7497,7 +7497,7 @@ SOFTWARE.
 
 Used by:
 - [block2 0.6.2](https://github.com/madsmtm/objc2)
-- [brotli-decompressor 6.3.1](https://github.com/dropbox/rust-brotli-decompressor)
+- [brotli-decompressor 6.3.2](https://github.com/dropbox/rust-brotli-decompressor)
 - [cargo_toml 1.0.1](https://gitlab.com/lib.rs/cargo_toml)
 - [cesu8 1.1.0](https://github.com/emk/cesu8-rs)
 - [chrono 0.4.45](https://github.com/chronotope/chrono)
@@ -7531,12 +7531,12 @@ Used by:
 - [objc2 0.6.5](https://github.com/madsmtm/objc2)
 - [r-efi 5.3.0](https://github.com/r-efi/r-efi)
 - [r-efi 6.0.0](https://github.com/r-efi/r-efi)
-- [rust_xlsxwriter 0.102.0](https://github.com/jmcnamara/rust_xlsxwriter)
+- [rust_xlsxwriter 0.104.0](https://github.com/jmcnamara/rust_xlsxwriter)
 - [rustls-platform-verifier-android 0.2.0](https://github.com/rustls/rustls-platform-verifier)
 - [tauri-plugin-dialog 2.8.4](https://github.com/tauri-apps/plugins-workspace)
 - [tauri-plugin-fs 2.7.1](https://github.com/tauri-apps/plugins-workspace)
 - [tauri-plugin-updater 2.14.1](https://github.com/tauri-apps/plugins-workspace)
-- [tauri-plugin 2.7.2](https://github.com/tauri-apps/tauri)
+- [tauri-plugin 2.7.4](https://github.com/tauri-apps/tauri)
 - [webview2-com-macros 0.8.1](https://github.com/wravery/webview2-rs)
 - [webview2-com-sys 0.39.1](https://github.com/wravery/webview2-rs)
 - [webview2-com 0.39.1](https://github.com/wravery/webview2-rs)
@@ -7852,7 +7852,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [adler2 2.0.1](https://github.com/oyvindln/adler2)
-- [anyhow 1.0.104](https://github.com/dtolnay/anyhow)
+- [anyhow 1.0.105](https://github.com/dtolnay/anyhow)
 - [async-channel 2.5.0](https://github.com/smol-rs/async-channel)
 - [async-executor 1.14.1](https://github.com/smol-rs/async-executor)
 - [async-io 2.6.0](https://github.com/smol-rs/async-io)
@@ -7886,7 +7886,7 @@ Used by:
 - [once_cell 1.21.4](https://github.com/matklad/once_cell)
 - [ordered-stream 0.2.0](https://github.com/danieldg/ordered-stream)
 - [parking 2.2.1](https://github.com/smol-rs/parking)
-- [pin-project-lite 0.2.17](https://github.com/taiki-e/pin-project-lite)
+- [pin-project-lite 0.2.18](https://github.com/taiki-e/pin-project-lite)
 - [piper 0.2.5](https://github.com/smol-rs/piper)
 - [polling 3.11.0](https://github.com/smol-rs/polling)
 - [proc-macro-crate 1.3.1](https://github.com/bkchr/proc-macro-crate)
@@ -8091,7 +8091,8 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- [ctor 1.0.13](https://github.com/mmastrac/linktime)
+- [ctor 1.0.14](https://github.com/mmastrac/linktime)
+- [link-section 0.19.4](https://github.com/mmastrac/linktime)
 
 ```
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the &quot;Software&quot;), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
@@ -8199,7 +8200,7 @@ SOFTWARE.
 
 Used by:
 - [tracing-core 0.1.36](https://github.com/tokio-rs/tracing)
-- [zip 9.5.1](https://github.com/zip-rs/zip2)
+- [zip 9.8.2](https://github.com/zip-rs/zip2)
 
 ```
 The MIT License (MIT)
@@ -8331,7 +8332,7 @@ Used by:
 - [aho-corasick 1.1.5](https://github.com/BurntSushi/aho-corasick)
 - [byteorder 1.5.0](https://github.com/BurntSushi/byteorder)
 - [memchr 2.8.3](https://github.com/BurntSushi/memchr)
-- [walkdir 2.5.0](https://github.com/BurntSushi/walkdir)
+- [walkdir 2.5.1](https://github.com/BurntSushi/walkdir)
 
 ```
 The MIT License (MIT)
@@ -8361,7 +8362,7 @@ THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [nix 0.31.3](https://github.com/nix-rust/nix)
+- [nix 0.32.0](https://github.com/nix-rust/nix)
 
 ```
 The MIT License (MIT)
@@ -8732,7 +8733,7 @@ SOFTWARE.
 
 Used by:
 - [async-compression 0.4.52](https://github.com/Nullus157/async-compression)
-- [compression-codecs 0.4.47](https://github.com/Nullus157/async-compression)
+- [compression-codecs 0.4.48](https://github.com/Nullus157/async-compression)
 - [compression-core 0.4.34](https://github.com/Nullus157/async-compression)
 
 ```
@@ -10492,7 +10493,7 @@ the following restrictions:
 ### Boost Software License 1.0
 
 Used by:
-- [xxhash-rust 0.8.19](https://github.com/DoumanAsh/xxhash-rust)
+- [xxhash-rust 0.8.21](https://github.com/DoumanAsh/xxhash-rust)
 
 ```
 Boost Software License - Version 1.0 - August 17th, 2003
@@ -10690,7 +10691,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [form_urlencoded 1.2.2](https://github.com/servo/rust-url)
+- [form_urlencoded 1.2.3](https://github.com/servo/rust-url)
 
 ```
 Copyright (c) 2013-2016 The rust-url developers
@@ -10726,7 +10727,7 @@ DEALINGS IN THE SOFTWARE.
 Used by:
 - [idna 1.1.0](https://github.com/servo/rust-url/)
 - [percent-encoding 2.3.2](https://github.com/servo/rust-url/)
-- [url 2.5.8](https://github.com/servo/rust-url)
+- [url 2.5.9](https://github.com/servo/rust-url)
 
 ```
 Copyright (c) 2013-2025 The rust-url developers
@@ -10801,9 +10802,9 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [regex-automata 0.4.18](https://github.com/rust-lang/regex)
-- [regex-syntax 0.8.11](https://github.com/rust-lang/regex)
-- [regex 1.13.1](https://github.com/rust-lang/regex)
+- [regex-automata 0.4.19](https://github.com/rust-lang/regex)
+- [regex-syntax 0.8.12](https://github.com/rust-lang/regex)
+- [regex 1.13.2](https://github.com/rust-lang/regex)
 
 ```
 Copyright (c) 2014 The Rust Project Developers
@@ -10837,7 +10838,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [uuid 1.29.2](https://github.com/uuid-rs/uuid)
+- [uuid 1.29.3](https://github.com/uuid-rs/uuid)
 
 ```
 Copyright (c) 2014 The Rust Project Developers
@@ -10985,7 +10986,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [hashbrown 0.17.1](https://github.com/rust-lang/hashbrown)
+- [hashbrown 0.17.2](https://github.com/rust-lang/hashbrown)
 
 ```
 Copyright (c) 2016 Amanieu d&#x27;Antras
@@ -11258,7 +11259,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [bytes 1.12.1](https://github.com/tokio-rs/bytes)
+- [bytes 1.12.2](https://github.com/tokio-rs/bytes)
 
 ```
 Copyright (c) 2018 Carl Lerche
@@ -11326,7 +11327,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [smallvec 1.16.5](https://github.com/servo/rust-smallvec)
+- [smallvec 1.16.6](https://github.com/smallvec/smallvec)
 
 ```
 Copyright (c) 2018 The Servo Project Developers
@@ -11463,7 +11464,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [bumpalo 3.20.3](https://github.com/fitzgen/bumpalo)
+- [bumpalo 3.20.4](https://github.com/fitzgen/bumpalo)
 
 ```
 Copyright (c) 2019 Nick Fitzgerald
@@ -11595,9 +11596,9 @@ SOFTWARE.
 Used by:
 - [config 0.15.27](https://github.com/rust-cli/config-rs)
 - [serde_spanned 1.1.3](https://github.com/toml-rs/toml)
-- [toml 1.2.1+spec-1.1.0](https://github.com/toml-rs/toml)
+- [toml 1.2.2+spec-1.1.0](https://github.com/toml-rs/toml)
 - [toml_datetime 1.1.3+spec-1.1.0](https://github.com/toml-rs/toml)
-- [toml_parser 1.1.5+spec-1.1.0](https://github.com/toml-rs/toml)
+- [toml_parser 1.1.6+spec-1.1.0](https://github.com/toml-rs/toml)
 
 ```
 Copyright (c) Individual contributors
@@ -12092,7 +12093,7 @@ Used by:
 - [either_of 0.1.9](https://github.com/leptos-rs/leptos)
 - [erased 0.1.2](https://github.com/JonathanBrouwer/erased)
 - [gloo-net 0.6.0](https://github.com/rustwasm/gloo)
-- [gloo-timers 0.4.0](https://github.com/rustwasm/gloo/tree/master/crates/timers)
+- [gloo-timers 0.4.1](https://github.com/rustwasm/gloo/tree/master/crates/timers)
 - [gloo-utils 0.2.0](https://github.com/rustwasm/gloo/tree/master/crates/utils)
 - [hydration_context 0.3.2](https://github.com/leptos-rs/leptos)
 - [leptos 0.8.23](https://github.com/leptos-rs/leptos)
@@ -12235,7 +12236,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- [anyhow 1.0.104](https://github.com/dtolnay/anyhow)
+- [anyhow 1.0.105](https://github.com/dtolnay/anyhow)
 - [async-lock 3.5.0](https://github.com/smol-rs/async-lock)
 - [async-trait 0.1.92](https://github.com/dtolnay/async-trait)
 - [camino 1.2.6](https://github.com/camino-rs/camino)
@@ -12246,9 +12247,9 @@ Used by:
 - [parking 2.2.1](https://github.com/smol-rs/parking)
 - [paste 1.0.15](https://github.com/dtolnay/paste)
 - [pathdiff 0.2.3](https://github.com/Manishearth/pathdiff)
-- [pin-project-internal 1.1.13](https://github.com/taiki-e/pin-project)
-- [pin-project-lite 0.2.17](https://github.com/taiki-e/pin-project-lite)
-- [pin-project 1.1.13](https://github.com/taiki-e/pin-project)
+- [pin-project-internal 1.2.0](https://github.com/taiki-e/pin-project)
+- [pin-project-lite 0.2.18](https://github.com/taiki-e/pin-project-lite)
+- [pin-project 1.2.0](https://github.com/taiki-e/pin-project)
 - [prettyplease 0.3.0](https://github.com/dtolnay/prettyplease)
 - [proc-macro2 1.0.107](https://github.com/dtolnay/proc-macro2)
 - [quote 1.0.47](https://github.com/dtolnay/quote)
@@ -12390,7 +12391,7 @@ THE SOFTWARE.
 Used by:
 - [aho-corasick 1.1.5](https://github.com/BurntSushi/aho-corasick)
 - [memchr 2.8.3](https://github.com/BurntSushi/memchr)
-- [walkdir 2.5.0](https://github.com/BurntSushi/walkdir)
+- [walkdir 2.5.1](https://github.com/BurntSushi/walkdir)
 
 ```
 The MIT License (MIT)
